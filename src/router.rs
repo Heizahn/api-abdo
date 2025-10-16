@@ -16,6 +16,12 @@ impl<DB: Db> Handler<DB> for AppRouter {
                 _ => Response::method_not_allowed(),
             },
 
+            "/auth/refresh" => match req.method.as_str() {
+                "POST" => controller::refresh(req, db),
+                "OPTIONS" => Response::options_ok(),
+                _ => Response::method_not_allowed(),
+            },
+
             _ => match req.method.as_str() {
                 "OPTIONS" => Response::options_ok(),
                 _ => Response::not_found(),

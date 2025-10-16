@@ -1,5 +1,6 @@
 mod auth;
 mod config;
+mod crypto;
 mod db;
 mod domain;
 mod http;
