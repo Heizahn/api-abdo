@@ -34,7 +34,8 @@ pub fn login<D: Db + Clone>(req: Request, db: D) -> Response {
     let jwt = JwtService::new(JwtCfg::from_env());
 
     let (access, access_exp) =
-        jwt.issue_access(&customer.id, None, &["me:read", "payments:create"]);
+        jwt.issue_encrypted_access(&customer.id, None, &["me:read", "payments:create"]);
+
     let family = uuid::Uuid::new_v4().to_string();
     let (refresh, refresh_exp, _jti) = jwt.issue_refresh(&customer.id, &family); // 👈 _jti
 
@@ -66,7 +67,9 @@ pub fn refresh<D: Db + Clone>(req: Request, _db: D) -> Response {
     // let ok = runtime.block_on(async { db.is_refresh_valid(&claims.jti).await });
     // if !ok { return Response::json(401, &bad_request("refresh_revoked_or_exp")); }
 
-    let (access, access_exp) = jwt.issue_access(&claims.sub, None, &["me:read", "payments:create"]);
+    let (access, access_exp) =
+        jwt.issue_encrypted_access(&claims.sub, None, &["me:read", "payments:create"]);
+
     let (new_refresh, refresh_exp, _new_jti) = jwt.issue_refresh(&claims.sub, &claims.fam); // 👈 _new_jti
 
     // Rotación real (cuando tengas persistencia):
