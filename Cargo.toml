@@ -16,3 +16,5 @@ base64 = "0.22"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 uuid = {version = "1", features=["v4"]}
 time = "0.3"
+hmac = "0.12.1"
+futures = "0.3.31"

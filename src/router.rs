@@ -21,6 +21,11 @@ impl<DB: Db> Handler<DB> for AppRouter {
                 "OPTIONS" => Response::options_ok(),
                 _ => Response::method_not_allowed(),
             },
+            "/profile/me" => match req.method.as_str() {
+                "GET" => controller::me(req, db),
+                "OPTIONS" => Response::options_ok(),
+                _ => Response::method_not_allowed(),
+            },
 
             _ => match req.method.as_str() {
                 "OPTIONS" => Response::options_ok(),

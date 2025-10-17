@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AccessClaims {
     pub iss: String,
@@ -11,6 +12,7 @@ pub struct AccessClaims {
     pub jti: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefreshClaims {
     pub iss: String,

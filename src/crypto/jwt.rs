@@ -1,18 +1,35 @@
-use jsonwebtoken::{
-    Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation, decode, encode,
-};
+use crate::crypto::jwt_verify::{decode_payload_as_string, verify_hs256_and_get_payload_b64};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::auth::claims::{AccessClaims, RefreshClaims};
+use crate::crypto::aes::{decrypt_payload, encrypt_payload};
 
-use crate::crypto::aes::decrypt_payload;
-use crate::crypto::aes::encrypt_payload;
-use serde_json;
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AccessClaims {
+    pub iss: String,
+    pub sub: String,
+    pub aid: Option<String>,
+    pub scope: Vec<String>,
+    pub iat: i64,
+    pub exp: i64,
+    pub jti: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshClaims {
+    pub iss: String,
+    pub sub: String,
+    pub iat: i64,
+    pub exp: i64,
+    pub jti: String,
+    pub fam: String,
+}
 
 pub struct JwtCfg {
     pub iss: String,
-    pub secret: String,
+    pub secret: String, // MISMA cadena para HS256 y AES-GCM (está bien)
     pub access_ttl: i64,
     pub refresh_ttl: i64,
 }
@@ -39,9 +56,27 @@ impl JwtCfg {
 }
 
 pub struct JwtService {
-    cfg: JwtCfg,
-    enc: EncodingKey,
-    dec: DecodingKey,
+    pub(crate) cfg: JwtCfg,
+    pub(crate) enc: EncodingKey,
+    pub(crate) dec: DecodingKey,
+}
+
+#[derive(Debug)]
+pub enum RefreshVerifyError {
+    Signature(jsonwebtoken::errors::Error),
+    Decrypt,
+    Json(serde_json::Error),
+    IssMismatch { got: String, want: String },
+    Expired,
+    PayloadNotString,
+}
+
+#[derive(Debug)]
+pub enum AccessVerifyError {
+    Signature(jsonwebtoken::errors::Error),
+    Decrypt,
+    Json(serde_json::Error),
+    PayloadNotString,
 }
 
 impl JwtService {
@@ -51,11 +86,31 @@ impl JwtService {
         Self { cfg, enc, dec }
     }
 
+    #[inline]
     pub fn now() -> i64 {
         OffsetDateTime::now_utc().unix_timestamp()
     }
+}
 
-    pub fn issue_access(&self, sub: &str, aid: Option<&str>, scope: &[&str]) -> (String, i64) {
+/// Validación SOLO de firma para payloads string (evita el error ClaimsForValidation).
+fn only_signature_validation() -> Validation {
+    let mut v = Validation::new(Algorithm::HS256);
+    v.validate_exp = false;
+    v.validate_nbf = false;
+    v.validate_aud = false;
+    // v.validate_iss = false;
+    v.required_spec_claims.clear();
+    v
+}
+
+impl JwtService {
+    // ------------ ISSUE ------------
+    pub fn issue_encrypted_access(
+        &self,
+        sub: &str,
+        aid: Option<&str>,
+        scope: &[&str],
+    ) -> (String, i64) {
         let now = Self::now();
         let exp = now + self.cfg.access_ttl;
         let claims = AccessClaims {
@@ -67,47 +122,19 @@ impl JwtService {
             exp,
             jti: Uuid::new_v4().to_string(),
         };
-        let mut header = Header::default();
-        header.alg = Algorithm::HS256;
-        let token = encode(&header, &claims, &self.enc).expect("encode access");
-        (token, exp)
-    }
-
-    pub fn issue_encrypted_access(
-        &self,
-        sub: &str,
-        aid: Option<&str>,
-        scope: &[&str],
-    ) -> (String, i64) {
-        let now = Self::now();
-        let exp = now + self.cfg.access_ttl;
-
-        let claims = AccessClaims {
-            iss: self.cfg.iss.clone(),
-            sub: sub.to_string(),
-            aid: aid.map(|s| s.to_string()),
-            scope: scope.iter().map(|s| s.to_string()).collect(),
-            iat: now,
-            exp,
-            jti: uuid::Uuid::new_v4().to_string(),
-        };
-
-        // 🔒 Convertir a JSON y encriptar
         let json = serde_json::to_string(&claims).expect("json claims");
         let encrypted = encrypt_payload(&self.cfg.secret, &json);
 
-        // 🔏 Firmar el texto cifrado como si fuera el payload
         let mut header = Header::default();
         header.alg = Algorithm::HS256;
-        let token = encode(&header, &encrypted, &self.enc).expect("encode jwt");
-
+        let token = encode(&header, &encrypted, &self.enc).expect("encode access");
         (token, exp)
     }
 
-    pub fn issue_refresh(&self, sub: &str, family: &str) -> (String, i64, String) {
+    pub fn issue_encrypted_refresh(&self, sub: &str, family: &str) -> (String, i64, String) {
         let now = Self::now();
         let exp = now + self.cfg.refresh_ttl;
-        let jti = uuid::Uuid::new_v4().to_string();
+        let jti = Uuid::new_v4().to_string();
 
         let claims = RefreshClaims {
             iss: self.cfg.iss.clone(),
@@ -117,26 +144,81 @@ impl JwtService {
             jti: jti.clone(),
             fam: family.to_string(),
         };
+        let json = serde_json::to_string(&claims).expect("json refresh");
+        let encrypted = encrypt_payload(&self.cfg.secret, &json);
 
         let mut header = Header::default();
         header.alg = Algorithm::HS256;
-
-        let token = encode(&header, &claims, &self.enc).expect("encode refresh");
+        let token = encode(&header, &encrypted, &self.enc).expect("encode refresh");
         (token, exp, jti)
     }
 
-    pub fn verify_refresh(
-        &self,
-        token: &str,
-    ) -> jsonwebtoken::errors::Result<TokenData<RefreshClaims>> {
-        let mut val = Validation::new(Algorithm::HS256);
-        val.set_issuer(&[&self.cfg.iss]);
-        decode::<RefreshClaims>(token, &self.dec, &val)
+    // ------------ DECODE ACCESS ------------
+    /// HS256 (firma) -> extrae STRING (blob cifrado) -> AES-GCM -> JSON -> AccessClaims
+    pub fn decode_encrypted_verbose(&self, token: &str) -> Result<AccessClaims, AccessVerifyError> {
+        // 1) Verificar firma HS256 (manual) y obtener el payload *b64url*
+        let payload_b64 = verify_hs256_and_get_payload_b64(token, self.cfg.secret.as_bytes())
+            .ok_or(AccessVerifyError::Signature(
+                // dejamos un error genérico; puedes definir el tuyo si quieres
+                jsonwebtoken::errors::Error::from(
+                    jsonwebtoken::errors::ErrorKind::InvalidSignature,
+                ),
+            ))?;
+
+        // 2) Ese payload (JSON) es un **string** con tu blob cifrado (Base64URL)
+        let encrypted_blob =
+            decode_payload_as_string(&payload_b64).ok_or(AccessVerifyError::PayloadNotString)?;
+
+        // 3) Descifrar AES-GCM (nonce||cipher, Base64URL sin padding)
+        let decrypted =
+            decrypt_payload(&self.cfg.secret, &encrypted_blob).ok_or(AccessVerifyError::Decrypt)?;
+
+        // 4) Parsear JSON descifrado -> AccessClaims
+        let claims: AccessClaims =
+            serde_json::from_str(&decrypted).map_err(AccessVerifyError::Json)?;
+
+        Ok(claims)
     }
 
-    pub fn decode_encrypted(&self, token: &str) -> Option<AccessClaims> {
-        let data = decode::<String>(token, &self.dec, &Validation::new(Algorithm::HS256)).ok()?;
-        let decrypted = decrypt_payload(&self.cfg.secret, &data.claims)?;
+    /// Igual que arriba, pero permitiendo que luego valides exp si quieres
+    pub fn decode_encrypted_allow_exp(&self, token: &str) -> Option<AccessClaims> {
+        let payload_b64 = verify_hs256_and_get_payload_b64(token, self.cfg.secret.as_bytes())?;
+        let encrypted_blob = decode_payload_as_string(&payload_b64)?;
+        let decrypted = decrypt_payload(&self.cfg.secret, &encrypted_blob)?;
         serde_json::from_str::<AccessClaims>(&decrypted).ok()
+    }
+
+    /// Refresh: igual flujo + valida iss/exp tras descifrar
+    pub fn verify_encrypted_refresh_verbose(
+        &self,
+        token: &str,
+    ) -> Result<RefreshClaims, RefreshVerifyError> {
+        let payload_b64 = verify_hs256_and_get_payload_b64(token, self.cfg.secret.as_bytes())
+            .ok_or(RefreshVerifyError::Signature(
+                jsonwebtoken::errors::Error::from(
+                    jsonwebtoken::errors::ErrorKind::InvalidSignature,
+                ),
+            ))?;
+
+        let encrypted_blob =
+            decode_payload_as_string(&payload_b64).ok_or(RefreshVerifyError::PayloadNotString)?;
+
+        let decrypted = decrypt_payload(&self.cfg.secret, &encrypted_blob)
+            .ok_or(RefreshVerifyError::Decrypt)?;
+
+        let claims: RefreshClaims =
+            serde_json::from_str(&decrypted).map_err(RefreshVerifyError::Json)?;
+
+        if claims.iss != self.cfg.iss {
+            return Err(RefreshVerifyError::IssMismatch {
+                got: claims.iss.clone(),
+                want: self.cfg.iss.clone(),
+            });
+        }
+        if claims.exp <= Self::now() {
+            return Err(RefreshVerifyError::Expired);
+        }
+
+        Ok(claims)
     }
 }

@@ -6,3 +6,9 @@ pub struct Customer {
     pub full_name: String,
     pub phone: String,
 }
+
+pub struct CustomerView {
+    pub full_name: String,
+    pub phone: String,
+    pub balance: f64,
+}

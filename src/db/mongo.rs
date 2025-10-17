@@ -1,26 +1,24 @@
+use super::Db;
+use crate::{domain::customer::Customer, domain::customer::CustomerView};
+use futures::stream::StreamExt;
 use mongodb::{
     Client, Collection, Database,
     bson::{Document, doc},
 };
 use std::sync::Arc;
 
-use super::Db;
-use crate::crypto::jwt::JwtService;
-use crate::domain::customer::Customer;
-
 #[derive(Clone)]
 pub struct MongoDB {
+    #[allow(dead_code)]
     client: Arc<Client>,
     db: Database,
 }
 
-#[derive(Debug, Clone)]
-pub struct RefreshRecord {
-    pub jti: String,
-    pub sub: String,
-    pub fam: String,
-    pub exp: i64,
-    pub revoked: bool,
+pub struct PhoneSummary {
+    pub primary_name: String, // nombre del primero
+    pub phone: String,
+    pub total_balance: f64, // suma de nBalance
+    pub count: i64,         // cuántos clientes comparten ese phone
 }
 
 impl MongoDB {
@@ -38,40 +36,6 @@ impl MongoDB {
     fn customers(&self) -> Collection<Document> {
         self.db.collection::<Document>("Clients")
     }
-
-    fn refresh_tokens(&self) -> Collection<Document> {
-        self.db.collection::<Document>("refresh_tokens") // 👈 nueva colección
-    }
-
-    // --- Métodos RT (opcionales pero útiles) ---
-    pub async fn save_refresh(&self, rec: RefreshRecord) {
-        let _ = self
-            .refresh_tokens()
-            .insert_one(doc! {
-                "jti": rec.jti,
-                "sub": rec.sub,
-                "fam": rec.fam,
-                "exp": rec.exp,
-                "revoked": rec.revoked,
-            })
-            .await;
-    }
-
-    pub async fn revoke_refresh(&self, jti: &str) {
-        let _ = self
-            .refresh_tokens()
-            .update_one(doc! {"jti": jti}, doc! {"$set": {"revoked": true}})
-            .await;
-    }
-
-    pub async fn is_refresh_valid(&self, jti: &str) -> bool {
-        if let Ok(Some(doc)) = self.refresh_tokens().find_one(doc! {"jti": jti}).await {
-            let revoked = doc.get_bool("revoked").unwrap_or(true);
-            let exp = doc.get_i64("exp").unwrap_or(0);
-            return !revoked && exp > JwtService::now();
-        }
-        false
-    }
 }
 
 #[async_trait::async_trait]
@@ -84,6 +48,45 @@ impl Db for MongoDB {
             id: result.get_object_id("_id").ok()?.to_string(),
             full_name: result.get_str("sName").unwrap_or_default().to_string(),
             phone: result.get_str("sPhone").unwrap_or_default().to_string(),
+        })
+    }
+
+    async fn find_customer_by_id(&self, id: &str) -> Option<CustomerView> {
+        let obj_id = mongodb::bson::oid::ObjectId::parse_str(id).ok()?;
+        let filter = doc! { "_id": obj_id };
+        let result = self.customers().find_one(filter).await.ok()??;
+
+        Some(CustomerView {
+            full_name: result.get_str("sName").unwrap_or_default().to_string(),
+            phone: result.get_str("sPhone").unwrap_or_default().to_string(),
+            balance: result.get_f64("nBalance").unwrap_or(0.0),
+        })
+    }
+
+    async fn summary_by_phone(&self, phone: &str) -> Option<PhoneSummary> {
+        let pipeline = vec![
+            doc! { "$match": { "sPhone": phone } },
+            // Ordenamos para que el "primero" sea estable
+            doc! { "$sort": { "_id": 1 } },
+            doc! { "$group": {
+                "_id": "$sPhone",
+                "firstName": { "$first": "$sName" },
+                "phone":     { "$first": "$sPhone" },
+                "totalBalance": { "$sum": { "$ifNull": ["$nBalance", 0.0] } },
+                "count": { "$sum": 1 }
+            }},
+        ];
+
+        let mut cursor = self.customers().aggregate(pipeline).await.ok()?;
+        let Some(Ok(doc)) = cursor.next().await else {
+            return None;
+        };
+
+        Some(PhoneSummary {
+            primary_name: doc.get_str("firstName").unwrap_or_default().to_string(),
+            phone: doc.get_str("phone").unwrap_or_default().to_string(),
+            total_balance: doc.get_f64("totalBalance").unwrap_or(0.0),
+            count: doc.get_i64("count").unwrap_or(0),
         })
     }
 }
