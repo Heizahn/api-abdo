@@ -1,5 +1,9 @@
 use super::Db;
-use crate::{domain::customer::Customer, domain::customer::CustomerView};
+use crate::{
+    auth::claims::VerificationCode,
+    domain::customer::{Customer, CustomerView},
+};
+use chrono::{Duration, Utc};
 use futures::stream::StreamExt;
 use mongodb::{
     Client, Collection, Database,
@@ -35,6 +39,10 @@ impl MongoDB {
 
     fn customers(&self) -> Collection<Document> {
         self.db.collection::<Document>("Clients")
+    }
+
+    fn verification_codes(&self) -> Collection<VerificationCode> {
+        self.db.collection::<VerificationCode>("verification_codes")
     }
 }
 
@@ -88,5 +96,18 @@ impl Db for MongoDB {
             total_balance: doc.get_f64("totalBalance").unwrap_or(0.0),
             count: doc.get_i64("count").unwrap_or(0),
         })
+    }
+
+    async fn store_verification_code(&self, phone: &str, code: &u32) -> mongodb::error::Result<()> {
+        let now = Utc::now();
+        let verification = VerificationCode {
+            phone: phone.to_string(),
+            code: code.to_string(),
+            created_at: now,
+            expires_at: now + Duration::minutes(3),
+        };
+
+        self.verification_codes().insert_one(verification).await?;
+        Ok(())
     }
 }

@@ -4,6 +4,7 @@ mod crypto;
 mod db;
 mod domain;
 mod http;
+mod profile;
 mod router;
 
 use config::Config;

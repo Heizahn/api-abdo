@@ -1,36 +1,31 @@
-use crate::auth::controller;
 use crate::db::Db;
-use crate::http::request::Request;
-use crate::http::response::Response;
 use crate::http::server::Handler;
+use crate::http::{request::Request, response::Response};
+
+use crate::auth::router::AuthRouter;
+use crate::profile::router::ProfileRouter;
 
 #[derive(Clone, Copy)]
 pub struct AppRouter;
 
 impl<DB: Db> Handler<DB> for AppRouter {
-    fn handle(&self, req: Request, db: DB) -> Response {
-        match req.path.as_str() {
-            "/auth/login" => match req.method.as_str() {
-                "POST" => controller::login(req, db),
-                "OPTIONS" => Response::options_ok(),
-                _ => Response::method_not_allowed(),
-            },
+    fn handle(&self, req: &Request, db: DB) -> Response {
+        if !req.path.starts_with("/v1/") {
+            return Response::not_found();
+        }
 
-            "/auth/refresh" => match req.method.as_str() {
-                "POST" => controller::refresh(req, db),
-                "OPTIONS" => Response::options_ok(),
-                _ => Response::method_not_allowed(),
-            },
-            "/profile/me" => match req.method.as_str() {
-                "GET" => controller::me(req, db),
-                "OPTIONS" => Response::options_ok(),
-                _ => Response::method_not_allowed(),
-            },
+        if let Some(resp) = AuthRouter.handle(req, db.clone()) {
+            return resp;
+        }
 
-            _ => match req.method.as_str() {
-                "OPTIONS" => Response::options_ok(),
-                _ => Response::not_found(),
-            },
+        if let Some(resp) = ProfileRouter.handle(req, db.clone()) {
+            return resp;
+        }
+
+        if req.method.to_string() == "OPTIONS" {
+            Response::options_ok()
+        } else {
+            Response::not_found()
         }
     }
 }

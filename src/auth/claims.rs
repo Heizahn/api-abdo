@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use chrono::{DateTime, Utc};
+
 
 #[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
@@ -21,4 +23,13 @@ pub struct RefreshClaims {
     pub exp: i64,
     pub jti: String, // id del refresh token
     pub fam: String, // family id para rotación
+}
+
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VerificationCode {
+    pub phone: String,
+    pub code: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
 }

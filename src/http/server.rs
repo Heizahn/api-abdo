@@ -7,7 +7,7 @@ use super::request::{Request, parse_request};
 use super::response::Response;
 
 pub trait Handler<DB: Send + 'static + Clone>: Send + Sync + 'static {
-    fn handle(&self, req: Request, db: DB) -> Response;
+    fn handle(&self, req: &Request, db: DB) -> Response;
 }
 
 pub struct HttpServer<DB: Send + 'static + Clone, H: Handler<DB>> {
@@ -56,7 +56,7 @@ fn handle_client<DB: Send + 'static + Clone, H: Handler<DB>>(
                 let _ = stream.write_all(&resp.to_bytes());
                 return;
             }
-            let resp = handler.handle(req, db);
+            let resp = handler.handle(&req, db);
             let _ = stream.write_all(&resp.to_bytes());
         }
         Err(_) => {
