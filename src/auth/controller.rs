@@ -22,9 +22,6 @@ fn generate_verification_code() -> u32 {
 }
 
 pub fn verify_number<D: Db + Clone>(req: &Request, db: D) -> Response {
-    println!("verify_number called");
-    println!("Request headers: {:?}", req.headers);
-    println!("Request body: {}", req.body_string());
     // 1. Validar content-type
     if let Some(ct) = req.header("content-type") {
         if !ct.contains("application/json") {
