@@ -22,7 +22,6 @@ fn generate_verification_code() -> u32 {
 }
 
 pub fn verify_number<D: Db + Clone>(req: &Request, db: D) -> Response {
-
     println!("verify_number called");
     println!("Request headers: {:?}", req.headers);
     println!("Request body: {}", req.body_string());
@@ -30,6 +29,7 @@ pub fn verify_number<D: Db + Clone>(req: &Request, db: D) -> Response {
     if req.header("content-type") != Some("application/json") {
         return match req.header("content-type") {
             Some(ct) if !ct.contains("application/json") => {
+                println!("Invalid content type: {}", ct);
                 Response::json(400, &bad_request("invalid_content_type"))
             }
             _ => Response::json(400, &bad_request("missing_content_type")),
