@@ -7,7 +7,7 @@ use chrono::{Duration, Utc};
 use futures::stream::StreamExt;
 use mongodb::{
     Client, Collection, Database,
-    bson::{Document, doc},
+    bson::{Document, doc, oid::ObjectId},
 };
 use std::sync::Arc;
 
@@ -101,13 +101,37 @@ impl Db for MongoDB {
     async fn store_verification_code(&self, phone: &str, code: &u32) -> mongodb::error::Result<()> {
         let now = Utc::now();
         let verification = VerificationCode {
+            _id: None,
             phone: phone.to_string(),
-            code: code.to_string(),
+            code: *code,
             created_at: now,
-            expires_at: now + Duration::minutes(3),
+            expires_at: now + Duration::minutes(60),
         };
 
         self.verification_codes().insert_one(verification).await?;
         Ok(())
+    }
+
+    async fn find_verification_code(&self, phone: &str, code: &u32) -> Option<VerificationCode> {
+        let filter = doc! { "phone": phone, "code": code };
+
+        // .await devuelve Result<Option<VerificationCode>, Error>
+        // .ok() lo convierte en Option<Option<VerificationCode>>
+        // .flatten() lo aplana a Option<VerificationCode>
+        self.verification_codes()
+            .find_one(filter)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn delete_verification_code(
+        &self,
+        id: &mongodb::bson::oid::ObjectId,
+    ) -> Result<u64, mongodb::error::Error> {
+        let filter = doc! { "_id": id };
+        let result = self.verification_codes().delete_one(filter).await?;
+        // Devolvemos el conteo de documentos borrados
+        Ok(result.deleted_count)
     }
 }

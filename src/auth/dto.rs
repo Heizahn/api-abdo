@@ -33,3 +33,7 @@ pub fn parse_refresh_body(json: &str) -> Option<String> {
         .ok()
         .map(|b| b.refresh_token)
 }
+
+pub fn auth_error(msg: &str) -> String {
+    format!(r#"{{"ok":false,"error":"{}"}}"#, msg)
+}

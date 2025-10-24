@@ -1,9 +1,11 @@
+use crate::auth::claims::LoginPayload;
 use crate::auth::dto::*;
 use crate::auth::service::AuthService;
 use crate::crypto::jwt::{JwtCfg, JwtService};
 use crate::db::Db;
 use crate::http::request::Request;
 use crate::http::response::Response;
+use chrono::Utc;
 use rand::{Rng, rng};
 
 fn parse_bearer(h: &str) -> Option<&str> {
@@ -79,39 +81,86 @@ pub fn verify_number<D: Db + Clone>(req: &Request, db: D) -> Response {
 }
 
 pub fn login<D: Db + Clone>(req: &Request, db: D) -> Response {
+    // 1. Validar content-type
     if req.header("content-type") != Some("application/json") {
-        if let Some(ct) = req.header("content-type") {
-            if !ct.contains("application/json") {
-                return Response::json(400, &bad_request("invalid_content_type"));
+        return match req.header("content-type") {
+            Some(ct) if !ct.contains("application/json") => {
+                Response::json(400, &bad_request("invalid_content_type"))
             }
-        } else {
-            return Response::json(400, &bad_request("missing_content_type"));
-        }
+            _ => Response::json(400, &bad_request("missing_content_type")),
+        };
     }
 
-    let body = req.body_string();
-    let Some(phone) = parse_login_body(&body) else {
-        return Response::json(400, &bad_request("invalid_json_or_phone"));
+    // --- 2. Parsear el body para `phone` Y `code` ---
+    // MODIFICADO: Leemos el body y lo parseamos a `LoginPayload`
+    let body_str = req.body_string();
+    let payload: LoginPayload = match serde_json::from_str(&body_str) {
+        Ok(p) => p,
+        Err(_) => {
+            // Error si el JSON es inválido o faltan campos
+            return Response::json(400, &bad_request("invalid_json_or_missing_fields"));
+        }
     };
 
-    // ⚠️ Runtime temporal por request (simple y funciona ya)
+    // ⚠️ Runtime temporal (sin cambios)
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let found = rt.block_on(AuthService::lookup_by_phone(&db, &phone));
 
-    // ✅ si no existe, responde como antes
-    if found.is_none() {
-        return Response::json(200, &login_response_not_found(&phone));
+    // --- 3. (Caso 2) Buscar si el *usuario* (customer) existe ---
+    // MODIFICADO: Buscamos por el `payload.phone`
+    let found_customer = rt.block_on(AuthService::lookup_by_phone(&db, &payload.phone));
+
+    if found_customer.is_none() {
+        // Requisito 2: "si el numero no existe entoces responde que el numero no es valido"
+        // Devolvemos un 401 (No Autorizado)
+        return Response::json(401, &auth_error("invalid_phone_number"));
     }
 
-    let customer = found.unwrap();
+    // Si llegamos aquí, el usuario SÍ existe.
+    let customer = found_customer.unwrap();
+
+    // --- 4. (Caso 3) Buscar el código de verificación ---
+    // NUEVO: Buscamos en `verification_codes`
+    let found_code = rt.block_on(AuthService::lookup_verification_code(
+        &db,
+        &payload.phone,
+        &payload.code,
+    ));
+
+    if found_code.is_none() {
+        // El código no coincide o no existe para ese teléfono
+        return Response::json(401, &auth_error("invalid_verification_code"));
+    }
+
+    // --- 5. (Caso 3) Verificar si el código ha expirado ---
+    // NUEVO: Comparamos la fecha de expiración con la actual
+    let verification = found_code.unwrap();
+    let now = Utc::now(); // Obtenemos la hora actual en UTC
+
+    if verification.expires_at < now {
+        // Requisito 3: "si ya el codigo expirto resnpoder con un mensaje correspondiente"
+        return Response::json(401, &auth_error("code_expired"));
+    }
+
+    // --- 6. (Caso 1) ¡Éxito! El código es válido y el usuario existe ---
+
+    // (Opcional pero recomendado) Borra el código para que no se reutilice
+    if let Some(id_to_delete) = &verification._id {
+        rt.block_on(AuthService::delete_verification_code(
+            &db,
+            id_to_delete, // id_to_delete es de tipo &ObjectId ¡Correcto!
+        ));
+    }
+
+    // Generar los tokens (lógica original)
     let jwt = JwtService::new(JwtCfg::from_env());
 
     let (access, access_exp) =
         jwt.issue_encrypted_access(&customer.id, None, &["me:read", "payments:create"]);
 
     let family = uuid::Uuid::new_v4().to_string();
-    let (refresh, refresh_exp, _jti) = jwt.issue_encrypted_refresh(&customer.id, &family); // (por ahora no persistimos RT; cuando extiendas el trait Db lo hacemos)
+    let (refresh, refresh_exp, _jti) = jwt.issue_encrypted_refresh(&customer.id, &family);
 
+    // Respuesta de éxito con tokens (sin cambios)
     let json = format!(
         r#"{{"ok":true,"exists":true,"tokens":{{"accessToken":"{}","accessExp":{},"refreshToken":"{}","refreshExp":{}}}}}"#,
         access, access_exp, refresh, refresh_exp

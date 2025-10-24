@@ -1,5 +1,9 @@
 pub mod mongo;
-use crate::domain::customer::{Customer, CustomerView};
+use crate::{
+    auth::claims::VerificationCode,
+    domain::customer::{Customer, CustomerView},
+};
+use mongodb::bson::oid::ObjectId;
 
 #[async_trait::async_trait]
 pub trait Db: Clone + Send + Sync + 'static {
@@ -7,4 +11,10 @@ pub trait Db: Clone + Send + Sync + 'static {
     async fn find_customer_by_id(&self, id: &str) -> Option<CustomerView>;
     async fn summary_by_phone(&self, phone: &str) -> Option<mongo::PhoneSummary>;
     async fn store_verification_code(&self, phone: &str, code: &u32) -> mongodb::error::Result<()>;
+
+    /// Busca un código de verificación por teléfono y código.
+    async fn find_verification_code(&self, phone: &str, code: &u32) -> Option<VerificationCode>;
+
+    /// Elimina un código de verificación por su ID de MongoDB.
+    async fn delete_verification_code(&self, id: &ObjectId) -> Result<u64, mongodb::error::Error>;
 }

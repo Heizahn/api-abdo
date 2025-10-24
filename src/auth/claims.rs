@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
-
+use mongodb::bson::oid::ObjectId;
+use serde::{Deserialize, Serialize};
 
 #[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
@@ -25,11 +25,18 @@ pub struct RefreshClaims {
     pub fam: String, // family id para rotación
 }
 
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VerificationCode {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub _id: Option<ObjectId>,
     pub phone: String,
-    pub code: String,
+    pub code: u32,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize)]
+pub struct LoginPayload {
+    pub phone: String,
+    pub code: u32,
 }
