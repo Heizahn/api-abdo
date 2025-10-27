@@ -1,5 +1,5 @@
 use crate::crypto::jwt_verify::{decode_payload_as_string, verify_hs256_and_get_payload_b64};
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -58,49 +58,36 @@ impl JwtCfg {
 pub struct JwtService {
     pub(crate) cfg: JwtCfg,
     pub(crate) enc: EncodingKey,
-    pub(crate) dec: DecodingKey,
 }
 
 #[derive(Debug)]
 pub enum RefreshVerifyError {
-    Signature(jsonwebtoken::errors::Error),
+    Signature,
     Decrypt,
-    Json(serde_json::Error),
-    IssMismatch { got: String, want: String },
+    Json,
+    IssMismatch,
     Expired,
     PayloadNotString,
 }
 
 #[derive(Debug)]
 pub enum AccessVerifyError {
-    Signature(jsonwebtoken::errors::Error),
+    Signature,
     Decrypt,
-    Json(serde_json::Error),
+    Json,
     PayloadNotString,
 }
 
 impl JwtService {
     pub fn new(cfg: JwtCfg) -> Self {
         let enc = EncodingKey::from_secret(cfg.secret.as_bytes()); // HS256
-        let dec = DecodingKey::from_secret(cfg.secret.as_bytes());
-        Self { cfg, enc, dec }
+        Self { cfg, enc }
     }
 
     #[inline]
     pub fn now() -> i64 {
         OffsetDateTime::now_utc().unix_timestamp()
     }
-}
-
-/// Validación SOLO de firma para payloads string (evita el error ClaimsForValidation).
-fn only_signature_validation() -> Validation {
-    let mut v = Validation::new(Algorithm::HS256);
-    v.validate_exp = false;
-    v.validate_nbf = false;
-    v.validate_aud = false;
-    // v.validate_iss = false;
-    v.required_spec_claims.clear();
-    v
 }
 
 impl JwtService {
@@ -158,12 +145,7 @@ impl JwtService {
     pub fn decode_encrypted_verbose(&self, token: &str) -> Result<AccessClaims, AccessVerifyError> {
         // 1) Verificar firma HS256 (manual) y obtener el payload *b64url*
         let payload_b64 = verify_hs256_and_get_payload_b64(token, self.cfg.secret.as_bytes())
-            .ok_or(AccessVerifyError::Signature(
-                // dejamos un error genérico; puedes definir el tuyo si quieres
-                jsonwebtoken::errors::Error::from(
-                    jsonwebtoken::errors::ErrorKind::InvalidSignature,
-                ),
-            ))?;
+            .ok_or(AccessVerifyError::Signature)?;
 
         // 2) Ese payload (JSON) es un **string** con tu blob cifrado (Base64URL)
         let encrypted_blob =
@@ -175,7 +157,7 @@ impl JwtService {
 
         // 4) Parsear JSON descifrado -> AccessClaims
         let claims: AccessClaims =
-            serde_json::from_str(&decrypted).map_err(AccessVerifyError::Json)?;
+            serde_json::from_str(&decrypted).map_err(|_| AccessVerifyError::Json)?;
 
         Ok(claims)
     }
@@ -194,11 +176,7 @@ impl JwtService {
         token: &str,
     ) -> Result<RefreshClaims, RefreshVerifyError> {
         let payload_b64 = verify_hs256_and_get_payload_b64(token, self.cfg.secret.as_bytes())
-            .ok_or(RefreshVerifyError::Signature(
-                jsonwebtoken::errors::Error::from(
-                    jsonwebtoken::errors::ErrorKind::InvalidSignature,
-                ),
-            ))?;
+            .ok_or(RefreshVerifyError::Signature)?;
 
         let encrypted_blob =
             decode_payload_as_string(&payload_b64).ok_or(RefreshVerifyError::PayloadNotString)?;
@@ -207,13 +185,9 @@ impl JwtService {
             .ok_or(RefreshVerifyError::Decrypt)?;
 
         let claims: RefreshClaims =
-            serde_json::from_str(&decrypted).map_err(RefreshVerifyError::Json)?;
-
+            serde_json::from_str(&decrypted).map_err(|_| RefreshVerifyError::Json)?;
         if claims.iss != self.cfg.iss {
-            return Err(RefreshVerifyError::IssMismatch {
-                got: claims.iss.clone(),
-                want: self.cfg.iss.clone(),
-            });
+            return Err(RefreshVerifyError::IssMismatch);
         }
         if claims.exp <= Self::now() {
             return Err(RefreshVerifyError::Expired);
