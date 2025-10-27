@@ -81,13 +81,12 @@ pub fn verify_number<D: Db + Clone>(req: &Request, db: D) -> Response {
 
 pub fn login<D: Db + Clone>(req: &Request, db: D) -> Response {
     // 1. Validar content-type
-    if req.header("content-type") != Some("application/json") {
-        return match req.header("content-type") {
-            Some(ct) if !ct.contains("application/json") => {
-                Response::json(400, &bad_request("invalid_content_type"))
-            }
-            _ => Response::json(400, &bad_request("missing_content_type")),
-        };
+    if let Some(ct) = req.header("content-type") {
+        if !ct.contains("application/json") {
+            return Response::json(400, &bad_request("invalid_content_type"));
+        }
+    } else {
+        return Response::json(400, &bad_request("missing_content_type"));
     }
 
     // --- 2. Parsear el body para `phone` Y `code` ---
