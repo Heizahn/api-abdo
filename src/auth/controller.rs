@@ -8,7 +8,7 @@ use crate::http::response::Response;
 use chrono::Utc;
 use rand::{Rng, rng};
 
-fn parse_bearer(h: &str) -> Option<&str> {
+pub fn parse_bearer(h: &str) -> Option<&str> {
     // "Bearer <token>"
     let p = h.split_whitespace().collect::<Vec<_>>();
     if p.len() == 2 && p[0].eq_ignore_ascii_case("bearer") {
@@ -223,60 +223,3 @@ pub fn refresh<D: Db + Clone>(req: &Request, _db: D) -> Response {
     );
     Response::json(200, &json)
 }
-
-// pub fn me<D: Db + Clone>(req: Request, db: D) -> Response {
-//     // 1️⃣ Validación de header Authorization
-//     let Some(h) = req.header("authorization") else {
-//         return Response::json(401, r#"{"ok":false,"error":"missing_authorization"}"#);
-//     };
-//     let Some(token) = parse_bearer(h) else {
-//         return Response::json(
-//             401,
-//             r#"{"ok":false,"error":"invalid_authorization_format"}"#,
-//         );
-//     };
-
-//     // 2️⃣ Decodificar y descifrar JWT
-//     let jwt = JwtService::new(JwtCfg::from_env());
-//     let claims = match jwt.decode_encrypted_verbose(token) {
-//         Ok(c) => c,
-//         Err(e) => {
-//             eprintln!("[/me] access verify failed: {e:?}");
-//             return Response::json(401, r#"{"ok":false,"error":"invalid_token"}"#);
-//         }
-//     };
-
-//     // 3️⃣ Verificar expiración y permisos
-//     if claims.exp < JwtService::now() {
-//         return Response::json(401, r#"{"ok":false,"error":"token_expired"}"#);
-//     }
-//     if !claims.scope.iter().any(|s| s == "me:read") {
-//         return Response::json(403, r#"{"ok":false,"error":"insufficient_scope"}"#);
-//     }
-
-//     // 4️⃣ Buscar cliente por ID (para obtener el teléfono)
-//     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-//     let customer_opt = rt.block_on(async { AuthService::lookup_by_id(&db, &claims.sub).await });
-//     let Some(customer) = customer_opt else {
-//         return Response::json(404, r#"{"ok":false,"error":"customer_not_found"}"#);
-//     };
-
-//     // 5️⃣ Buscar resumen por teléfono (nombre + suma de balances)
-//     let summary = rt.block_on(async { db.summary_by_phone(&customer.phone).await });
-
-//     if let Some(s) = summary {
-//         // ✅ Mostrar nombre del primero + suma total + cuántos hay
-//         let json = format!(
-//             r#"{{"ok":true,"customer":{{"name":"{}","phone":"{}","balance":{},"matches":{}}}}}"#,
-//             s.primary_name, s.phone, s.total_balance, s.count
-//         );
-//         Response::json(200, &json)
-//     } else {
-//         // Fallback si no hay coincidencias (debería ser raro)
-//         let json = format!(
-//             r#"{{"ok":true,"customer":{{"name":"{}","phone":"{}","balance":{}}}}}"#,
-//             customer.full_name, customer.phone, customer.balance
-//         );
-//         Response::json(200, &json)
-//     }
-// }

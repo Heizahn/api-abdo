@@ -17,4 +17,9 @@ pub trait Db: Clone + Send + Sync + 'static {
 
     /// Elimina un código de verificación por su ID de MongoDB.
     async fn delete_verification_code(&self, id: &ObjectId) -> Result<u64, mongodb::error::Error>;
+
+    //Traer el balance en USD
+    async fn get_user_balance_usd(&self, id: String) -> Result<f64, mongodb::error::Error>;
+
+    async fn get_latest_exchange_rate(&self) -> Result<f64, mongodb::error::Error>;
 }
