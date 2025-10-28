@@ -131,3 +131,58 @@ pub fn me_balance<D: Db + Clone>(req: &Request, db: D) -> Response {
     // Devolver el Response final que salió del bloque block_on
     final_response
 }
+
+pub fn me_last_payments<D: Db + Clone>(req: &Request, db: D) -> Response {
+    let Some(h) = req.header("authorization") else {
+        return Response::json(401, r#"{"ok":false,"error":"missing_authorization"}"#);
+    };
+    let Some(token) = parse_bearer(h) else {
+        return Response::json(401, r#"{"ok":false,"error":"invalid_authorization"}"#);
+    };
+
+    // ... (2️⃣ Decodificar y descifrar JWT)
+    let jwt = JwtService::new(JwtCfg::from_env());
+    let claims = match jwt.decode_encrypted_verbose(token) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[/profile/last_payment] access verify failed: {e:?}");
+            return Response::json(401, r#"{"ok":false,"error":"invalid_token"}"#);
+        }
+    };
+
+    // ... (3️⃣ Verificar expiración y permisos)
+    if claims.exp < JwtService::now() {
+        return Response::json(401, r#"{"ok":false,"error":"token_expired"}"#);
+    }
+    if !claims.scope.iter().any(|s| s == "me:read") {
+        return Response::json(403, r#"{"ok":false,"error":"insufficient_scope"}"#);
+    }
+
+    let user_id = claims.sub;
+
+    let rt = Runtime::new().expect("Failed to create Tokio runtime");
+
+    let final_response: Response = rt.block_on(async {
+        //Todo conectar a la base de datos
+        let result_db = match db.get_last_payments_by_id(user_id).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[/profile/last_payment] DB error: {:?}", e); // Mejor log de error
+                return Response::json(500, r#"{"ok":false,"error":"rate_service_error"}"#);
+            }
+        };
+
+        let data_json = match serde_json::to_string(&result_db) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[/profile/last_payment] JSON serialization error: {:?}", e);
+                return Response::json(500, r#"{"ok":false,"error":"json_serialization_error"}"#);
+            }
+        };
+
+        let json = format!(r#"{{"ok":true,"data": {}}}"#, data_json);
+        Response::json(200, &json)
+    });
+
+    final_response
+}

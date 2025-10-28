@@ -19,6 +19,11 @@ impl ProfileRouter {
                     "OPTIONS" => Response::options_ok(),
                     _ => Response::method_not_allowed(),
                 }),
+                "/me/last_payments" => Some(match req.method.as_str() {
+                    "GET" => controller::me_last_payments(req, db),
+                    "OPTIONS" => Response::options_ok(),
+                    _ => Response::method_not_allowed(),
+                }),
                 _ => None,
             },
             None => None,

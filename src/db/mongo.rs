@@ -6,11 +6,12 @@ use crate::{
 use chrono::{Duration, Utc};
 use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
-use mongodb::error::Error as MongoError;
 use mongodb::{
     Client, Collection, Database,
     bson::{DateTime, Document, doc, oid::ObjectId},
 };
+use mongodb::{bson, error::Error as MongoError};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -23,6 +24,25 @@ pub struct MongoDB {
 pub struct PhoneSummary {
     pub primary_name: String, // nombre del primero
     pub phone: String,        // cuántos clientes comparten ese phone
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PaymentDetails {
+    #[serde(rename = "_id")] // Guardamos el ID del pago por si acaso
+    pub id: ObjectId,
+    pub rason: String,
+    pub balance_bs: f64,
+    pub status: String,
+    // Guardamos la fecha completa original (con hora)
+    pub full_date: DateTime,
+}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ResultGroupedByDate {
+    #[serde(rename = "_id")] // El $group de MongoDB usa _id como clave
+    pub date: String, // Esta será la fecha (ej: "2025-10-27")
+
+    // Un vector de todos los pagos de ESE día
+    pub payments: Vec<PaymentDetails>,
 }
 
 impl MongoDB {
@@ -224,5 +244,98 @@ impl Db for MongoDB {
                 "No exchange rate found for today in BCV collection",
             )),
         }
+    }
+
+    async fn get_last_payments_by_id(
+        &self,
+        id: String,
+    ) -> Result<Vec<ResultGroupedByDate>, MongoError> {
+        // 1. Convertir String a ObjectId y manejar el error
+        let obj_id = ObjectId::parse_str(&id)
+            .map_err(|e| MongoError::custom(format!("Invalid ObjectId format: {}", e)))?;
+
+        let pipeline = vec![
+            // 1-6. Encuentra clientes, busca 10 pagos por cliente, desanida
+            doc! { "$match": { "_id": obj_id } },
+            doc! { "$lookup": {
+                "from": "Clients",
+                "localField": "sPhone",
+                "foreignField": "sPhone",
+                "as": "client_group"
+            }},
+            doc! { "$unwind": "$client_group" },
+            doc! { "$replaceRoot": { "newRoot": "$client_group" } },
+            doc! { "$lookup": {
+                "from": "Payments",
+                "let": { "client_id": "$_id" },
+                "pipeline": [
+                    doc! { "$match": { "$expr": { "$eq": ["$idClient", "$$client_id"] } }},
+                    doc! { "$sort": { "dCreation": -1 } },
+                    doc! { "$limit": 10 }
+                ],
+                "as": "recent_payments"
+            }},
+            doc! { "$unwind": "$recent_payments" },
+            // 7. Establece el pago como raíz
+            doc! { "$replaceRoot": { "newRoot": "$recent_payments" } },
+            // 8. PRE-PROYECCIÓN: Prepara los campos que necesitamos
+            doc! { "$project": {
+                "_id": 1,
+                "rason": "$sReason",
+                "balance_bs": "$nBs",
+                "status": "$sState",
+                "full_date": "$dCreation", // Mantenemos la fecha/hora completa
+                "date_group_key": { // Creamos la clave SÓLO de fecha (YYYY-MM-DD)
+                    "$dateToString": {
+                        "format": "%Y-%m-%d",
+                        "date": "$dCreation",
+                        "timezone": "America/Caracas" // <-- Importante: ajusta tu zona horaria
+                    }
+                }
+            }},
+            // 9. ORDENAR (Pre-agrupación): Ordena TODOS los pagos
+            // Esto asegura que $push (en el paso 10) respete el orden
+            doc! { "$sort": { "full_date": -1 } },
+            // 10. ¡AGRUPAR!
+            doc! { "$group": {
+                "_id": "$date_group_key", // Agrupa por la fecha (YYYY-MM-DD)
+                "payments": { "$push": {
+                    // Construye el objeto 'PaymentDetails'
+                    "_id": "$_id",
+                    "rason": "$rason",
+                    "balance_bs": "$balance_bs",
+                    "status": "$status",
+                    "full_date": "$full_date"
+                } }
+            }},
+            // 11. ORDENAR (Post-agrupación): Ordena los GRUPOS
+            doc! { "$sort": { "_id": -1 } }, // Ordena los grupos por fecha
+            // 12. LÍMITE: Limita a los 10 días más recientes
+            doc! { "$limit": 10 },
+        ];
+
+        let client_collection = self.db.collection::<mongodb::bson::Document>("Clients");
+
+        // Apunta al nuevo struct de resultado
+        let mut cursor = client_collection
+            .aggregate(pipeline) // <-- Sin genéricos
+            .await?;
+
+        let mut results: Vec<ResultGroupedByDate> = Vec::new();
+
+        // .try_next() viene de `use futures::stream::TryStreamExt;`
+        while let Some(doc) = cursor.try_next().await? {
+            // Deserializamos el Document BSON en nuestro struct
+            let item: ResultGroupedByDate = bson::from_document(doc).map_err(|e| {
+                MongoError::from(
+                    // Manejamos el error de deserialización
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()),
+                )
+            })?;
+
+            results.push(item);
+        }
+
+        Ok(results)
     }
 }
