@@ -3,6 +3,7 @@ use crate::{
     auth::claims::VerificationCode,
     db::mongo::ResultGroupedByDate,
     domain::customer::{Customer, CustomerView},
+    profile::structers::{Client, Debt, PartPayment, Payment},
 };
 use mongodb::bson::oid::ObjectId;
 use mongodb::error::Error as MongoError;
@@ -29,4 +30,22 @@ pub trait Db: Clone + Send + Sync + 'static {
         &self,
         id: String,
     ) -> Result<Vec<ResultGroupedByDate>, MongoError>;
+
+    // 1. Obtener el cliente por ID de usuario (user_id)
+    async fn find_client_by_user_id(&self, user_id: &str) -> Result<Option<Client>, String>;
+
+    // 2. Obtener todos los clientes con un sPhone específico
+    async fn find_clients_by_phone(&self, s_phone: &str) -> Result<Vec<Client>, String>;
+
+    // 3. Obtener todas las deudas para una lista de IDs de cliente
+    async fn find_debts_by_client_ids(&self, client_ids: &[ObjectId]) -> Result<Vec<Debt>, String>;
+
+    // 4. Obtener todas las partes de pago para una lista de IDs de deuda
+    async fn find_part_payments_by_debt_ids(
+        &self,
+        debt_ids: &[ObjectId],
+    ) -> Result<Vec<PartPayment>, String>;
+
+    // 5. Obtener los pagos por una lista de IDs de pago
+    async fn find_payments_by_ids(&self, payment_ids: &[ObjectId]) -> Result<Vec<Payment>, String>;
 }
