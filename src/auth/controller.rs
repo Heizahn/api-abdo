@@ -7,6 +7,8 @@ use crate::http::request::Request;
 use crate::http::response::Response;
 use chrono::Utc;
 use rand::{Rng, rng};
+use reqwest;
+use std::env;
 
 pub fn parse_bearer(h: &str) -> Option<&str> {
     // "Bearer <token>"
@@ -63,8 +65,122 @@ pub fn verify_number<D: Db + Clone>(req: &Request, db: D) -> Response {
             return Response::json(500, &json.to_string());
         }
 
-        // 7. Enviar SMS (solo si tenés implementado)
-        println!("{}", code);
+        // 7. Enviar SMS
+        //aqui necesito saber si el phone empieza por 0416 o 0426
+        //si eso es verdadero el prefijo que se obtine de la env API_SHORT_NUMBER se debe agregar alante el 121 guardar en una variable como complete_short
+        //se debe hacer una solicitud https post a API_HOST_SMS
+        //se debe enviar en el header Authorization: Basic API_KEY_SMS
+        /* el cuerpo de la peticion debe ser  {
+          "to": "584144271554",
+          "from": complete_short,
+          "content": code,
+          "dlr": "no",
+          "coding":"3"
+        }*/
+
+        // 7.1. Obtener variables de entorno
+        let (api_host, api_key, short_number) = {
+            // Función helper para no repetir el manejo de errores
+            let get_env_var = |name: &str| -> Result<String, Response> {
+                env::var(name).map_err(|e| {
+                    eprintln!(
+                        "Error: variable de entorno {} no configurada. {:?}",
+                        name, e
+                    );
+                    let json = serde_json::json!({
+                        "ok": false,
+                        "status_code": 500,
+                        "message": "Error interno del servidor (config)"
+                    });
+                    Response::json(500, &json.to_string())
+                })
+            };
+
+            let host = match get_env_var("API_HOST_SMS") {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+            let key = match get_env_var("API_KEY_SMS") {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+            let short = match get_env_var("API_SHORT_NUMBER") {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
+            (host, key, short)
+        };
+
+        // 7.2. Preparar variables para el SMS
+        let complete_short = if phone.starts_with("0416") || phone.starts_with("0426") {
+            format!("121{}", short_number)
+        } else {
+            short_number
+        };
+
+        // Formatear el número de "0414..." a "58414..."
+        let to_phone = if let Some(stripped_phone) = phone.strip_prefix('0') {
+            format!("58{}", stripped_phone)
+        } else {
+            phone.clone() // Fallback por si ya viene sin el 0
+        };
+
+        // 7.3. Construir cliente y cuerpo de la petición
+        let client = reqwest::Client::new();
+        let sms_content = format!(
+            "Inersiones ABDO77: Utiliza el codigo {} para verificar tu identidad. No lo compartas. Expira en 60 minutos.",
+            code
+        );
+        let sms_body = serde_json::json!({
+            "to": to_phone,
+            "from": complete_short,
+            "content": sms_content, // Usamos la variable 'code' del paso 5
+            "dlr": "no",
+            "coding": "3"
+        });
+
+        // 7.4. Enviar la solicitud POST
+        let res = client
+            .post(&api_host)
+            .header("Authorization", format!("Basic {}", api_key))
+            .json(&sms_body)
+            .send()
+            .await;
+
+        // 7.5. Manejar la respuesta del envío de SMS
+        match res {
+            Ok(response) => {
+                if !response.status().is_success() {
+                    // El proveedor de SMS devolvió un error (4xx, 5xx)
+                    let status = response.status();
+                    let error_body = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "sin cuerpo".to_string());
+                    eprintln!(
+                        "Error enviando SMS a {}. Status: {}. Body: {}",
+                        api_host, status, error_body
+                    );
+
+                    let json = serde_json::json!({
+                        "ok": false,
+                        "status_code": 500,
+                        "message": "Error al comunicarse con el proveedor de SMS"
+                    });
+                    return Response::json(500, &json.to_string());
+                }
+            }
+            Err(e) => {
+                // Error de red o al construir la petición
+                eprintln!("Error de red al enviar SMS: {:?}", e);
+                let json = serde_json::json!({
+                    "ok": false,
+                    "status_code": 500,
+                    "message": "Error de red al enviar el SMS"
+                });
+                return Response::json(500, &json.to_string());
+            }
+        }
 
         // 8. Retornar respuesta
         let json = serde_json::json!({
