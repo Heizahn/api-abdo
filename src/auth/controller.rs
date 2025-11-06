@@ -128,7 +128,7 @@ pub fn verify_number<D: Db + Clone>(req: &Request, db: D) -> Response {
         // 7.3. Construir cliente y cuerpo de la petición
         let client = reqwest::Client::new();
         let sms_content = format!(
-            "Inersiones ABDO77: Utiliza el codigo {} para verificar tu identidad. No lo compartas. Expira en 60 minutos.",
+            "Inversiones ABDO77 te envia el codigo {}. Valido solo por 1 hora para confirmar tu cuenta. No responder.",
             code
         );
         let sms_body = serde_json::json!({
