@@ -17,7 +17,7 @@ impl RedisClient {
 
         // Verificar conexión con ping
         let mut conn = client.get_multiplexed_async_connection().await?;
-        redis::cmd("PING").query_async::<_, ()>(&mut conn).await?;
+        let _: () = redis::cmd("PING").query_async(&mut conn).await?;
 
         tracing::info!("✅ Cliente Redis conectado");
 
