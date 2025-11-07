@@ -27,10 +27,14 @@ pub fn create_rate_limiter(
 pub fn create_auth_rate_limiter(
     per_minute: u64,
 ) -> GovernorLayer<'static, SmartIpKeyExtractor, NoOpMiddleware> {
+    // Asegurar que per_second sea al menos 1 para evitar división por 0
+    let per_second = std::cmp::max(1, per_minute / 60);
+    let burst = std::cmp::max(1, per_minute as u32);
+
     let config = Box::leak(Box::new(
         GovernorConfigBuilder::default()
-            .per_second(per_minute / 60) // Convertir a por segundo
-            .burst_size(per_minute as u32)
+            .per_second(per_second)
+            .burst_size(burst)
             .key_extractor(SmartIpKeyExtractor)
             .finish()
             .expect("Failed to create auth rate limiter config"),
