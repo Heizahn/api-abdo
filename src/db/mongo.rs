@@ -385,7 +385,7 @@ impl Db for MongoDB {
         match self.customers().find_one(filter).await {
             Ok(Some(doc)) => {
                 let client = crate::profile::structers::Client {
-                    _id: doc.get_object_id("_id").map(|o| o.to_string()).unwrap_or_default(),
+                    _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
                     s_phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
                 };
                 Ok(Some(client))
@@ -402,7 +402,7 @@ impl Db for MongoDB {
 
         while let Some(Ok(doc)) = cursor.next().await {
             let client = crate::profile::structers::Client {
-                _id: doc.get_object_id("_id").map(|o| o.to_string()).unwrap_or_default(),
+                _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
                 s_phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
             };
             clients.push(client);
@@ -419,10 +419,10 @@ impl Db for MongoDB {
 
         while let Some(Ok(doc)) = cursor.next().await {
             let debt = crate::profile::structers::Debt {
-                _id: doc.get_object_id("_id").map(|o| o.to_string()).unwrap_or_default(),
+                _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
                 n_amount: doc.get_f64("nAmount").unwrap_or(0.0),
                 s_state: doc.get_str("sState").unwrap_or_default().to_string(),
-                id_client: doc.get_object_id("idClient").map(|o| o.to_string()).unwrap_or_default(),
+                id_client: doc.get_object_id("idClient").unwrap_or_else(|_| ObjectId::new()),
                 s_reason: doc.get_str("sReason").unwrap_or_default().to_string(),
             };
             debts.push(debt);
@@ -439,9 +439,9 @@ impl Db for MongoDB {
 
         while let Some(Ok(doc)) = cursor.next().await {
             let pp = crate::profile::structers::PartPayment {
-                _id: doc.get_object_id("_id").map(|o| o.to_string()).unwrap_or_default(),
-                id_debt: doc.get_object_id("idDebt").map(|o| o.to_string()).unwrap_or_default(),
-                id_payment: doc.get_object_id("idPayment").map(|o| o.to_string()).unwrap_or_default(),
+                _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
+                id_debt: doc.get_object_id("idDebt").unwrap_or_else(|_| ObjectId::new()),
+                id_payment: doc.get_object_id("idPayment").unwrap_or_else(|_| ObjectId::new()),
                 n_amount: doc.get_f64("nAmount").unwrap_or(0.0),
             };
             part_payments.push(pp);
@@ -458,7 +458,7 @@ impl Db for MongoDB {
 
         while let Some(Ok(doc)) = cursor.next().await {
             let payment = crate::profile::structers::Payment {
-                _id: doc.get_object_id("_id").map(|o| o.to_string()).unwrap_or_default(),
+                _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
                 n_amount: doc.get_f64("nAmount").unwrap_or(0.0),
                 s_state: doc.get_str("sState").unwrap_or_default().to_string(),
             };

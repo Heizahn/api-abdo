@@ -37,13 +37,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Inicializar estado de aplicación (MongoDB + Redis)
     tracing::info!("Inicializando conexiones...");
-    let state = match AppState::new(cfg.clone()).await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!("Error inicializando estado: {:?}", e);
-            return Err(e);
-        }
-    };
+    let state = AppState::new(cfg.clone()).await.map_err(|e| {
+        tracing::error!("Error inicializando estado: {:?}", e);
+        Box::new(e) as Box<dyn std::error::Error>
+    })?;
 
     tracing::info!("✅ Conexiones establecidas");
 

@@ -1,7 +1,7 @@
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use mongodb::bson::oid::ObjectId;
+
+// Re-export ObjectId for backward compatibility
+pub use mongodb::bson::oid::ObjectId;
 
 // --- 1. Estructuras de Datos (Modelos) ---
 
