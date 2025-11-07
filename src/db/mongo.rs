@@ -377,4 +377,94 @@ impl Db for MongoDB {
 
         Ok(results)
     }
+
+    async fn find_client_by_user_id(&self, user_id: &str) -> Result<Option<crate::profile::structers::Client>, String> {
+        let obj_id = ObjectId::parse_str(user_id).map_err(|e| e.to_string())?;
+        let filter = doc! { "_id": obj_id };
+
+        match self.customers().find_one(filter).await {
+            Ok(Some(doc)) => {
+                let client = crate::profile::structers::Client {
+                    _id: doc.get_object_id("_id").map(|o| o.to_string()).unwrap_or_default(),
+                    s_phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
+                };
+                Ok(Some(client))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    async fn find_clients_by_phone(&self, s_phone: &str) -> Result<Vec<crate::profile::structers::Client>, String> {
+        let filter = doc! { "sPhone": s_phone };
+        let mut cursor = self.customers().find(filter).await.map_err(|e| e.to_string())?;
+        let mut clients = Vec::new();
+
+        while let Some(Ok(doc)) = cursor.next().await {
+            let client = crate::profile::structers::Client {
+                _id: doc.get_object_id("_id").map(|o| o.to_string()).unwrap_or_default(),
+                s_phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
+            };
+            clients.push(client);
+        }
+
+        Ok(clients)
+    }
+
+    async fn find_debts_by_client_ids(&self, client_ids: &[ObjectId]) -> Result<Vec<crate::profile::structers::Debt>, String> {
+        let filter = doc! { "idClient": { "$in": client_ids } };
+        let collection = self.db.collection::<Document>("Debts");
+        let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
+        let mut debts = Vec::new();
+
+        while let Some(Ok(doc)) = cursor.next().await {
+            let debt = crate::profile::structers::Debt {
+                _id: doc.get_object_id("_id").map(|o| o.to_string()).unwrap_or_default(),
+                n_amount: doc.get_f64("nAmount").unwrap_or(0.0),
+                s_state: doc.get_str("sState").unwrap_or_default().to_string(),
+                id_client: doc.get_object_id("idClient").map(|o| o.to_string()).unwrap_or_default(),
+                s_reason: doc.get_str("sReason").unwrap_or_default().to_string(),
+            };
+            debts.push(debt);
+        }
+
+        Ok(debts)
+    }
+
+    async fn find_part_payments_by_debt_ids(&self, debt_ids: &[ObjectId]) -> Result<Vec<crate::profile::structers::PartPayment>, String> {
+        let filter = doc! { "idDebt": { "$in": debt_ids } };
+        let collection = self.db.collection::<Document>("PartPayment");
+        let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
+        let mut part_payments = Vec::new();
+
+        while let Some(Ok(doc)) = cursor.next().await {
+            let pp = crate::profile::structers::PartPayment {
+                _id: doc.get_object_id("_id").map(|o| o.to_string()).unwrap_or_default(),
+                id_debt: doc.get_object_id("idDebt").map(|o| o.to_string()).unwrap_or_default(),
+                id_payment: doc.get_object_id("idPayment").map(|o| o.to_string()).unwrap_or_default(),
+                n_amount: doc.get_f64("nAmount").unwrap_or(0.0),
+            };
+            part_payments.push(pp);
+        }
+
+        Ok(part_payments)
+    }
+
+    async fn find_payments_by_ids(&self, payment_ids: &[ObjectId]) -> Result<Vec<crate::profile::structers::Payment>, String> {
+        let filter = doc! { "_id": { "$in": payment_ids } };
+        let collection = self.db.collection::<Document>("Payments");
+        let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
+        let mut payments = Vec::new();
+
+        while let Some(Ok(doc)) = cursor.next().await {
+            let payment = crate::profile::structers::Payment {
+                _id: doc.get_object_id("_id").map(|o| o.to_string()).unwrap_or_default(),
+                n_amount: doc.get_f64("nAmount").unwrap_or(0.0),
+                s_state: doc.get_str("sState").unwrap_or_default().to_string(),
+            };
+            payments.push(payment);
+        }
+
+        Ok(payments)
+    }
 }

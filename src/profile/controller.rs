@@ -1,11 +1,13 @@
 use tokio::runtime::Runtime;
+use std::collections::HashMap;
+use serde_json::json;
 
 use crate::{
     auth::{controller::parse_bearer, service::AuthService},
     crypto::jwt::{JwtCfg, JwtService},
     db::Db,
     http::{request::Request, response::Response},
-    profile::structers::ObjectId,
+    profile::structers::{ObjectId, ActiveDebtResponse},
 };
 
 pub fn me<D: Db + Clone>(req: &Request, db: D) -> Response {

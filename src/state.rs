@@ -2,7 +2,7 @@ use std::sync::Arc;
 use crate::{
     cache::RedisClient,
     config::Config,
-    db::MongoDB,
+    db::mongo::MongoDB,
 };
 
 /// Estado compartido de la aplicación
@@ -17,7 +17,7 @@ pub struct AppState {
 impl AppState {
     /// Crea un nuevo estado de aplicación
     /// Inicializa conexiones a MongoDB y Redis
-    pub async fn new(config: Config) -> Result<Self, anyhow::Error> {
+    pub async fn new(config: Config) -> Result<Arc<Self>, anyhow::Error> {
         tracing::info!("Inicializando estado de aplicación...");
 
         // Inicializar MongoDB con pool
@@ -30,10 +30,10 @@ impl AppState {
         let redis = RedisClient::new(&config).await?;
         tracing::info!("✅ Redis conectado");
 
-        Ok(Self {
+        Ok(Arc::new(Self {
             db,
             redis,
             config: Arc::new(config),
-        })
+        }))
     }
 }

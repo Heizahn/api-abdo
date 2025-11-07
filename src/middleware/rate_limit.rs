@@ -6,7 +6,7 @@ use tower_governor::{
 use std::time::Duration;
 
 /// Crea un rate limiter general para la API
-pub fn create_rate_limiter(per_second: u64, burst: u32) -> GovernorLayer<SmartIpKeyExtractor> {
+pub fn create_rate_limiter(per_second: u64, burst: u32) -> GovernorLayer<'static, SmartIpKeyExtractor, tower_governor::governor::DefaultKeyedStateStore<SmartIpKeyExtractor>> {
     let config = GovernorConfigBuilder::default()
         .per_second(per_second)
         .burst_size(burst)
@@ -20,7 +20,7 @@ pub fn create_rate_limiter(per_second: u64, burst: u32) -> GovernorLayer<SmartIp
 
 /// Crea un rate limiter específico para endpoints de auth
 /// Más restrictivo para prevenir ataques de fuerza bruta
-pub fn create_auth_rate_limiter(per_minute: u64) -> GovernorLayer<SmartIpKeyExtractor> {
+pub fn create_auth_rate_limiter(per_minute: u64) -> GovernorLayer<'static, SmartIpKeyExtractor, tower_governor::governor::DefaultKeyedStateStore<SmartIpKeyExtractor>> {
     let config = GovernorConfigBuilder::default()
         .period(Duration::from_secs(60))
         .burst_size(per_minute as u32)

@@ -3,7 +3,7 @@ use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
 
 #[allow(dead_code)]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessClaims {
     pub iss: String,
     pub sub: String,         // id del cliente
@@ -13,6 +13,9 @@ pub struct AccessClaims {
     pub exp: i64,
     pub jti: String,
 }
+
+// Alias para compatibilidad con el nuevo código
+pub type Claims = AccessClaims;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
