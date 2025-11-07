@@ -11,7 +11,7 @@ axum = { version = "0.7", features = ["macros"] }
 axum-extra = { version = "0.9", features = ["typed-header"] }
 tower = { version = "0.4", features = ["full"] }
 tower-http = { version = "0.5", features = ["compression-full", "cors", "trace"] }
-tower-governor = "0.3"
+tower_governor = "0.3"
 hyper = { version = "1", features = ["full"] }
 tokio = { version = "1.39", features = ["full", "tracing"] }
 
