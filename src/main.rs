@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Inicializando conexiones...");
     let state = AppState::new(cfg.clone()).await.map_err(|e| {
         tracing::error!("Error inicializando estado: {:?}", e);
-        Box::new(e) as Box<dyn std::error::Error>
+        format!("{:?}", e)
     })?;
 
     tracing::info!("✅ Conexiones establecidas");
