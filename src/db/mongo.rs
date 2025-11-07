@@ -57,6 +57,45 @@ impl MongoDB {
         }
     }
 
+    /// Crea una nueva instancia de MongoDB con pool de conexiones optimizado
+    pub async fn new_with_pool(cfg: &crate::config::Config) -> Result<Self, MongoError> {
+        use mongodb::options::ClientOptions;
+        use std::time::Duration as StdDuration;
+
+        let mut client_options = ClientOptions::parse(&cfg.mongo_uri).await?;
+
+        // ✅ Configuración del pool de conexiones
+        client_options.max_pool_size = Some(cfg.mongo_pool_size);
+        client_options.min_pool_size = Some(cfg.mongo_min_pool_size);
+        client_options.connect_timeout = Some(StdDuration::from_secs(cfg.mongo_connect_timeout));
+        client_options.server_selection_timeout = Some(StdDuration::from_secs(5));
+        client_options.max_idle_time = Some(StdDuration::from_secs(600)); // 10 minutos
+
+        // ✅ Retry automático
+        client_options.retry_writes = Some(true);
+        client_options.retry_reads = Some(true);
+
+        // ✅ App name para identificación en logs de MongoDB
+        client_options.app_name = Some("api-abdo".to_string());
+
+        let client = Client::with_options(client_options)?;
+        let db = client.database(&cfg.mongo_db);
+
+        // ✅ Verificar conexión con ping
+        tracing::info!("Verificando conexión a MongoDB...");
+        client.database("admin")
+            .run_command(doc! { "ping": 1 })
+            .await?;
+
+        tracing::info!("✅ MongoDB conectado con pool optimizado (max: {}, min: {})",
+            cfg.mongo_pool_size, cfg.mongo_min_pool_size);
+
+        Ok(Self {
+            client: Arc::new(client),
+            db,
+        })
+    }
+
     fn customers(&self) -> Collection<Document> {
         self.db.collection::<Document>("Clients")
     }
