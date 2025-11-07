@@ -19,7 +19,7 @@ use crate::{
 
 /// Construye el router completo de la aplicación
 pub fn build_router(state: Arc<AppState>) -> Router {
-    // CORS layer - permite todas las origenes (ajustar en producción)
+    // CORS layer
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -31,31 +31,32 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         state.config.rate_limit_burst,
     );
 
-    let auth_rate_limit = rate_limit::create_auth_rate_limiter(
-        state.config.rate_limit_auth_per_minute,
-    );
+    let auth_rate_limit =
+        rate_limit::create_auth_rate_limiter(state.config.rate_limit_auth_per_minute);
 
-    // Router de autenticación (público, con rate limiting estricto)
-    let auth_routes = Router::new()
-        .route("/verify_number", post(auth::verify_number_handler))
-        .route("/login", post(auth::login_handler))
-        .route("/refresh", post(auth::refresh_handler))
+    // ✅ RUTAS PÚBLICAS (sin JWT)
+    let public_routes = Router::new()
+        .route("/v1/auth/verify_number", post(auth::verify_number_handler))
+        .route("/v1/auth/login", post(auth::login_handler))
+        .route("/v1/auth/refresh", post(auth::refresh_handler))
         .layer(auth_rate_limit);
 
-    // Router de profile (protegido con JWT middleware)
-    let profile_routes = Router::new()
-        .route("/me", get(profile::me_handler))
-        .route("/me/balance", get(profile::me_balance_handler))
-        .route("/me/last_payments", get(profile::me_last_payments_handler))
-        .layer(middleware::from_fn_with_state(
+    // ✅ RUTAS PROTEGIDAS (con JWT)
+    let protected_routes = Router::new()
+        .route("/v1/profile/me", get(profile::me_handler))
+        .route("/v1/profile/me/balance", get(profile::me_balance_handler))
+        .route(
+            "/v1/profile/me/last_payments",
+            get(profile::me_last_payments_handler),
+        )
+        .route_layer(middleware::from_fn_with_state(
             state.clone(),
             jwt_auth_middleware,
         ));
 
-    // Router principal
-    Router::new()
-        .nest("/v1/auth", auth_routes)
-        .nest("/v1/profile", profile_routes)
+    // ✅ ROUTER PRINCIPAL: merge + state al final
+    public_routes
+        .merge(protected_routes)
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())

@@ -1,21 +1,13 @@
-use crate::crypto::jwt_verify::{decode_payload_as_string, verify_hs256_and_get_payload_b64};
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use crate::{
+    auth::claims::AccessClaims,
+    crypto::jwt_verify::{decode_payload_as_string, verify_hs256_and_get_payload_b64},
+};
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::crypto::aes::{decrypt_payload, encrypt_payload};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AccessClaims {
-    pub iss: String,
-    pub sub: String,
-    pub aid: Option<String>,
-    pub scope: Vec<String>,
-    pub iat: i64,
-    pub exp: i64,
-    pub jti: String,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefreshClaims {
