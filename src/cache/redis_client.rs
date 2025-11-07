@@ -88,6 +88,7 @@ impl RedisClient {
     }
 
     /// Invalida cache de balance de usuario
+    #[allow(dead_code)]
     pub async fn invalidate_user_balance(&self, user_id: &str) -> Result<(), RedisError> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
         let key = format!("balance:user:{}", user_id);
@@ -96,6 +97,7 @@ impl RedisClient {
     }
 
     /// Invalida cache de summary de usuario
+    #[allow(dead_code)]
     pub async fn invalidate_user_summary(&self, user_id: &str) -> Result<(), RedisError> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
         let key = format!("summary:user:{}", user_id);

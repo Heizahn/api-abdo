@@ -162,14 +162,6 @@ impl JwtService {
         Ok(claims)
     }
 
-    /// Igual que arriba, pero permitiendo que luego valides exp si quieres
-    pub fn decode_encrypted_allow_exp(&self, token: &str) -> Option<AccessClaims> {
-        let payload_b64 = verify_hs256_and_get_payload_b64(token, self.cfg.secret.as_bytes())?;
-        let encrypted_blob = decode_payload_as_string(&payload_b64)?;
-        let decrypted = decrypt_payload(&self.cfg.secret, &encrypted_blob)?;
-        serde_json::from_str::<AccessClaims>(&decrypted).ok()
-    }
-
     /// Refresh: igual flujo + valida iss/exp tras descifrar
     pub fn verify_encrypted_refresh_verbose(
         &self,

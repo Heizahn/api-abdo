@@ -46,17 +46,6 @@ pub struct ResultGroupedByDate {
 }
 
 impl MongoDB {
-    pub async fn new(uri: &str, db_name: &str) -> Self {
-        let client = Client::with_uri_str(uri)
-            .await
-            .expect("Error conectando a MongoDB");
-        let db = client.database(db_name);
-        Self {
-            client: Arc::new(client),
-            db,
-        }
-    }
-
     /// Crea una nueva instancia de MongoDB con pool de conexiones optimizado
     pub async fn new_with_pool(cfg: &crate::config::Config) -> Result<Self, MongoError> {
         use mongodb::options::ClientOptions;
@@ -378,13 +367,13 @@ impl Db for MongoDB {
         Ok(results)
     }
 
-    async fn find_client_by_user_id(&self, user_id: &str) -> Result<Option<crate::profile::structers::Client>, String> {
+    async fn find_client_by_user_id(&self, user_id: &str) -> Result<Option<crate::models::db::Client>, String> {
         let obj_id = ObjectId::parse_str(user_id).map_err(|e| e.to_string())?;
         let filter = doc! { "_id": obj_id };
 
         match self.customers().find_one(filter).await {
             Ok(Some(doc)) => {
-                let client = crate::profile::structers::Client {
+                let client = crate::models::db::Client {
                     _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
                     s_phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
                 };
@@ -395,13 +384,13 @@ impl Db for MongoDB {
         }
     }
 
-    async fn find_clients_by_phone(&self, s_phone: &str) -> Result<Vec<crate::profile::structers::Client>, String> {
+    async fn find_clients_by_phone(&self, s_phone: &str) -> Result<Vec<crate::models::db::Client>, String> {
         let filter = doc! { "sPhone": s_phone };
         let mut cursor = self.customers().find(filter).await.map_err(|e| e.to_string())?;
         let mut clients = Vec::new();
 
         while let Some(Ok(doc)) = cursor.next().await {
-            let client = crate::profile::structers::Client {
+            let client = crate::models::db::Client {
                 _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
                 s_phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
             };
@@ -411,14 +400,14 @@ impl Db for MongoDB {
         Ok(clients)
     }
 
-    async fn find_debts_by_client_ids(&self, client_ids: &[ObjectId]) -> Result<Vec<crate::profile::structers::Debt>, String> {
+    async fn find_debts_by_client_ids(&self, client_ids: &[ObjectId]) -> Result<Vec<crate::models::db::Debt>, String> {
         let filter = doc! { "idClient": { "$in": client_ids } };
         let collection = self.db.collection::<Document>("Debts");
         let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
         let mut debts = Vec::new();
 
         while let Some(Ok(doc)) = cursor.next().await {
-            let debt = crate::profile::structers::Debt {
+            let debt = crate::models::db::Debt {
                 _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
                 n_amount: doc.get_f64("nAmount").unwrap_or(0.0),
                 s_state: doc.get_str("sState").unwrap_or_default().to_string(),
@@ -431,14 +420,14 @@ impl Db for MongoDB {
         Ok(debts)
     }
 
-    async fn find_part_payments_by_debt_ids(&self, debt_ids: &[ObjectId]) -> Result<Vec<crate::profile::structers::PartPayment>, String> {
+    async fn find_part_payments_by_debt_ids(&self, debt_ids: &[ObjectId]) -> Result<Vec<crate::models::db::PartPayment>, String> {
         let filter = doc! { "idDebt": { "$in": debt_ids } };
         let collection = self.db.collection::<Document>("PartPayment");
         let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
         let mut part_payments = Vec::new();
 
         while let Some(Ok(doc)) = cursor.next().await {
-            let pp = crate::profile::structers::PartPayment {
+            let pp = crate::models::db::PartPayment {
                 _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
                 id_debt: doc.get_object_id("idDebt").unwrap_or_else(|_| ObjectId::new()),
                 id_payment: doc.get_object_id("idPayment").unwrap_or_else(|_| ObjectId::new()),
@@ -450,14 +439,14 @@ impl Db for MongoDB {
         Ok(part_payments)
     }
 
-    async fn find_payments_by_ids(&self, payment_ids: &[ObjectId]) -> Result<Vec<crate::profile::structers::Payment>, String> {
+    async fn find_payments_by_ids(&self, payment_ids: &[ObjectId]) -> Result<Vec<crate::models::db::Payment>, String> {
         let filter = doc! { "_id": { "$in": payment_ids } };
         let collection = self.db.collection::<Document>("Payments");
         let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
         let mut payments = Vec::new();
 
         while let Some(Ok(doc)) = cursor.next().await {
-            let payment = crate::profile::structers::Payment {
+            let payment = crate::models::db::Payment {
                 _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
                 n_amount: doc.get_f64("nAmount").unwrap_or(0.0),
                 s_state: doc.get_str("sState").unwrap_or_default().to_string(),

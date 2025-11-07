@@ -3,7 +3,7 @@ use crate::{
     auth::claims::VerificationCode,
     db::mongo::ResultGroupedByDate,
     domain::customer::{Customer, CustomerView},
-    profile::structers::{Client, Debt, PartPayment, Payment},
+    models::db::{Client, Debt, PartPayment, Payment},
 };
 use mongodb::bson::oid::ObjectId;
 use mongodb::error::Error as MongoError;
@@ -31,21 +31,29 @@ pub trait Db: Clone + Send + Sync + 'static {
         id: String,
     ) -> Result<Vec<ResultGroupedByDate>, MongoError>;
 
+    // The following methods are implemented for future endpoints
+    // that will display debt information and payment details.
+
     // 1. Obtener el cliente por ID de usuario (user_id)
+    #[allow(dead_code)]
     async fn find_client_by_user_id(&self, user_id: &str) -> Result<Option<Client>, String>;
 
     // 2. Obtener todos los clientes con un sPhone específico
+    #[allow(dead_code)]
     async fn find_clients_by_phone(&self, s_phone: &str) -> Result<Vec<Client>, String>;
 
     // 3. Obtener todas las deudas para una lista de IDs de cliente
+    #[allow(dead_code)]
     async fn find_debts_by_client_ids(&self, client_ids: &[ObjectId]) -> Result<Vec<Debt>, String>;
 
     // 4. Obtener todas las partes de pago para una lista de IDs de deuda
+    #[allow(dead_code)]
     async fn find_part_payments_by_debt_ids(
         &self,
         debt_ids: &[ObjectId],
     ) -> Result<Vec<PartPayment>, String>;
 
     // 5. Obtener los pagos por una lista de IDs de pago
+    #[allow(dead_code)]
     async fn find_payments_by_ids(&self, payment_ids: &[ObjectId]) -> Result<Vec<Payment>, String>;
 }

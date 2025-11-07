@@ -7,18 +7,13 @@ mod domain;
 mod error;
 mod state;
 
-// New modules for Axum
+// Axum modules
 mod axum_router;
 mod cache;
 mod handlers;
 mod middleware;
 mod models;
 mod utils;
-
-// Old modules (kept for compatibility)
-mod http;
-mod profile;
-mod router;
 
 use config::Config;
 use state::AppState;

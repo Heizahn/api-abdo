@@ -37,9 +37,3 @@ pub struct VerificationCode {
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
-
-#[derive(Deserialize)]
-pub struct LoginPayload {
-    pub phone: String,
-    pub code: u32,
-}

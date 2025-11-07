@@ -6,7 +6,6 @@ use axum::{
 };
 use std::sync::Arc;
 use crate::{
-    auth::claims::Claims,
     crypto::jwt::{JwtCfg, JwtService},
     state::AppState,
 };
@@ -50,28 +49,4 @@ pub async fn jwt_auth_middleware(
 
     // Continuar con el siguiente middleware/handler
     Ok(next.run(req).await)
-}
-
-/// Extractor de claims desde request extensions
-/// Se usa en handlers protegidos
-pub struct AuthUser(pub Claims);
-
-#[axum::async_trait]
-impl<S> axum::extract::FromRequestParts<S> for AuthUser
-where
-    S: Send + Sync,
-{
-    type Rejection = StatusCode;
-
-    async fn from_request_parts(
-        parts: &mut axum::http::request::Parts,
-        _state: &S,
-    ) -> Result<Self, Self::Rejection> {
-        parts
-            .extensions
-            .get::<Claims>()
-            .cloned()
-            .map(AuthUser)
-            .ok_or(StatusCode::UNAUTHORIZED)
-    }
 }

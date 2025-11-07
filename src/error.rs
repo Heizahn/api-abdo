@@ -17,6 +17,7 @@ pub enum ApiError {
     #[error("Forbidden")]
     Forbidden,
 
+    #[allow(dead_code)]
     #[error("Bad request: {0}")]
     BadRequest(String),
 
@@ -26,6 +27,7 @@ pub enum ApiError {
     #[error("Redis error: {0}")]
     CacheError(String),
 
+    #[allow(dead_code)]
     #[error("SMS sending error: {0}")]
     SmsError(String),
 

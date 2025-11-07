@@ -16,6 +16,7 @@ pub struct Config {
 
     // Redis
     pub redis_uri: String,
+    #[allow(dead_code)]
     pub redis_pool_size: u32,
     pub redis_exchange_rate_ttl: u64,
     pub redis_user_data_ttl: u64,
