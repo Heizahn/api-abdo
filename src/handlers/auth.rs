@@ -6,8 +6,9 @@ use std::sync::Arc;
 use chrono::Utc;
 
 use crate::{
-    auth::{service::AuthService, claims::Claims},
+    auth::service::AuthService,
     crypto::jwt::{JwtCfg, JwtService},
+    db::Db,
     error::ApiError,
     models::auth::*,
     state::AppState,

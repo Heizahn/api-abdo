@@ -69,7 +69,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✨ Servidor listo para recibir peticiones");
 
     // 6. Iniciar servidor
-    axum::serve(listener, app).await.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+    axum::serve(listener, app).await?;
+
+    Ok(())
 }
 
 /// Inicializa el sistema de tracing/logging

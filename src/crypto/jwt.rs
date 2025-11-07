@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::crypto::aes::{decrypt_payload, encrypt_payload};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessClaims {
     pub iss: String,
     pub sub: String,

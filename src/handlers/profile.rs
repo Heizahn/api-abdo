@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::{
     auth::{claims::Claims, service::AuthService},
+    db::Db,
     error::ApiError,
     models::profile::*,
     state::AppState,
