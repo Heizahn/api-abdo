@@ -1,10 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-// --- Tipos Comunes ---
-// Utilizaremos String para IDs, asumiendo que son ObjectId o UUIDs.
-pub type ObjectId = String;
+use mongodb::bson::oid::ObjectId;
 
 // --- 1. Estructuras de Datos (Modelos) ---
 
