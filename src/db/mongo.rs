@@ -2,15 +2,16 @@ use super::Db;
 use crate::{
     auth::claims::VerificationCode,
     domain::customer::{Customer, CustomerView},
+    models::db::Debt,
 };
 use chrono::{Duration, Utc};
 use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
-use mongodb::{
-    Client, Collection, Database,
-    bson::{DateTime, Document, doc, oid::ObjectId},
-};
 use mongodb::{bson, error::Error as MongoError};
+use mongodb::{
+    bson::{doc, oid::ObjectId, DateTime, Document},
+    Client, Collection, Database,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -72,12 +73,16 @@ impl MongoDB {
 
         // ✅ Verificar conexión con ping
         tracing::info!("Verificando conexión a MongoDB...");
-        client.database("admin")
+        client
+            .database("admin")
             .run_command(doc! { "ping": 1 })
             .await?;
 
-        tracing::info!("✅ MongoDB conectado con pool optimizado (max: {}, min: {})",
-            cfg.mongo_pool_size, cfg.mongo_min_pool_size);
+        tracing::info!(
+            "✅ MongoDB conectado con pool optimizado (max: {}, min: {})",
+            cfg.mongo_pool_size,
+            cfg.mongo_min_pool_size
+        );
 
         Ok(Self {
             client: Arc::new(client),
@@ -367,7 +372,10 @@ impl Db for MongoDB {
         Ok(results)
     }
 
-    async fn find_client_by_user_id(&self, user_id: &str) -> Result<Option<crate::models::db::Client>, String> {
+    async fn find_client_by_user_id(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<crate::models::db::Client>, String> {
         let obj_id = ObjectId::parse_str(user_id).map_err(|e| e.to_string())?;
         let filter = doc! { "_id": obj_id };
 
@@ -384,9 +392,16 @@ impl Db for MongoDB {
         }
     }
 
-    async fn find_clients_by_phone(&self, s_phone: &str) -> Result<Vec<crate::models::db::Client>, String> {
+    async fn find_clients_by_phone(
+        &self,
+        s_phone: &str,
+    ) -> Result<Vec<crate::models::db::Client>, String> {
         let filter = doc! { "sPhone": s_phone };
-        let mut cursor = self.customers().find(filter).await.map_err(|e| e.to_string())?;
+        let mut cursor = self
+            .customers()
+            .find(filter)
+            .await
+            .map_err(|e| e.to_string())?;
         let mut clients = Vec::new();
 
         while let Some(Ok(doc)) = cursor.next().await {
@@ -400,7 +415,10 @@ impl Db for MongoDB {
         Ok(clients)
     }
 
-    async fn find_debts_by_client_ids(&self, client_ids: &[ObjectId]) -> Result<Vec<crate::models::db::Debt>, String> {
+    async fn find_debts_by_client_ids(
+        &self,
+        client_ids: &[ObjectId],
+    ) -> Result<Vec<crate::models::db::Debt>, String> {
         let filter = doc! { "idClient": { "$in": client_ids } };
         let collection = self.db.collection::<Document>("Debts");
         let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
@@ -411,8 +429,15 @@ impl Db for MongoDB {
                 _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
                 n_amount: doc.get_f64("nAmount").unwrap_or(0.0),
                 s_state: doc.get_str("sState").unwrap_or_default().to_string(),
-                id_client: doc.get_object_id("idClient").unwrap_or_else(|_| ObjectId::new()),
+                id_client: doc
+                    .get_object_id("idClient")
+                    .unwrap_or_else(|_| ObjectId::new()),
                 s_reason: doc.get_str("sReason").unwrap_or_default().to_string(),
+                d_creation: doc
+                    .get_datetime("dCreation")
+                    .ok()
+                    .cloned()
+                    .unwrap_or_else(|| DateTime::from_millis(0)),
             };
             debts.push(debt);
         }
@@ -420,7 +445,10 @@ impl Db for MongoDB {
         Ok(debts)
     }
 
-    async fn find_part_payments_by_debt_ids(&self, debt_ids: &[ObjectId]) -> Result<Vec<crate::models::db::PartPayment>, String> {
+    async fn find_part_payments_by_debt_ids(
+        &self,
+        debt_ids: &[ObjectId],
+    ) -> Result<Vec<crate::models::db::PartPayment>, String> {
         let filter = doc! { "idDebt": { "$in": debt_ids } };
         let collection = self.db.collection::<Document>("PartPayment");
         let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
@@ -429,8 +457,12 @@ impl Db for MongoDB {
         while let Some(Ok(doc)) = cursor.next().await {
             let pp = crate::models::db::PartPayment {
                 _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
-                id_debt: doc.get_object_id("idDebt").unwrap_or_else(|_| ObjectId::new()),
-                id_payment: doc.get_object_id("idPayment").unwrap_or_else(|_| ObjectId::new()),
+                id_debt: doc
+                    .get_object_id("idDebt")
+                    .unwrap_or_else(|_| ObjectId::new()),
+                id_payment: doc
+                    .get_object_id("idPayment")
+                    .unwrap_or_else(|_| ObjectId::new()),
                 n_amount: doc.get_f64("nAmount").unwrap_or(0.0),
             };
             part_payments.push(pp);
@@ -439,7 +471,10 @@ impl Db for MongoDB {
         Ok(part_payments)
     }
 
-    async fn find_payments_by_ids(&self, payment_ids: &[ObjectId]) -> Result<Vec<crate::models::db::Payment>, String> {
+    async fn find_payments_by_ids(
+        &self,
+        payment_ids: &[ObjectId],
+    ) -> Result<Vec<crate::models::db::Payment>, String> {
         let filter = doc! { "_id": { "$in": payment_ids } };
         let collection = self.db.collection::<Document>("Payments");
         let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
@@ -448,12 +483,59 @@ impl Db for MongoDB {
         while let Some(Ok(doc)) = cursor.next().await {
             let payment = crate::models::db::Payment {
                 _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
-                n_amount: doc.get_f64("nAmount").unwrap_or(0.0),
+                n_amount: doc
+                    .get_f64("nAmount")
+                    .or_else(|_| doc.get_i32("nAmount").map(|v| v as f64))
+                    .or_else(|_| doc.get_i64("nAmount").map(|v| v as f64))
+                    .unwrap_or(0.0),
                 s_state: doc.get_str("sState").unwrap_or_default().to_string(),
+                n_bs: doc
+                    .get_f64("nBs")
+                    .or_else(|_| doc.get_i32("nBs").map(|v| v as f64))
+                    .or_else(|_| doc.get_i64("nBs").map(|v| v as f64))
+                    .unwrap_or(0.0),
             };
             payments.push(payment);
         }
 
         Ok(payments)
+    }
+
+    async fn find_active_debts_by_client_ids(
+        &self,
+        client_ids: &[ObjectId],
+    ) -> Result<Vec<Debt>, String> {
+        let filter = doc! {
+            "idClient": { "$in": client_ids },
+            "sState": "Activo"
+        };
+
+        let collection = self.db.collection::<Document>("Debts");
+        let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
+        let mut debts = Vec::new();
+
+        while let Some(Ok(doc)) = cursor.next().await {
+            let debt = Debt {
+                _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
+                n_amount: doc
+                    .get_f64("nAmount")
+                    .or_else(|_| doc.get_i32("nAmount").map(|v| v as f64))
+                    .or_else(|_| doc.get_i64("nAmount").map(|v| v as f64))
+                    .unwrap_or(0.0),
+                s_state: doc.get_str("sState").unwrap_or_default().to_string(),
+                id_client: doc
+                    .get_object_id("idClient")
+                    .unwrap_or_else(|_| ObjectId::new()),
+                s_reason: doc.get_str("sReason").unwrap_or_default().to_string(),
+                d_creation: doc
+                    .get_datetime("dCreation")
+                    .ok()
+                    .cloned()
+                    .unwrap_or_else(|| DateTime::from_millis(0)),
+            };
+            debts.push(debt);
+        }
+
+        Ok(debts)
     }
 }

@@ -57,6 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   GET    /v1/profile/me");
     println!("   GET    /v1/profile/me/balance");
     println!("   GET    /v1/profile/me/last_payments");
+    println!("   GET    /v1/receivable/me");
     println!("");
     println!("✨ Servidor listo para recibir peticiones");
 

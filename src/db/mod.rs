@@ -56,4 +56,9 @@ pub trait Db: Clone + Send + Sync + 'static {
     // 5. Obtener los pagos por una lista de IDs de pago
     #[allow(dead_code)]
     async fn find_payments_by_ids(&self, payment_ids: &[ObjectId]) -> Result<Vec<Payment>, String>;
+
+    async fn find_active_debts_by_client_ids(
+        &self,
+        client_ids: &[ObjectId],
+    ) -> Result<Vec<Debt>, String>;
 }
