@@ -205,7 +205,7 @@ pub async fn me_receivables_handler(
                 id_owner: debt.id_client.to_string(),
                 reason: debt.s_reason.clone(),
                 state: debt.s_state.clone(),
-                created_at: debt.d_creation,
+                created_at: debt.d_creation.timestamp_millis().to_string(),
                 pending_amount_bs: pending_bs_rounded,
                 has_pending_payments: has_pending,
                 payments: payment_list,

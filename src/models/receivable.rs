@@ -17,7 +17,7 @@ pub struct ReceivableData {
     pub id_owner: String,
     pub reason: String,
     pub state: String,
-    pub created_at: DateTime,
+    pub created_at: String,
     pub pending_amount_bs: f64,
     pub has_pending_payments: bool,
     pub payments: Vec<PaymentData>,
@@ -41,7 +41,7 @@ pub struct DebtWithPayments {
     pub id_owner: ObjectId,
     pub reason: String,
     pub state: String,
-    pub created_at: DateTime,
+    pub created_at: String,
     pub original_amount_usd: f64,
     pub part_payments: Vec<PartPaymentWithStatus>,
 }
