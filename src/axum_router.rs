@@ -26,10 +26,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .allow_headers(Any);
 
     // Rate limiters
-    let general_rate_limit = rate_limit::create_rate_limiter(
-        state.config.rate_limit_per_second,
-        state.config.rate_limit_burst,
-    );
+    // let general_rate_limit = rate_limit::create_rate_limiter(
+    //     state.config.rate_limit_per_second,
+    //     state.config.rate_limit_burst,
+    // );
 
     let auth_rate_limit =
         rate_limit::create_auth_rate_limiter(state.config.rate_limit_auth_per_minute);
@@ -62,8 +62,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
                 .layer(CompressionLayer::new())
-                .layer(cors)
-                .layer(general_rate_limit),
+                .layer(cors),
         )
         .with_state(state)
 }
