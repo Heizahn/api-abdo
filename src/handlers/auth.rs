@@ -3,7 +3,6 @@ use axum::{
     Json,
 };
 use std::sync::Arc;
-use chrono::Utc;
 
 use crate::{
     auth::service::AuthService,
@@ -12,7 +11,7 @@ use crate::{
     error::ApiError,
     models::auth::*,
     state::AppState,
-    utils::{generate_verification_code, sms::send_sms},
+    utils::{generate_verification_code, sms::send_sms, timezone::VenezuelaDateTime,},
 };
 
 /// POST /v1/auth/verify_number
@@ -21,7 +20,12 @@ pub async fn verify_number_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<VerifyNumberRequest>,
 ) -> Result<Json<VerifyNumberResponse>, ApiError> {
-    tracing::info!("verify_number request for phone: {}", payload.phone);
+    let now_vz = VenezuelaDateTime::now();
+    tracing::info!(
+        "[{}] verify_number request for phone: {}",
+        now_vz.datetime_string_venezuela(),
+        payload.phone
+    );
 
     // 1. Verificar si el usuario existe
     let found = AuthService::lookup_by_phone(&state.db, &payload.phone).await;
@@ -38,7 +42,7 @@ pub async fn verify_number_handler(
 
     // 2. Generar código de verificación
     let code = generate_verification_code();
-    tracing::debug!("Generated verification code: {}", code);
+
 
     // 3. Guardar código en MongoDB
     state
@@ -47,6 +51,11 @@ pub async fn verify_number_handler(
         .await
         .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
 
+    tracing::info!(
+        "Código guardado para {} - Hora Venezuela: {}",
+        payload.phone,
+        now_vz.datetime_string_venezuela()
+    );
     // 4. Enviar SMS de forma asíncrona (no bloquea la respuesta)
     let phone_clone = payload.phone.clone();
     tokio::spawn(async move {
@@ -66,12 +75,17 @@ pub async fn verify_number_handler(
 }
 
 /// POST /v1/auth/login
-/// Login con teléfono y código de verificación
+/// con teléfono y código de verificación
 pub async fn login_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
-    tracing::info!("login request for phone: {}", payload.phone);
+    let now_vz = VenezuelaDateTime::now();
+    tracing::info!(
+        "[{}] login request for phone: {}",
+        now_vz.datetime_string_venezuela(),
+        payload.phone
+    );
 
     // 1. Verificar que el usuario existe
     let customer = AuthService::lookup_by_phone(&state.db, &payload.phone)
@@ -94,15 +108,29 @@ pub async fn login_handler(
     })?;
 
     // 3. Verificar expiración del código
-    let now = Utc::now();
-    if verification.expires_at < now {
-        tracing::warn!("Expired verification code for phone: {}", payload.phone);
+    if AuthService::is_code_expired(&verification){
+        let expires_vz = VenezuelaDateTime::from_utc(verification.expires_at);
+        tracing::warn!(
+            "Código expirado para {}: expiró el {} (hora Venezuela)",
+            payload.phone,
+            expires_vz.datetime_string_venezuela()
+        );
         return Err(ApiError::Unauthorized("code_expired".to_string()));
     }
+
+    let created_vz = VenezuelaDateTime::from_utc(verification.created_at);
+    let expires_vz = VenezuelaDateTime::from_utc(verification.expires_at);
+    tracing::debug!(
+        "Código válido - Creado: {}, Expira: {}, Ahora: {}",
+        created_vz.datetime_string_venezuela(),
+        expires_vz.datetime_string_venezuela(),
+        now_vz.datetime_string_venezuela()
+    );
 
     // 4. Borrar código usado (opcional pero recomendado)
     if let Some(id) = &verification._id {
         let _ = AuthService::delete_verification_code(&state.db, id).await;
+        tracing::debug!("Código de verificación borrado después de uso exitoso");
     }
 
     // 5. Generar tokens JWT
@@ -117,7 +145,11 @@ pub async fn login_handler(
     let family = uuid::Uuid::new_v4().to_string();
     let (refresh_token, refresh_exp, _jti) = jwt.issue_encrypted_refresh(&customer.id, &family);
 
-    tracing::info!("Login successful for user: {}", customer.id);
+    tracing::info!(
+        "Login successful for user: {} at {} (Venezuela)",
+        customer.id,
+        now_vz.datetime_string_venezuela()
+    );
 
     Ok(Json(LoginResponse {
         ok: true,
@@ -137,7 +169,11 @@ pub async fn refresh_handler(
     State(_state): State<Arc<AppState>>,
     Json(payload): Json<RefreshRequest>,
 ) -> Result<Json<RefreshResponse>, ApiError> {
-    tracing::info!("refresh token request");
+    let now_vz = VenezuelaDateTime::now();
+    tracing::info!(
+        "[{}] refresh token request",
+        now_vz.datetime_string_venezuela()
+    );
 
     let jwt = JwtService::new(JwtCfg::from_env());
 
@@ -159,7 +195,11 @@ pub async fn refresh_handler(
     let (new_refresh_token, refresh_exp, _new_jti) =
         jwt.issue_encrypted_refresh(&refresh_claims.sub, &refresh_claims.fam);
 
-    tracing::info!("Tokens refreshed successfully for user: {}", refresh_claims.sub);
+    tracing::info!(
+        "Tokens refreshed successfully for user: {} at {} (Venezuela)",
+        refresh_claims.sub,
+        now_vz.datetime_string_venezuela()
+    );
 
     Ok(Json(RefreshResponse {
         ok: true,

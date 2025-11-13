@@ -15,6 +15,7 @@ mod middleware;
 mod models;
 mod utils;
 
+use chrono::Utc;
 use config::Config;
 use state::AppState;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -49,7 +50,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
     println!("🚀 API ABDO v0.2.0 iniciada");
-    println!("📍 Dirección: http://{}", addr);
     println!("📊 Endpoints disponibles:");
     println!("   POST   /v1/auth/verify_number");
     println!("   POST   /v1/auth/login");
@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   GET    /v1/profile/me/balance");
     println!("   GET    /v1/profile/me/last_payments");
     println!("   GET    /v1/receivable/me");
-    println!("");
+    println!();
     println!("✨ Servidor listo para recibir peticiones");
 
     // 6. Iniciar servidor

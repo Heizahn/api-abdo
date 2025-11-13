@@ -34,6 +34,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let auth_rate_limit =
         rate_limit::create_auth_rate_limiter(state.config.rate_limit_auth_per_minute);
 
+
     // ✅ RUTAS PÚBLICAS (sin JWT)
     let public_routes = Router::new()
         .route("/v1/auth/verify_number", post(auth::verify_number_handler))

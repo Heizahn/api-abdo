@@ -4,7 +4,7 @@ use crate::{
     domain::customer::{Customer, CustomerView},
     models::db::Debt,
 };
-use chrono::{Duration, Utc};
+use chrono::{Duration};
 use futures::stream::StreamExt;
 use futures::stream::TryStreamExt;
 use mongodb::{bson, error::Error as MongoError};
@@ -14,6 +14,7 @@ use mongodb::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use crate::utils::timezone::{VenezuelaDateTime, utils as tz_utils};
 
 #[derive(Clone)]
 pub struct MongoDB {
@@ -31,7 +32,7 @@ pub struct PhoneSummary {
 pub struct PaymentDetails {
     #[serde(rename = "_id")] // Guardamos el ID del pago por si acaso
     pub id: ObjectId,
-    pub rason: String,
+    pub reason: String,
     pub balance_bs: f64,
     pub status: String,
     // Guardamos la fecha completa original (con hora)
@@ -113,7 +114,7 @@ impl Db for MongoDB {
     }
 
     async fn find_customer_by_id(&self, id: &str) -> Option<CustomerView> {
-        let obj_id = mongodb::bson::oid::ObjectId::parse_str(id).ok()?;
+        let obj_id = ObjectId::parse_str(id).ok()?;
         let filter = doc! { "_id": obj_id };
         let result = self.customers().find_one(filter).await.ok()??;
 
@@ -147,13 +148,15 @@ impl Db for MongoDB {
     }
 
     async fn store_verification_code(&self, phone: &str, code: &u32) -> mongodb::error::Result<()> {
-        let now = Utc::now();
+        let now = VenezuelaDateTime::now();
+        let expires = now.add_duration(Duration::minutes(60));
+
         let verification = VerificationCode {
             _id: None,
             phone: phone.to_string(),
             code: *code,
-            created_at: now,
-            expires_at: now + Duration::minutes(60),
+            created_at: now.utc(),
+            expires_at: expires.utc(),
         };
 
         self.verification_codes().insert_one(verification).await?;
@@ -175,7 +178,7 @@ impl Db for MongoDB {
 
     async fn delete_verification_code(
         &self,
-        id: &mongodb::bson::oid::ObjectId,
+        id: &ObjectId,
     ) -> Result<u64, mongodb::error::Error> {
         let filter = doc! { "_id": id };
         let result = self.verification_codes().delete_one(filter).await?;
@@ -185,13 +188,13 @@ impl Db for MongoDB {
 
     async fn get_user_balance_usd(&self, id: String) -> Result<f64, MongoError> {
         // La colección 'Clients' debe tener _id, sPhone y nBalance
-        let collection: mongodb::Collection<Document> = self.db.collection("Clients");
+        let collection: Collection<Document> = self.db.collection("Clients");
 
         // 1. Convertir String a ObjectId y manejar el error
         let obj_id = ObjectId::parse_str(&id)
             .map_err(|e| MongoError::custom(format!("Invalid ObjectId format: {}", e)))?;
 
-        // 2. Definir la Pipeline de Agregación
+        // 2. Definir el Pipeline de Agregación
         let pipeline = vec![
             // 1. Obtener el sPhone del usuario autenticado (Fase 1)
             doc! { "$match": { "_id": obj_id } },
@@ -233,14 +236,12 @@ impl Db for MongoDB {
     async fn get_latest_exchange_rate(&self) -> Result<f64, mongodb::error::Error> {
         // 1. Inicialización de la colección (CORRECTO)
         let db_bcv = self.client.database("BCV");
-        let collection: mongodb::Collection<Document> = db_bcv.collection("BCVRates");
+        let collection: Collection<Document> = db_bcv.collection("BCVRates");
 
-        // 2. Cálculo de la medianoche (CORRECTO)
-        let now = Utc::now();
-        let start_of_day_chrono = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
-
-        let start_of_day_millis = start_of_day_chrono.timestamp_millis();
-        let start_of_day_bson = DateTime::from_millis(start_of_day_millis);
+        // ✅ Obtener inicio del día en Venezuela, convertido a UTC para query
+        let start_of_day = tz_utils::start_of_today_venezuela();
+        let start_of_day_display = start_of_day.clone();
+        let start_of_day_bson = mongodb::bson::DateTime::from(start_of_day);
 
         // 3. Definición del FILTRO (CORRECTO)
         let filter = doc! {
@@ -266,16 +267,36 @@ impl Db for MongoDB {
 
         match doc {
             Some(d) => {
-                // 7. Extracción del campo 'value'
                 let rate = d.get_f64("value").map_err(|_| {
                     MongoError::custom("Rate field 'value' not found or invalid type")
                 })?;
 
+                // ✅ Log con información de timezone
+                if let Ok(ts) = d.get_datetime("timestamp") {
+                    let vz_time = VenezuelaDateTime::from(*ts);
+                    tracing::info!(
+                    "💱 Tasa BCV: {} @ {} (hora Venezuela)",
+                    rate,
+                    vz_time.datetime_string_venezuela()
+                );
+                    tracing::debug!(
+                    "💾 Timestamp en DB (UTC): {}",
+                    vz_time.utc()
+                );
+                } else {
+                    tracing::info!("💱 Tasa BCV encontrada: {}", rate);
+                }
+
                 Ok(rate)
             }
-            None => Err(MongoError::custom(
-                "No exchange rate found for today in BCV collection",
-            )),
+            None => {
+                tracing::warn!(
+                "⚠️ No se encontró tasa BCV para hoy (desde {} Venezuela)", start_of_day_display.datetime_string_venezuela()
+            );
+                Err(MongoError::custom(
+                    "No exchange rate found for today in BCV collection",
+                ))
+            }
         }
     }
 
@@ -314,7 +335,7 @@ impl Db for MongoDB {
             // 8. PRE-PROYECCIÓN: Prepara los campos que necesitamos
             doc! { "$project": {
                 "_id": 1,
-                "rason": "$sReason",
+                "reason": "$sReason",
                 "balance_bs": "$nBs",
                 "status": "$sState",
                 "full_date": "$dCreation", // Mantenemos la fecha/hora completa
@@ -335,7 +356,7 @@ impl Db for MongoDB {
                 "payments": { "$push": {
                     // Construye el objeto 'PaymentDetails'
                     "_id": "$_id",
-                    "rason": "$rason",
+                    "reason": "$reason",
                     "balance_bs": "$balance_bs",
                     "status": "$status",
                     "full_date": "$full_date"
@@ -347,7 +368,7 @@ impl Db for MongoDB {
             doc! { "$limit": 10 },
         ];
 
-        let client_collection = self.db.collection::<mongodb::bson::Document>("Clients");
+        let client_collection = self.db.collection::<Document>("Clients");
 
         // Apunta al nuevo struct de resultado
         let mut cursor = client_collection
@@ -418,14 +439,14 @@ impl Db for MongoDB {
     async fn find_debts_by_client_ids(
         &self,
         client_ids: &[ObjectId],
-    ) -> Result<Vec<crate::models::db::Debt>, String> {
+    ) -> Result<Vec<Debt>, String> {
         let filter = doc! { "idClient": { "$in": client_ids } };
         let collection = self.db.collection::<Document>("Debts");
         let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
         let mut debts = Vec::new();
 
         while let Some(Ok(doc)) = cursor.next().await {
-            let debt = crate::models::db::Debt {
+            let debt = Debt {
                 _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
                 n_amount: doc.get_f64("nAmount").unwrap_or(0.0),
                 s_state: doc.get_str("sState").unwrap_or_default().to_string(),
