@@ -35,7 +35,9 @@ impl AuthService {
 
     pub fn is_code_expired(verification_code: &VerificationCode) -> bool {
         let now = VenezuelaDateTime::now();
+        println!("[{}]", now.utc);
         let expires = VenezuelaDateTime::from_utc(verification_code.created_at);
+        println!("[{}]", expires.utc);
 
         now.is_after(&expires)
     }
