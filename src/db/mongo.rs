@@ -531,8 +531,12 @@ impl Db for MongoDB {
             "sState": "Activo"
         };
 
+        let sort_debts= doc! {
+            "dCreation": 1
+        };
+
         let collection = self.db.collection::<Document>("Debts");
-        let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
+        let mut cursor = collection.find(filter).sort(sort_debts).await.map_err(|e| e.to_string())?;
         let mut debts = Vec::new();
 
         while let Some(Ok(doc)) = cursor.next().await {
