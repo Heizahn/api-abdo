@@ -54,22 +54,22 @@ impl ProfileRepository for MongoDB {
         })
     }
 
-    async fn find_client_by_user_id(&self, user_id: &str) -> Result<Option<Client>, String> {
-        let obj_id = ObjectId::parse_str(user_id).map_err(|e| e.to_string())?;
-        let filter = doc! { "_id": obj_id };
-
-        match self.customers().find_one(filter).await {
-            Ok(Some(doc)) => {
-                let client = Client {
-                    _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
-                    s_phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
-                };
-                Ok(Some(client))
-            }
-            Ok(None) => Ok(None),
-            Err(e) => Err(e.to_string()),
-        }
-    }
+    // async fn find_client_by_user_id(&self, user_id: &str) -> Result<Option<Client>, String> {
+    //     let obj_id = ObjectId::parse_str(user_id).map_err(|e| e.to_string())?;
+    //     let filter = doc! { "_id": obj_id };
+    //
+    //     match self.customers().find_one(filter).await {
+    //         Ok(Some(doc)) => {
+    //             let client = Client {
+    //                 _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
+    //                 s_phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
+    //             };
+    //             Ok(Some(client))
+    //         }
+    //         Ok(None) => Ok(None),
+    //         Err(e) => Err(e.to_string()),
+    //     }
+    // }
 
     async fn find_clients_by_phone(&self, s_phone: &str) -> Result<Vec<Client>, String> {
         let filter = doc! { "sPhone": s_phone };

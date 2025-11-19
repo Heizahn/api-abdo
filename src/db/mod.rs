@@ -33,7 +33,7 @@ pub trait ProfileRepository {
     async fn summary_by_phone(&self, phone: &str) -> Option<PhoneSummary>;
 
     // Métodos para futuros endpoints de perfil
-    async fn find_client_by_user_id(&self, user_id: &str) -> Result<Option<Client>, String>;
+    // async fn find_client_by_user_id(&self, user_id: &str) -> Result<Option<Client>, String>;
     async fn find_clients_by_phone(&self, s_phone: &str) -> Result<Vec<Client>, String>;
 }
 
@@ -47,7 +47,7 @@ pub trait SalesRepository {
     async fn get_latest_exchange_rate(&self) -> Result<f64, MongoError>;
 
     // Deudas
-    async fn find_debts_by_client_ids(&self, client_ids: &[ObjectId]) -> Result<Vec<Debt>, String>;
+    // async fn find_debts_by_client_ids(&self, client_ids: &[ObjectId]) -> Result<Vec<Debt>, String>;
     async fn find_active_debts_by_client_ids(&self, client_ids: &[ObjectId]) -> Result<Vec<Debt>, String>;
 
     // Pagos

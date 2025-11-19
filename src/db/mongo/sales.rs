@@ -131,25 +131,25 @@ impl SalesRepository for MongoDB {
         Ok(results)
     }
 
-    async fn find_debts_by_client_ids(&self, client_ids: &[ObjectId]) -> Result<Vec<Debt>, String> {
-        let filter = doc! { "idClient": { "$in": client_ids } };
-        let collection = self.db.collection::<Document>("Debts");
-        let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
-        let mut debts = Vec::new();
-
-        while let Some(Ok(doc)) = cursor.next().await {
-            let debt = Debt {
-                _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
-                n_amount: doc.get_f64("nAmount").unwrap_or(0.0),
-                s_state: doc.get_str("sState").unwrap_or_default().to_string(),
-                id_client: doc.get_object_id("idClient").unwrap_or_else(|_| ObjectId::new()),
-                s_reason: doc.get_str("sReason").unwrap_or_default().to_string(),
-                d_creation: doc.get_datetime("dCreation").ok().cloned().unwrap_or_else(|| DateTime::from_millis(0)),
-            };
-            debts.push(debt);
-        }
-        Ok(debts)
-    }
+    // async fn find_debts_by_client_ids(&self, client_ids: &[ObjectId]) -> Result<Vec<Debt>, String> {
+    //     let filter = doc! { "idClient": { "$in": client_ids } };
+    //     let collection = self.db.collection::<Document>("Debts");
+    //     let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
+    //     let mut debts = Vec::new();
+    // 
+    //     while let Some(Ok(doc)) = cursor.next().await {
+    //         let debt = Debt {
+    //             _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
+    //             n_amount: doc.get_f64("nAmount").unwrap_or(0.0),
+    //             s_state: doc.get_str("sState").unwrap_or_default().to_string(),
+    //             id_client: doc.get_object_id("idClient").unwrap_or_else(|_| ObjectId::new()),
+    //             s_reason: doc.get_str("sReason").unwrap_or_default().to_string(),
+    //             d_creation: doc.get_datetime("dCreation").ok().cloned().unwrap_or_else(|| DateTime::from_millis(0)),
+    //         };
+    //         debts.push(debt);
+    //     }
+    //     Ok(debts)
+    // }
 
     async fn find_part_payments_by_debt_ids(&self, debt_ids: &[ObjectId]) -> Result<Vec<PartPayment>, String> {
         let filter = doc! { "idDebt": { "$in": debt_ids } };
