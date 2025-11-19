@@ -15,7 +15,6 @@ mod middleware;
 mod models;
 mod utils;
 
-use chrono::Utc;
 use config::Config;
 use state::AppState;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

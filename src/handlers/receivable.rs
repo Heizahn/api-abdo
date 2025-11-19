@@ -2,7 +2,7 @@ use axum::{extract::State, Extension, Json};
 use std::sync::Arc;
 
 use crate::{
-    auth::claims::AccessClaims, auth::service::AuthService, db::Db, error::ApiError,
+    auth::claims::AccessClaims, auth::service::AuthService, db::{ProfileRepository, SalesRepository}, error::ApiError,
     models::receivable::*, state::AppState,
 };
 
@@ -170,17 +170,6 @@ pub async fn me_receivables_handler(
             }
         }
 
-        // Calcular monto pendiente
-        if debt._id.to_string() == "6863e184f73a401990403f93" {
-            tracing::info!("🔍 DEBUG debt._id: {}", debt._id);
-            tracing::info!("🔍 DEBUG debt.n_amount: {}", debt.n_amount);
-            tracing::info!(
-                "🔍 DEBUG debt.n_amount type: {}",
-                std::any::type_name_of_val(&debt.n_amount)
-            );
-            tracing::info!("🔍 DEBUG total_paid_usd: {}", total_paid_usd);
-            tracing::info!("🔍 DEBUG exchange_rate: {}", exchange_rate);
-        }
         let pending_usd = debt.n_amount - total_paid_usd;
         let pending_bs = if pending_usd > 0.0 {
             pending_usd * exchange_rate * 1.08 // Aplicar IVA

@@ -23,8 +23,7 @@ pub struct Config {
     pub redis_balance_ttl: u64,
 
     // Rate Limiting
-    pub rate_limit_per_second: u64,
-    pub rate_limit_burst: u32,
+    // pub rate_limit_burst: u32,
     pub rate_limit_auth_per_minute: u64,
 
     // Logging
@@ -78,16 +77,10 @@ impl Config {
                 .unwrap_or_else(|_| "60".to_string())
                 .parse()
                 .unwrap_or(60),
-
-            // Rate Limiting
-            rate_limit_per_second: env::var("RATE_LIMIT_PER_SECOND")
-                .unwrap_or_else(|_| "10".to_string())
-                .parse()
-                .unwrap_or(10),
-            rate_limit_burst: env::var("RATE_LIMIT_BURST")
-                .unwrap_or_else(|_| "20".to_string())
-                .parse()
-                .unwrap_or(20),
+            // rate_limit_burst: env::var("RATE_LIMIT_BURST")
+            //     .unwrap_or_else(|_| "20".to_string())
+            //     .parse()
+            //     .unwrap_or(20),
             rate_limit_auth_per_minute: env::var("RATE_LIMIT_AUTH_PER_MINUTE")
                 .unwrap_or_else(|_| "5".to_string())
                 .parse()

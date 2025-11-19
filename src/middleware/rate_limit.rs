@@ -6,21 +6,21 @@ use tower_governor::{
 };
 
 /// Crea un rate limiter general para la API
-pub fn create_rate_limiter(
-    per_second: u64,
-    burst: u32,
-) -> GovernorLayer<'static, SmartIpKeyExtractor, NoOpMiddleware> {
-    let config = Box::leak(Box::new(
-        GovernorConfigBuilder::default()
-            .per_second(per_second)
-            .burst_size(burst)
-            .key_extractor(SmartIpKeyExtractor)
-            .finish()
-            .expect("Failed to create rate limiter config"),
-    ));
-
-    GovernorLayer { config }
-}
+// pub fn create_rate_limiter(
+//     per_second: u64,
+//     burst: u32,
+// ) -> GovernorLayer<'static, SmartIpKeyExtractor, NoOpMiddleware> {
+//     let config = Box::leak(Box::new(
+//         GovernorConfigBuilder::default()
+//             .per_second(per_second)
+//             .burst_size(burst)
+//             .key_extractor(SmartIpKeyExtractor)
+//             .finish()
+//             .expect("Failed to create rate limiter config"),
+//     ));
+// 
+//     GovernorLayer { config }
+// }
 
 /// Crea un rate limiter específico para endpoints de auth
 /// Más restrictivo para prevenir ataques de fuerza bruta

@@ -1,4 +1,4 @@
-use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, Duration, TimeZone, Utc};
 use chrono_tz::America::Caracas;
 use serde::{Deserialize, Serialize};
 
@@ -100,6 +100,7 @@ impl From<VenezuelaDateTime> for mongodb::bson::DateTime {
 }
 
 /// Utilidades para fechas en Venezuela
+#[allow(dead_code)]
 pub mod utils {
     use super::*;
 

@@ -6,7 +6,7 @@ use crate::{
         claims::{AccessClaims, Claims},
         service::AuthService,
     },
-    db::Db,
+    db::{ProfileRepository, SalesRepository},
     error::ApiError,
     models::profile::*,
     state::AppState,

@@ -1,5 +1,5 @@
-use mongodb::bson::{oid::ObjectId, DateTime};
-use serde::Serialize;
+use mongodb::bson::{oid::ObjectId};
+use serde::{Deserialize, Serialize};
 
 // ============================================
 // RECEIVABLES (GET /v1/receivable/me)
@@ -34,22 +34,35 @@ pub struct PaymentData {
 // INTERNAL DATA STRUCTURES
 // ============================================
 
-/// Estructura interna para procesar deudas con sus pagos
-#[derive(Debug)]
-pub struct DebtWithPayments {
-    pub debt_id: ObjectId,
-    pub id_owner: ObjectId,
-    pub reason: String,
-    pub state: String,
-    pub created_at: String,
-    pub original_amount_usd: f64,
-    pub part_payments: Vec<PartPaymentWithStatus>,
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PaymentMethod {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    #[serde(rename = "nTag")]
+    pub n_tag: i32,
+    #[serde(rename = "sBankName")]
+    pub bank_name: String,
+    #[serde(rename = "sPhone")]
+    pub phone: String,
+    #[serde(rename = "sIdNumber")]
+    pub id_number: String,
+    #[serde(rename = "sAccountName")]
+    pub account_name: String,
+    pub is_active: bool,
 }
 
-#[derive(Debug)]
-pub struct PartPaymentWithStatus {
-    pub payment_id: ObjectId,
-    pub amount_usd: f64,
-    pub amount_bs: f64,
-    pub status: String,
-}
+// #[derive(Debug, Deserialize)]
+// pub struct ClientOwner {
+//     #[serde(rename = "_id")]
+//     pub id: ObjectId,
+//     #[serde(rename = "idOwner")]
+//     pub id_owner: String,
+// }
+//
+// #[derive(Debug, Deserialize)]
+// pub struct UserTag {
+//     #[serde(rename = "_id")]
+//     pub id: String,
+//     #[serde(rename = "nTag")]
+//     pub n_tag: i32,
+// }

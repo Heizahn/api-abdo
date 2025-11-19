@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::{
     auth::service::AuthService,
     crypto::jwt::{JwtCfg, JwtService},
-    db::Db,
+    db::AuthRepository,
     error::ApiError,
     models::auth::*,
     state::AppState,
