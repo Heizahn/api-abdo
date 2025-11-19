@@ -40,7 +40,7 @@ pub async fn me_handler(
 
     tracing::debug!("✅ Customer encontrado: phone={}", customer.phone);
 
-    // Intentar obtener summary desde cache
+    // Intentar obtener summary desde cáche
     tracing::debug!("🔍 Buscando summary en cache...");
     let summary = match state.redis.get_user_summary(&claims.sub).await {
         Ok(Some(cached)) => {
@@ -72,7 +72,7 @@ pub async fn me_handler(
         }
         Err(e) => {
             tracing::error!("❌ Error consultando cache: {:?}", e);
-            // Continuar sin cache
+            // Continuar sin cáche
             tracing::debug!("⚠️ Fallback a MongoDB sin cache");
             state
                 .db
@@ -97,7 +97,7 @@ pub async fn me_handler(
 }
 
 /// GET /v1/profile/me/balance
-/// Obtiene el balance en VES del usuario autenticado
+/// Obtiene el balance en Bs del usuario autenticado
 pub async fn me_balance_handler(
     Extension(claims): Extension<Claims>,
     State(state): State<Arc<AppState>>,
@@ -110,7 +110,7 @@ pub async fn me_balance_handler(
         return Err(ApiError::Forbidden);
     }
 
-    // Intentar obtener balance desde cache
+    // Intentar obtener balance desde cáche
     let usd_balance = match state.redis.get_user_balance(&claims.sub).await {
         Ok(Some(cached)) => {
             tracing::debug!("Cache hit for user balance: {}", claims.sub);
@@ -139,7 +139,7 @@ pub async fn me_balance_handler(
         }
     };
 
-    // Obtener tasa de cambio (con cache)
+    // Obtener tasa de cambio (con cáche)
     let exchange_rate = match state.redis.get_exchange_rate().await {
         Ok(Some(cached)) => {
             tracing::debug!("Cache hit for exchange rate");
@@ -161,7 +161,7 @@ pub async fn me_balance_handler(
         }
     };
 
-    // Calcular balance en VES
+    // Calcular balance en Bs
     let ves_balance = usd_balance * exchange_rate * 1.08;
     let ves_balance_rounded = (ves_balance * 100.0).round() / 100.0;
     tracing::info!(
