@@ -12,7 +12,7 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{auth, profile, receivable},
+    handlers::{auth, profile, receivable, payment},
     middleware::{auth::jwt_auth_middleware, rate_limit},
     state::AppState,
 };
@@ -51,6 +51,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(profile::me_last_payments_handler),
         )
         .route("/v1/receivable/me", get(receivable::me_receivables_handler))
+        .route("/v1/payments/methods/payment/:debt_id", get(payment::get_pago_movil_data_handler))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             jwt_auth_middleware,

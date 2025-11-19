@@ -7,6 +7,7 @@ use crate::utils::timezone::{VenezuelaDateTime, utils as tz_utils};
 use super::{MongoDB, ResultGroupedByDate};
 use crate::db::SalesRepository;
 use crate::models::db::{Debt, Payment, PartPayment};
+use crate::models::payment::{ClientOwner, PaymentMethod, UserPaymentInfo};
 
 #[async_trait]
 impl SalesRepository for MongoDB {
@@ -19,14 +20,14 @@ impl SalesRepository for MongoDB {
         let pipeline = vec![
             doc! { "$match": { "_id": obj_id } },
             doc! { "$lookup": {
-                "from": "Clients", 
+                "from": "Clients",
                 "localField": "sPhone",
                 "foreignField": "sPhone",
-                "as": "client_group" 
+                "as": "client_group"
             }},
             doc! { "$unwind": "$client_group" },
             doc! { "$group": {
-                "_id": "$sPhone", 
+                "_id": "$sPhone",
                 "total_balance": { "$sum": "$client_group.nBalance" }
             }},
         ];
@@ -136,7 +137,7 @@ impl SalesRepository for MongoDB {
     //     let collection = self.db.collection::<Document>("Debts");
     //     let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
     //     let mut debts = Vec::new();
-    // 
+    //
     //     while let Some(Ok(doc)) = cursor.next().await {
     //         let debt = Debt {
     //             _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
@@ -215,5 +216,43 @@ impl SalesRepository for MongoDB {
             debts.push(debt);
         }
         Ok(debts)
+    }
+
+
+    //[PAYMENT]
+    async fn find_debt_by_id(&self, id: &str) -> Result<Option<Debt>, String> {
+        let collection = self.db.collection::<Debt>("Debts");
+        let obj_id = ObjectId::parse_str(id).map_err(|e| e.to_string())?;
+        collection.find_one(doc! { "_id": obj_id }).await.map_err(|e| e.to_string())
+    }
+
+    async fn find_client_owner_by_id(&self, client_id: &ObjectId) -> Result<Option<ClientOwner>, String> {
+        let collection = self.db.collection::<ClientOwner>("Clients");
+        let options = mongodb::options::FindOneOptions::builder()
+            .projection(doc! { "idOwner": 1 })
+            .build();
+        collection.find_one(doc! { "_id": client_id }).with_options(options).await.map_err(|e| e.to_string())
+    }
+
+    // CAMBIO: Buscar User y traer idPaymentMethod
+    async fn find_user_payment_info_by_id(&self, user_id: &str) -> Result<Option<UserPaymentInfo>, String> {
+        let collection = self.db.collection::<UserPaymentInfo>("Users");
+        let filter = doc! { "_id": user_id };
+        let options = mongodb::options::FindOneOptions::builder()
+            .projection(doc! { "idPaymentMethod": 1 }) // Solo traemos el ID del método
+            .build();
+
+        collection.find_one(filter).with_options(options).await.map_err(|e| e.to_string())
+    }
+
+    // CAMBIO: Buscar PaymentMethod por _id
+    async fn find_payment_method_by_id(&self, id: &ObjectId) -> Result<Option<PaymentMethod>, String> {
+        let collection = self.db.collection::<PaymentMethod>("PaymentMethods");
+        let filter = doc! {
+            "_id": id,
+            "bActive": true // Mantenemos el filtro de activo por seguridad
+        };
+
+        collection.find_one(filter).await.map_err(|e| e.to_string())
     }
 }

@@ -14,9 +14,7 @@ use crate::db::Db;
 
 // Importamos modelos para los helpers de colecciones
 use crate::auth::claims::VerificationCode;
-use crate::models::receivable::{PaymentMethod,
-                                // ClientOwner, UserTag
-}; // Dejamos estos imports si los vas a usar pronto
+use crate::models::payment::{PaymentMethod, ClientOwner, UserPaymentInfo};
 
 // ============================================
 // Structs Auxiliares (Públicos para el Trait)

@@ -6,7 +6,6 @@ mod db;
 mod domain;
 mod error;
 mod state;
-
 // Axum modules
 mod axum_router;
 mod cache;
