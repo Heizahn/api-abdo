@@ -1,16 +1,16 @@
 pub mod mongo;
 
+use crate::models::payment::{Bank, PaymentReport};
 use crate::{
     auth::claims::VerificationCode,
     db::mongo::{PhoneSummary, ResultGroupedByDate},
     domain::customer::{Customer, CustomerView},
     models::db::{Client, Debt, PartPayment, Payment},
-    models::payment::{ClientOwner, PaymentMethod, UserPaymentInfo}
+    models::payment::{ClientOwner, PaymentMethod, UserPaymentInfo},
 };
 use mongodb::bson::oid::ObjectId;
 use mongodb::error::Error as MongoError;
 use mongodb::results::InsertOneResult;
-use crate::models::payment::PaymentReport;
 
 // ============================================
 // 1. AuthRepository: Login, Verificación
@@ -51,23 +51,49 @@ pub trait SalesRepository {
 
     // Deudas
     // async fn find_debts_by_client_ids(&self, client_ids: &[ObjectId]) -> Result<Vec<Debt>, String>;
-    async fn find_active_debts_by_client_ids(&self, client_ids: &[ObjectId]) -> Result<Vec<Debt>, String>;
+    async fn find_active_debts_by_client_ids(
+        &self,
+        client_ids: &[ObjectId],
+    ) -> Result<Vec<Debt>, String>;
 
     // Pagos
-    async fn find_part_payments_by_debt_ids(&self, debt_ids: &[ObjectId]) -> Result<Vec<PartPayment>, String>;
+    async fn find_part_payments_by_debt_ids(
+        &self,
+        debt_ids: &[ObjectId],
+    ) -> Result<Vec<PartPayment>, String>;
     async fn find_payments_by_ids(&self, payment_ids: &[ObjectId]) -> Result<Vec<Payment>, String>;
-    async fn get_last_payments_by_id(&self, id: String) -> Result<Vec<ResultGroupedByDate>, MongoError>;
+    async fn get_last_payments_by_id(
+        &self,
+        id: String,
+    ) -> Result<Vec<ResultGroupedByDate>, MongoError>;
 
     async fn find_debt_by_id(&self, id: &str) -> Result<Option<crate::models::db::Debt>, String>;
-    async fn find_client_owner_by_id(&self, client_id: &ObjectId) -> Result<Option<ClientOwner>, String>;
+    async fn find_client_owner_by_id(
+        &self,
+        client_id: &ObjectId,
+    ) -> Result<Option<ClientOwner>, String>;
 
     // CAMBIOS:
-    async fn find_user_payment_info_by_id(&self, user_id: &str) -> Result<Option<UserPaymentInfo>, String>;
-    async fn find_payment_method_by_id(&self, id: &ObjectId) -> Result<Option<PaymentMethod>, String>;
-    async fn create_payment_report(&self, report: PaymentReport) -> Result<InsertOneResult, MongoError>;
+    async fn find_user_payment_info_by_id(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<UserPaymentInfo>, String>;
+    async fn find_payment_method_by_id(
+        &self,
+        id: &ObjectId,
+    ) -> Result<Option<PaymentMethod>, String>;
+    async fn create_payment_report(
+        &self,
+        report: PaymentReport,
+    ) -> Result<InsertOneResult, MongoError>;
+
+    async fn find_bank_list(&self) -> Result<Vec<Bank>, String>;
 }
 
 // ============================================
 // TRAIT MAESTRO
 // ============================================
-pub trait Db: AuthRepository + ProfileRepository + SalesRepository + Clone + Send + Sync + 'static {}
+pub trait Db:
+    AuthRepository + ProfileRepository + SalesRepository + Clone + Send + Sync + 'static
+{
+}

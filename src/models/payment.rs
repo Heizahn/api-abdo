@@ -31,6 +31,28 @@ pub struct PagoMovilData {
     pub phone: String,
 }
 
+fn serialize_oid_as_string<S>(oid: &ObjectId, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&oid.to_hex())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Bank {
+    #[serde(rename(deserialize = "_id", serialize = "id"))]
+    #[serde(serialize_with = "serialize_oid_as_string")]
+    pub id: ObjectId,
+    pub bank_code: String,
+    pub bank_name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BankListResponse {
+    pub ok: bool,
+    pub data: Vec<Bank>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ClientOwner {
     #[serde(rename = "idOwner")]

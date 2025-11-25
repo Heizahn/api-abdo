@@ -12,7 +12,7 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{auth, profile, receivable, payment},
+    handlers::{auth, payment, profile, receivable, utils},
     middleware::{auth::jwt_auth_middleware, rate_limit},
     state::AppState,
 };
@@ -34,7 +34,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let auth_rate_limit =
         rate_limit::create_auth_rate_limiter(state.config.rate_limit_auth_per_minute);
 
-
     // ✅ RUTAS PÚBLICAS (sin JWT)
     let public_routes = Router::new()
         .route("/v1/auth/verify_number", post(auth::verify_number_handler))
@@ -51,8 +50,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(profile::me_last_payments_handler),
         )
         .route("/v1/receivable/me", get(receivable::me_receivables_handler))
-        .route("/v1/payments/methods/payment/:debt_id", get(payment::get_pago_movil_data_handler))
-        .route("/v1/payments/payment/report", post(payment::report_payment_handler))
+        .route(
+            "/v1/payments/methods/payment/:debt_id",
+            get(payment::get_pago_movil_data_handler),
+        )
+        .route(
+            "/v1/payments/payment/report",
+            post(payment::report_payment_handler),
+        )
+        .route("/v1/utils/list/banks", get(utils::get_bank_list))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             jwt_auth_middleware,
