@@ -9,6 +9,8 @@ use crate::{
 };
 use mongodb::bson::oid::ObjectId;
 use mongodb::error::Error as MongoError;
+use mongodb::results::InsertOneResult;
+use crate::models::payment::PaymentReport;
 
 // ============================================
 // 1. AuthRepository: Login, Verificación
@@ -62,6 +64,7 @@ pub trait SalesRepository {
     // CAMBIOS:
     async fn find_user_payment_info_by_id(&self, user_id: &str) -> Result<Option<UserPaymentInfo>, String>;
     async fn find_payment_method_by_id(&self, id: &ObjectId) -> Result<Option<PaymentMethod>, String>;
+    async fn create_payment_report(&self, report: PaymentReport) -> Result<InsertOneResult, MongoError>;
 }
 
 // ============================================

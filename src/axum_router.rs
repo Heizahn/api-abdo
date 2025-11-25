@@ -52,6 +52,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/receivable/me", get(receivable::me_receivables_handler))
         .route("/v1/payments/methods/payment/:debt_id", get(payment::get_pago_movil_data_handler))
+        .route("/v1/payments/payment/report", post(payment::report_payment_handler))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             jwt_auth_middleware,

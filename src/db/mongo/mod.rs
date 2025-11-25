@@ -14,7 +14,7 @@ use crate::db::Db;
 
 // Importamos modelos para los helpers de colecciones
 use crate::auth::claims::VerificationCode;
-use crate::models::payment::{PaymentMethod, ClientOwner, UserPaymentInfo};
+use crate::models::payment::{PaymentMethod};
 
 // ============================================
 // Structs Auxiliares (Públicos para el Trait)

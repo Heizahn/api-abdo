@@ -33,6 +33,9 @@ pub enum ApiError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    #[error("Error interno del servidor")]
+    InternalServerError
 }
 
 impl IntoResponse for ApiError {
@@ -46,6 +49,7 @@ impl IntoResponse for ApiError {
             ApiError::CacheError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "cache_error"),
             ApiError::SmsError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "sms_error"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+            ApiError::InternalServerError => (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error"),
         };
 
         // Log error details for debugging

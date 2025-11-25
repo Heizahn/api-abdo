@@ -25,6 +25,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Inicializar tracing/logging
     init_tracing(&cfg);
+    if !std::path::Path::new("./uploads").exists() {
+        tokio::fs::create_dir("./uploads").await?;
+    }
 
     tracing::info!("🚀 Iniciando API ABDO v0.2.0");
     tracing::info!("Environment: {}", cfg.rust_log);

@@ -2,12 +2,13 @@ use async_trait::async_trait;
 use mongodb::bson::{self, doc, oid::ObjectId, Document, DateTime};
 use mongodb::{Collection, error::Error as MongoError};
 use futures::stream::{StreamExt, TryStreamExt};
+use mongodb::results::InsertOneResult;
 use crate::utils::timezone::{VenezuelaDateTime, utils as tz_utils};
 
 use super::{MongoDB, ResultGroupedByDate};
 use crate::db::SalesRepository;
 use crate::models::db::{Debt, Payment, PartPayment};
-use crate::models::payment::{ClientOwner, PaymentMethod, UserPaymentInfo};
+use crate::models::payment::{ClientOwner, PaymentMethod, PaymentReport, UserPaymentInfo};
 
 #[async_trait]
 impl SalesRepository for MongoDB {
@@ -254,5 +255,13 @@ impl SalesRepository for MongoDB {
         };
 
         collection.find_one(filter).await.map_err(|e| e.to_string())
+    }
+
+    async fn create_payment_report(&self, report: PaymentReport) -> Result<InsertOneResult, MongoError> {
+        // Accede a la colección tipada con el struct
+        let collection = self.db.collection::<PaymentReport>("PaymentReports");
+
+        // Inserta el documento
+        collection.insert_one(report).await
     }
 }
