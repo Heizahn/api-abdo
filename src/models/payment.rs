@@ -26,6 +26,8 @@ pub struct PaymentMethodResponse {
 
 #[derive(Serialize, Deserialize)]
 pub struct PagoMovilData {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
     pub bank_name: String,
     pub id_number: String,
     pub phone: String,

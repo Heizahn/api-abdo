@@ -75,6 +75,7 @@ pub async fn get_pago_movil_data_handler(
         .map_err(ApiError::DatabaseError)?;
 
     let data = payment_method_opt.map(|pm| PagoMovilData {
+        id: pm.id,
         bank_name: pm.bank_name,
         id_number: pm.id_number,
         phone: pm.phone,
