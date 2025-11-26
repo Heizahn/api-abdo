@@ -91,6 +91,11 @@ pub trait SalesRepository {
     ) -> Result<InsertOneResult, MongoError>;
 
     async fn find_bank_list(&self) -> Result<Vec<Bank>, String>;
+
+    async fn find_pending_reports_by_debt_ids(
+        &self,
+        debt_ids: &[ObjectId],
+    ) -> Result<Vec<PaymentReport>, String>;
 }
 
 // ============================================

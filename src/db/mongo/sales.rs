@@ -343,4 +343,27 @@ impl SalesRepository for MongoDB {
 
         Ok(banks)
     }
+
+    async fn find_pending_reports_by_debt_ids(
+        &self,
+        debt_ids: &[ObjectId],
+    ) -> Result<Vec<PaymentReport>, String> {
+        let collection = self.db.collection::<PaymentReport>("PaymentReports");
+
+        // Buscamos reportes que coincidan con la lista de deudas Y que estén pendientes
+        let filter = doc! {
+            "idDebt": { "$in": debt_ids },
+            "sState": "Pendiente"
+        };
+
+        let cursor = collection.find(filter).await.map_err(|e| e.to_string());
+        let mut reports = Vec::new();
+
+        let mut cursor = cursor?;
+        while let Some(Ok(report)) = cursor.next().await {
+            reports.push(report);
+        }
+
+        Ok(reports)
+    }
 }
