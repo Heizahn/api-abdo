@@ -6,6 +6,7 @@ use crate::auth::claims::AccessClaims;
 use crate::{
     db::SalesRepository,
     error::ApiError,
+    models::db::PingResponse,
     models::payment::{Bank, BankListResponse},
     state::AppState,
 };
@@ -37,5 +38,12 @@ pub async fn get_bank_list(
     Ok(Json(BankListResponse {
         ok: true,
         data: banks_formatter,
+    }))
+}
+
+pub async fn get_ping_response() -> Result<Json<PingResponse>, ApiError> {
+    Ok(Json(PingResponse {
+        ok: true,
+        message: "pong".to_string(),
     }))
 }

@@ -95,7 +95,6 @@ pub async fn get_pago_movil_data_handler(
 
 /// POST /v1/payments/report
 pub async fn report_payment_handler(
-    // Quitamos 'claims' si ya no lo usas para verificar permisos, o ponle _claims para que no de warning
     Extension(_claims): Extension<AccessClaims>,
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,

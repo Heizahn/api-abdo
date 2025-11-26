@@ -62,3 +62,9 @@ pub struct ActiveDebtResponse {
     pub debt: Debt,
     pub active_debt_amount: f64,
 }
+
+#[derive(Debug, Serialize, Clone)]
+pub struct PingResponse {
+    pub ok: bool,
+    pub message: String,
+}

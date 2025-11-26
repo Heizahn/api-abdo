@@ -39,6 +39,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/auth/verify_number", post(auth::verify_number_handler))
         .route("/v1/auth/login", post(auth::login_handler))
         .route("/v1/auth/refresh", post(auth::refresh_handler))
+        .route("/v1/utils/ping", get(utils::get_ping_response))
         .layer(auth_rate_limit);
 
     // ✅ RUTAS PROTEGIDAS (con JWT)
