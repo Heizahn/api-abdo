@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::claims::AccessClaims,
-    db::SalesRepository,
+    db::{ProfileRepository, SalesRepository},
     error::ApiError,
     // Importamos ambos modelos desde 'payment' como indicaste
     models::payment::{PagoMovilData, PaymentMethodResponse, PaymentReport},
@@ -207,13 +207,70 @@ pub async fn report_payment_handler(
         ))?
         .id_client; // Aquí obtenemos el ID del cliente real
 
+    let client = state
+        .db
+        .find_client_by_id(&real_client_id.to_string())
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
+
+    let default_rate = 1.08;
+
+    let iva_rate = match client.id_tax {
+        Some(tax_id) => {
+            // El cliente tiene un ID de impuesto configurado
+            let tax_doc = state
+                .db
+                .find_tax_by_id(&tax_id)
+                .await
+                .map_err(|e| ApiError::DatabaseError(e))?; // Error de conexión
+
+            match tax_doc {
+                Some(t) => {
+                    tracing::info!(
+                        "🧾 Impuesto personalizado encontrado: {} ({})",
+                        t.target,
+                        t.iva
+                    );
+                    t.iva // Retorna el valor de la BD (ej. 0.16)
+                }
+                None => {
+                    tracing::warn!(
+                        "⚠️ Cliente tiene idTax {} pero no existe en 'taxes'. Usando defecto {:.2}",
+                        tax_id,
+                        default_rate
+                    );
+                    default_rate
+                }
+            }
+        }
+        None => {
+            // El cliente no tiene ID de impuesto (campo vacío o nulo)
+            tracing::info!(
+                "ℹ️ Cliente sin configuración de impuestos. Usando defecto {:.2}",
+                default_rate
+            );
+            default_rate
+        }
+    };
+
     // 5. Tasa de cambio
     let exchange_rate = state.db.get_latest_exchange_rate().await.map_err(|e| {
         tracing::error!("❌ Error tasa BCV: {:?}", e);
         ApiError::InternalServerError
     })?;
 
-    let amount_usd = (amount_bs_val / exchange_rate * 100.0).round() / 100.0;
+    let amount_bs_neto = amount_bs_val / iva_rate;
+
+    let amount_usd = (amount_bs_neto / exchange_rate * 100.0).round() / 100.0;
+
+    tracing::info!(
+        "💰 Matemáticas: Total: {} Bs | IVA: {} | Neto: {:.2} Bs | Tasa: {} | Final: {} USD",
+        amount_bs_val,
+        iva_rate,
+        amount_bs_neto,
+        exchange_rate,
+        amount_usd
+    );
 
     // 6. Fecha
     let payment_date = match date_str {

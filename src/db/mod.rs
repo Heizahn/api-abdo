@@ -1,5 +1,6 @@
 pub mod mongo;
 
+use crate::models::db::Tax;
 use crate::models::payment::{Bank, PaymentReport};
 use crate::{
     auth::claims::VerificationCode,
@@ -38,6 +39,8 @@ pub trait ProfileRepository {
     // Métodos para futuros endpoints de perfil
     // async fn find_client_by_user_id(&self, user_id: &str) -> Result<Option<Client>, String>;
     async fn find_clients_by_phone(&self, s_phone: &str) -> Result<Vec<Client>, String>;
+    async fn find_client_by_id(&self, id: &str) -> Result<Client, String>;
+    async fn find_tax_by_id(&self, id: &ObjectId) -> Result<Option<Tax>, String>;
 }
 
 // ============================================

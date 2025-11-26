@@ -13,6 +13,8 @@ pub struct Client {
     pub _id: ObjectId,
     #[serde(rename = "sPhone")]
     pub s_phone: String,
+    #[serde(rename = "idTax", skip_serializing_if = "Option::is_none")]
+    pub id_tax: Option<ObjectId>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -67,4 +69,14 @@ pub struct ActiveDebtResponse {
 pub struct PingResponse {
     pub ok: bool,
     pub message: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Tax {
+    #[serde(rename = "_id")]
+    pub id: ObjectId,
+    #[serde(rename = "sTarget")]
+    pub target: String,
+    #[serde(rename = "IVA")]
+    pub iva: f64,
 }
