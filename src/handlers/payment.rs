@@ -75,7 +75,7 @@ pub async fn get_pago_movil_data_handler(
         .map_err(ApiError::DatabaseError)?;
 
     let data = payment_method_opt.map(|pm| PagoMovilData {
-        id: pm.id,
+        id: pm.id.map(|oid| oid.to_string()).unwrap_or_default(),
         bank_name: pm.bank_name,
         id_number: pm.id_number,
         phone: pm.phone,
@@ -110,7 +110,7 @@ pub async fn report_payment_handler(
     let mut phone = None;
     let mut saved_image_path = None;
     let mut id_debt_str: Option<String> = None;
-    let mut id_payment_method_str: Option<String> = None;
+    let mut id_payment_method: Option<ObjectId> = None;
 
     // 2. Procesar Multipart
     while let Some(field) = multipart.next_field().await.map_err(|e| {
@@ -159,7 +159,9 @@ pub async fn report_payment_handler(
                 "bank" => bank = Some(text),
                 "phone" => phone = Some(text),
                 "id_debt" => id_debt_str = Some(text),
-                "id_payment_method" => id_payment_method_str = Some(text),
+                "id_payment_method" => {
+                    id_payment_method = Some(ObjectId::parse_str(&text).unwrap())
+                }
                 _ => {}
             }
         }
@@ -171,7 +173,7 @@ pub async fn report_payment_handler(
         || amount_bs.is_none()
         || saved_image_path.is_none()
         || id_debt_str.is_none()
-        || id_payment_method_str.is_none()
+        || id_payment_method.is_none()
     {
         return Err(ApiError::BadRequest(
             "Faltan datos obligatorios (referencia, monto, imagen, deuda o método)".into(),
@@ -181,14 +183,13 @@ pub async fn report_payment_handler(
     // Extracción segura
     let amount_bs_val = amount_bs.unwrap();
     let id_debt_raw = id_debt_str.unwrap();
-    let id_pm_raw = id_payment_method_str.unwrap();
+    let id_pm_raw = id_payment_method.unwrap();
 
     // Parseo seguro de ObjectIds (Evita crash si el ID está malformado)
     let id_debt_oid = ObjectId::parse_str(&id_debt_raw)
         .map_err(|_| ApiError::BadRequest("ID de deuda inválido".into()))?;
 
-    let id_pm_oid = ObjectId::parse_str(&id_pm_raw)
-        .map_err(|_| ApiError::BadRequest("ID de método de pago inválido".into()))?;
+    let id_pm_oid = id_pm_raw;
 
     // 4. Buscar Deuda y Cliente Real
     // Nota: Asumo que tu función find_debt_by_id acepta un ObjectId. Si acepta String, pasa &id_debt_raw
