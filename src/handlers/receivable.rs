@@ -132,6 +132,7 @@ pub async fn me_receivables_handler(
                     payment_list.push(PaymentData {
                         payment_id: payment._id.to_string(),
                         amount_bs: payment.n_bs,
+                        amount_usd: pp.n_amount,
                         status: payment.s_state.clone(),
                         reference: None,
                         is_report: false,
@@ -154,6 +155,7 @@ pub async fn me_receivables_handler(
             payment_list.push(PaymentData {
                 payment_id: report.id.map(|id| id.to_string()).unwrap_or_default(),
                 amount_bs: report.amount_bs,
+                amount_usd: report.amount_usd,
                 status: report.state.clone(), // "Pendiente"
                 reference: Some(report.reference.clone()),
                 is_report: true, // Es un reporte
@@ -182,6 +184,8 @@ pub async fn me_receivables_handler(
                 id_owner: debt.id_client.to_string(),
                 reason: debt.s_reason.clone(),
                 state: debt.s_state.clone(),
+                total_amount_usd: debt.n_amount,
+                pending_amount_usd: pending_usd,
                 created_at: debt.d_creation.to_string(),
                 pending_amount_bs: pending_bs_rounded,
                 has_pending_payments: has_pending,

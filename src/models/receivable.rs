@@ -17,6 +17,8 @@ pub struct ReceivableData {
     pub reason: String,
     pub state: String,
     pub created_at: String,
+    pub total_amount_usd: f64, // Monto original de la deuda
+    pub pending_amount_usd: f64,
     pub pending_amount_bs: f64, // Calculado con IVA específico
     pub has_pending_payments: bool,
     pub payments: Vec<PaymentData>,
@@ -25,6 +27,7 @@ pub struct ReceivableData {
 #[derive(Serialize)]
 pub struct PaymentData {
     pub payment_id: String,
+    pub amount_usd: f64,
     pub amount_bs: f64,
     pub status: String, // "Activo", "Pendiente", "Rechazado"
     pub reference: Option<String>,
