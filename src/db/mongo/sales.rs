@@ -25,7 +25,10 @@ impl SalesRepository for MongoDB {
                 "foreignField": "sPhone",
                 "as": "client_group"
             }},
-            doc! { "$unwind": "$client_group" },
+            doc! { "$unwind": {
+                "path": "$client_group",
+                "preserveNullAndEmptyArrays": true
+            }},
             doc! { "$group": {
                 "_id": "$sPhone",
                 "total_balance": { "$sum": "$client_group.nBalance" }
