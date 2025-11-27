@@ -19,8 +19,7 @@ pub struct Config {
     #[allow(dead_code)]
     pub redis_pool_size: u32,
     pub redis_exchange_rate_ttl: u64,
-    pub redis_user_data_ttl: u64,
-    pub redis_balance_ttl: u64,
+
 
     // Rate Limiting
     // pub rate_limit_burst: u32,
@@ -69,14 +68,6 @@ impl Config {
                 .unwrap_or_else(|_| "300".to_string())
                 .parse()
                 .unwrap_or(300),
-            redis_user_data_ttl: env::var("REDIS_USER_DATA_TTL")
-                .unwrap_or_else(|_| "60".to_string())
-                .parse()
-                .unwrap_or(60),
-            redis_balance_ttl: env::var("REDIS_BALANCE_TTL")
-                .unwrap_or_else(|_| "60".to_string())
-                .parse()
-                .unwrap_or(60),
             // rate_limit_burst: env::var("RATE_LIMIT_BURST")
             //     .unwrap_or_else(|_| "20".to_string())
             //     .parse()

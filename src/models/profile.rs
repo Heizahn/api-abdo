@@ -1,38 +1,27 @@
 use serde::Serialize;
 use crate::db::mongo::{ResultGroupedByDate};
 
-// ============================================
-// ME (GET /v1/profile/me)
-// ============================================
 
+// ============================================
+// CLIENT SUMMARY (GET /v1/profile/me/clients)
+// ============================================
 #[derive(Debug, Serialize)]
-pub struct MeResponse {
-    pub ok: bool,
-    pub customer: CustomerData,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CustomerData {
+pub struct ClientData {
+    pub id: String, 
     pub name: String,
     pub phone: String,
 }
 
-// ============================================
-// BALANCE (GET /v1/profile/me/balance)
-// ============================================
-
 #[derive(Debug, Serialize)]
-pub struct BalanceResponse {
-    pub ok: bool,
+pub struct ClientSummary {
+    pub client: ClientData,
     pub balance_ves: f64,
+    pub last_payments: Vec<ResultGroupedByDate>, 
 }
 
-// ============================================
-// LAST PAYMENTS (GET /v1/profile/me/last_payments)
-// ============================================
-
+// Estructura de respuesta principal
 #[derive(Debug, Serialize)]
-pub struct LastPaymentsResponse {
+pub struct MeGroupResponse {
     pub ok: bool,
-    pub data: Vec<ResultGroupedByDate>,
+    pub clients: Vec<ClientSummary>,
 }

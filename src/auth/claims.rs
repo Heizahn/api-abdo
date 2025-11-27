@@ -14,8 +14,6 @@ pub struct AccessClaims {
     pub jti: String,
 }
 
-// Alias para compatibilidad con el nuevo código
-pub type Claims = AccessClaims;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,59 +1,17 @@
 use crate::utils::timezone::{utils as tz_utils, VenezuelaDateTime};
 use async_trait::async_trait;
 use futures::stream::{StreamExt, TryStreamExt};
-use mongodb::bson::{self, doc, oid::ObjectId, DateTime, Document};
+use mongodb::bson::{doc, oid::ObjectId, DateTime, Document};
 use mongodb::results::InsertOneResult;
 use mongodb::{error::Error as MongoError, Collection};
 
-use super::{MongoDB, ResultGroupedByDate};
+use super::{MongoDB};
 use crate::db::SalesRepository;
 use crate::models::db::{Debt, PartPayment, Payment};
 use crate::models::payment::{Bank, ClientOwner, PaymentMethod, PaymentReport, UserPaymentInfo};
 
 #[async_trait]
 impl SalesRepository for MongoDB {
-    async fn get_user_balance_usd(&self, id: String) -> Result<f64, MongoError> {
-        let collection: Collection<Document> = self.db.collection("Clients");
-        let obj_id = ObjectId::parse_str(&id)
-            .map_err(|e| MongoError::custom(format!("Invalid ObjectId format: {}", e)))?;
-
-        let pipeline = vec![
-            doc! { "$match": { "_id": obj_id } },
-            doc! { "$lookup": {
-                "from": "Clients",
-                "localField": "sPhone",
-                "foreignField": "sPhone",
-                "as": "client_group"
-            }},
-            doc! { "$unwind": {
-                "path": "$client_group",
-                "preserveNullAndEmptyArrays": true
-            }},
-            doc! { "$group": {
-                "_id": "$sPhone",
-                "total_balance": { "$sum": {
-                    "$ifNull": [ { "$toDouble": "$client_group.nBalance" }, 0.0 ]
-                }}
-            }},
-        ];
-
-        let mut cursor = collection.aggregate(pipeline).await?;
-
-        if let Some(result) = cursor.try_next().await? {
-            let total_balance = result.get_f64("total_balance").unwrap_or(0.0);
-            Ok(total_balance)
-        } else {
-            // Si el match inicial por _id falla, no hay nada que buscar.
-            tracing::error!(
-                "User document with ID {} not found in Clients collection.",
-                id
-            );
-            Err(MongoError::custom(
-                "User document not found (initial match failed)",
-            ))
-        }
-    }
-
     async fn get_latest_exchange_rate(&self) -> Result<f64, MongoError> {
         let db_bcv = self.client.database("BCV");
         let collection: Collection<Document> = db_bcv.collection("BCVRates");
@@ -102,82 +60,6 @@ impl SalesRepository for MongoDB {
         }
     }
 
-    async fn get_last_payments_by_id(
-        &self,
-        id: String,
-    ) -> Result<Vec<ResultGroupedByDate>, MongoError> {
-        let obj_id = ObjectId::parse_str(&id)
-            .map_err(|e| MongoError::custom(format!("Invalid ObjectId format: {}", e)))?;
-
-        let pipeline = vec![
-            doc! { "$match": { "_id": obj_id } },
-            doc! { "$lookup": { "from": "Clients", "localField": "sPhone", "foreignField": "sPhone", "as": "client_group" }},
-            doc! { "$unwind": "$client_group" },
-            doc! { "$replaceRoot": { "newRoot": "$client_group" } },
-            doc! { "$lookup": {
-                "from": "Payments",
-                "let": { "client_id": "$_id" },
-                "pipeline": [
-                    doc! { "$match": { "$expr": { "$eq": ["$idClient", "$$client_id"] } }},
-                    doc! { "$sort": { "dCreation": -1 } },
-                    doc! { "$limit": 10 }
-                ],
-                "as": "recent_payments"
-            }},
-            doc! { "$unwind": "$recent_payments" },
-            doc! { "$replaceRoot": { "newRoot": "$recent_payments" } },
-            doc! { "$project": {
-                "_id": 1,
-                "reason": "$sReason",
-                "balance_bs": "$nBs",
-                "status": "$sState",
-                "full_date": "$dCreation",
-                "date_group_key": { "$dateToString": { "format": "%Y-%m-%d", "date": "$dCreation", "timezone": "America/Caracas" } }
-            }},
-            doc! { "$sort": { "full_date": -1 } },
-            doc! { "$group": {
-                "_id": "$date_group_key",
-                "payments": { "$push": { "_id": "$_id", "reason": "$reason", "balance_bs": "$balance_bs", "status": "$status", "full_date": "$full_date" } }
-            }},
-            doc! { "$sort": { "_id": -1 } },
-            doc! { "$limit": 10 },
-        ];
-
-        let client_collection = self.db.collection::<Document>("Clients");
-        let mut cursor = client_collection.aggregate(pipeline).await?;
-        let mut results: Vec<ResultGroupedByDate> = Vec::new();
-
-        while let Some(doc) = cursor.try_next().await? {
-            let item: ResultGroupedByDate = bson::from_document(doc).map_err(|e| {
-                MongoError::from(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    e.to_string(),
-                ))
-            })?;
-            results.push(item);
-        }
-        Ok(results)
-    }
-
-    // async fn find_debts_by_client_ids(&self, client_ids: &[ObjectId]) -> Result<Vec<Debt>, String> {
-    //     let filter = doc! { "idClient": { "$in": client_ids } };
-    //     let collection = self.db.collection::<Document>("Debts");
-    //     let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
-    //     let mut debts = Vec::new();
-    //
-    //     while let Some(Ok(doc)) = cursor.next().await {
-    //         let debt = Debt {
-    //             _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
-    //             n_amount: doc.get_f64("nAmount").unwrap_or(0.0),
-    //             s_state: doc.get_str("sState").unwrap_or_default().to_string(),
-    //             id_client: doc.get_object_id("idClient").unwrap_or_else(|_| ObjectId::new()),
-    //             s_reason: doc.get_str("sReason").unwrap_or_default().to_string(),
-    //             d_creation: doc.get_datetime("dCreation").ok().cloned().unwrap_or_else(|| DateTime::from_millis(0)),
-    //         };
-    //         debts.push(debt);
-    //     }
-    //     Ok(debts)
-    // }
 
     async fn find_part_payments_by_debt_ids(
         &self,

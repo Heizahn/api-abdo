@@ -20,11 +20,6 @@ use crate::models::payment::{PaymentMethod};
 // Structs Auxiliares (Públicos para el Trait)
 // ============================================
 
-pub struct PhoneSummary {
-    pub primary_name: String,
-    pub phone: String,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PaymentDetails {
     #[serde(rename = "_id")]
@@ -104,14 +99,6 @@ impl MongoDB {
     pub(crate) fn payment_methods(&self) -> Collection<PaymentMethod> {
         self.db.collection::<PaymentMethod>("PaymentsMethods")
     }
-    // #[allow(dead_code)]
-    // pub(crate) fn clients_raw(&self) -> Collection<ClientOwner> {
-    //     self.db.collection::<ClientOwner>("Clients")
-    // }
-    // #[allow(dead_code)]
-    // pub(crate) fn users_raw(&self) -> Collection<UserTag> {
-    //     self.db.collection::<UserTag>("Users")
-    // }
 }
 
 // Implementación vacía del Trait Maestro (los submódulos hacen el trabajo)

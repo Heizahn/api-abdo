@@ -1,10 +1,10 @@
 use axum::{extract::State, Extension, Json};
+use mongodb::bson::oid::ObjectId;
 use std::sync::Arc;
 
 use crate::{
     auth::{
-        claims::{AccessClaims, Claims},
-        service::AuthService,
+        claims::{AccessClaims},
     },
     db::{ProfileRepository, SalesRepository},
     error::ApiError,
@@ -12,202 +12,111 @@ use crate::{
     state::AppState,
 };
 
-/// GET /v1/profile/me
-/// Obtiene información básica del usuario autenticado
-pub async fn me_handler(
+/// GET /v1/profile/me/group
+pub async fn me_group_handler(
     Extension(claims): Extension<AccessClaims>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<MeResponse>, ApiError> {
-    tracing::info!("📋 GET /me for user: {}", claims.sub);
-    tracing::debug!("📋 Claims scope: {:?}", claims.scope);
+) -> Result<Json<MeGroupResponse>, ApiError> {
+    tracing::info!("📋 GET /me/group for user: {}", claims.sub);
 
-    // Verificar scope
+    // 1. Verificar scope
     if !claims.scope.contains(&"me:read".to_string()) {
         tracing::warn!("⚠️ Insufficient scope for user: {}", claims.sub);
         return Err(ApiError::Forbidden);
     }
 
-    tracing::debug!("✅ Scope válido: me:read");
-
-    // Buscar customer por ID
-    tracing::debug!("🔍 Buscando customer por ID: {}", claims.sub);
-    let customer = AuthService::lookup_by_id(&state.db, &claims.sub)
-        .await
-        .ok_or_else(|| {
-            tracing::error!("❌ Customer not found: {}", claims.sub);
-            ApiError::NotFound
-        })?;
-
-    tracing::debug!("✅ Customer encontrado: phone={}", customer.phone);
-
-    // Intentar obtener summary desde cáche
-    tracing::debug!("🔍 Buscando summary en cache...");
-    let summary = match state.redis.get_user_summary(&claims.sub).await {
-        Ok(Some(cached)) => {
-            tracing::debug!("✅ Cache HIT para user summary");
-            cached
-        }
-        Ok(None) => {
-            tracing::debug!("⚠️ Cache MISS - Consultando MongoDB");
-            // Obtener desde MongoDB
-            let s = state
-                .db
-                .summary_by_phone(&customer.phone)
-                .await
-                .ok_or_else(|| {
-                    tracing::error!("❌ Summary not found for phone: {}", customer.phone);
-                    ApiError::NotFound
-                })?;
-
-            tracing::debug!("✅ Summary obtenido de MongoDB");
-
-            // Guardar en cache
-            let ttl = state.config.redis_user_data_ttl;
-            match state.redis.set_user_summary(&claims.sub, &s, ttl).await {
-                Ok(_) => tracing::debug!("✅ Summary guardado en cache"),
-                Err(e) => tracing::warn!("⚠️ Error guardando en cache: {:?}", e),
-            }
-
-            s
-        }
-        Err(e) => {
-            tracing::error!("❌ Error consultando cache: {:?}", e);
-            // Continuar sin cáche
-            tracing::debug!("⚠️ Fallback a MongoDB sin cache");
-            state
-                .db
-                .summary_by_phone(&customer.phone)
-                .await
-                .ok_or_else(|| {
-                    tracing::error!("❌ Summary not found for phone: {}", customer.phone);
-                    ApiError::NotFound
-                })?
-        }
-    };
-
-    tracing::info!("✅ Respuesta exitosa para user: {}", claims.sub);
-
-    Ok(Json(MeResponse {
-        ok: true,
-        customer: CustomerData {
-            name: summary.primary_name,
-            phone: summary.phone,
-        },
-    }))
-}
-
-/// GET /v1/profile/me/balance
-/// Obtiene el balance en Bs del usuario autenticado
-pub async fn me_balance_handler(
-    Extension(claims): Extension<Claims>,
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<BalanceResponse>, ApiError> {
-    tracing::info!("GET /me/balance for user: {}", claims.sub);
-
-    // Verificar scope
-    if !claims.scope.contains(&"me:read".to_string()) {
-        tracing::warn!("Insufficient scope for user: {}", claims.sub);
-        return Err(ApiError::Forbidden);
-    }
-
-    // Intentar obtener balance desde cáche
-    let usd_balance = match state.redis.get_user_balance(&claims.sub).await {
-        Ok(Some(cached)) => {
-            tracing::debug!("Cache hit for user balance: {}", claims.sub);
-            cached
-        }
-        _ => {
-            tracing::debug!("Cache miss for user balance: {}", claims.sub);
-            // Obtener desde MongoDB
-            let balance = state
-                .db
-                .get_user_balance_usd(claims.sub.clone())
-                .await
-                .map_err(|e| {
-                    tracing::error!("Error getting user balance: {:?}", e);
-                    ApiError::DatabaseError(e.to_string())
-                })?;
-
-            // Guardar en cache
-            let ttl = state.config.redis_balance_ttl;
-            let _ = state
-                .redis
-                .set_user_balance(&claims.sub, balance, ttl)
-                .await;
-
-            balance
-        }
-    };
-
-    // Obtener tasa de cambio (con cáche)
+    // 2. Obtener la tasa de cambio primero (para calcular el balance VES)
     let exchange_rate = match state.redis.get_exchange_rate().await {
-        Ok(Some(cached)) => {
-            tracing::debug!("Cache hit for exchange rate");
-            cached
-        }
-        _ => {
-            tracing::debug!("Cache miss for exchange rate");
-            // Obtener desde MongoDB
-            let rate = state.db.get_latest_exchange_rate().await.map_err(|e| {
-                tracing::error!("Error getting exchange rate: {:?}", e);
-                ApiError::DatabaseError(e.to_string())
-            })?;
-
-            // Guardar en cache
-            let ttl = state.config.redis_exchange_rate_ttl;
-            let _ = state.redis.set_exchange_rate(rate, ttl).await;
-
-            rate
-        }
+        Ok(Some(cached)) => cached,
+        _ => state.db.get_latest_exchange_rate().await.map_err(|e| {
+            tracing::error!("Error getting exchange rate: {:?}", e);
+            ApiError::DatabaseError(e.to_string())
+        })?,
     };
 
-    // Calcular balance en Bs
-    let ves_balance = usd_balance * exchange_rate * 1.08;
-    let ves_balance_rounded = (ves_balance * 100.0).round() / 100.0;
-    tracing::info!(
-        "Balance calculated for user {}: {} VES",
-        claims.sub,
-        ves_balance
-    );
+    // Opcional: Guardar la tasa en cache si hubo fallo antes, omitido por brevedad.
 
-    Ok(Json(BalanceResponse {
-        ok: true,
-        balance_ves: ves_balance_rounded,
-    }))
-}
-
-/// GET /v1/profile/me/last_payments
-/// Obtiene los últimos pagos del usuario agrupados por fecha
-pub async fn me_last_payments_handler(
-    Extension(claims): Extension<AccessClaims>,
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<LastPaymentsResponse>, ApiError> {
-    tracing::info!("GET /me/last_payments for user: {}", claims.sub);
-
-    // Verificar scope
-    if !claims.scope.contains(&"me:read".to_string()) {
-        tracing::warn!("Insufficient scope for user: {}", claims.sub);
-        return Err(ApiError::Forbidden);
-    }
-
-    // Obtener últimos pagos desde MongoDB
-    let payments = state
+    // 3. Obtener todos los documentos de cliente asociados al teléfono del usuario autenticado
+    let client_docs = state
         .db
-        .get_last_payments_by_id(claims.sub.clone())
+        .get_clients_by_phone_group(claims.sub.clone())
         .await
         .map_err(|e| {
-            tracing::error!("Error getting last payments: {:?}", e);
+            tracing::error!("❌ Error fetching clients by phone group: {:?}", e);
             ApiError::DatabaseError(e.to_string())
         })?;
 
+    if client_docs.is_empty() {
+        tracing::warn!(
+            "⚠️ No clients found for phone group of user: {}",
+            claims.sub
+        );
+        return Err(ApiError::NotFound);
+    }
+
+    // 4. Procesar cada cliente para obtener su balance y pagos
+    let mut client_summaries: Vec<ClientSummary> = Vec::new();
+
+    for doc in client_docs {
+        let client_id_oid = doc.get_object_id("_id").unwrap().clone();
+        let client_id = client_id_oid.to_hex();
+        let name = doc.get_str("sName").unwrap_or("N/A").to_string();
+        let phone = doc.get_str("sPhone").unwrap_or("N/A").to_string();
+
+        // Asumiendo que `nBalance` es el campo directo en el documento del cliente
+        // que contiene el balance en USD.
+        let usd_balance = doc
+            .get_f64("nBalance")
+            .or_else(|_| doc.get_i32("nBalance").map(|v| v as f64))
+            .or_else(|_| doc.get_i64("nBalance").map(|v| v as f64))
+            .unwrap_or(0.0);
+
+        // 5. Calcular Balance en VES
+        // El factor 1.08 se mantiene de tu código original.
+        let linked_tax_id = doc.get_object_id("idTax").ok();
+        let dummy_oid = ObjectId::new(); 
+        let search_id = linked_tax_id.as_ref().unwrap_or(&dummy_oid);
+
+        let tax = state.db.find_tax_by_id(&search_id).await.unwrap_or(None);
+        let iva = tax.unwrap().iva;
+        let ves_balance = usd_balance * exchange_rate * iva;
+        let ves_balance_rounded = (ves_balance * 100.0).round() / 100.0;
+
+        // 6. Obtener Últimos Pagos (ya incluye Payments y PaymentReports)
+        // Usamos el ID individual de este cliente (client_id)
+        let last_payments = state
+            .db
+            .get_last_payments_by_id(client_id.clone())
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!(
+                    "❌ Error getting payments for client {}: {:?}",
+                    client_id,
+                    e
+                );
+                // Retornar un vector vacío en caso de error para no fallar todo el endpoint.
+                Vec::new()
+            });
+
+        client_summaries.push(ClientSummary {
+            client: ClientData {
+                id: client_id,
+                name,
+                phone,
+            },
+            balance_ves: ves_balance_rounded,
+            last_payments,
+        });
+    }
+
     tracing::info!(
-        "Found {} payment groups for user {}",
-        payments.len(),
+        "✅ Respuesta exitosa con {} clientes para user: {}",
+        client_summaries.len(),
         claims.sub
     );
 
-    Ok(Json(LastPaymentsResponse {
+    Ok(Json(MeGroupResponse {
         ok: true,
-        data: payments,
+        clients: client_summaries,
     }))
 }

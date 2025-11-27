@@ -44,12 +44,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     // ✅ RUTAS PROTEGIDAS (con JWT)
     let protected_routes = Router::new()
-        .route("/v1/profile/me", get(profile::me_handler))
-        .route("/v1/profile/me/balance", get(profile::me_balance_handler))
-        .route(
-            "/v1/profile/me/last_payments",
-            get(profile::me_last_payments_handler),
-        )
+        .route("/v1/profile/me/group", get(profile::me_group_handler))
         .route("/v1/receivable/me", get(receivable::me_receivables_handler))
         .route(
             "/v1/payments/methods/payment/:debt_id",
@@ -60,6 +55,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(payment::report_payment_handler),
         )
         .route("/v1/utils/list/banks", get(utils::get_bank_list))
+
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             jwt_auth_middleware,
