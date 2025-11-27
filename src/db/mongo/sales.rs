@@ -25,22 +25,31 @@ impl SalesRepository for MongoDB {
                 "foreignField": "sPhone",
                 "as": "client_group"
             }},
+            doc! { "$unwind": {
+                "path": "$client_group",
+                "preserveNullAndEmptyArrays": true
+            }},
             doc! { "$group": {
                 "_id": "$sPhone",
-                "total_balance": { "$sum": "$client_group.nBalance" }
+                "total_balance": { "$sum": {
+                    "$ifNull": [ { "$toDouble": "$client_group.nBalance" }, 0.0 ]
+                }}
             }},
         ];
 
         let mut cursor = collection.aggregate(pipeline).await?;
 
         if let Some(result) = cursor.try_next().await? {
-            let total_balance = result.get_f64("total_balance").map_err(|_| {
-                MongoError::custom("Field 'total_balance' not found or is not a number")
-            })?;
+            let total_balance = result.get_f64("total_balance").unwrap_or(0.0);
             Ok(total_balance)
         } else {
+            // Si el match inicial por _id falla, no hay nada que buscar.
+            tracing::error!(
+                "User document with ID {} not found in Clients collection.",
+                id
+            );
             Err(MongoError::custom(
-                "User document not found or no balance associated",
+                "User document not found (initial match failed)",
             ))
         }
     }
