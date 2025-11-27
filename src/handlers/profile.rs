@@ -120,3 +120,12 @@ pub async fn me_group_handler(
         clients: client_summaries,
     }))
 }
+
+
+pub async fn me_phone_handler(
+    Extension(claims): Extension<AccessClaims>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<MePhoneResponse>, ApiError> {
+    let phone = state.db.get_phone(&claims.sub).await.unwrap_or_default();
+    Ok(Json(MePhoneResponse { ok: true, phone }))
+}

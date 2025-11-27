@@ -56,6 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   POST   /v1/auth/login");
     println!("   POST   /v1/auth/refresh");
     println!("   GET    /v1/profile/me/group");
+    println!("   GET    /v1/profile/me/phone");
     println!("   GET    /v1/receivable/me");
     println!();
     println!("✨ Servidor listo para recibir peticiones");

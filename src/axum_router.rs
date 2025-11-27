@@ -45,6 +45,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // ✅ RUTAS PROTEGIDAS (con JWT)
     let protected_routes = Router::new()
         .route("/v1/profile/me/group", get(profile::me_group_handler))
+        .route("/v1/profile/me/phone", get(profile::me_phone_handler))
         .route("/v1/receivable/me", get(receivable::me_receivables_handler))
         .route(
             "/v1/payments/methods/payment/:debt_id",

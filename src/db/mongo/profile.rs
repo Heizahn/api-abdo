@@ -1,4 +1,4 @@
-use super::{MongoDB};
+use super::MongoDB;
 use crate::db::mongo::ResultGroupedByDate;
 use crate::db::ProfileRepository;
 use crate::domain::customer::{Customer, CustomerView};
@@ -224,5 +224,16 @@ impl ProfileRepository for MongoDB {
             results.push(item);
         }
         Ok(results)
+    }
+
+    async fn get_phone(&self, id: &str) -> Result<String, String> {
+        let obj_id = ObjectId::parse_str(id).map_err(|e| e.to_string())?;
+        let filter = doc! { "_id": obj_id };
+        let result = self.customers().find_one(filter).await.ok().flatten();
+
+        match result {
+            Some(doc) => Ok(doc.get_str("sPhone").unwrap_or_default().to_string()),
+            None => Err("Cliente no encontrado".to_string()),
+        }
     }
 }

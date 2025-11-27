@@ -38,6 +38,8 @@ pub trait ProfileRepository {
 
     async fn get_clients_by_phone_group(&self, phone: String) -> Result<Vec<Document>, MongoError>;
     async fn get_last_payments_by_id(&self, id: String) -> Result<Vec<ResultGroupedByDate>, MongoError>;
+
+    async fn get_phone(&self, id: &str) -> Result<String, String>;
 }
 
 // ============================================
