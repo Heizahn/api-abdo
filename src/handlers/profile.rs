@@ -1,11 +1,8 @@
 use axum::{extract::State, Extension, Json};
-use mongodb::bson::oid::ObjectId;
 use std::sync::Arc;
 
 use crate::{
-    auth::{
-        claims::{AccessClaims},
-    },
+    auth::claims::AccessClaims,
     db::{ProfileRepository, SalesRepository},
     error::ApiError,
     models::profile::*,
@@ -33,8 +30,6 @@ pub async fn me_group_handler(
             ApiError::DatabaseError(e.to_string())
         })?,
     };
-
-    // Opcional: Guardar la tasa en cache si hubo fallo antes, omitido por brevedad.
 
     // 3. Obtener todos los documentos de cliente asociados al teléfono del usuario autenticado
     let client_docs = state
@@ -72,13 +67,11 @@ pub async fn me_group_handler(
             .unwrap_or(0.0);
 
         // 5. Calcular Balance en VES
-        // El factor 1.08 se mantiene de tu código original.
         let linked_tax_id = doc.get_object_id("idTax").ok();
-        let dummy_oid = ObjectId::new(); 
-        let search_id = linked_tax_id.as_ref().unwrap_or(&dummy_oid);
 
-        let tax = state.db.find_tax_by_id(&search_id).await.unwrap_or(None);
-        let iva = tax.unwrap().iva;
+        let tax = state.db.find_tax_by_id(linked_tax_id).await.unwrap_or(None);
+        let iva = tax.map(|t| t.iva).unwrap_or(1.0);
+
         let ves_balance = usd_balance * exchange_rate * iva;
         let ves_balance_rounded = (ves_balance * 100.0).round() / 100.0;
 
@@ -120,7 +113,6 @@ pub async fn me_group_handler(
         clients: client_summaries,
     }))
 }
-
 
 pub async fn me_phone_handler(
     Extension(claims): Extension<AccessClaims>,

@@ -12,7 +12,7 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{auth, payment, profile, receivable, utils},
+    handlers::{auth, calculation, payment, profile, receivable, utils},
     middleware::{auth::jwt_auth_middleware, rate_limit},
     state::AppState,
 };
@@ -39,6 +39,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/auth/verify_number", post(auth::verify_number_handler))
         .route("/v1/auth/login", post(auth::login_handler))
         .route("/v1/auth/refresh", post(auth::refresh_handler))
+        .route(
+            "/v1/utils/calculate/bs",
+            post(calculation::calculate_bs_handler),
+        )
         .route("/v1/utils/ping", get(utils::get_ping_response))
         .layer(auth_rate_limit);
 
@@ -56,7 +60,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(payment::report_payment_handler),
         )
         .route("/v1/utils/list/banks", get(utils::get_bank_list))
-
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             jwt_auth_middleware,

@@ -220,7 +220,7 @@ pub async fn report_payment_handler(
             // El cliente tiene un ID de impuesto configurado
             let tax_doc = state
                 .db
-                .find_tax_by_id(&tax_id)
+                .find_tax_by_id(Some(tax_id))
                 .await
                 .map_err(|e| ApiError::DatabaseError(e))?; // Error de conexión
 

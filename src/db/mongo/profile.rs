@@ -77,16 +77,17 @@ impl ProfileRepository for MongoDB {
         }
     }
 
-    async fn find_tax_by_id(&self, tax_id: &ObjectId) -> Result<Option<Tax>, String> {
+    async fn find_tax_by_id(&self, tax_id: Option<ObjectId>) -> Result<Option<Tax>, String> {
         let db_bcv = self.client.database("BCV");
         let collection: Collection<Tax> = db_bcv.collection("IVA");
 
         let mut tax_doc = None;
 
-        let filter = doc! { "_id": tax_id };
-
-        if let Ok(found) = collection.find_one(filter).await {
-            tax_doc = found;
+        if let Some(id) = tax_id {
+            let filter = doc! { "_id": id };
+            if let Ok(found) = collection.find_one(filter).await {
+                tax_doc = found;
+            }
         }
 
         if tax_doc.is_none() {
@@ -97,10 +98,6 @@ impl ProfileRepository for MongoDB {
             } else {
                 return Ok(None);
             }
-        }
-
-        if tax_doc.is_none() {
-            return Ok(None);
         }
 
         Ok(tax_doc)

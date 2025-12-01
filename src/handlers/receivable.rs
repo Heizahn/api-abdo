@@ -40,7 +40,7 @@ pub async fn me_receivables_handler(
     for client in &clients {
         // Lógica: Si tiene id_tax busca en BD, sino usa 1.08
         let tax_rate = if let Some(tax_id) = client.id_tax {
-            match state.db.find_tax_by_id(&tax_id).await {
+            match state.db.find_tax_by_id(Some(tax_id)).await {
                 Ok(Some(tax)) => tax.iva, // Asumo que tu modelo Tax tiene campo 'iva'
                 _ => 1.08,
             }

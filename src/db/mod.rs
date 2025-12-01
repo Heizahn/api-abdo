@@ -4,13 +4,13 @@ use crate::models::db::Tax;
 use crate::models::payment::{Bank, PaymentReport};
 use crate::{
     auth::claims::VerificationCode,
-    db::mongo::{ ResultGroupedByDate},
+    db::mongo::ResultGroupedByDate,
     domain::customer::{Customer, CustomerView},
     models::db::{Client, Debt, PartPayment, Payment},
     models::payment::{ClientOwner, PaymentMethod, UserPaymentInfo},
 };
-use mongodb::bson::Document;
 use mongodb::bson::oid::ObjectId;
+use mongodb::bson::Document;
 use mongodb::error::Error as MongoError;
 use mongodb::results::InsertOneResult;
 
@@ -34,10 +34,13 @@ pub trait ProfileRepository {
 
     async fn find_clients_by_phone(&self, s_phone: &str) -> Result<Vec<Client>, String>;
     async fn find_client_by_id(&self, id: &str) -> Result<Client, String>;
-    async fn find_tax_by_id(&self, id: &ObjectId) -> Result<Option<Tax>, String>;
+    async fn find_tax_by_id(&self, id: Option<ObjectId>) -> Result<Option<Tax>, String>;
 
     async fn get_clients_by_phone_group(&self, phone: String) -> Result<Vec<Document>, MongoError>;
-    async fn get_last_payments_by_id(&self, id: String) -> Result<Vec<ResultGroupedByDate>, MongoError>;
+    async fn get_last_payments_by_id(
+        &self,
+        id: String,
+    ) -> Result<Vec<ResultGroupedByDate>, MongoError>;
 
     async fn get_phone(&self, id: &str) -> Result<String, String>;
 }
