@@ -52,6 +52,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/profile/me/phone", get(profile::me_phone_handler))
         .route("/v1/receivable/me", get(receivable::me_receivables_handler))
         .route(
+            "/v1/receivable/:id",
+            get(receivable::get_receivable_by_id_handler),
+        )
+        .route(
             "/v1/payments/methods/payment/:debt_id",
             get(payment::get_pago_movil_data_handler),
         )

@@ -11,6 +11,12 @@ pub struct ReceivablesResponse {
 }
 
 #[derive(Serialize)]
+pub struct ReceivableByIdResponse {
+    pub ok: bool,
+    pub receivable: ReceivableData,
+}
+
+#[derive(Serialize)]
 pub struct ReceivableData {
     pub debt_id: String,
     pub id_owner: String, // El cliente dueño de la deuda
