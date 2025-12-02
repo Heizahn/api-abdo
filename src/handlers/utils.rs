@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use crate::auth::claims::AccessClaims;
 
+use crate::db::UtilsRepository;
+use crate::models::db::LatestVersionResponse;
 use crate::{
     db::SalesRepository,
     error::ApiError,
@@ -46,4 +48,23 @@ pub async fn get_ping_response() -> Result<Json<PingResponse>, ApiError> {
         ok: true,
         message: "pong".to_string(),
     }))
+}
+
+//endpoiint para devolver el latest version de la app
+pub async fn get_latest_version_response(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<LatestVersionResponse>, ApiError> {
+    let latest_version = state.db.find_latest_version().await.or_else(|e| {
+        tracing::error!("Error finding latest version: {}", e);
+        Err(ApiError::DatabaseError(e.to_string()))
+    })?;
+
+    if let Some(version) = latest_version {
+        Ok(Json(LatestVersionResponse {
+            ok: true,
+            data: version,
+        }))
+    } else {
+        Err(ApiError::NotFound)
+    }
 }

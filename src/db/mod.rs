@@ -1,6 +1,6 @@
 pub mod mongo;
 
-use crate::models::db::Tax;
+use crate::models::db::{LatestVersion, Tax};
 use crate::models::payment::{Bank, PaymentReport};
 use crate::{
     auth::claims::VerificationCode,
@@ -89,6 +89,14 @@ pub trait SalesRepository {
         &self,
         debt_ids: &[ObjectId],
     ) -> Result<Vec<PaymentReport>, String>;
+}
+
+// ============================================
+// 4. UtilsRepository: Utils
+// ============================================
+#[async_trait::async_trait]
+pub trait UtilsRepository {
+    async fn find_latest_version(&self) -> Result<Option<LatestVersion>, String>;
 }
 
 // ============================================

@@ -80,3 +80,15 @@ pub struct Tax {
     #[serde(rename = "IVA")]
     pub iva: f64,
 }
+
+#[derive(Debug, Serialize, Clone)]
+pub struct LatestVersionResponse {
+    pub ok: bool,
+    pub data: LatestVersion,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LatestVersion {
+    pub latest_version_code: i32,
+    pub update_url: String,
+}

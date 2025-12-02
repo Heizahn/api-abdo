@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod profile;
 pub mod sales;
+pub mod utils;
 
 use mongodb::{
     bson::{doc, DateTime, Document},

@@ -44,6 +44,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(calculation::calculate_bs_handler),
         )
         .route("/v1/utils/ping", get(utils::get_ping_response))
+        .route("/v1/utils/latest-version", get(utils::get_latest_version_response))
         .layer(auth_rate_limit);
 
     // ✅ RUTAS PROTEGIDAS (con JWT)
