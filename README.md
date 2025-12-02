@@ -275,6 +275,34 @@ Obtiene últimos pagos agrupados por fecha.
 }
 ```
 
+### Receivables (Deudas)
+
+#### GET `/v1/receivable/me`
+Obtiene todas las deudas activas.
+- **Nota**: No incluye lista de pagos (`payments: null`).
+
+#### GET `/v1/receivable/me/paid`
+Obtiene todas las deudas pagadas (histórico).
+- **Nota**: No incluye lista de pagos (`payments: null`).
+
+#### GET `/v1/receivable/:id`
+Obtiene detalle de una deuda específica.
+- **Nota**: Incluye lista completa de pagos (`payments: [...]`).
+
+### Payments & Utils
+
+#### GET `/v1/payments/methods/payment/:debt_id`
+Obtiene datos para pago móvil asociados a una deuda.
+
+#### POST `/v1/payments/payment/report`
+Reporta un pago realizado.
+
+#### GET `/v1/utils/list/banks`
+Lista de bancos disponibles.
+
+#### POST `/v1/utils/calculate/bs`
+Calculadora de conversión USD -> VES.
+
 ## 🧪 Testing
 
 ### Test manual con curl

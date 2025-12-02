@@ -27,7 +27,7 @@ pub struct ReceivableData {
     pub pending_amount_usd: f64,
     pub pending_amount_bs: f64, // Calculado con IVA específico
     pub has_pending_payments: bool,
-    pub payments: Vec<PaymentData>,
+    pub payments: Option<Vec<PaymentData>>,
 }
 
 #[derive(Serialize)]

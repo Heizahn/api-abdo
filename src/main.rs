@@ -50,18 +50,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    println!("🚀 API ABDO v0.2.0 iniciada");
-    println!("📊 Endpoints disponibles:");
-    println!("   POST   /v1/auth/verify_number");
-    println!("   POST   /v1/auth/login");
-    println!("   POST   /v1/auth/refresh");
-    println!("   GET    /v1/profile/me/group");
-    println!("   GET    /v1/profile/me/phone");
-    println!("   GET    /v1/receivable/me");
-    println!("   GET    /v1/receivable/:id");
-    println!();
-    println!("✨ Servidor listo para recibir peticiones");
-
     // 6. Iniciar servidor
     axum::serve(listener, app).await?;
 

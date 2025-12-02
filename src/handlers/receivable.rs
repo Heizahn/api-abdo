@@ -189,7 +189,176 @@ pub async fn me_receivables_handler(
                 created_at: debt.d_creation.to_string(),
                 pending_amount_bs: pending_bs_rounded,
                 has_pending_payments: has_pending,
-                payments: payment_list,
+                payments: None,
+            });
+        }
+    }
+
+    Ok(Json(ReceivablesResponse {
+        ok: true,
+        receivables,
+    }))
+}
+
+/// GET /v1/receivable/me/paid
+/// Obtiene todas las deudas PAGADAS (saldo 0) del usuario autenticado
+pub async fn me_paid_receivables_handler(
+    Extension(claims): Extension<AccessClaims>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ReceivablesResponse>, ApiError> {
+    tracing::info!("📋 GET /receivable/me/paid for user: {}", claims.sub);
+
+    // ... (Validaciones de scope) ...
+
+    // 1. Obtener Customer y Clientes
+    let customer = AuthService::lookup_by_id(&state.db, &claims.sub)
+        .await
+        .ok_or(ApiError::NotFound)?;
+
+    let clients = state
+        .db
+        .find_clients_by_phone(&customer.phone)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    let client_ids: Vec<_> = clients.iter().map(|c| c._id).collect();
+
+    // 2. Crear Mapa de Impuestos (Client ID -> IVA)
+    let mut client_tax_map: HashMap<bson::oid::ObjectId, f64> = HashMap::new();
+
+    for client in &clients {
+        // Lógica: Si tiene id_tax busca en BD, sino usa 1.08
+        let tax_rate = if let Some(tax_id) = client.id_tax {
+            match state.db.find_tax_by_id(Some(tax_id)).await {
+                Ok(Some(tax)) => tax.iva, // Asumo que tu modelo Tax tiene campo 'iva'
+                _ => 1.08,
+            }
+        } else {
+            1.08
+        };
+        client_tax_map.insert(client._id, tax_rate);
+    }
+
+    // 3. Obtener Deudas Activas
+    let debts = state
+        .db
+        .find_active_debts_by_client_ids(&client_ids)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    if debts.is_empty() {
+        return Ok(Json(ReceivablesResponse {
+            ok: true,
+            receivables: vec![],
+        }));
+    }
+
+    let debt_ids: Vec<_> = debts.iter().map(|d| d._id).collect();
+
+    // 4. Obtener PartPayments (Usando tu struct simple)
+    let part_payments = state
+        .db
+        .find_part_payments_by_debt_ids(&debt_ids)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    // Extraemos IDs de pagos para buscar sus detalles en la colección Payment
+    let payment_ids: Vec<_> = part_payments.iter().map(|pp| pp.id_payment).collect();
+
+    // 5. Obtener Payments (Solo para ver si están Activos)
+    let processed_payments = state
+        .db
+        .find_payments_by_ids(&payment_ids)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    // 6. Obtener Reportes PENDIENTES (Nueva función)
+    let pending_reports = state
+        .db
+        .find_pending_reports_by_debt_ids(&debt_ids)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    // 7. Obtener Tasa de Cambio
+    let exchange_rate = match state.redis.get_exchange_rate().await {
+        Ok(Some(rate)) => rate,
+        _ => {
+            let rate = state
+                .db
+                .get_latest_exchange_rate()
+                .await
+                .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+            let _ = state
+                .redis
+                .set_exchange_rate(rate, state.config.redis_exchange_rate_ttl)
+                .await;
+            rate
+        }
+    };
+
+    // 8. Procesar Datos
+    let mut receivables = Vec::new();
+
+    for debt in debts {
+        let mut total_paid_usd = 0.0;
+        let mut has_pending = false;
+
+        // --- A. Procesar Pagos YA Activos (Restan Deuda) ---
+        // Filtramos usando el campo id_debt de tu struct PartPayment
+        let debt_parts: Vec<_> = part_payments
+            .iter()
+            .filter(|pp| pp.id_debt == debt._id)
+            .collect();
+
+        for pp in debt_parts {
+            // Buscamos el Payment padre para ver el estado
+            if let Some(payment) = processed_payments.iter().find(|p| p._id == pp.id_payment) {
+                if payment.s_state == "Activo" {
+                    // Usamos pp.n_amount de tu struct PartPayment
+                    total_paid_usd += pp.n_amount;
+                }
+            }
+        }
+
+        // --- B. Procesar Reportes Pendientes (Solo se listan) ---
+        // Filtramos reportes donde id_debt coincide (manejando el Option)
+        let debt_reports: Vec<_> = pending_reports
+            .iter()
+            .filter(|r| r.id_debt == Some(debt._id))
+            .collect();
+
+        for _ in debt_reports {
+            has_pending = true;
+        }
+
+        // --- C. Calcular Saldo Pendiente ---
+        let pending_usd = debt.n_amount - total_paid_usd;
+
+        // Solo procesamos si NO hay deuda (pagado)
+        if pending_usd <= 0.001 {
+            // 1. Obtener Tax del cliente
+            let client_tax_rate = client_tax_map.get(&debt.id_client).cloned().unwrap_or(1.08);
+
+            // 2. Calcular BS: (Deuda USD * Tasa * Tax)
+            let pending_bs = if pending_usd > 0.0 {
+                pending_usd * exchange_rate * client_tax_rate
+            } else {
+                0.0
+            };
+
+            let pending_bs_rounded = (pending_bs * 100.0).round() / 100.0;
+
+            receivables.push(ReceivableData {
+                debt_id: debt._id.to_string(),
+                id_owner: debt.id_client.to_string(),
+                reason: debt.s_reason.clone(),
+                state: debt.s_state.clone(),
+                total_amount_usd: debt.n_amount,
+                pending_amount_usd: pending_usd,
+                created_at: debt.d_creation.to_string(),
+                pending_amount_bs: pending_bs_rounded,
+                has_pending_payments: has_pending,
+                payments: None,
             });
         }
     }
@@ -357,7 +526,7 @@ pub async fn get_receivable_by_id_handler(
         created_at: debt.d_creation.to_string(),
         pending_amount_bs: pending_bs_rounded,
         has_pending_payments: has_pending,
-        payments: payment_list,
+        payments: Some(payment_list),
     };
 
     Ok(Json(ReceivableByIdResponse {
