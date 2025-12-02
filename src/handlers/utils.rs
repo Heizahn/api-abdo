@@ -1,3 +1,4 @@
+use axum::response::Html;
 use axum::{extract::State, Extension, Json};
 use std::sync::Arc;
 
@@ -21,13 +22,6 @@ pub async fn get_bank_list(
         tracing::error!("Error finding bank list: {}", e);
         Err(ApiError::DatabaseError(e.to_string()))
     })?;
-
-    // Convert ObjectId to String for client convenience if Bank struct doesn't handle it via serde
-    // Assuming Bank struct has an ObjectId field that needs serialization adjustment,
-    // but usually, this is handled in the struct definition with #[serde(with = "bson::serde_helpers::hex_string_as_object_id")]
-    // or similar. Since I cannot see the Bank struct definition, I will assume the user wants
-    // me to modify the handler logic, but typically this requires changing the model.
-    // However, if the user implies mapping the data here:
     let banks_formatter = banks
         .into_iter()
         .map(|bank| Bank {
@@ -67,4 +61,10 @@ pub async fn get_latest_version_response(
     } else {
         Err(ApiError::NotFound)
     }
+}
+
+pub async fn get_privacy_policy() -> Result<Html<String>, ApiError> {
+    tracing::info!("Handling get_privacy_policy request");
+    let privacy_policy = include_str!("../../public/privacy_policy.html");
+    Ok(Html(privacy_policy.to_string()))
 }

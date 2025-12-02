@@ -44,7 +44,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             post(calculation::calculate_bs_handler),
         )
         .route("/v1/utils/ping", get(utils::get_ping_response))
-        .route("/v1/utils/latest-version", get(utils::get_latest_version_response))
+        .route(
+            "/v1/utils/latest-version",
+            get(utils::get_latest_version_response),
+        )
         .layer(auth_rate_limit);
 
     // ✅ RUTAS PROTEGIDAS (con JWT)
@@ -74,9 +77,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             jwt_auth_middleware,
         ));
 
+    let static_routes = Router::new().route("/v1/privacy-policy", get(utils::get_privacy_policy));
+
     // ✅ ROUTER PRINCIPAL: merge + state al final
     public_routes
         .merge(protected_routes)
+        .merge(static_routes)
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
