@@ -37,7 +37,7 @@ pub trait ProfileRepository {
     async fn find_tax_by_id(&self, id: Option<ObjectId>) -> Result<Option<Tax>, String>;
 
     async fn get_clients_by_phone_group(&self, phone: String) -> Result<Vec<Document>, MongoError>;
-    async fn get_last_payments_by_id(
+    async fn get_last_payments_by_id_client(
         &self,
         id: String,
     ) -> Result<Vec<ResultGroupedByDate>, MongoError>;

@@ -79,7 +79,7 @@ pub async fn me_group_handler(
         // Usamos el ID individual de este cliente (client_id)
         let last_payments = state
             .db
-            .get_last_payments_by_id(client_id.clone())
+            .get_last_payments_by_id_client(client_id.clone())
             .await
             .unwrap_or_else(|e| {
                 tracing::error!(
