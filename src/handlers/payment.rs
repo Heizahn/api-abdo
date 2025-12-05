@@ -159,7 +159,12 @@ pub async fn report_payment_handler(
                 "phone" => phone = Some(text),
                 "id_debt" => id_debt_str = Some(text),
                 "id_payment_method" => {
-                    id_payment_method = Some(ObjectId::parse_str(&text).unwrap())
+                    if let Ok(oid) = ObjectId::parse_str(&text) {
+                        id_payment_method = Some(oid);
+                    } else {
+                        tracing::warn!("⚠️ Recibido id_payment_method inválido: '{}'", text);
+                        // Opcional: return Err(ApiError::BadRequest("ID método pago inválido".into()));
+                    }
                 }
                 _ => {}
             }
