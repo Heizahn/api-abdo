@@ -1,21 +1,13 @@
-use crate::crypto::jwt_verify::{decode_payload_as_string, verify_hs256_and_get_payload_b64};
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use crate::{
+    auth::claims::AccessClaims,
+    crypto::jwt_verify::{decode_payload_as_string, verify_hs256_and_get_payload_b64},
+};
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::crypto::aes::{decrypt_payload, encrypt_payload};
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AccessClaims {
-    pub iss: String,
-    pub sub: String,
-    pub aid: Option<String>,
-    pub scope: Vec<String>,
-    pub iat: i64,
-    pub exp: i64,
-    pub jti: String,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefreshClaims {
@@ -160,14 +152,6 @@ impl JwtService {
             serde_json::from_str(&decrypted).map_err(|_| AccessVerifyError::Json)?;
 
         Ok(claims)
-    }
-
-    /// Igual que arriba, pero permitiendo que luego valides exp si quieres
-    pub fn decode_encrypted_allow_exp(&self, token: &str) -> Option<AccessClaims> {
-        let payload_b64 = verify_hs256_and_get_payload_b64(token, self.cfg.secret.as_bytes())?;
-        let encrypted_blob = decode_payload_as_string(&payload_b64)?;
-        let decrypted = decrypt_payload(&self.cfg.secret, &encrypted_blob)?;
-        serde_json::from_str::<AccessClaims>(&decrypted).ok()
     }
 
     /// Refresh: igual flujo + valida iss/exp tras descifrar

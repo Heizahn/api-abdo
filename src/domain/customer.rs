@@ -8,6 +8,7 @@ pub struct Customer {
 }
 
 pub struct CustomerView {
+    #[allow(dead_code)]
     pub full_name: String,
     pub phone: String,
 }
