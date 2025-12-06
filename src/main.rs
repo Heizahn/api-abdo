@@ -1,27 +1,77 @@
+// Core modules
 mod auth;
 mod config;
 mod crypto;
 mod db;
 mod domain;
-mod http;
-mod profile;
-mod router;
+mod error;
+mod state;
+// Axum modules
+mod axum_router;
+mod cache;
+mod handlers;
+mod middleware;
+mod models;
+mod utils;
 
 use config::Config;
-use db::mongo::MongoDB;
-use http::server::HttpServer;
-use router::AppRouter;
+use state::AppState;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Cargar configuración
     let cfg = Config::from_env();
 
-    // Conectamos a la base con URI + nombre de DB desde .env
-    let db = MongoDB::new(&cfg.mongo_uri, &cfg.mongo_db).await;
+    // 2. Inicializar tracing/logging
+    init_tracing(&cfg);
+    if !std::path::Path::new("./uploads").exists() {
+        tokio::fs::create_dir("./uploads").await?;
+    }
 
-    println!("✅ Conectado a MongoDB: {}", &cfg.mongo_db);
+    tracing::info!("🚀 Iniciando API ABDO v0.2.0");
+    tracing::info!("Environment: {}", cfg.rust_log);
 
-    let server = HttpServer::new(cfg.address(), AppRouter, db);
-    println!("🚀 Servidor en http://{}", cfg.address());
-    server.run();
+    // 3. Inicializar estado de aplicación (MongoDB + Redis)
+    tracing::info!("Inicializando conexiones...");
+    let state = AppState::new(cfg.clone()).await.map_err(|e| {
+        tracing::error!("Error inicializando estado: {:?}", e);
+        format!("{:?}", e)
+    })?;
+
+    tracing::info!("✅ Conexiones establecidas");
+
+    // 4. Construir router de Axum
+    let app = axum_router::build_router(state);
+
+    // 5. Crear listener TCP
+    let addr = cfg.address();
+    tracing::info!("Servidor escuchando en: http://{}", addr);
+
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+
+    // 6. Iniciar servidor
+    axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+/// Inicializa el sistema de tracing/logging
+fn init_tracing(cfg: &Config) {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&cfg.rust_log));
+
+    if cfg.log_format == "json" {
+        // Formato JSON para producción
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer().json())
+            .init();
+    } else {
+        // Formato pretty para desarrollo
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer().pretty())
+            .init();
+    }
 }

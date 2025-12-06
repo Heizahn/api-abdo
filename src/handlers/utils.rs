@@ -1,0 +1,70 @@
+use axum::response::Html;
+use axum::{extract::State, Extension, Json};
+use std::sync::Arc;
+
+use crate::auth::claims::AccessClaims;
+
+use crate::db::UtilsRepository;
+use crate::models::db::LatestVersionResponse;
+use crate::{
+    db::SalesRepository,
+    error::ApiError,
+    models::db::PingResponse,
+    models::payment::{Bank, BankListResponse},
+    state::AppState,
+};
+
+pub async fn get_bank_list(
+    Extension(_claims): Extension<AccessClaims>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BankListResponse>, ApiError> {
+    let banks: Vec<Bank> = state.db.find_bank_list().await.or_else(|e| {
+        tracing::error!("Error finding bank list: {}", e);
+        Err(ApiError::DatabaseError(e.to_string()))
+    })?;
+    let banks_formatter = banks
+        .into_iter()
+        .map(|bank| Bank {
+            id: bank.id,
+            bank_code: bank.bank_code,
+            bank_name: bank.bank_name,
+        })
+        .collect::<Vec<Bank>>();
+
+    Ok(Json(BankListResponse {
+        ok: true,
+        data: banks_formatter,
+    }))
+}
+
+pub async fn get_ping_response() -> Result<Json<PingResponse>, ApiError> {
+    Ok(Json(PingResponse {
+        ok: true,
+        message: "pong".to_string(),
+    }))
+}
+
+//endpoiint para devolver el latest version de la app
+pub async fn get_latest_version_response(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<LatestVersionResponse>, ApiError> {
+    let latest_version = state.db.find_latest_version().await.or_else(|e| {
+        tracing::error!("Error finding latest version: {}", e);
+        Err(ApiError::DatabaseError(e.to_string()))
+    })?;
+
+    if let Some(version) = latest_version {
+        Ok(Json(LatestVersionResponse {
+            ok: true,
+            data: version,
+        }))
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+pub async fn get_privacy_policy() -> Result<Html<String>, ApiError> {
+    tracing::info!("Handling get_privacy_policy request");
+    let privacy_policy = include_str!("../../public/privacy_policy.html");
+    Ok(Html(privacy_policy.to_string()))
+}

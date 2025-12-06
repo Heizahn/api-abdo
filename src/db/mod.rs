@@ -1,51 +1,108 @@
 pub mod mongo;
+
+use crate::models::db::{LatestVersion, Tax};
+use crate::models::payment::{Bank, PaymentReport};
 use crate::{
     auth::claims::VerificationCode,
     db::mongo::ResultGroupedByDate,
     domain::customer::{Customer, CustomerView},
-    profile::structers::{Client, Debt, PartPayment, Payment},
+    models::db::{Client, Debt, PartPayment, Payment},
+    models::payment::{ClientOwner, PaymentMethod, UserPaymentInfo},
 };
 use mongodb::bson::oid::ObjectId;
+use mongodb::bson::Document;
 use mongodb::error::Error as MongoError;
+use mongodb::results::InsertOneResult;
 
+// ============================================
+// 1. AuthRepository: Login, Verificación
+// ============================================
 #[async_trait::async_trait]
-pub trait Db: Clone + Send + Sync + 'static {
+pub trait AuthRepository {
+    async fn store_verification_code(&self, phone: &str, code: &u32) -> mongodb::error::Result<()>;
+    async fn find_verification_code(&self, phone: &str, code: &u32) -> Option<VerificationCode>;
+    async fn delete_verification_code(&self, id: &ObjectId) -> Result<u64, MongoError>;
+}
+
+// ============================================
+// 2. ProfileRepository: Clientes
+// ============================================
+#[async_trait::async_trait]
+pub trait ProfileRepository {
     async fn find_customer_by_phone(&self, phone: &str) -> Option<Customer>;
     async fn find_customer_by_id(&self, id: &str) -> Option<CustomerView>;
-    async fn summary_by_phone(&self, phone: &str) -> Option<mongo::PhoneSummary>;
-    async fn store_verification_code(&self, phone: &str, code: &u32) -> mongodb::error::Result<()>;
 
-    /// Busca un código de verificación por teléfono y código.
-    async fn find_verification_code(&self, phone: &str, code: &u32) -> Option<VerificationCode>;
+    async fn find_clients_by_phone(&self, s_phone: &str) -> Result<Vec<Client>, String>;
+    async fn find_client_by_id(&self, id: &str) -> Result<Client, String>;
+    async fn find_tax_by_id(&self, id: Option<ObjectId>) -> Result<Option<Tax>, String>;
 
-    /// Elimina un código de verificación por su ID de MongoDB.
-    async fn delete_verification_code(&self, id: &ObjectId) -> Result<u64, MongoError>;
-
-    //Traer el balance en USD
-    async fn get_user_balance_usd(&self, id: String) -> Result<f64, MongoError>;
-
-    async fn get_latest_exchange_rate(&self) -> Result<f64, MongoError>;
-
-    async fn get_last_payments_by_id(
+    async fn get_clients_by_phone_group(&self, phone: String) -> Result<Vec<Document>, MongoError>;
+    async fn get_last_payments_by_id_client(
         &self,
         id: String,
     ) -> Result<Vec<ResultGroupedByDate>, MongoError>;
 
-    // 1. Obtener el cliente por ID de usuario (user_id)
-    async fn find_client_by_user_id(&self, user_id: &str) -> Result<Option<Client>, String>;
+    async fn get_phone(&self, id: &str) -> Result<String, String>;
+}
 
-    // 2. Obtener todos los clientes con un sPhone específico
-    async fn find_clients_by_phone(&self, s_phone: &str) -> Result<Vec<Client>, String>;
+// ============================================
+// 3. SalesRepository: Ventas, Pagos, Deudas
+// ============================================
+#[async_trait::async_trait]
+pub trait SalesRepository {
+    async fn get_latest_exchange_rate(&self) -> Result<f64, MongoError>;
 
-    // 3. Obtener todas las deudas para una lista de IDs de cliente
-    async fn find_debts_by_client_ids(&self, client_ids: &[ObjectId]) -> Result<Vec<Debt>, String>;
+    async fn find_active_debts_by_client_ids(
+        &self,
+        client_ids: &[ObjectId],
+    ) -> Result<Vec<Debt>, String>;
 
-    // 4. Obtener todas las partes de pago para una lista de IDs de deuda
+    // Pagos
     async fn find_part_payments_by_debt_ids(
         &self,
         debt_ids: &[ObjectId],
     ) -> Result<Vec<PartPayment>, String>;
-
-    // 5. Obtener los pagos por una lista de IDs de pago
     async fn find_payments_by_ids(&self, payment_ids: &[ObjectId]) -> Result<Vec<Payment>, String>;
+    async fn find_debt_by_id(&self, id: &str) -> Result<Option<crate::models::db::Debt>, String>;
+    async fn find_client_owner_by_id(
+        &self,
+        client_id: &ObjectId,
+    ) -> Result<Option<ClientOwner>, String>;
+
+    // CAMBIOS:
+    async fn find_user_payment_info_by_id(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<UserPaymentInfo>, String>;
+    async fn find_payment_method_by_id(
+        &self,
+        id: &ObjectId,
+    ) -> Result<Option<PaymentMethod>, String>;
+    async fn create_payment_report(
+        &self,
+        report: PaymentReport,
+    ) -> Result<InsertOneResult, MongoError>;
+
+    async fn find_bank_list(&self) -> Result<Vec<Bank>, String>;
+
+    async fn find_pending_reports_by_debt_ids(
+        &self,
+        debt_ids: &[ObjectId],
+    ) -> Result<Vec<PaymentReport>, String>;
+}
+
+// ============================================
+// 4. UtilsRepository: Utils
+// ============================================
+#[async_trait::async_trait]
+pub trait UtilsRepository {
+    async fn find_latest_version(&self) -> Result<Option<LatestVersion>, String>;
+}
+
+// ============================================
+// TRAIT MAESTRO
+// ============================================
+pub trait Db:
+    AuthRepository + ProfileRepository + SalesRepository + Clone + Send + Sync + 'static
+{
 }

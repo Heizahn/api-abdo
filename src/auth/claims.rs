@@ -3,7 +3,7 @@ use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
 
 #[allow(dead_code)]
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessClaims {
     pub iss: String,
     pub sub: String,         // id del cliente
@@ -13,6 +13,7 @@ pub struct AccessClaims {
     pub exp: i64,
     pub jti: String,
 }
+
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,10 +34,4 @@ pub struct VerificationCode {
     pub code: u32,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
-}
-
-#[derive(Deserialize)]
-pub struct LoginPayload {
-    pub phone: String,
-    pub code: u32,
 }
