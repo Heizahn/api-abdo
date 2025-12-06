@@ -152,11 +152,15 @@ impl ProfileRepository for MongoDB {
         // Usaremos $unionWith para combinar ambas colecciones.
         let pipeline = vec![
             doc! { "$match": { "_id": obj_id } },
+            // 1. Lookup de Payments (Filtrando solo Activos)
             doc! { "$lookup": {
                 "from": "Payments",
                 "let": { "client_id": "$_id" },
                 "pipeline": [
-                    doc! { "$match": { "$expr": { "$eq": ["$idClient", "$$client_id"] } }},
+                    doc! { "$match": {
+                        "$expr": { "$eq": ["$idClient", "$$client_id"] },
+                        "sState": "Activo" 
+                    }},
                     doc! { "$project": {
                         "_id": 1, "sReason": 1, "nBs": 1, "sState": 1, "dCreation": 1,
                         "type": "Payment"
@@ -164,12 +168,15 @@ impl ProfileRepository for MongoDB {
                 ],
                 "as": "payments"
             }},
+            // 2. Lookup de PaymentReports (Filtrando solo Activos)
             doc! { "$lookup": {
                 "from": "PaymentReports",
                 "let": { "client_id": "$_id" },
                 "pipeline": [
-                    doc! { "$match": { "$expr": { "$eq": ["$idClient", "$$client_id"] } }},
-                    // Lookup para obtener la razón de la deuda asociada
+                    doc! { "$match": {
+                        "$expr": { "$eq": ["$idClient", "$$client_id"] },
+                        "sState": "Pendiente" 
+                    }},
                     doc! { "$lookup": {
                         "from": "Debts",
                         "localField": "idDebt",
@@ -182,7 +189,6 @@ impl ProfileRepository for MongoDB {
                     }},
                     doc! { "$project": {
                         "_id": 1,
-                        // Usar la razón de la deuda si existe, sino la del reporte
                         "sReason": { "$ifNull": ["$debt.sReason", "$sReason"] },
                         "nBs": 1, "sState": 1, "dCreation": 1,
                         "type": "Report",
@@ -190,6 +196,7 @@ impl ProfileRepository for MongoDB {
                 ],
                 "as": "reports"
             }},
+            // El resto del pipeline se mantiene igual
             doc! { "$project": {
                 "all_transactions": { "$concatArrays": ["$payments", "$reports"] }
             }},
@@ -197,16 +204,15 @@ impl ProfileRepository for MongoDB {
             doc! { "$replaceRoot": { "newRoot": "$all_transactions" } },
             doc! { "$project": {
                 "_id": 1,
-                "reason": { "$ifNull": ["$sReason", "Abono"] }, // Prioriza sReason, sino "Abono"
-                "balance_bs": "$nBs", // nBs unificado de Payments y Reports
+                "reason": { "$ifNull": ["$sReason", "Abono"] },
+                "balance_bs": "$nBs",
                 "status": "$sState",
-                // Usamos $toDate para manejar dCreation tanto si es String (ISO) como si es BSON Date
                 "full_date": { "$toDate": "$dCreation" },
-                "type": "$type", // Incluir el tipo para distinguirlos
+                "type": "$type",
                 "date_group_key": { "$dateToString": { "format": "%Y-%m-%d", "date": { "$toDate": "$dCreation" }, "timezone": "America/Caracas" } }
             }},
             doc! { "$sort": { "full_date": -1 } },
-            doc! { "$limit": 7 }, // Aumentar el límite total si se combinan dos colecciones.
+            doc! { "$limit": 7 },
             doc! { "$group": {
                 "_id": "$date_group_key",
                 "payments": { "$push": {
