@@ -6,7 +6,7 @@ use mongodb::bson::{doc, oid::ObjectId, DateTime, Document};
 use mongodb::results::InsertOneResult;
 use mongodb::{error::Error as MongoError, Collection};
 
-use super::{MongoDB};
+use super::MongoDB;
 use crate::db::SalesRepository;
 use crate::models::db::{Debt, PartPayment, Payment};
 use crate::models::payment::{Bank, ClientOwner, PaymentMethod, PaymentReport, UserPaymentInfo};
@@ -32,9 +32,15 @@ impl SalesRepository for MongoDB {
 
         match doc {
             Some(d) => {
-                let rate = d.get_f64("value").map_err(|_| {
-                    MongoError::custom("Rate field 'value' not found or invalid type")
-                })?;
+                // CAMBIO: Usamos get_bson_amount para mayor seguridad
+                // (Aunque 'value' suele ser float, es mejor prevenir)
+                let rate = get_bson_amount(&d, "value");
+
+                // Si devuelve 0.0 es porque no lo encontró o era inválido,
+                // validamos para no devolver tasa 0 accidentalmente.
+                if rate <= 0.0 {
+                    return Err(MongoError::custom("Invalid or zero exchange rate value"));
+                }
 
                 if let Ok(ts) = d.get_datetime("timestamp") {
                     let vz_time = VenezuelaDateTime::from(*ts);
@@ -43,7 +49,6 @@ impl SalesRepository for MongoDB {
                         rate,
                         vz_time.datetime_string_venezuela()
                     );
-                    tracing::debug!("💾 Timestamp en DB (UTC): {}", vz_time.utc());
                 } else {
                     tracing::info!("💱 Tasa BCV encontrada: {}", rate);
                 }
@@ -60,7 +65,6 @@ impl SalesRepository for MongoDB {
             }
         }
     }
-
 
     async fn find_part_payments_by_debt_ids(
         &self,
@@ -144,14 +148,39 @@ impl SalesRepository for MongoDB {
 
     //[PAYMENT]
     async fn find_debt_by_id(&self, id: &str) -> Result<Option<Debt>, String> {
-        let collection = self.db.collection::<Debt>("Debts");
+        // 1. Cambiamos <Debt> por <Document> para leer sin errores de tipo
+        let collection = self.db.collection::<Document>("Debts");
         let obj_id = ObjectId::parse_str(id).map_err(|e| e.to_string())?;
-        collection
+
+        // 2. Buscamos el documento crudo
+        let result = collection
             .find_one(doc! { "_id": obj_id })
             .await
-            .map_err(|e| e.to_string())
-    }
+            .map_err(|e| e.to_string())?;
 
+        // 3. Mapeamos manualmente usando el helper
+        match result {
+            Some(doc) => {
+                let debt = Debt {
+                    _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
+                    // AQUI LA PROTECCION:
+                    n_amount: get_bson_amount(&doc, "nAmount"),
+                    s_state: doc.get_str("sState").unwrap_or_default().to_string(),
+                    id_client: doc
+                        .get_object_id("idClient")
+                        .unwrap_or_else(|_| ObjectId::new()),
+                    s_reason: doc.get_str("sReason").unwrap_or_default().to_string(),
+                    d_creation: doc
+                        .get_datetime("dCreation")
+                        .ok()
+                        .cloned()
+                        .unwrap_or_else(|| DateTime::from_millis(0)),
+                };
+                Ok(Some(debt))
+            }
+            None => Ok(None),
+        }
+    }
     async fn find_client_owner_by_id(
         &self,
         client_id: &ObjectId,
