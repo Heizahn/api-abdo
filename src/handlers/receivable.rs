@@ -176,9 +176,7 @@ pub async fn me_receivables_handler(
             };
             let pending_bs_rounded = (pending_bs * 100.0).round() / 100.0;
 
-            // CORRECCIÓN FECHA: Convertir bson::DateTime a String ISO 8601 estándar
-            // .to_chrono() convierte a chrono::DateTime<Utc>, luego to_rfc3339() lo hace string
-            let created_at_str = debt.d_creation.to_string();
+            let created_at_str = debt.d_creation.try_to_rfc3339_string().unwrap();
 
             receivables.push(ReceivableData {
                 debt_id: debt._id.to_string(),
