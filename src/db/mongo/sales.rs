@@ -202,7 +202,7 @@ impl SalesRepository for MongoDB {
         user_id: &str,
     ) -> Result<Option<UserPaymentInfo>, String> {
         let collection = self.db.collection::<UserPaymentInfo>("Users");
-        let filter = doc! { "_id": user_id, "sState": "Activo"};
+        let filter = doc! { "_id": user_id};
         let options = mongodb::options::FindOneOptions::builder()
             .projection(doc! { "idPaymentMethod": 1 }) // Solo traemos el ID del método
             .build();
