@@ -1,3 +1,4 @@
+use crate::utils::get_bson_amount::get_bson_amount;
 use crate::utils::timezone::{utils as tz_utils, VenezuelaDateTime};
 use async_trait::async_trait;
 use futures::stream::{StreamExt, TryStreamExt};
@@ -79,7 +80,7 @@ impl SalesRepository for MongoDB {
                 id_payment: doc
                     .get_object_id("idPayment")
                     .unwrap_or_else(|_| ObjectId::new()),
-                n_amount: doc.get_f64("nAmount").unwrap_or(0.0),
+                n_amount: get_bson_amount(&doc, "nAmount"),
             };
             part_payments.push(pp);
         }
@@ -95,17 +96,9 @@ impl SalesRepository for MongoDB {
         while let Some(Ok(doc)) = cursor.next().await {
             let payment = Payment {
                 _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
-                n_amount: doc
-                    .get_f64("nAmount")
-                    .or_else(|_| doc.get_i32("nAmount").map(|v| v as f64))
-                    .or_else(|_| doc.get_i64("nAmount").map(|v| v as f64))
-                    .unwrap_or(0.0),
+                n_amount: get_bson_amount(&doc, "nAmount"),
                 s_state: doc.get_str("sState").unwrap_or_default().to_string(),
-                n_bs: doc
-                    .get_f64("nBs")
-                    .or_else(|_| doc.get_i32("nBs").map(|v| v as f64))
-                    .or_else(|_| doc.get_i64("nBs").map(|v| v as f64))
-                    .unwrap_or(0.0),
+                n_bs: get_bson_amount(&doc, "nBs"),
             };
             payments.push(payment);
         }
@@ -132,11 +125,7 @@ impl SalesRepository for MongoDB {
         while let Some(Ok(doc)) = cursor.next().await {
             let debt = Debt {
                 _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
-                n_amount: doc
-                    .get_f64("nAmount")
-                    .or_else(|_| doc.get_i32("nAmount").map(|v| v as f64))
-                    .or_else(|_| doc.get_i64("nAmount").map(|v| v as f64))
-                    .unwrap_or(0.0),
+                n_amount: get_bson_amount(&doc, "nAmount"),
                 s_state: doc.get_str("sState").unwrap_or_default().to_string(),
                 id_client: doc
                     .get_object_id("idClient")

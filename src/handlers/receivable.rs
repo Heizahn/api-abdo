@@ -198,6 +198,8 @@ pub async fn me_receivables_handler(
         receivables,
     }))
 }
+
+
 /// GET /v1/receivable/me/paid
 /// Obtiene todas las deudas PAGADAS (saldo 0) del usuario autenticado
 pub async fn me_paid_receivables_handler(
