@@ -71,7 +71,7 @@ impl SalesRepository for MongoDB {
         debt_ids: &[ObjectId],
     ) -> Result<Vec<PartPayment>, String> {
         let filter = doc! { "idDebt": { "$in": debt_ids } };
-        let collection = self.db.collection::<Document>("PartPayment");
+        let collection = self.db.collection::<Document>("PartPayments");
         let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
         let mut part_payments = Vec::new();
 
