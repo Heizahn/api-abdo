@@ -355,7 +355,7 @@ pub async fn me_paid_receivables_handler(
                 state: debt.s_state.clone(),
                 total_amount_usd: debt.n_amount,
                 pending_amount_usd: pending_usd,
-                created_at: debt.d_creation.to_string(),
+                created_at: debt.d_creation.try_to_rfc3339_string().unwrap(),
                 pending_amount_bs: pending_bs_rounded,
                 has_pending_payments: has_pending,
                 payments: None,
@@ -363,6 +363,10 @@ pub async fn me_paid_receivables_handler(
         }
     }
 
+    //ordenamos por fecha de creacion las mas nuevas primero
+    let mut receivables = receivables;
+
+    receivables.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(Json(ReceivablesResponse {
         ok: true,
         receivables,
