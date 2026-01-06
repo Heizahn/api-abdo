@@ -2,6 +2,7 @@ use axum::extract::Path;
 use axum::response::{Html, IntoResponse};
 use axum::{extract::State, Extension, Json};
 use hyper::header;
+use std::env;
 use std::sync::Arc;
 
 use crate::auth::claims::AccessClaims;
@@ -70,27 +71,41 @@ pub async fn get_privacy_policy() -> Result<Html<String>, ApiError> {
     let privacy_policy = include_str!("../../public/privacy_policy.html");
     Ok(Html(privacy_policy.to_string()))
 }
-
 pub async fn get_image(
     Path(filename): Path<String>,
     State(_state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // 1. Construir la ruta al archivo.
-    // IMPORTANTE: 'uploads' está en la raiz, al mismo nivel que src
-    let path = format!("/uploads/{}", filename);
+    
+    // 1. Obtener el directorio actual de trabajo (CWD) para debuggear
+    let current_dir = env::current_dir().unwrap_or_default();
+    
+    // NOTA: Quité la barra inicial "/" antes de uploads. 
+    // Si pones "/uploads", busca en la raíz del sistema operativo.
+    // Al poner "uploads/", busca relativo a donde ejecutaste el comando cargo run.
+    let path_str = format!("uploads/{}", filename); 
+    
+    // Tratamos de obtener la ruta absoluta para ver en el log
+    let absolute_path = current_dir.join(&path_str);
 
-    // 2. Seguridad básica: evitar que intenten leer otros archivos con "../"
+    println!("---------------- DEBUG IMAGEN ----------------");
+    println!("1. Directorio de ejecución (CWD): {:?}", current_dir);
+    println!("2. Filename recibido: {}", filename);
+    println!("3. Ruta relativa construida: {}", path_str);
+    println!("4. Ruta absoluta intentada: {:?}", absolute_path);
+
+    // 2. Seguridad básica
     if filename.contains("..") {
-        // Retorna un error de tu ApiError (ajusta según tu enum)
+        println!("ERROR: Intento de Path Traversal detectado");
         return Err(ApiError::BadRequest(
             "Ruta inválida o intento de hackeo".to_string(),
         ));
     }
 
     // 3. Intentar leer el archivo
-    match tokio::fs::read(&path).await {
+    match tokio::fs::read(&path_str).await {
         Ok(bytes) => {
-            // 4. Determinar el Content-Type manualmente
+            println!("EXITO: Imagen encontrada y leída. Bytes: {}", bytes.len());
+            
             let content_type = if filename.ends_with(".png") {
                 "image/png"
             } else if filename.ends_with(".jpg") || filename.ends_with(".jpeg") {
@@ -98,14 +113,18 @@ pub async fn get_image(
             } else if filename.ends_with(".webp") {
                 "image/webp"
             } else {
-                "application/octet-stream" // Tipo genérico
+                "application/octet-stream"
             };
 
-            // 5. Devolver la respuesta con el header correcto
             Ok(([(header::CONTENT_TYPE, content_type)], bytes))
         }
-        Err(_) => {
-            // Si el archivo no existe, retornamos error 404 (ajusta a tu ApiError)
+        Err(e) => {
+            // AQUÍ VERÁS EL ERROR REAL DEL SISTEMA OPERATIVO
+            println!("ERROR FATAL LEYENDO ARCHIVO: {:?}", e);
+            println!("¿El archivo realmente existe en {:?}?", absolute_path);
+            println!("----------------------------------------------");
+            
+            // Si el error es NotFound, retornamos NotFound, si es permisos, etc.
             Err(ApiError::NotFound)
         }
     }
