@@ -74,58 +74,7 @@ pub async fn get_privacy_policy() -> Result<Html<String>, ApiError> {
 pub async fn get_image(
     Path(filename): Path<String>,
     State(_state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, ApiError> {
-    
-    // 1. Obtener el directorio actual de trabajo (CWD) para debuggear
-    let current_dir = env::current_dir().unwrap_or_default();
-    
-    // NOTA: Quité la barra inicial "/" antes de uploads. 
-    // Si pones "/uploads", busca en la raíz del sistema operativo.
-    // Al poner "uploads/", busca relativo a donde ejecutaste el comando cargo run.
-    let path_str = format!("uploads/{}", filename); 
-    
-    // Tratamos de obtener la ruta absoluta para ver en el log
-    let absolute_path = current_dir.join(&path_str);
-
-    println!("---------------- DEBUG IMAGEN ----------------");
-    println!("1. Directorio de ejecución (CWD): {:?}", current_dir);
-    println!("2. Filename recibido: {}", filename);
-    println!("3. Ruta relativa construida: {}", path_str);
-    println!("4. Ruta absoluta intentada: {:?}", absolute_path);
-
-    // 2. Seguridad básica
-    if filename.contains("..") {
-        println!("ERROR: Intento de Path Traversal detectado");
-        return Err(ApiError::BadRequest(
-            "Ruta inválida o intento de hackeo".to_string(),
-        ));
-    }
-
-    // 3. Intentar leer el archivo
-    match tokio::fs::read(&path_str).await {
-        Ok(bytes) => {
-            println!("EXITO: Imagen encontrada y leída. Bytes: {}", bytes.len());
-            
-            let content_type = if filename.ends_with(".png") {
-                "image/png"
-            } else if filename.ends_with(".jpg") || filename.ends_with(".jpeg") {
-                "image/jpeg"
-            } else if filename.ends_with(".webp") {
-                "image/webp"
-            } else {
-                "application/octet-stream"
-            };
-
-            Ok(([(header::CONTENT_TYPE, content_type)], bytes))
-        }
-        Err(e) => {
-            // AQUÍ VERÁS EL ERROR REAL DEL SISTEMA OPERATIVO
-            println!("ERROR FATAL LEYENDO ARCHIVO: {:?}", e);
-            println!("¿El archivo realmente existe en {:?}?", absolute_path);
-            println!("----------------------------------------------");
-            
-            // Si el error es NotFound, retornamos NotFound, si es permisos, etc.
-            Err(ApiError::NotFound)
-        }
-    }
+) -> Result<String, ApiError> {
+    println!("filename: {}", filename);
+    Ok("ok".to_string())
 }
