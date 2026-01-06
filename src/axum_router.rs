@@ -48,6 +48,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/utils/latest-version",
             get(utils::get_latest_version_response),
         )
+        .route("/v1/utils/image/:filename", get(utils::get_image))
         .layer(auth_rate_limit);
 
     // ✅ RUTAS PROTEGIDAS (con JWT)
