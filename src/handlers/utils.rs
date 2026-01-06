@@ -77,7 +77,7 @@ pub async fn get_image(
 ) -> Result<impl IntoResponse, ApiError> {
     // 1. Construir la ruta al archivo.
     // IMPORTANTE: 'uploads' está en la raiz, al mismo nivel que src
-    let path = format!("uploads/{}", filename);
+    let path = format!("/uploads/{}", filename);
 
     // 2. Seguridad básica: evitar que intenten leer otros archivos con "../"
     if filename.contains("..") {
