@@ -128,6 +128,7 @@ impl ProfileRepository for MongoDB {
                 "_id": 1,
                 "sName": 1,
                 "sPhone": 1,
+                "idTax": 1,
                 "nBalance": 1 // Si el balance es un campo directo del cliente, tómalo.
             }},
         ];

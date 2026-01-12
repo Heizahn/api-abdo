@@ -96,6 +96,7 @@ pub async fn me_group_handler(
                 id: client_id,
                 name,
                 phone,
+                id_tax: linked_tax_id.map(|oid| oid.to_hex()),
             },
             balance_ves: ves_balance_rounded,
             last_payments,

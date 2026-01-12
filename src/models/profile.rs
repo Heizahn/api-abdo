@@ -9,6 +9,7 @@ pub struct ClientData {
     pub id: String,
     pub name: String,
     pub phone: String,
+    pub id_tax: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
