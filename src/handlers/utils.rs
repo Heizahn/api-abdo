@@ -1,8 +1,8 @@
+use axum::body::Body;
 use axum::extract::Path;
-use axum::response::{Html, IntoResponse};
+use axum::response::{Html, Response};
 use axum::{extract::State, Extension, Json};
 use hyper::header;
-use std::env;
 use std::sync::Arc;
 
 use crate::auth::claims::AccessClaims;
@@ -71,10 +71,44 @@ pub async fn get_privacy_policy() -> Result<Html<String>, ApiError> {
     let privacy_policy = include_str!("../../public/privacy_policy.html");
     Ok(Html(privacy_policy.to_string()))
 }
+
 pub async fn get_image(
     Path(filename): Path<String>,
     State(_state): State<Arc<AppState>>,
-) -> Result<String, ApiError> {
-    println!("filename: {}", filename);
-    Ok("ok".to_string())
+) -> Result<Response, ApiError> {
+    // 1. Evitar ataques de "Directory Traversal" (seguridad básica)
+    if filename.contains("..") || filename.starts_with('/') || filename.contains('\\') {
+        return Err(ApiError::NotFound);
+    }
+
+    // 2. Construir la ruta (coincide con tu carpeta 'uploads' en la raíz)
+    let path = format!("uploads/{}", filename);
+
+    // 3. Leer el archivo
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => {
+            // 4. Determinar el tipo de contenido (MIME Type) manualmente
+            // Nota: Podrías usar la librería 'mime_guess' para esto, pero aquí lo hago manual
+            let content_type = if path.ends_with(".png") {
+                "image/png"
+            } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+                "image/jpeg"
+            } else if path.ends_with(".webp") {
+                "image/webp"
+            } else {
+                "application/octet-stream" // Tipo genérico
+            };
+
+            // 5. Construir la respuesta con el Header correcto
+            let response = Response::builder()
+                .header(header::CONTENT_TYPE, content_type)
+                // Opcional: Cache-Control para que el navegador guarde la imagen un tiempo
+                .header(header::CACHE_CONTROL, "public, max-age=3600")
+                .body(Body::from(bytes))
+                .unwrap(); // En producción maneja este unwrap mejor
+
+            Ok(response)
+        }
+        Err(_) => Err(ApiError::NotFound),
+    }
 }
