@@ -43,6 +43,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/utils/calculate/bs",
             post(calculation::calculate_bs_handler),
         )
+        .route(
+            "/v2/utils/calculate",
+            post(calculation::calculate_handler),
+        )
         .route("/v1/utils/ping", get(utils::get_ping_response))
         .route(
             "/v1/utils/latest-version",
