@@ -93,6 +93,71 @@ pub async fn get_pago_movil_data_handler(
     Ok(Json(PaymentMethodResponse { ok: true, data }))
 }
 
+pub async fn get_pago_movil_data_by_client_handler(
+    Extension(_claims): Extension<AccessClaims>,
+    State(state): State<Arc<AppState>>,
+    AxumPath(client_id): AxumPath<String>, // Usamos el alias AxumPath
+) -> Result<Json<PaymentMethodResponse>, ApiError> {
+    tracing::info!("💸 Buscando pago móvil (por ID) para cliente: {}", client_id);
+
+    let client_id_oid = ObjectId::parse_str(&client_id).map_err(|_| ApiError::NotFound)?;
+
+    let client = state
+        .db
+        .find_client_owner_by_id(&client_id_oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    let user_info = state
+        .db
+        .find_user_payment_info_by_id(&client.id_owner)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| {
+            tracing::error!("❌ Proveedor no encontrado: {}", client.id_owner);
+            ApiError::NotFound
+        })?;
+
+    let payment_method_id = match user_info.id_payment_method {
+        Some(id) => id,
+        None => {
+            tracing::warn!(
+                "⚠️ El usuario {} no tiene idPaymentMethod configurado",
+                client.id_owner
+            );
+            return Ok(Json(PaymentMethodResponse {
+                ok: true,
+                data: None,
+            }));
+        }
+    };
+
+    let payment_method_opt = state
+        .db
+        .find_payment_method_by_id(&payment_method_id)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    let data = payment_method_opt.map(|pm| PagoMovilData {
+        id: pm.id.map(|oid| oid.to_string()).unwrap_or_default(),
+        bank_name: pm.bank_name,
+        id_number: pm.id_number,
+        phone: pm.phone,
+    });
+
+    if data.is_none() {
+        tracing::warn!(
+            "⚠️ Método de pago {} no encontrado o inactivo",
+            payment_method_id
+        );
+    } else {
+        tracing::info!("✅ Datos de pago recuperados correctamente");
+    }
+
+    Ok(Json(PaymentMethodResponse { ok: true, data }))
+}
+
 /// POST /v1/payments/report
 pub async fn report_payment_handler(
     Extension(_claims): Extension<AccessClaims>,

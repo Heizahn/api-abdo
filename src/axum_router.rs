@@ -73,6 +73,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(payment::get_pago_movil_data_handler),
         )
         .route(
+            "/v1/payments/methods/payment/by-client/:client_id",
+            get(payment::get_pago_movil_data_by_client_handler),
+        )
+        .route(
             "/v1/payments/payment/report",
             post(payment::report_payment_handler),
         )
