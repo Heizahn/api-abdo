@@ -40,10 +40,8 @@ impl UtilsRepository for MongoDB {
         let collection: Collection<Document> = db_bcv.collection("BCVRates");
 
         let doc = doc! {
-            "timestamp": mongodb::bson::DateTime::from_millis(date.timestamp_millis()),
             "value": rate,
-            "source": "Scraper Auto",
-            "active": true
+            "timestamp": mongodb::bson::DateTime::from_millis(date.timestamp_millis()),
         };
 
         collection.insert_one(doc).await?;

@@ -22,13 +22,13 @@ pub async fn fetch_bcv_rate() -> Result<f64> {
 
     if let Some(value) = document.select(&selector).next() {
         let text = value.text().collect::<Vec<_>>().join("");
-        let cleaned_text = text.trim().replace(",", "");
+        let cleaned_text = text.trim().replace('.', "").replace(',', ".");
 
         let rate = cleaned_text
             .parse::<f64>()
             .map_err(|e| anyhow::anyhow!("Error parsing rate: {:?}", e))?;
 
-        return Ok(rate);
+        return Ok((rate * 10_000.0).round() / 10_000.0);
     }
 
     Err(anyhow::anyhow!(
