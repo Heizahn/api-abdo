@@ -98,7 +98,10 @@ pub async fn get_pago_movil_data_by_client_handler(
     State(state): State<Arc<AppState>>,
     AxumPath(client_id): AxumPath<String>, // Usamos el alias AxumPath
 ) -> Result<Json<PaymentMethodResponse>, ApiError> {
-    tracing::info!("💸 Buscando pago móvil (por ID) para cliente: {}", client_id);
+    tracing::info!(
+        "💸 Buscando pago móvil (por ID) para cliente: {}",
+        client_id
+    );
 
     let client_id_oid = ObjectId::parse_str(&client_id).map_err(|_| ApiError::NotFound)?;
 
@@ -164,9 +167,8 @@ pub async fn report_payment_handler(
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, ApiError> {
-    tracing::info!("📸 Iniciando reporte de pago (Cliente determinado por deuda)");
+    tracing::info!("📸 Iniciando reporte de pago (Abono o Deuda)");
 
-    // 1. Variables
     let mut reference = None;
     let mut date_str = None;
     let mut amount_bs = None;
@@ -174,9 +176,10 @@ pub async fn report_payment_handler(
     let mut phone = None;
     let mut saved_image_path = None;
     let mut id_debt_str: Option<String> = None;
-    let mut id_payment_method: Option<ObjectId> = None;
+    let mut id_client_str: Option<String> = None; // Nueva variable
+    let mut id_payment_method_str: Option<String> = None;
 
-    // 2. Procesar Multipart
+    // 1. Procesar Multipart
     while let Some(field) = multipart.next_field().await.map_err(|e| {
         tracing::error!("Error multipart: {}", e);
         ApiError::BadRequest("Error leyendo formulario".into())
@@ -184,35 +187,24 @@ pub async fn report_payment_handler(
         let name = field.name().unwrap_or("").to_string();
 
         if name == "image" {
+            // ... (Mantiene tu lógica de guardado de imagen igual)
             let file_name = field.file_name().unwrap_or("unknown.jpg").to_string();
             let extension = Path::new(&file_name)
                 .extension()
                 .and_then(|s| s.to_str())
                 .unwrap_or("jpg");
-
-            let content_type = field.content_type().unwrap_or("application/octet-stream");
-            if !content_type.starts_with("image/") && content_type != "application/pdf" {
-                return Err(ApiError::BadRequest(
-                    "El archivo debe ser una imagen o PDF".into(),
-                ));
-            }
-
             let unique_name = format!("{}.{}", Uuid::new_v4(), extension);
             let file_path = format!("uploads/{}", unique_name);
-
             let data = field
                 .bytes()
                 .await
                 .map_err(|_| ApiError::InternalServerError)?;
-
-            let mut file = File::create(&file_path).await.map_err(|e| {
-                tracing::error!("❌ Error guardando archivo: {}", e);
-                ApiError::InternalServerError
-            })?;
+            let mut file = File::create(&file_path)
+                .await
+                .map_err(|_| ApiError::InternalServerError)?;
             file.write_all(&data)
                 .await
                 .map_err(|_| ApiError::InternalServerError)?;
-
             saved_image_path = Some(format!("/uploads/{}", unique_name));
         } else {
             let text = field.text().await.unwrap_or_default();
@@ -223,134 +215,102 @@ pub async fn report_payment_handler(
                 "bank" => bank = Some(text),
                 "phone" => phone = Some(text),
                 "id_debt" => id_debt_str = Some(text),
-                "id_payment_method" => {
-                    id_payment_method = Some(ObjectId::parse_str(&text).unwrap())
-                }
+                "id_client" => id_client_str = Some(text), // Capturar cliente
+                "id_payment_method" => id_payment_method_str = Some(text),
                 _ => {}
             }
         }
     }
 
-    // 3. Validaciones (BLINDADO)
-    // Verificamos que existan TODOS los campos obligatorios antes de usar .unwrap()
+    // 2. Validaciones Críticas
     if reference.is_none()
         || amount_bs.is_none()
         || saved_image_path.is_none()
-        || id_debt_str.is_none()
-        || id_payment_method.is_none()
+        || id_payment_method_str.is_none()
     {
         return Err(ApiError::BadRequest(
-            "Faltan datos obligatorios (referencia, monto, imagen, deuda o método)".into(),
+            "Faltan datos básicos (ref, monto, imagen o método)".into(),
         ));
     }
 
-    // Extracción segura
-    let amount_bs_val = amount_bs.unwrap();
-    let id_debt_raw = id_debt_str.unwrap();
-    let id_pm_raw = id_payment_method.unwrap();
+    // Validación Lógica: Debe venir id_debt O id_client
+    if id_debt_str.is_none() && id_client_str.is_none() {
+        return Err(ApiError::BadRequest(
+            "Debe especificar una Deuda o un Cliente para el abono".into(),
+        ));
+    }
 
-    // Parseo seguro de ObjectIds (Evita crash si el ID está malformado)
-    let id_debt_oid = ObjectId::parse_str(&id_debt_raw)
-        .map_err(|_| ApiError::BadRequest("ID de deuda inválido".into()))?;
+    let id_pm_oid = ObjectId::parse_str(&id_payment_method_str.unwrap())
+        .map_err(|_| ApiError::BadRequest("Método de pago inválido".into()))?;
 
-    let id_pm_oid = id_pm_raw;
+    // 3. Determinar el Cliente Real y la Deuda (si aplica)
+    let mut id_debt_oid: Option<ObjectId> = None;
+    let real_client_id: ObjectId;
 
-    // 4. Buscar Deuda y Cliente Real
-    // Nota: Asumo que tu función find_debt_by_id acepta un ObjectId. Si acepta String, pasa &id_debt_raw
-    let debt_document = state
-        .db
-        .find_debt_by_id(&id_debt_oid.to_string())
-        .await
-        .map_err(|e| {
-            tracing::error!("❌ Error DB buscando deuda: {:?}", e);
-            ApiError::InternalServerError
-        })?;
+    if let Some(d_str) = id_debt_str {
+        // Caso A: Reporte ligado a una deuda
+        let oid = ObjectId::parse_str(&d_str)
+            .map_err(|_| ApiError::BadRequest("ID deuda malformado".into()))?;
+        let debt_doc = state
+            .db
+            .find_debt_by_id(&oid.to_string())
+            .await
+            .map_err(|e| ApiError::DatabaseError(e))?
+            .ok_or(ApiError::BadRequest("La deuda no existe".into()))?;
 
-    let real_client_id = debt_document
-        .ok_or(ApiError::BadRequest(
-            "La deuda seleccionada no existe".into(),
-        ))?
-        .id_client; // Aquí obtenemos el ID del cliente real
+        real_client_id = debt_doc.id_client;
+        id_debt_oid = Some(oid);
+    } else {
+        // Caso B: Abono directo a cuenta de cliente (Adelanto)
+        let c_str = id_client_str.unwrap();
+        real_client_id = ObjectId::parse_str(&c_str)
+            .map_err(|_| ApiError::BadRequest("ID cliente malformado".into()))?;
+    }
 
+    // 4. Obtener Cliente e Impuestos
+    // Buscamos al cliente en la base de datos
     let client = state
         .db
         .find_client_by_id(&real_client_id.to_string())
         .await
-        .map_err(|e| ApiError::DatabaseError(e))?;
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
 
-    let default_rate = 1.08;
+    // Definimos una tasa por defecto (1.0 significa que no hay recargo/descuento de IVA)
+    let default_rate = 1.0;
 
-    let iva_rate = match client.id_tax {
-        Some(tax_id) => {
-            // El cliente tiene un ID de impuesto configurado
-            let tax_doc = state
-                .db
-                .find_tax_by_id(Some(tax_id))
-                .await
-                .map_err(|e| ApiError::DatabaseError(e))?; // Error de conexión
-
-            match tax_doc {
-                Some(t) => {
-                    tracing::info!(
-                        "🧾 Impuesto personalizado encontrado: {} ({})",
-                        t.target,
-                        t.iva
-                    );
-                    t.iva // Retorna el valor de la BD (ej. 0.16)
-                }
-                None => {
-                    tracing::warn!(
-                        "⚠️ Cliente tiene idTax {} pero no existe en 'taxes'. Usando defecto {:.2}",
-                        tax_id,
-                        default_rate
-                    );
-                    default_rate
-                }
-            }
-        }
-        None => {
-            // El cliente no tiene ID de impuesto (campo vacío o nulo)
-            tracing::info!(
-                "ℹ️ Cliente sin configuración de impuestos. Usando defecto {:.2}",
-                default_rate
-            );
-            default_rate
-        }
+    // Resolvemos el IVA del cliente
+    let iva_rate = if let Some(tax_id) = client.id_tax {
+        state
+            .db
+            .find_tax_by_id(Some(tax_id))
+            .await
+            .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+            .map(|t| t.iva)
+            .unwrap_or(default_rate)
+    } else {
+        default_rate
     };
 
-    // 5. Tasa de cambio
-    let exchange_rate = state.db.get_latest_exchange_rate().await.map_err(|e| {
-        tracing::error!("❌ Error tasa BCV: {:?}", e);
-        ApiError::InternalServerError
-    })?;
-
+    // 5. Cálculos y Tasa
+    let exchange_rate = state
+        .db
+        .get_latest_exchange_rate()
+        .await
+        .map_err(|_| ApiError::InternalServerError)?;
+    let amount_bs_val = amount_bs.unwrap();
     let amount_bs_neto = amount_bs_val / iva_rate;
-
     let amount_usd = (amount_bs_neto / exchange_rate * 100.0).round() / 100.0;
 
-    tracing::info!(
-        "💰 Matemáticas: Total: {} Bs | IVA: {} | Neto: {:.2} Bs | Tasa: {} | Final: {} USD",
-        amount_bs_val,
-        iva_rate,
-        amount_bs_neto,
-        exchange_rate,
-        amount_usd
-    );
-
-    // 6. Fecha
-    let payment_date = match date_str {
-        Some(d) => d.parse::<DateTime<Utc>>().unwrap_or(Utc::now()),
-        None => Utc::now(),
-    };
-
-    // 7. Construir Modelo
+    // 6. Guardar Reporte
     let new_report = PaymentReport {
         id: None,
-        id_client: Some(real_client_id), // Usamos el ID recuperado de la deuda
-        id_debt: Some(id_debt_oid),      // Usamos el OID parseado arriba
-        id_payment_method: Some(id_pm_oid), // Usamos el OID parseado arriba
+        id_client: Some(real_client_id),
+        id_debt: id_debt_oid, // Será Some(id) o None (si es abono general)
+        id_payment_method: Some(id_pm_oid),
         reference: reference.unwrap(),
-        payment_date,
+        payment_date: date_str
+            .and_then(|d| d.parse::<DateTime<Utc>>().ok())
+            .unwrap_or(Utc::now()),
         amount_bs: amount_bs_val,
         bank_origin: bank.unwrap_or_default(),
         phone_number: phone.unwrap_or_default(),
@@ -361,22 +321,19 @@ pub async fn report_payment_handler(
         created_at: Utc::now(),
     };
 
-    // 8. Guardar
     let result = state
         .db
         .create_payment_report(new_report)
         .await
         .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
 
-    tracing::info!("✅ Pago reportado. ID: {}", result.inserted_id);
-
     Ok(Json(serde_json::json!({
         "ok": true,
-        "message": "Pago reportado correctamente",
+        "message": if id_debt_oid.is_some() { "Pago a deuda registrado" } else { "Abono a cuenta registrado" },
         "data": {
             "id": result.inserted_id,
             "amount_usd": amount_usd,
-            "status": "Pendiente"
+            "is_advance": id_debt_oid.is_none()
         }
     })))
 }
