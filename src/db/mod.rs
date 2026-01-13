@@ -97,6 +97,9 @@ pub trait SalesRepository {
 #[async_trait::async_trait]
 pub trait UtilsRepository {
     async fn find_latest_version(&self) -> Result<Option<LatestVersion>, String>;
+
+    async fn exists_rate_for_date(&self, date_start: chrono::DateTime<chrono::Utc>, date_end: chrono::DateTime<chrono::Utc>) -> Result<bool, String>;
+    async fn save_exchange_rate(&self, rate: f64, date: chrono::DateTime<chrono::Utc>) -> Result<(), mongodb::error::Error>;
 }
 
 // ============================================
