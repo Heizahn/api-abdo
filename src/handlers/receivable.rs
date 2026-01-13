@@ -188,7 +188,7 @@ pub async fn me_receivables_handler(
                 created_at: created_at_str, // <--- Aquí va el string limpio
                 pending_amount_bs: pending_bs_rounded,
                 has_pending_payments: has_pending,
-                payments: None, // O Some(payment_list) si quieres devolver los pagos aquí
+                payments: Some(payment_list), // O Some(payment_list) si quieres devolver los pagos aquí
             });
         }
     }
