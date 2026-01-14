@@ -200,7 +200,7 @@ pub async fn calculate_handler(
             // Entrada: BS -> Salida: USD
             // Fórmula: (Monto / Tasa) * Impuesto
             // Nota: Aquí asumo que quieres aplicar el impuesto también al convertir a USD.
-            let result = (payload.amount / exchange_rate) * tax.iva;
+            let result = payload.amount / (exchange_rate * tax.iva);
             (result, Currency::USD)
         },
     };

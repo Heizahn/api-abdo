@@ -14,6 +14,9 @@ mod middleware;
 mod models;
 mod utils;
 
+// Cron modules
+mod cron_bcv;
+
 use config::Config;
 use state::AppState;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -39,8 +42,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         format!("{:?}", e)
     })?;
 
+    let state_for_cron = state.clone();
+    tokio::spawn(async move {
+        cron_bcv::run_bcv_scraper_task(state_for_cron).await;
+    });
+    
     tracing::info!("✅ Conexiones establecidas");
-
     // 4. Construir router de Axum
     let app = axum_router::build_router(state);
 
