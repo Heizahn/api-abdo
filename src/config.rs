@@ -33,6 +33,10 @@ pub struct Config {
 
     //ZTE
     pub olt_zte_pass: String,
+
+    //MikroTik
+    pub port_mk: String,
+    pub pass_mk: String,
 }
 
 impl Config {
@@ -92,6 +96,10 @@ impl Config {
 
             //ZTE
             olt_zte_pass: env::var("OLT_ZTE_PASS").expect("Falta OLT_ZTE_PASS en .env"),
+
+            //MikroTik
+            port_mk: env::var("PORT_MK").unwrap_or_else(|_| "22".to_string()),
+            pass_mk: env::var("PASS_MK").expect("Falta PASS_MK en .env"),
         }
     }
 

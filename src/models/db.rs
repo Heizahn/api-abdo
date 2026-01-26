@@ -113,3 +113,19 @@ pub struct OnuIdentity {
     #[serde(rename = "idOlt")]
     pub id_olt: Option<ObjectId>,
 }
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct OnuForUpdateIp {
+    #[serde(rename = "_id")]
+    pub id: ObjectId,
+    #[serde(rename = "sMac")]
+    pub mac: String,
+    #[serde(rename = "sIp")]
+    pub ip: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OnuIpUpdate {
+    pub id: ObjectId,
+    pub new_ip: String,
+}

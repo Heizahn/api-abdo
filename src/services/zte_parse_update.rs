@@ -9,7 +9,6 @@ use std::str::FromStr;
 #[derive(Debug, Clone)]
 pub struct OnuDetected {
     pub id: ObjectId,
-    pub sn: String,
     pub mac: String,
     pub motherboard: u32,
     pub pon: u32,
@@ -116,7 +115,6 @@ pub fn parse_zte_report(file_path: &str, db_sn_list: &[OnuIdentity]) -> Result<V
 
                                 actualizaciones.push(OnuDetected {
                                     id: db_record.id,
-                                    sn: sn.to_string(),
                                     mac: mac_file.to_string(),
                                     motherboard: moth_u32,
                                     pon: pon_u32,
