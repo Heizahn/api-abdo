@@ -16,6 +16,9 @@ mod utils;
 
 // Cron modules
 mod cron_bcv;
+mod cron_mikrotik;
+mod cron_zte;
+mod services;
 
 use config::Config;
 use state::AppState;
@@ -46,7 +49,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         cron_bcv::run_bcv_scraper_task(state_for_cron).await;
     });
-    
+
+    let state_for_zte = state.clone();
+    tokio::spawn(async move {
+        cron_zte::run_zte_sync_task(state_for_zte).await;
+    });
+
+    let state_for_mikrotik = state.clone();
+    tokio::spawn(async move {
+        cron_mikrotik::run_mikrotik_sync_task(state_for_mikrotik).await;
+    });
+
     tracing::info!("✅ Conexiones establecidas");
     // 4. Construir router de Axum
     let app = axum_router::build_router(state);

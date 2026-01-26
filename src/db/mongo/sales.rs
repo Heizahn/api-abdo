@@ -17,11 +17,22 @@ impl SalesRepository for MongoDB {
         let db_bcv = self.client.database("BCV");
         let collection: Collection<Document> = db_bcv.collection("BCVRates");
 
+        // 1. Obtener el inicio del día usando tu librería (CORRIGE EL PROBLEMA DE LAS 8 PM)
+        // Esto devuelve un VenezuelaDateTime (que internamente tiene el UTC correcto: 04:00 AM)
         let start_of_day = tz_utils::start_of_today_venezuela();
-        let start_of_day_display = start_of_day.clone();
-        let start_of_day_bson = mongodb::bson::DateTime::from(start_of_day);
+
+        // 2. Convertir a BSON para la query de Mongo
+        // (Usamos el impl From<VenezuelaDateTime> for BsonDateTime que definiste)
+        let start_of_day_bson = mongodb::bson::DateTime::from(start_of_day.clone());
+
+        // Opcional: Log para depurar y ver que la fecha es correcta
+        tracing::info!(
+            "🔎 Buscando tasas desde: {} (Hora Vzla)",
+            start_of_day.datetime_string_venezuela()
+        );
 
         let filter = doc! { "timestamp": { "$gte": start_of_day_bson } };
+
         let options = mongodb::options::FindOptions::builder()
             .sort(doc! { "timestamp": -1 })
             .limit(1)
@@ -32,18 +43,18 @@ impl SalesRepository for MongoDB {
 
         match doc {
             Some(d) => {
-                // CAMBIO: Usamos get_bson_amount para mayor seguridad
-                // (Aunque 'value' suele ser float, es mejor prevenir)
+                // Usamos tu helper para sacar el float de forma segura
                 let rate = get_bson_amount(&d, "value");
 
-                // Si devuelve 0.0 es porque no lo encontró o era inválido,
-                // validamos para no devolver tasa 0 accidentalmente.
                 if rate <= 0.0 {
                     return Err(MongoError::custom("Invalid or zero exchange rate value"));
                 }
 
+                // Log informativo con la fecha formateada
                 if let Ok(ts) = d.get_datetime("timestamp") {
+                    // Convertimos el timestamp de BSON a tu struct VenezuelaDateTime
                     let vz_time = VenezuelaDateTime::from(*ts);
+
                     tracing::info!(
                         "💱 Tasa BCV: {} @ {} (hora Venezuela)",
                         rate,
@@ -55,9 +66,10 @@ impl SalesRepository for MongoDB {
                 Ok(rate)
             }
             None => {
+                // Usamos start_of_day para mostrar desde qué hora buscamos
                 tracing::warn!(
-                    "⚠️ No se encontró tasa BCV para hoy (desde {} Venezuela)",
-                    start_of_day_display.datetime_string_venezuela()
+                    "⚠️ No se encontró tasa BCV para hoy (Buscando desde {})",
+                    start_of_day.datetime_string_venezuela()
                 );
                 Err(MongoError::custom(
                     "No exchange rate found for today in BCV collection",
@@ -65,7 +77,6 @@ impl SalesRepository for MongoDB {
             }
         }
     }
-
     async fn find_part_payments_by_debt_ids(
         &self,
         debt_ids: &[ObjectId],

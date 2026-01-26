@@ -1,7 +1,8 @@
 pub mod mongo;
 
-use crate::models::db::{LatestVersion, Tax};
+use crate::models::db::{LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, Tax};
 use crate::models::payment::{Bank, PaymentReport};
+use crate::services::zte_parse_update::OnuDetected;
 use crate::{
     auth::claims::VerificationCode,
     db::mongo::ResultGroupedByDate,
@@ -98,14 +99,36 @@ pub trait SalesRepository {
 pub trait UtilsRepository {
     async fn find_latest_version(&self) -> Result<Option<LatestVersion>, String>;
 
-    async fn exists_rate_for_date(&self, date_start: chrono::DateTime<chrono::Utc>, date_end: chrono::DateTime<chrono::Utc>) -> Result<bool, String>;
-    async fn save_exchange_rate(&self, rate: f64, date: chrono::DateTime<chrono::Utc>) -> Result<(), mongodb::error::Error>;
+    async fn exists_rate_for_date(
+        &self,
+        date_start: chrono::DateTime<chrono::Utc>,
+        date_end: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, String>;
+    async fn save_exchange_rate(
+        &self,
+        rate: f64,
+        date: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), mongodb::error::Error>;
+}
+
+// ============================================
+// 5. OnuRepository: Onu
+// ============================================
+#[async_trait::async_trait]
+pub trait OnuRepository {
+    // ZTE / Devices
+    async fn get_device_serial_numbers(&self) -> Result<Vec<OnuIdentity>, String>;
+    async fn save_onu_from_zte(&self, onu: OnuDetected, id_editor: &str) -> Result<(), String>;
+
+    // IP Update
+    async fn get_onus_for_update_ip(&self) -> Result<Vec<OnuForUpdateIp>, String>;
+    async fn update_onu_ip(&self, onu: OnuIpUpdate, id_editor: &str) -> Result<(), String>;
 }
 
 // ============================================
 // TRAIT MAESTRO
 // ============================================
 pub trait Db:
-    AuthRepository + ProfileRepository + SalesRepository + Clone + Send + Sync + 'static
+    AuthRepository + ProfileRepository + SalesRepository + OnuRepository + Clone + Send + Sync + 'static
 {
 }

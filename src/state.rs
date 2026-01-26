@@ -1,9 +1,5 @@
+use crate::{cache::RedisClient, config::Config, db::mongo::MongoDB};
 use std::sync::Arc;
-use crate::{
-    cache::RedisClient,
-    config::Config,
-    db::mongo::MongoDB,
-};
 
 /// Estado compartido de la aplicación
 /// Se pasa a todos los handlers mediante Axum's State extractor

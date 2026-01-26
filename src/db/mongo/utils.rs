@@ -3,7 +3,11 @@ use crate::db::UtilsRepository;
 use crate::models::db::LatestVersion;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use mongodb::{Collection, bson::{Document, doc}, error::Error as MongoError};
+use mongodb::{
+    bson::{doc, Document},
+    error::Error as MongoError,
+    Collection,
+};
 
 #[async_trait]
 impl UtilsRepository for MongoDB {
@@ -15,7 +19,11 @@ impl UtilsRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
-    async fn exists_rate_for_date(&self, date_start: DateTime<Utc>, date_end: DateTime<Utc>) -> Result<bool, String> {
+    async fn exists_rate_for_date(
+        &self,
+        date_start: DateTime<Utc>,
+        date_end: DateTime<Utc>,
+    ) -> Result<bool, String> {
         let db_bcv = self.client.database("BCV");
         let collection: Collection<Document> = db_bcv.collection("BCVRates");
 
@@ -31,7 +39,10 @@ impl UtilsRepository for MongoDB {
             }
         };
 
-        let count = collection.count_documents(filter).await.map_err(|e| e.to_string())?;
+        let count = collection
+            .count_documents(filter)
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(count > 0)
     }
 
