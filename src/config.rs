@@ -20,7 +20,6 @@ pub struct Config {
     pub redis_pool_size: u32,
     pub redis_exchange_rate_ttl: u64,
 
-
     // Rate Limiting
     // pub rate_limit_burst: u32,
     pub rate_limit_auth_per_minute: u64,
@@ -28,6 +27,16 @@ pub struct Config {
     // Logging
     pub rust_log: String,
     pub log_format: String,
+
+    //System
+    pub id_simcot: String,
+
+    //ZTE
+    pub olt_zte_pass: String,
+
+    //MikroTik
+    pub port_mk: String,
+    pub pass_mk: String,
 }
 
 impl Config {
@@ -59,7 +68,8 @@ impl Config {
                 .unwrap_or(5),
 
             // Redis
-            redis_uri: env::var("REDIS_URI").unwrap_or_else(|_| "redis://localhost:6379".to_string()),
+            redis_uri: env::var("REDIS_URI")
+                .unwrap_or_else(|_| "redis://localhost:6379".to_string()),
             redis_pool_size: env::var("REDIS_POOL_SIZE")
                 .unwrap_or_else(|_| "50".to_string())
                 .parse()
@@ -80,6 +90,16 @@ impl Config {
             // Logging
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info,api_abdo=debug".to_string()),
             log_format: env::var("LOG_FORMAT").unwrap_or_else(|_| "json".to_string()),
+
+            //System
+            id_simcot: env::var("ID_SIMCOT").unwrap_or_else(|_| "".to_string()),
+
+            //ZTE
+            olt_zte_pass: env::var("OLT_ZTE_PASS").expect("Falta OLT_ZTE_PASS en .env"),
+
+            //MikroTik
+            port_mk: env::var("PORT_MK").unwrap_or_else(|_| "22".to_string()),
+            pass_mk: env::var("PASS_MK").expect("Falta PASS_MK en .env"),
         }
     }
 

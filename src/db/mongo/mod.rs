@@ -1,21 +1,22 @@
 pub mod auth;
+pub mod onu;
 pub mod profile;
 pub mod sales;
 pub mod utils;
 
+use crate::db::Db;
+use mongodb::bson::oid::ObjectId;
+use mongodb::error::Error as MongoError;
 use mongodb::{
     bson::{doc, DateTime, Document},
     Client, Collection, Database,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use mongodb::error::Error as MongoError;
-use mongodb::bson::oid::ObjectId;
-use crate::db::Db;
 
 // Importamos modelos para los helpers de colecciones
 use crate::auth::claims::VerificationCode;
-use crate::models::payment::{PaymentMethod};
+use crate::models::payment::PaymentMethod;
 
 // ============================================
 // Structs Auxiliares (Públicos para el Trait)
@@ -69,7 +70,10 @@ impl MongoDB {
         let db = client.database(&cfg.mongo_db);
 
         tracing::info!("Verificando conexión a MongoDB...");
-        client.database("admin").run_command(doc! { "ping": 1 }).await?;
+        client
+            .database("admin")
+            .run_command(doc! { "ping": 1 })
+            .await?;
 
         tracing::info!(
             "✅ MongoDB conectado con pool optimizado (max: {}, min: {})",

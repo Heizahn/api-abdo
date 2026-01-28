@@ -92,3 +92,40 @@ pub struct LatestVersion {
     pub latest_version_code: i32,
     pub update_url: String,
 }
+
+// ============================================
+// ONU get DB
+// ============================================
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct OnuIdentity {
+    #[serde(rename = "_id")]
+    pub id: ObjectId,
+    #[serde(rename = "sSn")]
+    pub sn: String,
+    #[serde(rename = "sMac")]
+    pub mac: Option<String>,
+    #[serde(rename = "nMotherboard")]
+    pub motherboard: Option<i32>,
+    #[serde(rename = "nPon")]
+    pub pon: Option<i32>,
+    #[serde(rename = "nIdOnu")]
+    pub id_onu: Option<i32>,
+    #[serde(rename = "idOlt")]
+    pub id_olt: Option<ObjectId>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct OnuForUpdateIp {
+    #[serde(rename = "_id")]
+    pub id: ObjectId,
+    #[serde(rename = "sMac")]
+    pub mac: String,
+    #[serde(rename = "sIp")]
+    pub ip: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OnuIpUpdate {
+    pub id: ObjectId,
+    pub new_ip: String,
+}
