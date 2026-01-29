@@ -3,3 +3,4 @@ pub mod db;
 pub mod profile;
 pub mod receivable;
 pub mod payment;
+pub mod users;
