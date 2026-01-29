@@ -1,5 +1,6 @@
 pub mod mongo;
 use crate::models::db::{LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, Tax};
+use crate::models::onu::Onu;
 use crate::models::payment::{Bank, PaymentReport};
 use crate::models::users::{User, UserCredentials}; // Import
 use crate::services::zte_parse_update::OnuDetected;
@@ -139,6 +140,9 @@ pub trait OnuRepository {
     // IP Update
     async fn get_onus_for_update_ip(&self) -> Result<Vec<OnuForUpdateIp>, String>;
     async fn update_onu_ip(&self, onu: OnuIpUpdate, id_editor: &str) -> Result<(), String>;
+
+    // Onu
+    async fn get_all_onus(&self) -> Result<Vec<Onu>, String>;
 }
 
 // ============================================

@@ -12,7 +12,7 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{auth, auth_user, calculation, payment, profile, receivable, utils}, // Added auth_user
+    handlers::{auth, auth_user, calculation, onu, payment, profile, receivable, utils}, // Added auth_user
     middleware::{auth::jwt_auth_middleware, auth_user::user_jwt_auth_middleware, rate_limit}, // Added user_jwt_auth_middleware
     state::AppState,
 };
@@ -64,6 +64,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let auth_user_protected = Router::new()
         .route("/v1/auth-user/me", get(auth_user::me_handler))
         .route("/v1/utils/bcv", get(utils::get_bcv))
+        .route("/v1/onu/list", get(onu::get_all_onus))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             user_jwt_auth_middleware,
