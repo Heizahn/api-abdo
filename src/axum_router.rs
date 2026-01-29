@@ -43,10 +43,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/utils/calculate/bs",
             post(calculation::calculate_bs_handler),
         )
-        .route(
-            "/v2/utils/calculate",
-            post(calculation::calculate_handler),
-        )
+        .route("/v2/utils/calculate", post(calculation::calculate_handler))
         .route("/v1/utils/ping", get(utils::get_ping_response))
         .route(
             "/v1/utils/latest-version",
@@ -66,6 +63,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     let auth_user_protected = Router::new()
         .route("/v1/auth-user/me", get(auth_user::me_handler))
+        .route("/v1/utils/bcv", get(utils::get_bcv))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             user_jwt_auth_middleware,
