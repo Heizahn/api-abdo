@@ -2,6 +2,7 @@ pub mod auth;
 pub mod onu;
 pub mod profile;
 pub mod sales;
+pub mod users;
 pub mod utils;
 
 use crate::db::Db;
