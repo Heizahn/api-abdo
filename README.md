@@ -19,21 +19,6 @@ API REST de alto rendimiento construida con Rust, Axum, MongoDB y Redis.
 - **Redis** 7.0 o superior
 - **mongosh** (para crear índices)
 
-### Instalación rápida (Ubuntu/Debian):
-```bash
-# Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# MongoDB
-sudo apt-get install -y mongodb
-
-# Redis
-sudo apt-get install -y redis-server
-
-# mongosh
-sudo apt-get install -y mongodb-mongosh
-```
-
 ## 🛠️ Configuración Inicial
 
 ### 1. Clonar y configurar
@@ -41,57 +26,15 @@ sudo apt-get install -y mongodb-mongosh
 ```bash
 git clone <repo-url>
 cd api-abdo
-git checkout claude/review-api-structure-011CUtjB8zmukBitMEPj98sM
 ```
 
 ### 2. Crear archivo .env
 
 ```bash
 cp .env.example .env
-nano .env
 ```
 
-Configurar las siguientes variables:
-
-```bash
-# Servidor
-HOST=127.0.0.1
-PORT=3000
-
-# MongoDB
-MONGO_URI=mongodb://localhost:27017
-MONGO_DB=tu_base_de_datos
-MONGO_POOL_SIZE=100
-MONGO_MIN_POOL_SIZE=10
-MONGO_CONNECT_TIMEOUT=5
-
-# Redis
-REDIS_URI=redis://localhost:6379
-REDIS_POOL_SIZE=50
-REDIS_EXCHANGE_RATE_TTL=300
-REDIS_USER_DATA_TTL=60
-REDIS_BALANCE_TTL=60
-
-# JWT
-JWT_ISS=abdo-api
-JWT_SECRET=tu_secreto_super_seguro_de_al_menos_32_caracteres
-ACCESS_TTL_SECS=900
-REFRESH_TTL_SECS=3888000
-
-# SMS
-API_HOST_SMS=https://tu-proveedor-sms.com/send
-API_KEY_SMS=tu_api_key
-API_SHORT_NUMBER=1234
-
-# Rate Limiting
-RATE_LIMIT_PER_SECOND=10
-RATE_LIMIT_BURST=20
-RATE_LIMIT_AUTH_PER_MINUTE=5
-
-# Logging
-RUST_LOG=info,api_abdo=debug
-LOG_FORMAT=pretty
-```
+Configurar las variables de entorno para MongoDB, Redis, JWT y servicios externos.
 
 ### 3. Crear índices en MongoDB (CRÍTICO)
 
@@ -100,208 +43,105 @@ LOG_FORMAT=pretty
 mongosh mongodb://localhost:27017/tu_base_de_datos < scripts/create_indexes.js
 ```
 
-Esto creará índices optimizados que mejoran las queries 10-50x.
-
-### 4. Iniciar Redis
+### 4. Compilar y Ejecutar
 
 ```bash
-# Iniciar Redis en background
-redis-server --daemonize yes
-
-# Verificar que está corriendo
-redis-cli ping
-# Debe responder: PONG
-```
-
-### 5. Compilar el proyecto
-
-```bash
-# Development (más rápido de compilar)
-cargo build
-
-# Production (optimizado)
-cargo build --release
-```
-
-**Nota**: La primera compilación puede tomar 5-10 minutos descargando dependencias.
-
-## ▶️ Ejecutar la API
-
-### Modo Development
-```bash
+# Development
 cargo run
-```
 
-### Modo Production
-```bash
+# Production
+cargo build --release
 ./target/release/api-abdo
 ```
 
-La API estará disponible en: `http://127.0.0.1:3000`
+---
 
-## 📡 Endpoints Disponibles
+## 📡 API Endpoints
 
-### Autenticación
+### 🔐 Autenticación (Pública)
 
-#### POST `/v1/auth/verify_number`
-Envía código de verificación por SMS.
+| Método | Endpoint | Descripción |
+| :--- | :--- | :--- |
+| `POST` | `/v1/auth/verify_number` | Verifica si el número existe y envía código SMS. Payload: `{ "phone": "..." }`. |
+| `POST` | `/v1/auth/login` | Login con teléfono y código. Retorna Access/Refresh tokens. Payload: `{ "phone": "...", "code": 1234 }`. |
+| `POST` | `/v1/auth/refresh` | Renueva tokens usando refresh token. Payload: `{ "refresh_token": "..." }`. |
 
-**Request:**
-```json
-{
-  "phone": "04141234567"
-}
-```
+### 👤 Perfil (Requiere JWT)
 
-**Response (usuario existe):**
-```json
-{
-  "ok": true,
-  "exists": true,
-  "message": "verification_code_sent"
-}
-```
+| Método | Endpoint | Descripción |
+| :--- | :--- | :--- |
+| `GET` | `/v1/profile/me/group` | Retorna resumen de todas las cuentas asociadas al teléfono del usuario (balances, últimos pagos). |
+| `GET` | `/v1/profile/me/phone` | Retorna el número de teléfono del usuario autenticado. |
 
-**Response (usuario no existe):**
-```json
-{
-  "ok": true,
-  "exists": false,
-  "phone": "04141234567"
-}
-```
+### 💳 Deudas y Pagos (Requiere JWT)
 
-#### POST `/v1/auth/login`
-Login con teléfono y código.
+| Método | Endpoint | Descripción |
+| :--- | :--- | :--- |
+| `GET` | `/v1/receivable/me` | Obtiene todas las deudas **activas** (saldo pendiente). Incluye pagos parciales y reportes pendientes. |
+| `GET` | `/v1/receivable/me/paid` | Obtiene historial de deudas **pagadas** (saldo 0). |
+| `GET` | `/v1/receivable/:id` | Obtiene detalle completo de una deuda específica (incluye pagos y reportes). |
+| `GET` | `/v1/payments/methods/payment/:debt_id` | Obtiene datos de pago móvil asociados al cliente dueño de una deuda específica. |
+| `GET` | `/v1/payments/methods/payment/by-client/:client_id` | Obtiene datos de pago móvil asociados a un cliente específico. |
+| `POST` | `/v1/payments/payment/report` | Reporta un pago (Multipart Form). Campos: `reference`, `amount_bs`, `date`, `bank`, `phone`, `image` (file), `id_payment_method` y (`id_debt` o `id_client`). |
 
-**Request:**
-```json
-{
-  "phone": "04141234567",
-  "code": 123456
-}
-```
+### 🛠️ Utilidades
 
-**Response:**
-```json
-{
-  "ok": true,
-  "exists": true,
-  "tokens": {
-    "accessToken": "eyJ...",
-    "accessExp": 1699123456,
-    "refreshToken": "eyJ...",
-    "refreshExp": 1702123456
-  }
-}
-```
+| Método | Endpoint | Descripción | Acceso |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/v1/utils/calculate/bs` | Calcula monto en BS según tasa BCV + IVA. | Público |
+| `POST` | `/v2/utils/calculate` | Calculadora bidireccional (USD<->BS) según tasa e IVA. | Público |
+| `GET` | `/v1/utils/list/banks` | Lista de bancos disponibles en el sistema. | JWT |
+| `GET` | `/v1/utils/ping` | Health check (`pong`). | Público |
+| `GET` | `/v1/utils/latest-version` | Obtiene la última versión disponible de la app. | Público |
+| `GET` | `/v1/utils/image/:filename` | Sirve imágenes subidas (uploads). | Público |
+| `GET` | `/v1/privacy-policy` | Retorna la política de privacidad en HTML. | Público |
 
-#### POST `/v1/auth/refresh`
-Renueva tokens.
+---
 
-**Request:**
-```json
-{
-  "refresh_token": "eyJ..."
-}
-```
+## 🗄️ Database Functions (Modules)
 
-**Response:**
-```json
-{
-  "ok": true,
-  "tokens": {
-    "accessToken": "eyJ...",
-    "accessExp": 1699123456,
-    "refreshToken": "eyJ...",
-    "refreshExp": 1702123456
-  }
-}
-```
+La capa de acceso a datos está organizada en repositorios implementados sobre MongoDB.
 
-### Profile (Requieren autenticación)
+### `AuthRepository` (src/db/mongo/auth.rs)
+- **`store_verification_code`**: Guarda código SMS con expiración (60 min).
+- **`find_verification_code`**: Busca código por teléfono y valor.
+- **`delete_verification_code`**: Elimina código tras uso.
 
-Todos los endpoints de profile requieren header:
-```
-Authorization: Bearer <accessToken>
-```
+### `ProfileRepository` (src/db/mongo/profile.rs)
+- **`find_customer_by_phone`**: Busca cliente principal por teléfono.
+- **`find_customer_by_id`**: Busca vista de cliente por ID.
+- **`find_clients_by_phone`**: Obtiene todas las cuentas de cliente (Clients) ligadas a un teléfono.
+- **`find_client_by_id`**: Obtiene una cuenta específica por ID.
+- **`find_tax_by_id`**: Obtiene configuración de impuestos (o default).
+- **`get_clients_by_phone_group`**: Agregación compleja que agrupa todas las cuentas de un usuario, sus balances y detalles.
+- **`get_last_payments_by_id_client`**: Agregación que combina `Payments` y `PaymentReports` para historial unificado.
+- **`get_phone`**: Helper para obtener solo el teléfono dado un ID.
 
-#### GET `/v1/profile/me`
-Obtiene datos del usuario autenticado.
+### `SalesRepository` (src/db/mongo/sales.rs)
+- **`get_latest_exchange_rate`**: Obtiene tasa BCV del día (con manejo de zona horaria VET).
+- **`find_part_payments_by_debt_ids`**: Busca pagos parciales asociados a lista de deudas.
+- **`find_payments_by_ids`**: Busca documentos de pago (Payments) por ID.
+- **`find_active_debts_by_client_ids`**: Busca deudas con estado "Activo".
+- **`find_debt_by_id`**: Obtiene detalle de una deuda.
+- **`find_client_owner_by_id`**: Busca el `idOwner` (proveedor) de un cliente.
+- **`find_user_payment_info_by_id`**: Obtiene config de pago del proveedor.
+- **`find_payment_method_by_id`**: Obtiene datos bancarios/pago móvil.
+- **`create_payment_report`**: Inserta nuevo reporte de pago.
+- **`find_pending_reports_by_debt_ids`**: Busca reportes en estado "Pendiente" para calcular saldos "en proceso".
+- **`find_bank_list`**: Lista catálogo de bancos.
 
-**Response:**
-```json
-{
-  "ok": true,
-  "customer": {
-    "name": "Juan Pérez",
-    "phone": "04141234567"
-  }
-}
-```
+### `OnuRepository` (src/db/mongo/onu.rs)
+- **`get_device_serial_numbers`**: Listado ligero de ONUs (ID, SN, MAC, OLT).
+- **`save_onu_from_zte`**: Upsert de datos de ONU detectados desde OLT.
+- **`get_onus_for_update_ip`**: Lista ONUs que requieren actualización de IP.
+- **`update_onu_ip`**: Actualiza IP de una ONU.
 
-#### GET `/v1/profile/me/balance`
-Obtiene balance en VES del usuario.
+### `UtilsRepository` (src/db/mongo/utils.rs)
+- **`find_latest_version`**: Obtiene control de versiones de la app.
+- **`exists_rate_for_date`**: Verifica si ya existe tasa BCV para un rango.
+- **`save_exchange_rate`**: Guarda nueva tasa BCV histórica.
 
-**Response:**
-```json
-{
-  "ok": true,
-  "balance_ves": 150000.50
-}
-```
-
-#### GET `/v1/profile/me/last_payments`
-Obtiene últimos pagos agrupados por fecha.
-
-**Response:**
-```json
-{
-  "ok": true,
-  "data": [
-    {
-      "_id": "2025-11-06",
-      "payments": [
-        {
-          "_id": "673abc123...",
-          "rason": "Pago cuota #1",
-          "balance_bs": 5000.00,
-          "status": "Activo",
-          "full_date": "2025-11-06T14:30:00Z"
-        }
-      ]
-    }
-  ]
-}
-```
-
-### Receivables (Deudas)
-
-#### GET `/v1/receivable/me`
-Obtiene todas las deudas activas.
-- **Nota**: No incluye lista de pagos (`payments: null`).
-
-#### GET `/v1/receivable/me/paid`
-Obtiene todas las deudas pagadas (histórico).
-- **Nota**: No incluye lista de pagos (`payments: null`).
-
-#### GET `/v1/receivable/:id`
-Obtiene detalle de una deuda específica.
-- **Nota**: Incluye lista completa de pagos (`payments: [...]`).
-
-### Payments & Utils
-
-#### GET `/v1/payments/methods/payment/:debt_id`
-Obtiene datos para pago móvil asociados a una deuda.
-
-#### POST `/v1/payments/payment/report`
-Reporta un pago realizado.
-
-#### GET `/v1/utils/list/banks`
-Lista de bancos disponibles.
-
-#### POST `/v1/utils/calculate/bs`
-Calculadora de conversión USD -> VES.
+---
 
 ## 🧪 Testing
 
@@ -319,241 +159,6 @@ curl -X POST http://localhost:3000/v1/auth/login \
   -d '{"phone":"04141234567","code":123456}'
 
 # Profile me (requiere token)
-curl http://localhost:3000/v1/profile/me \
+curl http://localhost:3000/v1/profile/me/group \
   -H "Authorization: Bearer <tu_access_token>"
 ```
-
-### Benchmark de rendimiento
-
-Instalar herramienta de benchmark:
-```bash
-# Opción 1: wrk
-sudo apt-get install wrk
-
-# Opción 2: autocannon (Node.js)
-npm install -g autocannon
-```
-
-Ejecutar benchmark:
-```bash
-# Con wrk (4 threads, 100 conexiones, 30 segundos)
-wrk -t4 -c100 -d30s http://localhost:3000/v1/profile/me \
-  -H "Authorization: Bearer <token>"
-
-# Con autocannon
-autocannon -c 100 -d 30 http://localhost:3000/v1/profile/me \
-  -H "Authorization: Bearer <token>"
-```
-
-**Resultados esperados:**
-- Requests/sec: 15,000 - 25,000
-- Latencia p50: < 10ms
-- Latencia p99: < 50ms
-
-## 🐳 Despliegue con Docker
-
-### Opción 1: Docker simple
-
-```bash
-# Build
-docker build -t api-abdo:v0.2.0 .
-
-# Run
-docker run -d \
-  --name api-abdo \
-  -p 3000:3000 \
-  --env-file .env \
-  api-abdo:v0.2.0
-```
-
-### Opción 2: Docker Compose (Recomendado)
-
-```bash
-# Iniciar todo el stack (API + MongoDB + Redis)
-docker-compose up -d
-
-# Ver logs
-docker-compose logs -f api-abdo
-
-# Detener
-docker-compose down
-```
-
-## 📊 Monitoreo
-
-### Logs estructurados
-
-La API usa `tracing` para logs estructurados:
-
-```bash
-# Formato pretty (desarrollo)
-LOG_FORMAT=pretty cargo run
-
-# Formato JSON (producción)
-LOG_FORMAT=json cargo run
-```
-
-### Métricas Redis
-
-```bash
-# Conectar a Redis CLI
-redis-cli
-
-# Ver todas las keys
-KEYS *
-
-# Ver tasa de cambio cacheada
-GET exchange_rate:bcv
-
-# Ver estadísticas
-INFO stats
-```
-
-### Estadísticas MongoDB
-
-```bash
-mongosh
-
-# Conectar a tu DB
-use tu_base_de_datos
-
-# Ver estadísticas de colecciones
-db.Clients.stats()
-db.Payments.stats()
-
-# Ver índices
-db.Clients.getIndexes()
-
-# Ver queries lentas
-db.setProfilingLevel(1, { slowms: 100 })
-db.system.profile.find().limit(10).sort({ ts: -1 })
-```
-
-## 🔧 Troubleshooting
-
-### Error: "Failed to connect to MongoDB"
-
-```bash
-# Verificar que MongoDB está corriendo
-sudo systemctl status mongod
-
-# Iniciar MongoDB
-sudo systemctl start mongod
-
-# Verificar conexión
-mongosh mongodb://localhost:27017
-```
-
-### Error: "Failed to connect to Redis"
-
-```bash
-# Verificar que Redis está corriendo
-redis-cli ping
-
-# Iniciar Redis
-redis-server --daemonize yes
-```
-
-### Error: "cargo build" falla
-
-```bash
-# Actualizar Rust
-rustup update
-
-# Limpiar cache y recompilar
-cargo clean
-cargo build
-```
-
-### Error de compilación "edition 2024 not found"
-
-```bash
-# Editar Cargo.toml y cambiar:
-edition = "2024"  # ← Cambiar a 2021
-edition = "2021"  # ← Correcto
-```
-
-### Performance bajo
-
-1. **Verificar índices MongoDB:**
-```bash
-mongosh < scripts/create_indexes.js
-```
-
-2. **Verificar que Redis está activo:**
-```bash
-redis-cli ping
-```
-
-3. **Verificar configuración de pool:**
-```bash
-# En .env, asegurar:
-MONGO_POOL_SIZE=100
-REDIS_POOL_SIZE=50
-```
-
-4. **Compilar en modo release:**
-```bash
-cargo build --release
-./target/release/api-abdo
-```
-
-## 📚 Documentación Adicional
-
-- **Migración completa**: Ver `MIGRACION_OPTIMIZACION.md`
-- **Scripts útiles**: Directorio `scripts/`
-  - `backup_db.sh`: Backup de MongoDB
-  - `create_indexes.js`: Crear índices
-
-## 🔐 Seguridad
-
-### Recomendaciones para producción:
-
-1. **Cambiar JWT_SECRET** a un valor aleatorio seguro de 64+ caracteres
-2. **Configurar CORS** específico en `src/axum_router.rs`:
-   ```rust
-   .allow_origin("https://tu-dominio.com".parse::<HeaderValue>().unwrap())
-   ```
-3. **Habilitar HTTPS** con reverse proxy (nginx/caddy)
-4. **Ajustar rate limits** según tu caso de uso
-5. **Usar MongoDB con autenticación** en producción
-6. **Usar Redis con password** en producción
-
-### Ejemplo nginx con HTTPS:
-
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name api.tudominio.com;
-
-    ssl_certificate /path/to/cert.pem;
-    ssl_certificate_key /path/to/key.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
-```
-
-## 📈 Optimizaciones Futuras
-
-- [ ] Implementar caché de sesiones en Redis
-- [ ] Agregar endpoints de health check
-- [ ] Implementar métricas de Prometheus
-- [ ] Agregar tests unitarios e integración
-- [ ] Implementar circuit breaker para MongoDB
-- [ ] Agregar rate limiting por usuario (no solo por IP)
-
-## 👥 Equipo y Soporte
-
-Para reportar issues o solicitar features, crear un issue en el repositorio.
-
-## 📝 Licencia
-
-[Especificar licencia]
-
----
-
-**v0.2.0** - Migración completa a Axum con optimizaciones de alto rendimiento ✨
