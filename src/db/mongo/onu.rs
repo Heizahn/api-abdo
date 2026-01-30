@@ -1,7 +1,7 @@
 use super::MongoDB;
 use crate::db::OnuRepository;
 use crate::models::db::{OnuForUpdateIp, OnuIdentity, OnuIpUpdate};
-use crate::models::onu::Onu;
+use crate::models::onu::{Onu, OnuCreate};
 use crate::services::zte_parse_update::OnuDetected;
 use async_trait::async_trait;
 use futures::TryStreamExt;
@@ -218,5 +218,20 @@ impl OnuRepository for MongoDB {
             .collect::<Result<Vec<Onu>, String>>()?; // Recolectamos todo en el Vec final
 
         Ok(onus)
+    }
+
+    async fn create_onu(&self, onu: OnuCreate) -> Result<(), String> {
+        let collection = self.db.collection("Onus");
+        let document = doc! {
+                "sSn": onu.sn,
+                "idCreator": onu.id_creator,
+                "dCreation": onu.d_creation,
+                "sState": "SIN ASIGNAR".to_string(),
+        };
+
+        match collection.insert_one(document).await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
     }
 }

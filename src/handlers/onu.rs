@@ -1,8 +1,9 @@
 use crate::db::OnuRepository;
 
-use crate::models::onu::OnuResponse;
+use crate::models::onu::{OnuCreate, OnuResponse};
 use crate::{error::ApiError, state::AppState};
-use axum::{extract::State, Json};
+use axum::{extract::State, http::StatusCode, Json};
+use serde::Serialize;
 use std::sync::Arc;
 
 pub async fn get_all_onus(
@@ -19,4 +20,23 @@ pub async fn get_all_onus(
         ok: true,
         data: onus,
     }))
+}
+
+#[derive(Serialize)]
+pub struct OkResponse {
+    ok: bool,
+}
+
+pub async fn create_onu(
+    State(state): State<Arc<AppState>>,
+    Json(onu): Json<OnuCreate>,
+) -> Result<(StatusCode, Json<OkResponse>), ApiError> {
+    match state.db.create_onu(onu).await {
+        // TODO: Implementar respuesta correcta status code 201
+        Ok(_) => {
+            let response = Json(OkResponse { ok: true });
+            Ok((StatusCode::CREATED, response))
+        }
+        Err(e) => Err(ApiError::DatabaseError(e)),
+    }
 }
