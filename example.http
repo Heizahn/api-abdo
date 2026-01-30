@@ -1,0 +1,33 @@
+//Login user
+# POST http://localhost:8080/v1/auth-user/login
+# Content-Type: application/json
+# X-Forwarded-For: 127.0.0.1
+# X-Real-IP: 127.0.0.1
+
+# {
+#     "email": "humberto@abdo.com",
+#     "password": "h40bert6"
+# }
+
+//Refresh token
+# POST http://localhost:8080/v1/auth-user/refresh-token
+# Content-Type: application/json
+# X-Forwarded-For: 127.0.0.1
+# X-Real-IP: 127.0.0.1
+
+# {
+#     "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImQ1YjRiMGMwLThhYTAtNGYxZC1iNmMxLTJiMDNhMWY0YzhhOSIsIm5hbWUiOiJIdW1iZXJ0byIsImlhdCI6MTc2OTY5OTM4MCwiZXhwIjoxNzY5NzcxMzgwfQ._WJQ7tPR-yBMjFswzdjPHcIsdNsBNQgr9u6CcZVABJw"
+# }
+
+//BCV
+# GET http://localhost:8080/v1/utils/bcv
+# X-Forwarded-For: 127.0.0.1
+# X-Real-IP: 127.0.0.1
+# Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImQ1YjRiMGMwLThhYTAtNGYxZC1iNmMxLTJiMDNhMWY0YzhhOSIsIm5hbWUiOiJIdW1iZXJ0byIsImlhdCI6MTc2OTY5OTM4MCwiZXhwIjoxNzY5NzcxMzgwfQ._WJQ7tPR-yBMjFswzdjPHcIsdNsBNQgr9u6CcZVABJw
+
+//ONUS
+# GET http://localhost:8080/v1/onu/list
+# X-Forwarded-For: 127.0.0.1
+# X-Real-IP: 127.0.0.1
+# Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImQ1YjRiMGMwLThhYTAtNGYxZC1iNmMxLTJiMDNhMWY0YzhhOSIsIm5hbWUiOiJIdW1iZXJ0byIsImlhdCI6MTc2OTY5OTM4MCwiZXhwIjoxNzY5NzcxMzgwfQ._WJQ7tPR-yBMjFswzdjPHcIsdNsBNQgr9u6CcZVABJw
+

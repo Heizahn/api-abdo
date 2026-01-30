@@ -50,10 +50,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cron_bcv::run_bcv_scraper_task(state_for_cron).await;
     });
 
-    let state_for_zte = state.clone();
-    tokio::spawn(async move {
-        cron_zte::run_zte_sync_task(state_for_zte).await;
-    });
+    // let state_for_zte = state.clone();
+    // tokio::spawn(async move {
+    //     cron_zte::run_zte_sync_task(state_for_zte).await;
+    // });
 
     let state_for_mikrotik = state.clone();
     tokio::spawn(async move {
