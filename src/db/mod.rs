@@ -1,7 +1,8 @@
 pub mod mongo;
-
 use crate::models::db::{LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, Tax};
+use crate::models::onu::Onu;
 use crate::models::payment::{Bank, PaymentReport};
+use crate::models::users::{User, UserCredentials}; // Import
 use crate::services::zte_parse_update::OnuDetected;
 use crate::{
     auth::claims::VerificationCode,
@@ -23,6 +24,22 @@ pub trait AuthRepository {
     async fn store_verification_code(&self, phone: &str, code: &u32) -> mongodb::error::Result<()>;
     async fn find_verification_code(&self, phone: &str, code: &u32) -> Option<VerificationCode>;
     async fn delete_verification_code(&self, id: &ObjectId) -> Result<u64, MongoError>;
+}
+
+// ============================================
+// 6. UserRepository: Auth Users (Admin/Staff)
+// ============================================
+#[async_trait::async_trait]
+pub trait UserRepository {
+    async fn find_user_by_email(&self, email: &str) -> Result<Option<User>, String>;
+    async fn find_user_credentials_by_user_id(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<UserCredentials>, String>;
+    async fn find_user_by_id(&self, id: &str) -> Result<Option<User>, String>;
+    async fn create_user(&self, user: User) -> Result<(), String>;
+    async fn create_user_credentials(&self, creds: UserCredentials) -> Result<(), String>;
+    // Add other methods as needed: find_providers, find_users_list...
 }
 
 // ============================================
@@ -123,12 +140,24 @@ pub trait OnuRepository {
     // IP Update
     async fn get_onus_for_update_ip(&self) -> Result<Vec<OnuForUpdateIp>, String>;
     async fn update_onu_ip(&self, onu: OnuIpUpdate, id_editor: &str) -> Result<(), String>;
+
+    // Onu
+    async fn get_all_onus(&self) -> Result<Vec<Onu>, String>;
 }
 
 // ============================================
 // TRAIT MAESTRO
 // ============================================
 pub trait Db:
-    AuthRepository + ProfileRepository + SalesRepository + OnuRepository + Clone + Send + Sync + 'static
+    AuthRepository
+    + UserRepository
+    + ProfileRepository
+    + SalesRepository
+    + OnuRepository
+    + UtilsRepository
+    + Clone
+    + Send
+    + Sync
+    + 'static
 {
 }

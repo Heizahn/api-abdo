@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::auth::claims::AccessClaims;
 
 use crate::db::UtilsRepository;
-use crate::models::db::LatestVersionResponse;
+use crate::models::db::{BcvResponse, LatestVersionResponse};
 use crate::{
     db::SalesRepository,
     error::ApiError,
@@ -110,5 +110,14 @@ pub async fn get_image(
             Ok(response)
         }
         Err(_) => Err(ApiError::NotFound),
+    }
+}
+
+pub async fn get_bcv(State(state): State<Arc<AppState>>) -> Result<Json<BcvResponse>, ApiError> {
+    let bcv = state.db.get_latest_exchange_rate().await;
+
+    match bcv {
+        Ok(bcv) => Ok(Json(BcvResponse { bcv })),
+        Err(e) => Err(ApiError::DatabaseError(e.to_string())),
     }
 }

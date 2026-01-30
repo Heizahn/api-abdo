@@ -5,3 +5,7 @@
 /uploads
 /olt_reports
 /mk_reports
+
+
+# Example HTTP
+example.http
