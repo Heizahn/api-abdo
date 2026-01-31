@@ -14,20 +14,3 @@ pub struct Onu {
     pub pon: Option<i32>,
     pub id_onu: Option<i32>,
 }
-
-#[derive(Debug, Serialize, Deserialize)]
-
-pub struct OnuResponse {
-    pub ok: bool,
-    pub data: Vec<Onu>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct OnuCreate {
-    #[serde(rename = "sSn")]
-    pub sn: String,
-    #[serde(rename = "idCreator")]
-    pub id_creator: String,
-    #[serde(rename = "dCreation")]
-    pub d_creation: String,
-}

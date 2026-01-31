@@ -1,7 +1,7 @@
 use super::MongoDB;
 use crate::db::OnuRepository;
 use crate::models::db::{OnuForUpdateIp, OnuIdentity, OnuIpUpdate};
-use crate::models::onu::{Onu, OnuCreate};
+
 use crate::services::zte_parse_update::OnuDetected;
 use async_trait::async_trait;
 use futures::TryStreamExt;
@@ -127,111 +127,5 @@ impl OnuRepository for MongoDB {
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
-    }
-
-    async fn get_all_onus(&self) -> Result<Vec<Onu>, String> {
-        let collection = self.db.collection::<Document>("Onus");
-
-        // 1. Definir el pipeline de agregación
-        let pipeline = vec![
-            // 1. Joins (Lookup)
-            doc! {
-                "$lookup": {
-                    "from": "Olts",
-                    "localField": "idOlt",
-                    "foreignField": "_id",
-                    "as": "olt_res",
-                }
-            },
-            doc! {
-                "$lookup": {
-                    "from": "Clients",
-                    "localField": "_id",
-                    "foreignField": "idOnu",
-                    "as": "client_res",
-                }
-            },
-            // 2. Proyección y Limpieza inicial
-            doc! {
-                "$project": {
-                    "_id": 0,
-                    "cliente": {
-                        "$ifNull": [
-                            { "$arrayElemAt": ["$client_res.sName", 0] },
-                            "SIN ASIGNAR"
-                        ]
-                    },
-                    "olt_name": {
-                        "$ifNull": [
-                            { "$arrayElemAt": ["$olt_res.sName", 0] },
-                            "SIN ASIGNAR"
-                        ]
-                    },
-                    "sn": "$sSn",
-                    "mac": "$sMac",
-                    "ip": "$sIp",
-                    "motherboard": "$nMotherboard",
-                    "pon": "$nPon",
-                    "id_onu": "$nIdOnu",
-                }
-            },
-            // 3. Crear un campo de prioridad para el ordenamiento
-            doc! {
-                "$addFields": {
-                    "sortPriority": {
-                        "$cond": {
-                            "if": { "$eq": ["$cliente", "SIN ASIGNAR"] },
-                            "then": 1, // Prioridad baja (va al final)
-                            "else": 0  // Prioridad alta (va al principio)
-                        }
-                    }
-                }
-            },
-            // 4. Ordenar: Primero por prioridad (0 antes que 1), luego alfabéticamente
-            doc! {
-                "$sort": doc! {
-                    "sortPriority": 1,
-                    "cliente": 1
-                }
-            },
-            // 5. Opcional: Eliminar el campo temporal de prioridad
-            doc! {
-                "$project": { "sortPriority": 0 }
-            },
-        ];
-
-        let cursor = collection
-            .aggregate(pipeline)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        // 4. De-serialización automática de BSON a Vec<Onu>
-        let onus: Vec<Onu> = cursor
-            .try_collect::<Vec<Document>>() // Primero recolectamos los documentos
-            .await
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(|doc| {
-                // Convertimos cada Document individual a tu Struct Onu
-                mongodb::bson::from_document::<Onu>(doc).map_err(|e| e.to_string())
-            })
-            .collect::<Result<Vec<Onu>, String>>()?; // Recolectamos todo en el Vec final
-
-        Ok(onus)
-    }
-
-    async fn create_onu(&self, onu: OnuCreate) -> Result<(), String> {
-        let collection = self.db.collection("Onus");
-        let document = doc! {
-                "sSn": onu.sn,
-                "idCreator": onu.id_creator,
-                "dCreation": onu.d_creation,
-                "sState": "SIN ASIGNAR".to_string(),
-        };
-
-        match collection.insert_one(document).await {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e.to_string()),
-        }
     }
 }
