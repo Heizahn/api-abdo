@@ -129,3 +129,8 @@ pub struct OnuIpUpdate {
     pub id: ObjectId,
     pub new_ip: String,
 }
+
+#[derive(Debug, Serialize, Clone)]
+pub struct BcvResponse {
+    pub bcv: f64,
+}

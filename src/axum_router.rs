@@ -12,8 +12,8 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{auth, calculation, payment, profile, receivable, utils},
-    middleware::{auth::jwt_auth_middleware, rate_limit},
+    handlers::{auth, auth_user, calculation, payment, profile, receivable, utils}, // Added auth_user
+    middleware::{auth::jwt_auth_middleware, auth_user::user_jwt_auth_middleware, rate_limit}, // Added user_jwt_auth_middleware
     state::AppState,
 };
 
@@ -43,19 +43,35 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/utils/calculate/bs",
             post(calculation::calculate_bs_handler),
         )
-        .route(
-            "/v2/utils/calculate",
-            post(calculation::calculate_handler),
-        )
+        .route("/v2/utils/calculate", post(calculation::calculate_handler))
         .route("/v1/utils/ping", get(utils::get_ping_response))
         .route(
             "/v1/utils/latest-version",
             get(utils::get_latest_version_response),
         )
         .route("/v1/utils/image/:filename", get(utils::get_image))
-        .layer(auth_rate_limit);
+        .layer(auth_rate_limit.clone()); // Cloned to reuse
 
-    // ✅ RUTAS PROTEGIDAS (con JWT)
+    // ✅ AUTH USER RUTAS (Admin/Staff)
+    let auth_user_public = Router::new()
+        .route("/v1/auth-user/login", post(auth_user::login_handler))
+        .route(
+            "/v1/auth-user/refresh-token",
+            post(auth_user::refresh_token_handler),
+        )
+        .layer(auth_rate_limit); // Reused rate limiter
+
+    let auth_user_protected = Router::new()
+        .route("/v1/auth-user/me", get(auth_user::me_handler))
+        .route("/v1/utils/bcv", get(utils::get_bcv))
+        .route("/v1/utils/ip-pppoe/:sn", get(utils::get_ip_pppoe))
+        
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            user_jwt_auth_middleware,
+        ));
+
+    // ✅ RUTAS PROTEGIDAS (con JWT Clientes)
     let protected_routes = Router::new()
         .route("/v1/profile/me/group", get(profile::me_group_handler))
         .route("/v1/profile/me/phone", get(profile::me_phone_handler))
@@ -90,6 +106,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     // ✅ ROUTER PRINCIPAL: merge + state al final
     public_routes
+        .merge(auth_user_public)
+        .merge(auth_user_protected)
         .merge(protected_routes)
         .merge(static_routes)
         .layer(

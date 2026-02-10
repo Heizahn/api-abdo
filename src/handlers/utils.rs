@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::auth::claims::AccessClaims;
 
 use crate::db::UtilsRepository;
-use crate::models::db::LatestVersionResponse;
+use crate::models::db::{BcvResponse, LatestVersionResponse};
 use crate::{
     db::SalesRepository,
     error::ApiError,
@@ -16,6 +16,8 @@ use crate::{
     models::payment::{Bank, BankListResponse},
     state::AppState,
 };
+use crate::services::get_ip_pppoe_mk::get_ip_pppoe_mk;
+
 
 pub async fn get_bank_list(
     Extension(_claims): Extension<AccessClaims>,
@@ -110,5 +112,44 @@ pub async fn get_image(
             Ok(response)
         }
         Err(_) => Err(ApiError::NotFound),
+    }
+}
+
+pub async fn get_bcv(State(state): State<Arc<AppState>>) -> Result<Json<BcvResponse>, ApiError> {
+    let bcv = state.db.get_latest_exchange_rate().await;
+
+    match bcv {
+        Ok(bcv) => Ok(Json(BcvResponse { bcv })),
+        Err(e) => Err(ApiError::DatabaseError(e.to_string())),
+    }
+}
+
+pub async fn get_ip_pppoe(
+    Path(sn): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<String>, ApiError> {
+
+    let port_mk = state.config.port_mk.clone();
+    let pass_mk = state.config.pass_mk.clone();
+
+    // Es recomendable que get_ip_pppoe_mk sea ejecutada dentro de un spawn_blocking
+    // si la librería de SSH que usas es síncrona, para no bloquear el runtime de Axum.
+    let ip_pppoe = tokio::task::spawn_blocking(move || {
+        get_ip_pppoe_mk(&sn, "10.255.255.5", port_mk.as_str(), "rust_api", pass_mk.as_str())
+    })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?; // Error del join de la tarea
+
+    match ip_pppoe {
+        Ok(ip) => Ok(Json(ip)),
+        Err(e) => {
+            // Si el error dice "no tiene sesión activa", podrías devolver un 404
+            if e.contains("no tiene una sesión activa") {
+                Err(ApiError::NotFound)
+            } else {
+                // Si es un error de SSH o conexión, un 500
+                Err(ApiError::Internal(e))
+            }
+        }
     }
 }
