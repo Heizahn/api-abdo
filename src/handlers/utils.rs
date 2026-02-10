@@ -144,7 +144,7 @@ pub async fn get_ip_pppoe(
         Ok(ip) => Ok(Json(ip)),
         Err(e) => {
             // Si el error dice "no tiene sesión activa", podrías devolver un 404
-            if e.contains("no tiene sesión activa") {
+            if e.contains("no tiene una sesión activa") {
                 Err(ApiError::NotFound)
             } else {
                 // Si es un error de SSH o conexión, un 500
