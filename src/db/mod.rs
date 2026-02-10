@@ -126,6 +126,7 @@ pub trait UtilsRepository {
         rate: f64,
         date: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), mongodb::error::Error>;
+    
 }
 
 // ============================================

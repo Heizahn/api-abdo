@@ -16,6 +16,8 @@ use crate::{
     models::payment::{Bank, BankListResponse},
     state::AppState,
 };
+use crate::services::get_ip_pppoe_mk::get_ip_pppoe_mk;
+
 
 pub async fn get_bank_list(
     Extension(_claims): Extension<AccessClaims>,
@@ -119,5 +121,31 @@ pub async fn get_bcv(State(state): State<Arc<AppState>>) -> Result<Json<BcvRespo
     match bcv {
         Ok(bcv) => Ok(Json(BcvResponse { bcv })),
         Err(e) => Err(ApiError::DatabaseError(e.to_string())),
+    }
+}
+
+pub async fn get_ip_pppoe(
+    Path(sn): Path<String>
+) -> Result<Json<String>, ApiError> {
+
+    // Es recomendable que get_ip_pppoe_mk sea ejecutada dentro de un spawn_blocking
+    // si la librería de SSH que usas es síncrona, para no bloquear el runtime de Axum.
+    let ip_pppoe = tokio::task::spawn_blocking(move || {
+        get_ip_pppoe_mk(&sn)
+    })
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?; // Error del join de la tarea
+
+    match ip_pppoe {
+        Ok(ip) => Ok(Json(ip)),
+        Err(e) => {
+            // Si el error dice "no tiene sesión activa", podrías devolver un 404
+            if e.contains("no tiene sesión activa") {
+                Err(ApiError::NotFound)
+            } else {
+                // Si es un error de SSH o conexión, un 500
+                Err(ApiError::Internal(e))
+            }
+        }
     }
 }
