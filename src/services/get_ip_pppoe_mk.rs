@@ -2,9 +2,12 @@ use std::io::Read;
 use std::net::TcpStream;
 use ssh2::Session;
 
-pub fn get_ip_pppoe_mk(sn: &str) -> Result<String, String> {
+pub fn get_ip_pppoe_mk(sn: &str,     ip: &str,
+                       port: &str,
+                       user: &str,
+                       pass: &str,) -> Result<String, String> {
     // 1. Configurar la conexión (Asegúrate de usar variables de entorno para esto)
-    let tcp = TcpStream::connect("TU_IP_BRAS:22")
+    let tcp = TcpStream::connect(ip.to_string() + ":" + port)
         .map_err(|e| format!("Error de conexión: {}", e))?;
 
     let mut sess = Session::new().unwrap();
@@ -12,7 +15,7 @@ pub fn get_ip_pppoe_mk(sn: &str) -> Result<String, String> {
     sess.handshake().map_err(|e| format!("Error de handshake: {}", e))?;
 
     // Autenticación
-    sess.userauth_password("soporte", "TU_PASSWORD")
+    sess.userauth_password(user, pass)
         .map_err(|e| format!("Error de autenticación: {}", e))?;
 
     if !sess.authenticated() {

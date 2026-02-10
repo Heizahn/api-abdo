@@ -59,12 +59,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/auth-user/refresh-token",
             post(auth_user::refresh_token_handler),
         )
-        .route("/v1/utils/ip-pppoe/:sn", get(utils::get_ip_pppoe))
         .layer(auth_rate_limit); // Reused rate limiter
 
     let auth_user_protected = Router::new()
         .route("/v1/auth-user/me", get(auth_user::me_handler))
         .route("/v1/utils/bcv", get(utils::get_bcv))
+        .route("/v1/utils/ip-pppoe/:sn", get(utils::get_ip_pppoe))
+        
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             user_jwt_auth_middleware,
