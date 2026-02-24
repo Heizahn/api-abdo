@@ -91,6 +91,15 @@ pub async fn get_client_traffic(
         .json(&search_payload)
         .send().await?.json().await?;
 
+    // 1. 🐛 IMPRIMIR LA RESPUESTA CRUDA PARA DEBUGGEAR
+    println!("🔎 RAW Zabbix Response: {}", search_resp);
+
+    // 2. 🛡️ CAPTURAR EL ERROR NATIVO DE ZABBIX
+    if let Some(error) = search_resp.get("error") {
+        return Err(format!("Zabbix API Error: {}", error).into());
+    }
+
+    // 3. CONTINUAR NORMALMENTE
     let items = search_resp["result"].as_array()
         .ok_or("Error: No se pudo parsear el resultado de Zabbix")?;
 
