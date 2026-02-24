@@ -134,7 +134,7 @@ pub async fn get_zabbix(
     // let db_client = state.db.find_client_by_id(&id_client).await.map_err(|_| ApiError::NotFound)?;
 
     // Mock temporal para estructura
-    let client_sn = "GPON03ONU13".to_string();
+    let client_zabbix_code = "GPON03ONU13".to_string();
     let olt_zabbix_name = "OLT VSOL FLOR A".to_string();
 
     // 2. Llamar al servicio inyectando el cliente HTTP del State
@@ -142,7 +142,7 @@ pub async fn get_zabbix(
         &state.reqwest_client,
         &state.config.zabbix_url,
         &state.config.zabbix_token,
-        &client_sn,
+        &client_zabbix_code,
         &olt_zabbix_name
     ).await.map_err(|e| {
         // Mapea el error del servicio a tu ApiError personalizado

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
 pub struct ZabbixTrafficResponse {
-    pub client_sn: String,
+    pub client_zabbix_code: String,
     pub olt_name: String,
     pub total_download_gb: f64,
     pub total_upload_gb: f64,

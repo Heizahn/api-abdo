@@ -69,7 +69,7 @@ pub async fn get_client_traffic(
     http_client: &Client, // <- Recibimos el cliente desde AppState
     zabbix_url: &str,
     zabbix_token: &str,
-    client_sn: &str,
+    client_zabbix_code: &str,
     olt_zabbix_name: &str
 ) -> Result<ZabbixTrafficResponse, Box<dyn Error + Send + Sync>> {
 
@@ -77,9 +77,14 @@ pub async fn get_client_traffic(
     let search_payload = json!({
         "jsonrpc": "2.0", "method": "item.get",
         "params": {
-            "output": ["itemid", "key_", "value_type"],
-            "search": { "name": client_sn },
-            "host": olt_zabbix_name,
+            // Agregamos "name" y "selectHosts" para que sea idéntico a tu script original
+            "output": ["itemid", "name", "key_", "value_type"],
+            "selectHosts": ["name"],
+            "search": { "name": client_zabbix_code, },
+
+            // ⚠️ COMENTAMOS EL FILTRO DEL HOST TEMPORALMENTE ⚠️
+            // "host": olt_zabbix_name,
+
             "startSearch": false, "searchByAny": false
         },
         "id": 1
@@ -174,7 +179,7 @@ pub async fn get_client_traffic(
     }
 
     Ok(ZabbixTrafficResponse {
-        client_sn: client_sn.to_string(),
+        client_zabbix_code: client_zabbix_code.to_string(),
         olt_name: olt_zabbix_name.to_string(),
         total_download_gb: grand_total_download,
         total_upload_gb: grand_total_upload,
