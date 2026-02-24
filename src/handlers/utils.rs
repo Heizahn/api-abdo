@@ -16,7 +16,7 @@ use crate::{
     models::payment::{Bank, BankListResponse},
     state::AppState,
 };
-use crate::models::Zabbix::ZabbixTrafficResponse;
+use crate::models::zabbix::ZabbixTrafficResponse;
 use crate::services::zabbix_service;
 
 pub async fn get_bank_list(
@@ -131,12 +131,9 @@ pub async fn get_zabbix(
 
     // 1. Buscar en tu DB el cliente
     // TODO: Reemplaza esto con tu query real a la DB usando state.db
-    // let db_client = state.db.find_client_by_id(&id_client).await.map_err(|_| ApiError::NotFound)?;
+    let (client_zabbix_code, olt_zabbix_name) = state.db.find_client_olt_position(&id_client).await.map_err(|_| ApiError::NotFound)?;
 
 
-    // Mock temporal para estructura
-    let client_zabbix_code = "GPON03ONU13".to_string();
-    let olt_zabbix_name = "OLT VSOL FLOR A".to_string();
 
     // 2. Llamar al servicio inyectando el cliente HTTP del State
     let traffic_data = zabbix_service::get_client_traffic(
@@ -144,7 +141,7 @@ pub async fn get_zabbix(
         &state.config.zabbix_url,
         &state.config.zabbix_token,
         &client_zabbix_code,
-        // &olt_zabbix_name
+        &olt_zabbix_name
     ).await.map_err(|e| {
         // Mapea el error del servicio a tu ApiError personalizado
         eprintln!("Error en Zabbix Service: {}", e);

@@ -15,6 +15,7 @@ use mongodb::bson::oid::ObjectId;
 use mongodb::bson::Document;
 use mongodb::error::Error as MongoError;
 use mongodb::results::InsertOneResult;
+use crate::error::ApiError;
 
 // ============================================
 // 1. AuthRepository: Login, Verificación
@@ -126,6 +127,8 @@ pub trait UtilsRepository {
         rate: f64,
         date: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), mongodb::error::Error>;
+
+    async fn find_client_olt_position(&self, client_id: &str) -> Result<(String, String), ApiError>;
 }
 
 // ============================================

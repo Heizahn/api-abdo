@@ -4,7 +4,7 @@ use chrono::{Utc, TimeZone, Datelike};
 use std::error::Error;
 use std::pin::Pin;
 use std::future::Future;
-use crate::models::Zabbix::{MonthlyTraffic, ZabbixTrafficResponse};
+use crate::models::zabbix::{MonthlyTraffic, ZabbixTrafficResponse};
 
 const KEY_DOWNLOAD: &str = "onu.vol.download";
 const KEY_UPLOAD: &str = "onu.vol.upload";
@@ -57,7 +57,6 @@ async fn fetch_history_gb(
         }
     }
 
-    // Si no hay datos, retorna 0.0
     if total_bytes == 0 {
         return Ok(0.0);
     }
@@ -65,26 +64,22 @@ async fn fetch_history_gb(
     Ok((total_bytes as f64) / 1024.0 / 1024.0 / 1024.0)
 }
 
-// ... (imports y funciones auxiliares iguales) ...
-
 pub async fn get_client_traffic(
     http_client: &Client,
     zabbix_url: &str,
     zabbix_token: &str,
     client_zabbix_code: &str,
-    // Eliminamos el parámetro 'olt_zabbix_name' porque lo deduciremos de la respuesta
+    olt_zabbix_name: &str // <- ¡De vuelta a la acción!
 ) -> Result<ZabbixTrafficResponse, Box<dyn Error + Send + Sync>> {
 
     // 1. Buscar los Items (Download y Upload)
     let search_payload = json!({
         "jsonrpc": "2.0", "method": "item.get",
         "params": {
-            // Solo pedimos las keys de consumo, ignoramos las de velocidad (onu.download)
             "output": ["itemid", "name", "key_", "value_type"],
             "selectHosts": ["name"],
-            // Forzamos que la búsqueda coincida EXACTAMENTE con el código del cliente
-            // y que contenga la palabra "CONSUMO" para filtrar basuras.
             "search": { "name": format!("CONSUMO *{}*", client_zabbix_code) },
+            "host": olt_zabbix_name, // <- Filtro estricto aplicado
             "searchWildcardsEnabled": true,
             "startSearch": false, "searchByAny": false
         },
@@ -106,14 +101,11 @@ pub async fn get_client_traffic(
 
     let mut down_info = None;
     let mut up_info = None;
-    let mut detected_olt_name = String::from("OLT DESCONOCIDA");
 
     for item in items {
-        // Validación estricta: Nos aseguramos de que el nombre contenga el código EXACTO
-        // Esto evita agarrar "GPON03ONU13 WILLIANMOLINARIERA" cuando buscas solo "GPON03ONU13"
         let full_name = item["name"].as_str().unwrap_or("");
 
-        // Si no es el cliente exacto que buscamos (por ejemplo, tiene un sufijo), lo saltamos
+        // Mantenemos esto para evitar gemelos (ej: "GPON03ONU13 WILLIANMOLINARIERA")
         if !full_name.ends_with(client_zabbix_code) && !full_name.contains(&format!("{} ", client_zabbix_code)) {
             continue;
         }
@@ -123,21 +115,12 @@ pub async fn get_client_traffic(
         let val_type = item["value_type"].as_str().unwrap_or("3").parse::<i32>().unwrap_or(3);
         let hist_mode = if val_type == 0 { 0 } else { 3 };
 
-        // Extraemos el nombre real de la OLT desde la respuesta de Zabbix
-        if detected_olt_name == "OLT DESCONOCIDA" {
-            detected_olt_name = item["hosts"].as_array()
-                .and_then(|h| h.first())
-                .and_then(|h| h["name"].as_str())
-                .unwrap_or("OLT DESCONOCIDA")
-                .to_string();
-        }
-
         if key.contains(KEY_DOWNLOAD) { down_info = Some((item_id, hist_mode)); }
         else if key.contains(KEY_UPLOAD) { up_info = Some((item_id, hist_mode)); }
     }
 
     if down_info.is_none() && up_info.is_none() {
-        return Err("No se encontraron items de tráfico EXACTOS para este cliente".into());
+        return Err("No se encontraron items de tráfico EXACTOS para este cliente en esta OLT".into());
     }
 
     // 2. Iterar meses hacia atrás
@@ -149,9 +132,7 @@ pub async fn get_client_traffic(
     let mut grand_total_download = 0.0;
     let mut grand_total_upload = 0.0;
 
-    // DEFINIMOS UN LÍMITE DE BÚSQUEDA (ej: 6 meses).
-    // Cambiamos el 'loop' infinito por un 'for' para evitar que se corte prematuramente si hay un mes en 0 por suspensión.
-    let MAX_MESES_HISTORIAL = 6;
+    const MAX_MESES_HISTORIAL: u8 = 6;
 
     for _ in 0..MAX_MESES_HISTORIAL {
         if current_month == 1 {
@@ -174,14 +155,8 @@ pub async fn get_client_traffic(
         };
 
         let (down_res, up_res) = tokio::join!(down_fut, up_fut);
-        let month_down = down_res.unwrap_or(0.0); // Usamos unwrap_or(0.0) para que un fallo de red temporal no rompa todo el historial
+        let month_down = down_res.unwrap_or(0.0);
         let month_up = up_res.unwrap_or(0.0);
-
-        // Si llevamos 3 meses seguidos en 0.0, asumimos que ya no hay más datos históricos y cortamos para ahorrar recursos
-        if month_down == 0.0 && month_up == 0.0 {
-            // Puedes poner un contador aquí si quieres que soporte meses suspendidos.
-            // Por ahora lo dejamos almacenar el mes en 0 y continuar.
-        }
 
         grand_total_download += month_down;
         grand_total_upload += month_up;
@@ -196,7 +171,7 @@ pub async fn get_client_traffic(
 
     Ok(ZabbixTrafficResponse {
         client_zabbix_code: client_zabbix_code.to_string(),
-        olt_name: detected_olt_name, // Devolvemos la OLT que encontramos
+        olt_name: olt_zabbix_name.to_string(),
         total_download_gb: grand_total_download,
         total_upload_gb: grand_total_upload,
         history: history_list,
