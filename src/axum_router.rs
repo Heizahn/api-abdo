@@ -49,7 +49,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/utils/latest-version",
             get(utils::get_latest_version_response),
         )
-        .route("/v1/utils/image/:filename", get(utils::get_image))
         .layer(auth_rate_limit.clone()); // Cloned to reuse
 
     // ✅ AUTH USER RUTAS (Admin/Staff)
@@ -64,6 +63,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let auth_user_protected = Router::new()
         .route("/v1/auth-user/me", get(auth_user::me_handler))
         .route("/v1/utils/bcv", get(utils::get_bcv))
+        .route("/v1/utils/image/:filename", get(utils::get_image))
+        .route("/v1/utils/zabbix/:id_client", get(utils::get_zabbix))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             user_jwt_auth_middleware,
