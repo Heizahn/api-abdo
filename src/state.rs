@@ -1,15 +1,19 @@
+use std::collections::HashMap;
 use crate::{cache::RedisClient, config::Config, db::mongo::MongoDB};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use serde::{Deserialize, Serialize};
 
 /// Estado compartido de la aplicación
 /// Se pasa a todos los handlers mediante Axum's State extractor
+
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: MongoDB,
     pub redis: RedisClient,
     pub config: Arc<Config>,
+    pub reqwest_client: reqwest::Client,
 }
-
 impl AppState {
     /// Crea un nuevo estado de aplicación
     /// Inicializa conexiones a MongoDB y Redis
@@ -26,10 +30,12 @@ impl AppState {
         let redis = RedisClient::new(&config).await?;
         tracing::info!("✅ Redis conectado");
 
+
         Ok(Arc::new(Self {
             db,
             redis,
             config: Arc::new(config),
+            reqwest_client: reqwest::Client::new(),
         }))
     }
 }
