@@ -37,6 +37,10 @@ pub struct Config {
     //MikroTik
     pub port_mk: String,
     pub pass_mk: String,
+
+    //Zabbix
+    pub zabbix_url: String,
+    pub zabbix_token: String,
 }
 
 impl Config {
@@ -100,6 +104,10 @@ impl Config {
             //MikroTik
             port_mk: env::var("PORT_MK").unwrap_or_else(|_| "22".to_string()),
             pass_mk: env::var("PASS_MK").expect("Falta PASS_MK en .env"),
+
+            //Zabbix
+            zabbix_url: env::var("ZABBIX_URL").expect("Falta ZABBIX_URL en .env"),
+            zabbix_token: env::var("ZABBIX_TOKEN").expect("Falta ZABBIX_TOKEN en .env"),
         }
     }
 

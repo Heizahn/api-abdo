@@ -4,7 +4,7 @@ use axum::response::{Html, Response};
 use axum::{extract::State, Extension, Json};
 use hyper::header;
 use std::sync::Arc;
-
+use serde::Deserialize;
 use crate::auth::claims::AccessClaims;
 
 use crate::db::UtilsRepository;
@@ -17,7 +17,8 @@ use crate::{
     state::AppState,
 };
 use crate::services::get_ip_pppoe_mk::get_ip_pppoe_mk;
-
+use crate::models::zabbix::ZabbixTrafficResponse;
+use crate::services::zabbix_service;
 
 pub async fn get_bank_list(
     Extension(_claims): Extension<AccessClaims>,
@@ -128,7 +129,6 @@ pub async fn get_ip_pppoe(
     Path(sn): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<String>, ApiError> {
-
     let port_mk = state.config.port_mk.clone();
     let pass_mk = state.config.pass_mk.clone();
 
@@ -152,4 +152,30 @@ pub async fn get_ip_pppoe(
             }
         }
     }
+}
+pub async fn get_zabbix(
+    Path(id_client): Path<String>,
+    State(state): State<Arc<AppState>>
+) -> Result<Json<ZabbixTrafficResponse>, ApiError> {
+
+    // 1. Buscar en tu DB el cliente
+    // TODO: Reemplaza esto con tu query real a la DB usando state.db
+    let (client_zabbix_code, olt_zabbix_name) = state.db.find_client_olt_position(&id_client).await.map_err(|_| ApiError::NotFound)?;
+
+
+
+    // 2. Llamar al servicio inyectando el cliente HTTP del State
+    let traffic_data = zabbix_service::get_client_traffic(
+        &state.reqwest_client,
+        &state.config.zabbix_url,
+        &state.config.zabbix_token,
+        &client_zabbix_code,
+        &olt_zabbix_name
+    ).await.map_err(|e| {
+        // Mapea el error del servicio a tu ApiError personalizado
+        eprintln!("Error en Zabbix Service: {}", e);
+        ApiError::Internal("Error al consultar el tráfico histórico".to_string())
+    })?;
+
+    Ok(Json(traffic_data))
 }
