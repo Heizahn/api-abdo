@@ -1,6 +1,8 @@
 use std::io::Read;
 use std::net::TcpStream;
 use ssh2::Session;
+// Asegúrate de tener importado tu sistema de logs, usualmente tracing o log
+use tracing::{debug, error, warn};
 
 pub fn get_ip_pppoe_mk(
     sn: &str,
@@ -9,36 +11,44 @@ pub fn get_ip_pppoe_mk(
     user: &str,
     pass: &str,
 ) -> Result<String, String> {
-    println!("--> [DEBUG] Iniciando conexión a {}:{} con usuario '{}'", ip, port, user);
+    debug!("Intentando localizar SN: {} en BRAS {}:{}", sn, ip, port);
 
-    // 1. Configurar la conexión SSH
+    // 1. Configurar la conexión TCP con manejo de error no fatal
     let tcp = TcpStream::connect(format!("{}:{}", ip, port)).map_err(|e| {
-        println!("--> [ERROR] Falló conexión TCP a {}: {}", ip, e);
-        format!("Error de conexión TCP: {}", e)
+        let msg = format!("Fallo de conexión TCP al router {}: {}", ip, e);
+        error!(target: "api_abdo::mikrotik", "{}", msg);
+        msg
     })?;
-    println!("--> [DEBUG] TCP conectado correctamente a {}", ip);
 
-    let mut sess = Session::new().unwrap();
+    // Eliminamos el .unwrap() que podía causar un crash en el hilo
+    let mut sess = Session::new().map_err(|e| {
+        let msg = format!("No se pudo inicializar la estructura de sesión SSH2: {}", e);
+        error!(target: "api_abdo::mikrotik", "{}", msg);
+        msg
+    })?;
+
     sess.set_tcp_stream(tcp);
     sess.handshake().map_err(|e| {
-        println!("--> [ERROR] Falló handshake SSH: {}", e);
-        format!("Error de handshake SSH: {}", e)
+        let msg = format!("Fallo en handshake SSH con el router {}: {}", ip, e);
+        error!(target: "api_abdo::mikrotik", "{}", msg);
+        msg
     })?;
-    println!("--> [DEBUG] Handshake SSH exitoso");
 
-    // Autenticación
+    // 2. Autenticación
     sess.userauth_password(user, pass).map_err(|e| {
-        println!("--> [ERROR] Error en autenticación con {}: {}", user, e);
-        format!("Error de autenticación: {}", e)
+        let msg = format!("Error interno de autenticación SSH en {}: {}", ip, e);
+        error!(target: "api_abdo::mikrotik", "{}", msg);
+        msg
     })?;
 
     if !sess.authenticated() {
-        println!("--> [ERROR] Autenticación fallida. Credenciales incorrectas.");
+        let msg = format!("Credenciales SSH rechazadas por el router {}", ip);
+        // Usamos warn! porque el servidor está bien, pero la configuración de claves es errónea
+        warn!(target: "api_abdo::mikrotik", "{}", msg);
         return Err("Autenticación fallida".to_string());
     }
-    println!("--> [DEBUG] Sesión autenticada correctamente");
 
-    // 2. Construir regex para que sea case-insensitive
+    // 3. Construir regex case-insensitive para el SN
     let regex_sn: String = sn
         .chars()
         .map(|c| {
@@ -50,49 +60,48 @@ pub fn get_ip_pppoe_mk(
         })
         .collect();
 
-    // 3. Comando protegido. Nota las llaves externas {{ }} para agrupar el script en SSH
+    // Comando protegido con llaves y selección única
     let command = format!(
         "{{ :do {{ :put [/ppp active get [:pick [find name~\"{}\"] 0] address] }} on-error={{ :put \"NOT_FOUND\" }} }}",
         regex_sn
     );
-    println!("--> [DEBUG] Comando a enviar: {}", command);
 
     // 4. Ejecutar el comando
     let mut channel = sess.channel_session().map_err(|e| {
-        println!("--> [ERROR] Falló al abrir el canal de sesión SSH: {}", e);
-        e.to_string()
+        let msg = format!("No se pudo abrir el canal SSH en {}: {}", ip, e);
+        error!(target: "api_abdo::mikrotik", "{}", msg);
+        msg
     })?;
 
     channel.exec(&command).map_err(|e| {
-        println!("--> [ERROR] Falló al ejecutar comando en MikroTik: {}", e);
-        e.to_string()
+        let msg = format!("Fallo al inyectar comando en {}: {}", ip, e);
+        error!(target: "api_abdo::mikrotik", "{}", msg);
+        msg
     })?;
 
     let mut output = String::new();
     channel.read_to_string(&mut output).map_err(|e| {
-        println!("--> [ERROR] Falló al leer respuesta: {}", e);
-        e.to_string()
+        let msg = format!("Error leyendo el buffer SSH de {}: {}", ip, e);
+        error!(target: "api_abdo::mikrotik", "{}", msg);
+        msg
     })?;
     channel.wait_close().ok();
 
-    // AQUÍ ESTÁ LA MAGIA DEL DEBUG: Veremos qué devuelve exactamente MikroTik
-    println!("--> [DEBUG] Respuesta cruda (RAW) del MikroTik: {:?}", output);
-
-    // 5. Limpiar y validar la respuesta
+    // 5. Limpiar y validar
     let ip_result = output.trim();
-    println!("--> [DEBUG] Respuesta limpia (TRIM): '{}'", ip_result);
 
     if ip_result.is_empty() || ip_result == "NOT_FOUND" {
-        println!("--> [ERROR] Respuesta indica que no existe el cliente.");
+        // No usamos error! aquí porque que un cliente no esté conectado es un escenario normal (404), no un fallo del sistema.
+        debug!(target: "api_abdo::mikrotik", "El SN {} no está en el BRAS {}", sn, ip);
         return Err(format!("El SN {} no tiene una sesión activa", sn));
     }
 
-    // Validar que lo recibido tenga formato de IP
     if ip_result.contains('.') {
-        println!("--> [DEBUG] ÉXITO. IP extraída: {}", ip_result);
+        debug!(target: "api_abdo::mikrotik", "SN {} localizado exitosamente con IP {}", sn, ip_result);
         Ok(ip_result.to_string())
     } else {
-        println!("--> [ERROR] La respuesta no parece una IP válida.");
-        Err(format!("Respuesta inesperada del BRAS: {}", ip_result))
+        let msg = format!("El router {} devolvió datos corruptos o inesperados: {}", ip, ip_result);
+        error!(target: "api_abdo::mikrotik", "{}", msg);
+        Err(msg)
     }
 }
