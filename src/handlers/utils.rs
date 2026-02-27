@@ -132,37 +132,39 @@ pub async fn get_ip_pppoe(
     let port_mk = state.config.port_mk.clone();
     let pass_mk = state.config.pass_mk.clone();
 
-    // Definimos los routers a consultar.
-    // Lo ideal a futuro es que esta lista venga de state.config
-    let routers = vec!["10.255.255.5", "10.255.255.8"];
+    // Lista de routers donde vamos a buscar
+    // (A futuro puedes sacar esto de state.config.routers)
+    let routers = vec!["10.255.255.5", "10.255.255.6"];
 
     let ip_pppoe_result = tokio::task::spawn_blocking(move || {
         let mut last_error = String::new();
 
         for router_ip in routers {
+            // Intentamos buscar en el router actual
             match get_ip_pppoe_mk(&sn, router_ip, port_mk.as_str(), "rust_api", pass_mk.as_str()) {
-                Ok(ip) => return Ok(ip), // Si lo encuentra, sale inmediatamente del loop y de la tarea
+                Ok(ip) => return Ok(ip), // Lo encontró: sale del loop y devuelve la IP inmediatamente
                 Err(e) => {
                     last_error = e;
-                    // Si el error es de sesión o de conexión, simplemente continuamos con el siguiente router
+                    // No está aquí o hubo un fallo de conexión, probamos en el siguiente
                     continue;
                 }
             }
         }
 
-        // Si el ciclo termina sin encontrar nada, devolvemos el último error registrado
+        // Si terminó el bucle y no retornó OK, es porque no estaba en ningún router
         Err(last_error)
     })
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?; // Error si la tarea asíncrona falla
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
+    // Evaluación final para Axum
     match ip_pppoe_result {
         Ok(ip) => Ok(Json(ip)),
         Err(e) => {
             if e.contains("no tiene una sesión activa") {
-                Err(ApiError::NotFound)
+                Err(ApiError::NotFound) // Devuelve HTTP 404
             } else {
-                Err(ApiError::Internal(e))
+                Err(ApiError::Internal(e)) // Devuelve HTTP 500 para otros errores
             }
         }
     }

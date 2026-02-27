@@ -2,17 +2,20 @@ use std::io::Read;
 use std::net::TcpStream;
 use ssh2::Session;
 
-pub fn get_ip_pppoe_mk(sn: &str,     ip: &str,
-                       port: &str,
-                       user: &str,
-                       pass: &str,) -> Result<String, String> {
-    // 1. Configurar la conexión (Asegúrate de usar variables de entorno para esto)
-    let tcp = TcpStream::connect(ip.to_string() + ":" + port)
-        .map_err(|e| format!("Error de conexión: {}", e))?;
+pub fn get_ip_pppoe_mk(
+    sn: &str,
+    ip: &str,
+    port: &str,
+    user: &str,
+    pass: &str,
+) -> Result<String, String> {
+    // 1. Configurar la conexión SSH
+    let tcp = TcpStream::connect(format!("{}:{}", ip, port))
+        .map_err(|e| format!("Error de conexión TCP: {}", e))?;
 
     let mut sess = Session::new().unwrap();
     sess.set_tcp_stream(tcp);
-    sess.handshake().map_err(|e| format!("Error de handshake: {}", e))?;
+    sess.handshake().map_err(|e| format!("Error de handshake SSH: {}", e))?;
 
     // Autenticación
     sess.userauth_password(user, pass)
@@ -55,10 +58,10 @@ pub fn get_ip_pppoe_mk(sn: &str,     ip: &str,
         return Err(format!("El SN {} no tiene una sesión activa", sn));
     }
 
-    // Validar que lo recibido parezca una IP (opcional pero recomendado)
-    if ip.contains('.') {
-        Ok(ip.to_string())
+    // Validar que lo recibido tenga formato de IP
+    if ip_result.contains('.') {
+        Ok(ip_result.to_string())
     } else {
-        Err(format!("Respuesta inesperada del BRAS: {}", ip))
+        Err(format!("Respuesta inesperada del BRAS: {}", ip_result))
     }
 }
