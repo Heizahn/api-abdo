@@ -134,7 +134,7 @@ pub async fn get_ip_pppoe(
 
     // Definimos los routers a consultar.
     // Lo ideal a futuro es que esta lista venga de state.config
-    let routers = vec!["10.255.255.5", "10.255.255.6"];
+    let routers = vec!["10.255.255.5", "10.255.255.8"];
 
     let ip_pppoe_result = tokio::task::spawn_blocking(move || {
         let mut last_error = String::new();
