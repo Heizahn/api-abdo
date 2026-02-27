@@ -23,11 +23,9 @@ pub fn get_ip_pppoe_mk(sn: &str,     ip: &str,
     }
 
     // 2. Preparar el comando que probamos en la terminal
-    // Usamos comillas para el SN y manejamos el error con :on-error para que no rompa el script
-    let interface_name = format!("<pppoe-{}>", sn);
     let command = format!(
-        ":do {{ :put ([/interface pppoe-server monitor \"{}\" once as-value]->\"remote-address\") }} on-error={{ :put \"NOT_FOUND\" }}",
-        interface_name
+        ":do {{ :put ([/interface pppoe-server monitor ([find name~\"(?i)<pppoe-{}>\"]->0) once as-value]->\"remote-address\") }} on-error={{ :put \"NOT_FOUND\" }}",
+        sn
     );
 
     // 3. Ejecutar el comando

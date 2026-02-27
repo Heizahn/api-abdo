@@ -132,22 +132,36 @@ pub async fn get_ip_pppoe(
     let port_mk = state.config.port_mk.clone();
     let pass_mk = state.config.pass_mk.clone();
 
-    // Es recomendable que get_ip_pppoe_mk sea ejecutada dentro de un spawn_blocking
-    // si la librería de SSH que usas es síncrona, para no bloquear el runtime de Axum.
-    let ip_pppoe = tokio::task::spawn_blocking(move || {
-        get_ip_pppoe_mk(&sn, "10.255.255.5", port_mk.as_str(), "rust_api", pass_mk.as_str())
+    // Definimos los routers a consultar.
+    // Lo ideal a futuro es que esta lista venga de state.config
+    let routers = vec!["10.255.255.5", "10.255.255.6"];
+
+    let ip_pppoe_result = tokio::task::spawn_blocking(move || {
+        let mut last_error = String::new();
+
+        for router_ip in routers {
+            match get_ip_pppoe_mk(&sn, router_ip, port_mk.as_str(), "rust_api", pass_mk.as_str()) {
+                Ok(ip) => return Ok(ip), // Si lo encuentra, sale inmediatamente del loop y de la tarea
+                Err(e) => {
+                    last_error = e;
+                    // Si el error es de sesión o de conexión, simplemente continuamos con el siguiente router
+                    continue;
+                }
+            }
+        }
+
+        // Si el ciclo termina sin encontrar nada, devolvemos el último error registrado
+        Err(last_error)
     })
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?; // Error del join de la tarea
+        .map_err(|e| ApiError::Internal(e.to_string()))?; // Error si la tarea asíncrona falla
 
-    match ip_pppoe {
+    match ip_pppoe_result {
         Ok(ip) => Ok(Json(ip)),
         Err(e) => {
-            // Si el error dice "no tiene sesión activa", podrías devolver un 404
             if e.contains("no tiene una sesión activa") {
                 Err(ApiError::NotFound)
             } else {
-                // Si es un error de SSH o conexión, un 500
                 Err(ApiError::Internal(e))
             }
         }
