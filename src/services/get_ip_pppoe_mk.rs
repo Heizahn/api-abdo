@@ -22,13 +22,25 @@ pub fn get_ip_pppoe_mk(sn: &str,     ip: &str,
         return Err("Autenticación fallida".to_string());
     }
 
-    // 2. Preparar el comando que probamos en la terminal
+    // 2. Construir regex para que sea case-insensitive (Ej: "vSol" -> "[vV][sS][oO][lL]")
+    let regex_sn: String = sn
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphabetic() {
+                format!("[{}{}]", c.to_ascii_lowercase(), c.to_ascii_uppercase())
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
+
+    // 3. Comando corto usando /ppp active protegido con on-error
     let command = format!(
-        ":do {{ :put ([/interface pppoe-server monitor ([find name~\"(?i)<pppoe-{}>\"]->0) once as-value]->\"remote-address\") }} on-error={{ :put \"NOT_FOUND\" }}",
-        sn
+        ":do {{ :put [/ppp active get [find name~\"{}\"] address] }} on-error={{ :put \"NOT_FOUND\" }}",
+        regex_sn
     );
 
-    // 3. Ejecutar el comando
+    // 4. Ejecutar el comando
     let mut channel = sess.channel_session().map_err(|e| e.to_string())?;
     channel.exec(&command).map_err(|e| e.to_string())?;
 
@@ -36,11 +48,11 @@ pub fn get_ip_pppoe_mk(sn: &str,     ip: &str,
     channel.read_to_string(&mut output).map_err(|e| e.to_string())?;
     channel.wait_close().ok();
 
-    // 4. Limpiar y validar la respuesta
-    let ip = output.trim();
+    // 5. Limpiar y validar la respuesta
+    let ip_result = output.trim();
 
-    if ip.is_empty() || ip == "NOT_FOUND" {
-        return Err(format!("El SN {} no tiene una sesión activa en el BRAS", sn));
+    if ip_result.is_empty() || ip_result == "NOT_FOUND" {
+        return Err(format!("El SN {} no tiene una sesión activa", sn));
     }
 
     // Validar que lo recibido parezca una IP (opcional pero recomendado)
