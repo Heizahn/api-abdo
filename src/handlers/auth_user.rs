@@ -48,10 +48,18 @@ pub async fn login_handler(
     // 4. Generate Token
     let jwt_service = UserJwtService::new();
     let token = jwt_service
-        .generate_token(&user.id, &user.s_name)
+        .generate_token(&user.id, &user.name)
         .map_err(|e| ApiError::Internal(e))?;
 
     Ok(Json(UserLoginResponse { token }))
+}
+
+async fn get_user_by_id(state: &Arc<AppState>, id: &str) -> Result<Option<User>, ApiError> {
+    state
+        .db
+        .find_user_by_id(id)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))
 }
 
 /// POST /v1/auth-user/refresh-token
@@ -67,16 +75,13 @@ pub async fn refresh_token_handler(
         .map_err(|_| ApiError::Unauthorized("Token inválido".to_string()))?;
 
     // 2. Check if user still exists
-    let user = state
-        .db
-        .find_user_by_id(&claims.id)
-        .await
-        .map_err(|e| ApiError::DatabaseError(e))?
+    let user = get_user_by_id(&state, &claims.id)
+        .await?
         .ok_or(ApiError::Unauthorized("Usuario no encontrado".to_string()))?;
 
     // 3. Generate new token
     let new_token = jwt_service
-        .generate_token(&user.id, &user.s_name)
+        .generate_token(&user.id, &user.name)
         .map_err(|e| ApiError::Internal(e))?;
 
     Ok(Json(RefreshTokenResponse { token: new_token }))
@@ -87,11 +92,8 @@ pub async fn me_handler(
     Extension(claims): Extension<UserProfileClaims>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<User>, ApiError> {
-    let user = state
-        .db
-        .find_user_by_id(&claims.id)
-        .await
-        .map_err(|e| ApiError::DatabaseError(e))?
+    let user = get_user_by_id(&state, &claims.id)
+        .await?
         .ok_or(ApiError::Unauthorized("Usuario no encontrado".to_string()))?;
 
     Ok(Json(user))

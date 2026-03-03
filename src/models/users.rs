@@ -6,10 +6,10 @@ pub struct User {
     pub id: String, // LB4 uses UUID strings as _id usually, not ObjectId. Based on the code: `id: string` and `uuidv4()`.
 
     #[serde(rename = "sName")]
-    pub s_name: String,
+    pub name: String,
 
     #[serde(rename = "nRole")]
-    pub n_role: f32,
+    pub role: f32,
 
     #[serde(rename = "email")]
     pub email: String,
@@ -18,7 +18,7 @@ pub struct User {
     pub visible: bool,
 
     #[serde(rename = "nTag", skip_serializing_if = "Option::is_none")]
-    pub n_tag: Option<u32>,
+    pub tag: Option<u32>,
 
     #[serde(rename = "idCreator", skip_serializing_if = "Option::is_none")]
     pub id_creator: Option<String>,
