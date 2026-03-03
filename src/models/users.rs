@@ -61,7 +61,6 @@ impl From<User> for UserResponse {
 pub struct ProviderResponse {
     pub id: String,
     pub tag: String,
-    #[serde(rename = "sName")]
     pub name: String,
 }
 
