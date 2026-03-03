@@ -8,6 +8,7 @@ use crate::{
     error::ApiError,
     models::users::{
         RefreshTokenRequest, RefreshTokenResponse, User, UserLoginRequest, UserLoginResponse,
+        UserResponse,
     },
     state::AppState,
 };
@@ -91,10 +92,10 @@ pub async fn refresh_token_handler(
 pub async fn me_handler(
     Extension(claims): Extension<UserProfileClaims>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<User>, ApiError> {
+) -> Result<Json<UserResponse>, ApiError> {
     let user = get_user_by_id(&state, &claims.id)
         .await?
         .ok_or(ApiError::Unauthorized("Usuario no encontrado".to_string()))?;
 
-    Ok(Json(user))
+    Ok(Json(UserResponse::from(user)))
 }

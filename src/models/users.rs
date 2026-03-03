@@ -37,6 +37,25 @@ pub struct UserCredentials {
 
 // DTOs
 
+#[derive(Debug, Serialize)]
+pub struct UserResponse {
+    pub id: String,
+    pub name: String,
+    pub email: String,
+    pub role: f32,
+}
+
+impl From<User> for UserResponse {
+    fn from(user: User) -> Self {
+        UserResponse {
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            role: user.role,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct UserLoginRequest {
     pub email: String,
