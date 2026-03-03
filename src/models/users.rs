@@ -1,9 +1,10 @@
+use mongodb::bson::Bson;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct User {
     #[serde(rename = "_id")]
-    pub id: String, // LB4 uses UUID strings as _id usually, not ObjectId. Based on the code: `id: string` and `uuidv4()`.
+    pub id: String, // Tu UUID puro intocable
 
     #[serde(rename = "sName")]
     pub name: String,
@@ -23,10 +24,10 @@ pub struct User {
     #[serde(rename = "idCreator", skip_serializing_if = "Option::is_none")]
     pub id_creator: Option<String>,
 
+    // Las fechas en Mongo suelen guardarse como mapas (ISODate), así que también usamos Bson aquí por si acaso
     #[serde(rename = "dCreation", skip_serializing_if = "Option::is_none")]
-    pub d_creation: Option<String>, // LB4 uses ISO string
+    pub d_creation: Option<Bson>,
 }
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserCredentials {
     //si no es UUID es ObjectId el _id de la credencial
@@ -67,6 +68,8 @@ pub struct ProviderResponse {
 impl From<User> for ProviderResponse {
     fn from(user: User) -> Self {
         let tag_value = user.tag.unwrap_or(0);
+
+
         ProviderResponse {
             id: user.id,
             tag: format!("ABDO77-{}", tag_value),
