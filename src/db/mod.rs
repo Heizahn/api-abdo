@@ -40,7 +40,7 @@ pub trait UserRepository {
     async fn find_user_by_id(&self, id: &str) -> Result<Option<User>, String>;
     async fn create_user(&self, user: User) -> Result<(), String>;
     async fn create_user_credentials(&self, creds: UserCredentials) -> Result<(), String>;
-    // Add other methods as needed: find_providers, find_users_list...
+    async fn find_providers(&self) -> Result<Vec<User>, String>;
 }
 
 // ============================================

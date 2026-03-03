@@ -56,6 +56,25 @@ impl From<User> for UserResponse {
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct ProviderResponse {
+    pub id: String,
+    pub tag: String,
+    #[serde(rename = "sName")]
+    pub name: String,
+}
+
+impl From<User> for ProviderResponse {
+    fn from(user: User) -> Self {
+        let tag_value = user.tag.unwrap_or(0);
+        ProviderResponse {
+            id: user.id,
+            tag: format!("ABDO77-{}", tag_value),
+            name: user.name,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct UserLoginRequest {
     pub email: String,
