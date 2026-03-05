@@ -40,10 +40,8 @@ async fn resolve_owner_id(
         .ok_or_else(|| ApiError::Unauthorized("Usuario no encontrado".to_string()))?;
 
     if (user.role - 3.0_f32).abs() < 0.01 {
-        // Provider/Owner: siempre filtra por su propio ID
         Ok(Some(claims.id.clone()))
     } else {
-        // Superadmin u otro rol: usa el parámetro opcional
         Ok(owner_param.map(|s| s.to_string()))
     }
 }

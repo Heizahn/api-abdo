@@ -288,17 +288,37 @@ impl SalesRepository for MongoDB {
         let mut pipeline: Vec<Document> = Vec::new();
 
         if let Some(owner) = owner_id {
-            // Join Clients first to filter by idOwner before limiting
+            // Paso 1: obtener los _id de los clientes del owner (usa índice en idOwner)
+            let clients_col = self.db.collection::<Document>("Clients");
+            let mut cursor = clients_col
+                .find(doc! { "idOwner": owner })
+                .projection(doc! { "_id": 1 })
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let mut client_ids: Vec<ObjectId> = Vec::new();
+            while let Some(Ok(doc)) = cursor.next().await {
+                if let Ok(id) = doc.get_object_id("_id") {
+                    client_ids.push(id);
+                }
+            }
+
+            if client_ids.is_empty() {
+                return Ok(vec![]);
+            }
+
+            // Paso 2: filtrar pagos por esos IDs (usa índice en idClient), luego sort+limit
+            pipeline.push(doc! { "$match": { "idClient": { "$in": &client_ids } } });
+            pipeline.push(doc! { "$sort": { "dCreation": -1 } });
+            pipeline.push(doc! { "$limit": limit as i64 });
             pipeline.push(doc! { "$lookup": {
                 "from": "Clients",
                 "localField": "idClient",
                 "foreignField": "_id",
-                "as": "client"
+                "as": "client",
+                "pipeline": [{ "$project": { "_id": 0, "sName": 1 } }]
             }});
-            pipeline.push(doc! { "$unwind": { "path": "$client", "preserveNullAndEmptyArrays": false } });
-            pipeline.push(doc! { "$match": { "client.idOwner": owner } });
-            pipeline.push(doc! { "$sort": { "dCreation": -1 } });
-            pipeline.push(doc! { "$limit": limit as i64 });
+            pipeline.push(doc! { "$unwind": { "path": "$client", "preserveNullAndEmptyArrays": true } });
         } else {
             pipeline.push(doc! { "$sort": { "dCreation": -1 } });
             pipeline.push(doc! { "$limit": limit as i64 });
