@@ -250,6 +250,40 @@ impl SalesRepository for MongoDB {
         collection.insert_one(report).await
     }
 
+    async fn sum_active_payments_in_range(
+        &self,
+        client_ids: &[ObjectId],
+        start: chrono::DateTime<chrono::Utc>,
+        end: chrono::DateTime<chrono::Utc>,
+    ) -> Result<f64, String> {
+        let start_bson = mongodb::bson::DateTime::from_millis(start.timestamp_millis());
+        let end_bson = mongodb::bson::DateTime::from_millis(end.timestamp_millis());
+
+        let pipeline = vec![
+            doc! {
+                "$match": {
+                    "idClient": { "$in": client_ids },
+                    "sState": "Activo",
+                    "dCreation": { "$gte": start_bson, "$lte": end_bson },
+                }
+            },
+            doc! {
+                "$group": {
+                    "_id": null,
+                    "total": { "$sum": "$nAmount" },
+                }
+            },
+        ];
+
+        let collection = self.db.collection::<Document>("Payments");
+        let mut cursor = collection.aggregate(pipeline).await.map_err(|e| e.to_string())?;
+
+        if let Some(Ok(doc)) = cursor.next().await {
+            return Ok(get_bson_amount(&doc, "total"));
+        }
+        Ok(0.0)
+    }
+
     async fn find_bank_list(&self) -> Result<Vec<Bank>, String> {
         let collection = self.db.collection::<Bank>("ListBanks");
 

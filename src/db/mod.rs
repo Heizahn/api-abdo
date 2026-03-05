@@ -1,5 +1,5 @@
 pub mod mongo;
-use crate::models::db::{LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, Tax};
+use crate::models::db::{ActiveClientBalance, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, Tax};
 
 use crate::models::payment::{Bank, PaymentReport};
 use crate::models::users::{User, UserCredentials}; // Import
@@ -62,6 +62,8 @@ pub trait ProfileRepository {
     ) -> Result<Vec<ResultGroupedByDate>, MongoError>;
 
     async fn get_phone(&self, id: &str) -> Result<String, String>;
+
+    async fn find_active_clients_for_closing(&self) -> Result<Vec<ActiveClientBalance>, String>;
 }
 
 // ============================================
@@ -103,6 +105,13 @@ pub trait SalesRepository {
     ) -> Result<InsertOneResult, MongoError>;
 
     async fn find_bank_list(&self) -> Result<Vec<Bank>, String>;
+
+    async fn sum_active_payments_in_range(
+        &self,
+        client_ids: &[mongodb::bson::oid::ObjectId],
+        start: chrono::DateTime<chrono::Utc>,
+        end: chrono::DateTime<chrono::Utc>,
+    ) -> Result<f64, String>;
 
     async fn find_pending_reports_by_debt_ids(
         &self,

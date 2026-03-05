@@ -15,6 +15,16 @@ pub struct Client {
     pub s_phone: String,
     #[serde(rename = "idTax", skip_serializing_if = "Option::is_none")]
     pub id_tax: Option<ObjectId>,
+    #[serde(rename = "nBalance", default)]
+    pub n_balance: f64,
+    #[serde(rename = "sState", default)]
+    pub s_state: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveClientBalance {
+    pub id: ObjectId,
+    pub n_balance: f64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

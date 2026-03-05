@@ -2,7 +2,7 @@ use super::MongoDB;
 use crate::db::mongo::ResultGroupedByDate;
 use crate::db::ProfileRepository;
 use crate::domain::customer::{Customer, CustomerView};
-use crate::models::db::{Client, Tax};
+use crate::models::db::{ActiveClientBalance, Client, Tax};
 use async_trait::async_trait;
 use futures::stream::StreamExt;
 use futures::TryStreamExt;
@@ -49,6 +49,8 @@ impl ProfileRepository for MongoDB {
                 _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
                 s_phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
                 id_tax: None,
+                n_balance: 0.0,
+                s_state: String::new(),
             };
             clients.push(client);
         }
@@ -65,6 +67,8 @@ impl ProfileRepository for MongoDB {
                     _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
                     s_phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
                     id_tax: doc.get_object_id("idTax").ok(),
+                    n_balance: 0.0,
+                    s_state: String::new(),
                 };
                 Ok(client)
             }
@@ -72,6 +76,8 @@ impl ProfileRepository for MongoDB {
                 _id: ObjectId::new(),
                 s_phone: String::new(),
                 id_tax: None,
+                n_balance: 0.0,
+                s_state: String::new(),
             }),
             Err(e) => Err(e.to_string()),
         }
@@ -238,6 +244,29 @@ impl ProfileRepository for MongoDB {
             results.push(item);
         }
         Ok(results)
+    }
+
+    async fn find_active_clients_for_closing(&self) -> Result<Vec<ActiveClientBalance>, String> {
+        use crate::utils::get_bson_amount::get_bson_amount;
+
+        let filter = doc! { "sState": "Activo" };
+        let collection: Collection<Document> = self.db.collection("Clients");
+
+        let mut cursor = collection
+            .find(filter)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut clients = Vec::new();
+        while let Some(Ok(doc)) = cursor.next().await {
+            if let Ok(id) = doc.get_object_id("_id") {
+                clients.push(ActiveClientBalance {
+                    id,
+                    n_balance: get_bson_amount(&doc, "nBalance"),
+                });
+            }
+        }
+        Ok(clients)
     }
 
     async fn get_phone(&self, id: &str) -> Result<String, String> {
