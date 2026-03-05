@@ -246,11 +246,13 @@ impl ProfileRepository for MongoDB {
         Ok(results)
     }
 
-    async fn get_solvency_counts(&self) -> Result<SolvencyCounts, String> {
+    async fn get_solvency_counts(&self, owner_id: Option<&str>) -> Result<SolvencyCounts, String> {
+        let mut match_doc = doc! { "sState": { "$in": ["Activo", "Suspendido"] } };
+        if let Some(owner) = owner_id {
+            match_doc.insert("idOwner", owner);
+        }
         let pipeline = vec![
-            doc! {
-                "$match": { "sState": { "$in": ["Activo", "Suspendido"] } }
-            },
+            doc! { "$match": match_doc },
             doc! {
                 "$group": {
                     "_id": null,
@@ -287,10 +289,13 @@ impl ProfileRepository for MongoDB {
         Ok(SolvencyCounts { solventes: 0, morosos: 0, suspendidos: 0 })
     }
 
-    async fn find_active_clients_for_closing(&self) -> Result<Vec<ActiveClientBalance>, String> {
+    async fn find_active_clients_for_closing(&self, owner_id: Option<&str>) -> Result<Vec<ActiveClientBalance>, String> {
         use crate::utils::get_bson_amount::get_bson_amount;
 
-        let filter = doc! { "sState": "Activo" };
+        let mut filter = doc! { "sState": "Activo" };
+        if let Some(owner) = owner_id {
+            filter.insert("idOwner", owner);
+        }
         let collection: Collection<Document> = self.db.collection("Clients");
 
         let mut cursor = collection

@@ -284,39 +284,53 @@ impl SalesRepository for MongoDB {
         Ok(0.0)
     }
 
-    async fn get_latest_payments(&self, limit: u32) -> Result<Vec<LatestPayment>, String> {
-        let pipeline = vec![
-            doc! { "$sort": { "dCreation": -1 } },
-            doc! { "$limit": limit as i64 },
-            // Lookup client name
-            doc! { "$lookup": {
+    async fn get_latest_payments(&self, limit: u32, owner_id: Option<&str>) -> Result<Vec<LatestPayment>, String> {
+        let mut pipeline: Vec<Document> = Vec::new();
+
+        if let Some(owner) = owner_id {
+            // Join Clients first to filter by idOwner before limiting
+            pipeline.push(doc! { "$lookup": {
+                "from": "Clients",
+                "localField": "idClient",
+                "foreignField": "_id",
+                "as": "client"
+            }});
+            pipeline.push(doc! { "$unwind": { "path": "$client", "preserveNullAndEmptyArrays": false } });
+            pipeline.push(doc! { "$match": { "client.idOwner": owner } });
+            pipeline.push(doc! { "$sort": { "dCreation": -1 } });
+            pipeline.push(doc! { "$limit": limit as i64 });
+        } else {
+            pipeline.push(doc! { "$sort": { "dCreation": -1 } });
+            pipeline.push(doc! { "$limit": limit as i64 });
+            pipeline.push(doc! { "$lookup": {
                 "from": "Clients",
                 "localField": "idClient",
                 "foreignField": "_id",
                 "as": "client",
                 "pipeline": [{ "$project": { "_id": 0, "sName": 1 } }]
-            }},
-            doc! { "$unwind": { "path": "$client", "preserveNullAndEmptyArrays": true } },
-            // Lookup creator name (UUID string _id en Users)
-            doc! { "$lookup": {
-                "from": "Users",
-                "localField": "idCreator",
-                "foreignField": "_id",
-                "as": "creator",
-                "pipeline": [{ "$project": { "_id": 0, "sName": 1 } }]
-            }},
-            doc! { "$unwind": { "path": "$creator", "preserveNullAndEmptyArrays": true } },
-            doc! { "$project": {
-                "_id": 1,
-                "dCreation": 1,
-                "sReason": 1,
-                "sState": 1,
-                "nAmount": 1,
-                "nBs": 1,
-                "client_name": { "$ifNull": ["$client.sName", ""] },
-                "creator_name": { "$ifNull": ["$creator.sName", ""] },
-            }},
-        ];
+            }});
+            pipeline.push(doc! { "$unwind": { "path": "$client", "preserveNullAndEmptyArrays": true } });
+        }
+
+        // Lookup creator name (UUID string _id en Users)
+        pipeline.push(doc! { "$lookup": {
+            "from": "Users",
+            "localField": "idCreator",
+            "foreignField": "_id",
+            "as": "creator",
+            "pipeline": [{ "$project": { "_id": 0, "sName": 1 } }]
+        }});
+        pipeline.push(doc! { "$unwind": { "path": "$creator", "preserveNullAndEmptyArrays": true } });
+        pipeline.push(doc! { "$project": {
+            "_id": 1,
+            "dCreation": 1,
+            "sReason": 1,
+            "sState": 1,
+            "nAmount": 1,
+            "nBs": 1,
+            "client_name": { "$ifNull": ["$client.sName", ""] },
+            "creator_name": { "$ifNull": ["$creator.sName", ""] },
+        }});
 
         let collection = self.db.collection::<Document>("Payments");
         let mut cursor = collection.aggregate(pipeline).await.map_err(|e| e.to_string())?;

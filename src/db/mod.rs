@@ -63,9 +63,9 @@ pub trait ProfileRepository {
 
     async fn get_phone(&self, id: &str) -> Result<String, String>;
 
-    async fn find_active_clients_for_closing(&self) -> Result<Vec<ActiveClientBalance>, String>;
+    async fn find_active_clients_for_closing(&self, owner_id: Option<&str>) -> Result<Vec<ActiveClientBalance>, String>;
 
-    async fn get_solvency_counts(&self) -> Result<SolvencyCounts, String>;
+    async fn get_solvency_counts(&self, owner_id: Option<&str>) -> Result<SolvencyCounts, String>;
 }
 
 // ============================================
@@ -115,7 +115,7 @@ pub trait SalesRepository {
         end: chrono::DateTime<chrono::Utc>,
     ) -> Result<f64, String>;
 
-    async fn get_latest_payments(&self, limit: u32) -> Result<Vec<LatestPayment>, String>;
+    async fn get_latest_payments(&self, limit: u32, owner_id: Option<&str>) -> Result<Vec<LatestPayment>, String>;
 
     async fn find_pending_reports_by_debt_ids(
         &self,

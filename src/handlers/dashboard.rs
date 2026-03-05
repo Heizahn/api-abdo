@@ -1,11 +1,12 @@
-use axum::{extract::{Query, State}, Json};
+use axum::{extract::{Extension, Query, State}, Json};
 use chrono::{Datelike, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::{
-    db::{ProfileRepository, SalesRepository},
+    auth::user_jwt::UserProfileClaims,
+    db::{ProfileRepository, SalesRepository, UserRepository},
     error::ApiError,
     models::db::{LatestPayment, SolvencyCounts},
     state::AppState,
@@ -13,8 +14,38 @@ use crate::{
 };
 
 #[derive(Deserialize)]
+pub struct DashboardQuery {
+    pub owner: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct MonthlyClosingQuery {
     pub month: Option<String>,
+    pub owner: Option<String>,
+}
+
+/// Determina el idOwner efectivo según el rol del usuario autenticado.
+/// Si es provider (nRole == 3): siempre usa su propio ID del JWT.
+/// Si es superadmin u otro: usa el parámetro `owner` si se proporcionó.
+async fn resolve_owner_id(
+    state: &Arc<AppState>,
+    claims: &UserProfileClaims,
+    owner_param: Option<&str>,
+) -> Result<Option<String>, ApiError> {
+    let user = state
+        .db
+        .find_user_by_id(&claims.id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| ApiError::Unauthorized("Usuario no encontrado".to_string()))?;
+
+    if (user.role - 3.0_f32).abs() < 0.01 {
+        // Provider/Owner: siempre filtra por su propio ID
+        Ok(Some(claims.id.clone()))
+    } else {
+        // Superadmin u otro rol: usa el parámetro opcional
+        Ok(owner_param.map(|s| s.to_string()))
+    }
 }
 
 #[derive(Serialize)]
@@ -31,35 +62,43 @@ pub struct MonthlyClosingData {
     pub efficiency: Option<f64>,
 }
 
-/// GET /v1/auth-user/dashboard/latest-payments
+/// GET /v1/auth-user/dashboard/latest-payments?owner=<id>
 pub async fn latest_payments_handler(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Query(params): Query<DashboardQuery>,
 ) -> Result<Json<Vec<LatestPayment>>, ApiError> {
+    let owner_id = resolve_owner_id(&state, &claims, params.owner.as_deref()).await?;
     state
         .db
-        .get_latest_payments(10)
+        .get_latest_payments(10, owner_id.as_deref())
         .await
         .map(Json)
         .map_err(ApiError::DatabaseError)
 }
 
-/// GET /v1/auth-user/dashboard/solvency
+/// GET /v1/auth-user/dashboard/solvency?owner=<id>
 pub async fn solvency_handler(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Query(params): Query<DashboardQuery>,
 ) -> Result<Json<SolvencyCounts>, ApiError> {
+    let owner_id = resolve_owner_id(&state, &claims, params.owner.as_deref()).await?;
     state
         .db
-        .get_solvency_counts()
+        .get_solvency_counts(owner_id.as_deref())
         .await
         .map(Json)
         .map_err(ApiError::DatabaseError)
 }
 
-/// GET /v1/auth-user/dashboard/monthly-closing?month=YYYY-MM
+/// GET /v1/auth-user/dashboard/monthly-closing?month=YYYY-MM&owner=<id>
 pub async fn monthly_closing_handler(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
     Query(params): Query<MonthlyClosingQuery>,
 ) -> Result<Json<MonthlyClosingResponse>, ApiError> {
+    let owner_id = resolve_owner_id(&state, &claims, params.owner.as_deref()).await?;
     let now_vz = Utc::now().with_timezone(&VENEZUELA_TZ);
     let current_year = now_vz.year();
     let current_month = now_vz.month();
@@ -100,7 +139,7 @@ pub async fn monthly_closing_handler(
     // Obtener todos los clientes activos con su balance
     let active_clients = state
         .db
-        .find_active_clients_for_closing()
+        .find_active_clients_for_closing(owner_id.as_deref())
         .await
         .map_err(ApiError::DatabaseError)?;
 
