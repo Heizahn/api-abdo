@@ -2,7 +2,7 @@ use super::MongoDB;
 use crate::db::mongo::ResultGroupedByDate;
 use crate::db::ProfileRepository;
 use crate::domain::customer::{Customer, CustomerView};
-use crate::models::db::{ActiveClientBalance, Client, Tax};
+use crate::models::db::{ActiveClientBalance, Client, SolvencyCounts, Tax};
 use async_trait::async_trait;
 use futures::stream::StreamExt;
 use futures::TryStreamExt;
@@ -244,6 +244,47 @@ impl ProfileRepository for MongoDB {
             results.push(item);
         }
         Ok(results)
+    }
+
+    async fn get_solvency_counts(&self) -> Result<SolvencyCounts, String> {
+        let pipeline = vec![
+            doc! {
+                "$match": { "sState": { "$in": ["Activo", "Suspendido"] } }
+            },
+            doc! {
+                "$group": {
+                    "_id": null,
+                    "solventes": { "$sum": {
+                        "$cond": [{ "$and": [
+                            { "$eq": ["$sState", "Activo"] },
+                            { "$gte": ["$nBalance", 0.0] }
+                        ]}, 1, 0]
+                    }},
+                    "morosos": { "$sum": {
+                        "$cond": [{ "$and": [
+                            { "$eq": ["$sState", "Activo"] },
+                            { "$lt": ["$nBalance", 0.0] }
+                        ]}, 1, 0]
+                    }},
+                    "suspendidos": { "$sum": {
+                        "$cond": [{ "$eq": ["$sState", "Suspendido"] }, 1, 0]
+                    }},
+                }
+            },
+        ];
+
+        let collection: Collection<Document> = self.db.collection("Clients");
+        let mut cursor = collection.aggregate(pipeline).await.map_err(|e| e.to_string())?;
+
+        if let Some(Ok(doc)) = cursor.next().await {
+            return Ok(SolvencyCounts {
+                solventes: doc.get_i32("solventes").unwrap_or(0) as u32,
+                morosos: doc.get_i32("morosos").unwrap_or(0) as u32,
+                suspendidos: doc.get_i32("suspendidos").unwrap_or(0) as u32,
+            });
+        }
+
+        Ok(SolvencyCounts { solventes: 0, morosos: 0, suspendidos: 0 })
     }
 
     async fn find_active_clients_for_closing(&self) -> Result<Vec<ActiveClientBalance>, String> {

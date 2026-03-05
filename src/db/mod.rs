@@ -1,5 +1,5 @@
 pub mod mongo;
-use crate::models::db::{ActiveClientBalance, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, Tax};
+use crate::models::db::{ActiveClientBalance, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
 
 use crate::models::payment::{Bank, PaymentReport};
 use crate::models::users::{User, UserCredentials}; // Import
@@ -64,6 +64,8 @@ pub trait ProfileRepository {
     async fn get_phone(&self, id: &str) -> Result<String, String>;
 
     async fn find_active_clients_for_closing(&self) -> Result<Vec<ActiveClientBalance>, String>;
+
+    async fn get_solvency_counts(&self) -> Result<SolvencyCounts, String>;
 }
 
 // ============================================

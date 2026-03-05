@@ -27,6 +27,13 @@ pub struct ActiveClientBalance {
     pub n_balance: f64,
 }
 
+#[derive(Debug, Serialize)]
+pub struct SolvencyCounts {
+    pub solventes: u32,
+    pub morosos: u32,
+    pub suspendidos: u32,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Debt {
     #[serde(rename = "_id")]

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::{
     db::{ProfileRepository, SalesRepository},
     error::ApiError,
+    models::db::SolvencyCounts,
     state::AppState,
     utils::timezone::VENEZUELA_TZ,
 };
@@ -28,6 +29,18 @@ pub struct MonthlyClosingData {
     pub collected: f64,
     pub pending: f64,
     pub efficiency: Option<f64>,
+}
+
+/// GET /v1/auth-user/dashboard/solvency
+pub async fn solvency_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<SolvencyCounts>, ApiError> {
+    state
+        .db
+        .get_solvency_counts()
+        .await
+        .map(Json)
+        .map_err(ApiError::DatabaseError)
 }
 
 /// GET /v1/auth-user/dashboard/monthly-closing?month=YYYY-MM

@@ -66,6 +66,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/auth-user/dashboard/monthly-closing",
             get(dashboard::monthly_closing_handler),
         )
+        .route(
+            "/v1/auth-user/dashboard/solvency",
+            get(dashboard::solvency_handler),
+        )
         .route("/v1/users/providers", get(providers::get_providers_handler))
         .route("/v1/utils/bcv", get(utils::get_bcv))
         .route("/v1/utils/ip-pppoe/:sn", get(utils::get_ip_pppoe))
