@@ -1,6 +1,7 @@
 use axum::{extract::{Query, State}, Json};
 use chrono::{Datelike, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::{
@@ -37,6 +38,7 @@ pub async fn monthly_closing_handler(
     let now_vz = Utc::now().with_timezone(&VENEZUELA_TZ);
     let current_year = now_vz.year();
     let current_month = now_vz.month();
+    let current_idx = month_to_index(current_year, current_month);
 
     // Parsear mes solicitado o usar el actual
     let (selected_year, selected_month) = match &params.month {
@@ -45,7 +47,15 @@ pub async fn monthly_closing_handler(
         None => (current_year, current_month),
     };
 
-    let is_current_month = selected_year == current_year && selected_month == current_month;
+    // Validar que no sea un mes futuro
+    let selected_idx = month_to_index(selected_year, selected_month);
+    if selected_idx > current_idx {
+        return Err(ApiError::BadRequest(
+            "El mes seleccionado no puede ser mayor al mes actual".into(),
+        ));
+    }
+
+    let is_current_month = selected_idx == current_idx;
 
     // Rango del mes seleccionado en Venezuela (primer y último día, 00:00:00 / 23:59:59)
     let last_day = days_in_month(selected_year, selected_month);
@@ -82,6 +92,11 @@ pub async fn monthly_closing_handler(
             .map_err(ApiError::DatabaseError)?
     };
 
+    // Para meses pasados sin ningún dato recaudado, no tiene sentido mostrarlos
+    if !is_current_month && collected == 0.0 {
+        return Err(ApiError::NotFound);
+    }
+
     // Calcular pendiente: solo si es el mes actual
     let pending = if is_current_month {
         active_clients
@@ -105,8 +120,8 @@ pub async fn monthly_closing_handler(
         None
     };
 
-    // Lista de últimos 6 meses para el selector del frontend
-    let months = last_six_months(current_year, current_month);
+    // Lista de meses: 3 antes + seleccionado + 3 después (capeados al actual) + siempre el actual
+    let months = build_month_selector(selected_year, selected_month, current_year, current_month);
     let selected_month_str = format!("{:04}-{:02}", selected_year, selected_month);
 
     Ok(Json(MonthlyClosingResponse {
@@ -118,6 +133,51 @@ pub async fn monthly_closing_handler(
             efficiency,
         },
     }))
+}
+
+/// Construye la lista de meses para el selector:
+/// 3 meses antes del seleccionado + el seleccionado + 3 después (capeados al actual)
+/// El mes actual siempre está incluido. Orden: más reciente primero.
+fn build_month_selector(
+    sel_year: i32,
+    sel_month: u32,
+    cur_year: i32,
+    cur_month: u32,
+) -> Vec<String> {
+    let sel_idx = month_to_index(sel_year, sel_month);
+    let cur_idx = month_to_index(cur_year, cur_month);
+
+    let mut set: BTreeSet<i32> = BTreeSet::new();
+
+    // 3 antes + seleccionado + 3 después, capado al mes actual
+    for offset in -3i32..=3 {
+        let idx = sel_idx + offset;
+        if idx <= cur_idx {
+            set.insert(idx);
+        }
+    }
+
+    // El mes actual siempre aparece
+    set.insert(cur_idx);
+
+    // Orden descendente (más reciente primero)
+    set.into_iter()
+        .rev()
+        .map(|idx| {
+            let (y, m) = index_to_month(idx);
+            format!("{:04}-{:02}", y, m)
+        })
+        .collect()
+}
+
+fn month_to_index(year: i32, month: u32) -> i32 {
+    year * 12 + month as i32 - 1
+}
+
+fn index_to_month(idx: i32) -> (i32, u32) {
+    let year = idx / 12;
+    let month = (idx % 12 + 1) as u32;
+    (year, month)
 }
 
 fn parse_year_month(s: &str) -> Option<(i32, u32)> {
@@ -143,20 +203,4 @@ fn days_in_month(year: i32, month: u32) -> u32 {
         }
         _ => 30,
     }
-}
-
-fn last_six_months(year: i32, month: u32) -> Vec<String> {
-    let mut result = Vec::with_capacity(6);
-    let mut y = year;
-    let mut m = month;
-    for _ in 0..6 {
-        result.push(format!("{:04}-{:02}", y, m));
-        if m == 1 {
-            m = 12;
-            y -= 1;
-        } else {
-            m -= 1;
-        }
-    }
-    result
 }
