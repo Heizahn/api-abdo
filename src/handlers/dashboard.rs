@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::{
     db::{ProfileRepository, SalesRepository},
     error::ApiError,
-    models::db::SolvencyCounts,
+    models::db::{LatestPayment, SolvencyCounts},
     state::AppState,
     utils::timezone::VENEZUELA_TZ,
 };
@@ -29,6 +29,18 @@ pub struct MonthlyClosingData {
     pub collected: f64,
     pub pending: f64,
     pub efficiency: Option<f64>,
+}
+
+/// GET /v1/auth-user/dashboard/latest-payments
+pub async fn latest_payments_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<LatestPayment>>, ApiError> {
+    state
+        .db
+        .get_latest_payments(10)
+        .await
+        .map(Json)
+        .map_err(ApiError::DatabaseError)
 }
 
 /// GET /v1/auth-user/dashboard/solvency

@@ -28,6 +28,18 @@ pub struct ActiveClientBalance {
 }
 
 #[derive(Debug, Serialize)]
+pub struct LatestPayment {
+    pub id: String,
+    pub created_at: String,
+    pub reason: String,
+    pub state: String,
+    pub amount: f64,
+    pub amount_bs: f64,
+    pub client_name: String,
+    pub creator_name: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct SolvencyCounts {
     pub solventes: u32,
     pub morosos: u32,

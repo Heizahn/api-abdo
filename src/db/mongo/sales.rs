@@ -8,7 +8,7 @@ use mongodb::{error::Error as MongoError, Collection};
 
 use super::MongoDB;
 use crate::db::SalesRepository;
-use crate::models::db::{Debt, PartPayment, Payment};
+use crate::models::db::{Debt, LatestPayment, PartPayment, Payment};
 use crate::models::payment::{Bank, ClientOwner, PaymentMethod, PaymentReport, UserPaymentInfo};
 
 #[async_trait]
@@ -282,6 +282,71 @@ impl SalesRepository for MongoDB {
             return Ok(get_bson_amount(&doc, "total"));
         }
         Ok(0.0)
+    }
+
+    async fn get_latest_payments(&self, limit: u32) -> Result<Vec<LatestPayment>, String> {
+        let pipeline = vec![
+            doc! { "$sort": { "dCreation": -1 } },
+            doc! { "$limit": limit as i64 },
+            // Lookup client name
+            doc! { "$lookup": {
+                "from": "Clients",
+                "localField": "idClient",
+                "foreignField": "_id",
+                "as": "client",
+                "pipeline": [{ "$project": { "_id": 0, "sName": 1 } }]
+            }},
+            doc! { "$unwind": { "path": "$client", "preserveNullAndEmptyArrays": true } },
+            // Lookup creator name (UUID string _id en Users)
+            doc! { "$lookup": {
+                "from": "Users",
+                "localField": "idCreator",
+                "foreignField": "_id",
+                "as": "creator",
+                "pipeline": [{ "$project": { "_id": 0, "sName": 1 } }]
+            }},
+            doc! { "$unwind": { "path": "$creator", "preserveNullAndEmptyArrays": true } },
+            doc! { "$project": {
+                "_id": 1,
+                "dCreation": 1,
+                "sReason": 1,
+                "sState": 1,
+                "nAmount": 1,
+                "nBs": 1,
+                "client_name": { "$ifNull": ["$client.sName", ""] },
+                "creator_name": { "$ifNull": ["$creator.sName", ""] },
+            }},
+        ];
+
+        let collection = self.db.collection::<Document>("Payments");
+        let mut cursor = collection.aggregate(pipeline).await.map_err(|e| e.to_string())?;
+        let mut payments = Vec::new();
+
+        while let Some(Ok(doc)) = cursor.next().await {
+            let id = doc
+                .get_object_id("_id")
+                .map(|o| o.to_hex())
+                .unwrap_or_default();
+
+            let created_at = doc
+                .get_datetime("dCreation")
+                .ok()
+                .map(|dt| VenezuelaDateTime::from(*dt).datetime_string_venezuela())
+                .unwrap_or_default();
+
+            payments.push(LatestPayment {
+                id,
+                created_at,
+                reason: doc.get_str("sReason").unwrap_or_default().to_string(),
+                state: doc.get_str("sState").unwrap_or_default().to_string(),
+                amount: get_bson_amount(&doc, "nAmount"),
+                amount_bs: get_bson_amount(&doc, "nBs"),
+                client_name: doc.get_str("client_name").unwrap_or_default().to_string(),
+                creator_name: doc.get_str("creator_name").unwrap_or_default().to_string(),
+            });
+        }
+
+        Ok(payments)
     }
 
     async fn find_bank_list(&self) -> Result<Vec<Bank>, String> {

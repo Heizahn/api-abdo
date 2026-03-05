@@ -1,5 +1,5 @@
 pub mod mongo;
-use crate::models::db::{ActiveClientBalance, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
+use crate::models::db::{ActiveClientBalance, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
 
 use crate::models::payment::{Bank, PaymentReport};
 use crate::models::users::{User, UserCredentials}; // Import
@@ -114,6 +114,8 @@ pub trait SalesRepository {
         start: chrono::DateTime<chrono::Utc>,
         end: chrono::DateTime<chrono::Utc>,
     ) -> Result<f64, String>;
+
+    async fn get_latest_payments(&self, limit: u32) -> Result<Vec<LatestPayment>, String>;
 
     async fn find_pending_reports_by_debt_ids(
         &self,
