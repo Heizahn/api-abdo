@@ -1,4 +1,8 @@
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Extension, Query, State},
+    Json,
+};
+use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::{
@@ -8,16 +12,20 @@ use crate::{
     models::db::ClientListItem,
     state::AppState,
 };
-use axum::extract::Extension;
 
-/// GET /v1/auth-user/clients/all
+#[derive(Deserialize)]
+pub struct ClientsQuery {
+    pub owner: Option<String>,
+}
+
+/// GET /v1/auth-user/clients/all?owner=<id>
 ///
-/// Retorna la lista de clientes con id, nombre y balance.
-/// Si el usuario tiene rol provider (nRole == 3) solo ve sus clientes.
-/// Otros roles ven todos los clientes (o pueden filtrar via query en el futuro).
+/// - Rol 3 (provider): siempre filtra por su propio ID, ignora ?owner.
+/// - Otros roles: usa ?owner si se provee, o devuelve todos.
 pub async fn get_all_clients_handler(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<UserProfileClaims>,
+    Query(params): Query<ClientsQuery>,
 ) -> Result<Json<Vec<ClientListItem>>, ApiError> {
     let user = state
         .db
@@ -26,15 +34,15 @@ pub async fn get_all_clients_handler(
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(|| ApiError::Unauthorized("Usuario no encontrado".to_string()))?;
 
-    let owner_id = if (user.role - 3.0_f32).abs() < 0.01 {
-        Some(claims.id.as_str())
+    let owner_id: Option<String> = if (user.role - 3.0_f32).abs() < 0.01 {
+        Some(claims.id.clone())
     } else {
-        None
+        params.owner
     };
 
     state
         .db
-        .get_all_clients(owner_id)
+        .get_all_clients(owner_id.as_deref())
         .await
         .map(Json)
         .map_err(ApiError::DatabaseError)

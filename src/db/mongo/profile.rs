@@ -11,6 +11,7 @@ use mongodb::bson::{self, Document};
 use mongodb::bson::{doc, oid::ObjectId};
 use mongodb::error::Error as MongoError;
 use mongodb::Collection;
+use std::collections::HashMap;
 
 #[async_trait]
 impl ProfileRepository for MongoDB {
@@ -326,41 +327,87 @@ impl ProfileRepository for MongoDB {
     }
 
     async fn get_all_clients(&self, owner_id: Option<&str>) -> Result<Vec<ClientListItem>, String> {
-        let collection: Collection<Document> = self.db.collection("Clients");
+        let db = self.db.clone();
 
-        let mut match_doc = doc! {
+        let mut client_filter = doc! {
             "sState": { "$in": ["Activo", "Suspendido", "Retirado"] }
         };
         if let Some(owner) = owner_id {
-            match_doc.insert("idOwner", owner);
+            client_filter.insert("idOwner", owner);
         }
 
-        let pipeline = vec![
-            doc! { "$match": match_doc },
-            doc! { "$lookup": {
-                "from": "Sectors",
-                "localField": "idSector",
-                "foreignField": "_id",
-                "as": "sector",
-                "pipeline": [{ "$project": { "_id": 0, "sName": 1 } }]
-            }},
-            doc! { "$lookup": {
-                "from": "Plans",
-                "localField": "idSubscription",
-                "foreignField": "_id",
-                "as": "plan",
-                "pipeline": [{ "$project": { "_id": 0, "sName": 1, "nAmount": 1 } }]
-            }},
-            doc! { "$sort": { "sName": 1 } },
-        ];
+        let client_projection = doc! {
+            "_id": 1, "sName": 1, "sDni": 1, "sRif": 1,
+            "sState": 1, "nBalance": 1, "idSector": 1, "idSubscription": 1
+        };
 
-        let mut cursor = collection
-            .aggregate(pipeline)
-            .await
-            .map_err(|e| e.to_string())?;
+        // 3 queries en paralelo: clients + sectors + plans
+        let clients_fut = {
+            let db = db.clone();
+            let filter = client_filter.clone();
+            let proj = client_projection.clone();
+            async move {
+                db.collection::<Document>("Clients")
+                    .find(filter)
+                    .projection(proj)
+                    .sort(doc! { "sName": 1 })
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+        };
 
-        let mut clients = Vec::with_capacity(256);
-        while let Some(Ok(doc)) = cursor.next().await {
+        let sectors_fut = {
+            let db = db.clone();
+            async move {
+                db.collection::<Document>("Sectors")
+                    .find(doc! {})
+                    .projection(doc! { "_id": 1, "sName": 1 })
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+        };
+
+        let plans_fut = {
+            let db = db.clone();
+            async move {
+                db.collection::<Document>("Plans")
+                    .find(doc! {})
+                    .projection(doc! { "_id": 1, "sName": 1, "nAmount": 1 })
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+        };
+
+        let (clients_res, sectors_res, plans_res) =
+            tokio::join!(clients_fut, sectors_fut, plans_fut);
+
+        let mut clients_cursor = clients_res?;
+        let mut sectors_cursor = sectors_res?;
+        let mut plans_cursor = plans_res?;
+
+        // Sector HashMap: ObjectId hex -> sector_name
+        let mut sectors: HashMap<String, String> = HashMap::new();
+        while let Some(Ok(doc)) = sectors_cursor.next().await {
+            if let Ok(id) = doc.get_object_id("_id") {
+                if let Ok(name) = doc.get_str("sName") {
+                    sectors.insert(id.to_hex(), name.to_string());
+                }
+            }
+        }
+
+        // Plans HashMap: ObjectId hex -> (plan_name, plan_price)
+        let mut plans: HashMap<String, (String, f64)> = HashMap::new();
+        while let Some(Ok(doc)) = plans_cursor.next().await {
+            if let Ok(id) = doc.get_object_id("_id") {
+                let name = doc.get_str("sName").unwrap_or_default().to_string();
+                let price = get_bson_amount(&doc, "nAmount");
+                plans.insert(id.to_hex(), (name, price));
+            }
+        }
+
+        // Construir lista de clientes haciendo join en memoria
+        let mut clients = Vec::with_capacity(512);
+        while let Some(Ok(doc)) = clients_cursor.next().await {
             let id = doc
                 .get_object_id("_id")
                 .map(|o| o.to_hex())
@@ -376,7 +423,6 @@ impl ProfileRepository for MongoDB {
                 other => other.to_string(),
             };
 
-            // sDni tiene prioridad sobre sRif
             let dni = doc
                 .get_str("sDni")
                 .ok()
@@ -385,28 +431,19 @@ impl ProfileRepository for MongoDB {
                 .map(|s| s.to_string());
 
             let sector_name = doc
-                .get_array("sector")
+                .get_object_id("idSector")
                 .ok()
-                .and_then(|arr| arr.first())
-                .and_then(|v| v.as_document())
-                .and_then(|d| d.get_str("sName").ok())
-                .map(|s| s.to_string());
-
-            let plan = doc
-                .get_array("plan")
-                .ok()
-                .and_then(|arr| arr.first())
-                .and_then(|v| v.as_document())
+                .and_then(|id| sectors.get(&id.to_hex()))
                 .cloned();
 
-            let plan_name = plan
-                .as_ref()
-                .and_then(|d| d.get_str("sName").ok())
-                .map(|s| s.to_string());
+            let plan_entry = doc
+                .get_object_id("idSubscription")
+                .ok()
+                .and_then(|id| plans.get(&id.to_hex()));
 
-            let plan_price = plan
-                .as_ref()
-                .map(|d| get_bson_amount(d, "nAmount"))
+            let plan_name = plan_entry.map(|(name, _)| name.clone());
+            let plan_price = plan_entry
+                .map(|(_, price)| *price)
                 .filter(|&v| v > 0.0);
 
             clients.push(ClientListItem {
