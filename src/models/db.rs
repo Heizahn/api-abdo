@@ -168,5 +168,10 @@ pub struct BcvResponse {
 pub struct ClientListItem {
     pub id: String,
     pub name: String,
+    pub dni: Option<String>,
+    pub status: String,
     pub balance: f64,
+    pub sector_name: Option<String>,
+    pub plan_name: Option<String>,
+    pub plan_price: Option<f64>,
 }

@@ -328,19 +328,34 @@ impl ProfileRepository for MongoDB {
     async fn get_all_clients(&self, owner_id: Option<&str>) -> Result<Vec<ClientListItem>, String> {
         let collection: Collection<Document> = self.db.collection("Clients");
 
-        let mut filter = doc! { "sState": { "$in": ["Activo", "Suspendido"] } };
+        let mut match_doc = doc! {
+            "sState": { "$in": ["Activo", "Suspendido", "Retirado"] }
+        };
         if let Some(owner) = owner_id {
-            filter.insert("idOwner", owner);
+            match_doc.insert("idOwner", owner);
         }
 
-        let options = mongodb::options::FindOptions::builder()
-            .projection(doc! { "_id": 1, "sName": 1, "nBalance": 1 })
-            .sort(doc! { "sName": 1 })
-            .build();
+        let pipeline = vec![
+            doc! { "$match": match_doc },
+            doc! { "$lookup": {
+                "from": "Sectors",
+                "localField": "idSector",
+                "foreignField": "_id",
+                "as": "sector",
+                "pipeline": [{ "$project": { "_id": 0, "sName": 1 } }]
+            }},
+            doc! { "$lookup": {
+                "from": "Plans",
+                "localField": "idSubscription",
+                "foreignField": "_id",
+                "as": "plan",
+                "pipeline": [{ "$project": { "_id": 0, "sName": 1, "nAmount": 1 } }]
+            }},
+            doc! { "$sort": { "sName": 1 } },
+        ];
 
         let mut cursor = collection
-            .find(filter)
-            .with_options(options)
+            .aggregate(pipeline)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -350,9 +365,60 @@ impl ProfileRepository for MongoDB {
                 .get_object_id("_id")
                 .map(|o| o.to_hex())
                 .unwrap_or_default();
+
             let name = doc.get_str("sName").unwrap_or_default().to_string();
             let balance = get_bson_amount(&doc, "nBalance");
-            clients.push(ClientListItem { id, name, balance });
+            let s_state = doc.get_str("sState").unwrap_or_default();
+
+            let status = match s_state {
+                "Activo" if balance < 0.0 => "Moroso".to_string(),
+                "Activo" => "Solvente".to_string(),
+                other => other.to_string(),
+            };
+
+            // sDni tiene prioridad sobre sRif
+            let dni = doc
+                .get_str("sDni")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(|| doc.get_str("sRif").ok().filter(|s| !s.is_empty()))
+                .map(|s| s.to_string());
+
+            let sector_name = doc
+                .get_array("sector")
+                .ok()
+                .and_then(|arr| arr.first())
+                .and_then(|v| v.as_document())
+                .and_then(|d| d.get_str("sName").ok())
+                .map(|s| s.to_string());
+
+            let plan = doc
+                .get_array("plan")
+                .ok()
+                .and_then(|arr| arr.first())
+                .and_then(|v| v.as_document())
+                .cloned();
+
+            let plan_name = plan
+                .as_ref()
+                .and_then(|d| d.get_str("sName").ok())
+                .map(|s| s.to_string());
+
+            let plan_price = plan
+                .as_ref()
+                .map(|d| get_bson_amount(d, "nAmount"))
+                .filter(|&v| v > 0.0);
+
+            clients.push(ClientListItem {
+                id,
+                name,
+                dni,
+                status,
+                balance,
+                sector_name,
+                plan_name,
+                plan_price,
+            });
         }
 
         Ok(clients)
