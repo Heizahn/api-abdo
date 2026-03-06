@@ -165,6 +165,57 @@ pub struct BcvResponse {
 }
 
 #[derive(Debug, Serialize, Clone)]
+pub struct ClientOnu {
+    pub id: String,
+    pub sn: Option<String>,
+    pub mac: Option<String>,
+    pub motherboard: Option<i32>,
+    pub pon: Option<i32>,
+    pub id_onu: Option<i32>,
+    pub olt_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ClientDetail {
+    pub id: String,
+    pub name: String,
+    pub dni: Option<String>,
+    pub rif: Option<String>,
+    pub phone: String,
+    pub email: Option<String>,
+    pub status: String,
+    pub balance: f64,
+    pub ip: Option<String>,
+    pub sn: Option<String>,
+    pub mac: Option<String>,
+    pub client_type: Option<String>,
+    pub payment: Option<f64>,
+    pub address: Option<String>,
+    pub gps: Option<String>,
+    pub commentary: Option<String>,
+    pub subscription_id: Option<String>,
+    pub sector_id: Option<String>,
+    pub owner_id: Option<String>,
+    pub tax_id: Option<String>,
+    pub is_suspendable: Option<bool>,
+    pub check: Option<bool>,
+    pub created_at: Option<String>,
+    pub suspended_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub installed_at: Option<String>,
+    pub plan_name: Option<String>,
+    pub plan_price: Option<f64>,
+    pub plan_mbps: Option<f64>,
+    pub sector_name: Option<String>,
+    pub provider_tag: Option<i32>,
+    pub creator: Option<String>,
+    pub editor: Option<String>,
+    pub installer: Option<String>,
+    pub suspender: Option<String>,
+    pub onu: Option<ClientOnu>,
+}
+
+#[derive(Debug, Serialize, Clone)]
 pub struct ClientListItem {
     pub id: String,
     pub name: String,

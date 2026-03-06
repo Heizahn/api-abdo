@@ -2,8 +2,9 @@ use super::MongoDB;
 use crate::db::mongo::ResultGroupedByDate;
 use crate::db::ProfileRepository;
 use crate::domain::customer::{Customer, CustomerView};
-use crate::models::db::{ActiveClientBalance, Client, ClientListItem, SolvencyCounts, Tax};
+use crate::models::db::{ActiveClientBalance, Client, ClientDetail, ClientListItem, ClientOnu, SolvencyCounts, Tax};
 use crate::utils::get_bson_amount::get_bson_amount;
+use crate::utils::timezone::VenezuelaDateTime;
 use async_trait::async_trait;
 use futures::stream::StreamExt;
 use futures::TryStreamExt;
@@ -459,5 +460,159 @@ impl ProfileRepository for MongoDB {
         }
 
         Ok(clients)
+    }
+
+    async fn get_client_by_id(
+        &self,
+        id: &str,
+        owner_id: Option<&str>,
+    ) -> Result<Option<ClientDetail>, String> {
+        let obj_id = ObjectId::parse_str(id).map_err(|e| e.to_string())?;
+
+        let mut match_doc = doc! { "_id": obj_id };
+        // Rol 3: enforce ownership at query level — no info leakage
+        if let Some(owner) = owner_id {
+            match_doc.insert("idOwner", owner);
+        }
+
+        let pipeline = vec![
+            doc! { "$match": match_doc },
+            doc! { "$lookup": { "from": "Plans",   "localField": "idSubscription", "foreignField": "_id", "as": "plans" } },
+            doc! { "$lookup": { "from": "Sectors",  "localField": "idSector",       "foreignField": "_id", "as": "sectors" } },
+            doc! { "$lookup": { "from": "Users",    "localField": "idInstaller",    "foreignField": "_id", "as": "installer" } },
+            doc! { "$lookup": { "from": "Users",    "localField": "idCreator",      "foreignField": "_id", "as": "creator" } },
+            doc! { "$lookup": { "from": "Users",    "localField": "idEditor",       "foreignField": "_id", "as": "editor" } },
+            doc! { "$lookup": { "from": "Users",    "localField": "idSuspender",    "foreignField": "_id", "as": "suspender" } },
+            doc! { "$lookup": { "from": "Users",    "localField": "idOwner",        "foreignField": "_id", "as": "provider" } },
+            doc! { "$lookup": { "from": "Onus",     "localField": "idOnu",          "foreignField": "_id", "as": "onu" } },
+            doc! { "$limit": 1 },
+        ];
+
+        let collection: Collection<Document> = self.db.collection("Clients");
+        let mut cursor = collection
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let raw = match cursor.next().await {
+            Some(Ok(doc)) => doc,
+            _ => return Ok(None),
+        };
+
+        // Helper to get first sName from a lookup array
+        let first_name = |field: &str| -> Option<String> {
+            raw.get_array(field)
+                .ok()
+                .and_then(|arr| arr.first())
+                .and_then(|v| v.as_document())
+                .and_then(|d| d.get_str("sName").ok())
+                .map(|s| s.to_string())
+        };
+
+        let fmt_date = |field: &str| -> Option<String> {
+            raw.get_datetime(field)
+                .ok()
+                .map(|dt| VenezuelaDateTime::from(*dt).datetime_string_venezuela())
+        };
+
+        let balance = get_bson_amount(&raw, "nBalance");
+        let s_state = raw.get_str("sState").unwrap_or_default();
+        let status = match s_state {
+            "Activo" if balance < 0.0 => "Moroso".to_string(),
+            "Activo" => "Solvente".to_string(),
+            other => other.to_string(),
+        };
+
+        // Plan fields
+        let plan_doc = raw
+            .get_array("plans")
+            .ok()
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_document())
+            .cloned();
+
+        let plan_name = plan_doc.as_ref().and_then(|d| d.get_str("sName").ok()).map(|s| s.to_string());
+        let plan_price = plan_doc.as_ref().map(|d| get_bson_amount(d, "nAmount")).filter(|&v| v > 0.0);
+        let plan_mbps = plan_doc.as_ref().map(|d| get_bson_amount(d, "nMBPS")).filter(|&v| v > 0.0);
+
+        // Sector
+        let sector_name = raw
+            .get_array("sectors")
+            .ok()
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_document())
+            .and_then(|d| d.get_str("sName").ok())
+            .map(|s| s.to_string());
+
+        // Provider tag
+        let provider_tag = raw
+            .get_array("provider")
+            .ok()
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_document())
+            .and_then(|d| d.get_i32("nTag").ok());
+
+        // ONU
+        let onu = raw
+            .get_array("onu")
+            .ok()
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_document())
+            .map(|d| ClientOnu {
+                id: d.get_object_id("_id").map(|o| o.to_hex()).unwrap_or_default(),
+                sn: d.get_str("sSn").ok().map(|s| s.to_string()),
+                mac: d.get_str("sMac").ok().map(|s| s.to_string()),
+                motherboard: d.get_i32("nMotherboard").ok(),
+                pon: d.get_i32("nPon").ok(),
+                id_onu: d.get_i32("nIdOnu").ok(),
+                olt_id: d.get_object_id("idOlt").ok().map(|o| o.to_hex()),
+            });
+
+        // IDs de relacion como strings
+        let subscription_id = raw.get_object_id("idSubscription").ok().map(|o| o.to_hex());
+        let sector_id = raw.get_object_id("idSector").ok().map(|o| o.to_hex());
+        let owner_id_val = raw.get_str("idOwner").ok().map(|s| s.to_string());
+        let tax_id = raw.get_object_id("idTax").ok().map(|o| o.to_hex());
+
+        let detail = ClientDetail {
+            id: raw.get_object_id("_id").map(|o| o.to_hex()).unwrap_or_default(),
+            name: raw.get_str("sName").unwrap_or_default().to_string(),
+            dni: raw.get_str("sDni").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            rif: raw.get_str("sRif").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            phone: raw.get_str("sPhone").unwrap_or_default().to_string(),
+            email: raw.get_str("sEmail").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            status,
+            balance,
+            ip: raw.get_str("sIp").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            sn: raw.get_str("sSn").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            mac: raw.get_str("sMac").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            client_type: raw.get_str("sType").ok().map(|s| s.to_string()),
+            payment: Some(get_bson_amount(&raw, "nPayment")).filter(|&v| v != 0.0),
+            address: raw.get_str("sAddress").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            gps: raw.get_str("sGps").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            commentary: raw.get_str("sCommentary").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            subscription_id,
+            sector_id,
+            owner_id: owner_id_val,
+            tax_id,
+            is_suspendable: raw.get_bool("bIsSuspendable").ok(),
+            check: raw.get_bool("bCheck").ok(),
+            created_at: fmt_date("dCreation"),
+            suspended_at: fmt_date("dSuspension"),
+            updated_at: fmt_date("dEdition"),
+            installed_at: fmt_date("dInstallation"),
+            plan_name,
+            plan_price,
+            plan_mbps,
+            sector_name,
+            provider_tag,
+            creator: first_name("creator"),
+            editor: first_name("editor"),
+            installer: first_name("installer"),
+            suspender: first_name("suspender"),
+            onu,
+        };
+
+        Ok(Some(detail))
     }
 }

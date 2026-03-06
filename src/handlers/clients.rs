@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Extension, Query, State},
+    extract::{Extension, Path, Query, State},
     Json,
 };
 use serde::Deserialize;
@@ -9,13 +9,45 @@ use crate::{
     auth::user_jwt::UserProfileClaims,
     db::{ProfileRepository, UserRepository},
     error::ApiError,
-    models::db::ClientListItem,
+    models::db::{ClientDetail, ClientListItem},
     state::AppState,
 };
 
 #[derive(Deserialize)]
 pub struct ClientsQuery {
     pub owner: Option<String>,
+}
+
+/// GET /v1/auth-user/clients/:id
+///
+/// Devuelve el detalle completo de un cliente.
+/// - Rol 3 (provider): solo puede ver sus propios clientes.
+/// - Otros roles: acceso libre, pueden filtrar por ?owner.
+pub async fn get_client_by_id_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+) -> Result<Json<ClientDetail>, ApiError> {
+    let user = state
+        .db
+        .find_user_by_id(&claims.id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| ApiError::Unauthorized("Usuario no encontrado".to_string()))?;
+
+    let owner_id: Option<String> = if (user.role - 3.0_f32).abs() < 0.01 {
+        Some(claims.id.clone())
+    } else {
+        None
+    };
+
+    state
+        .db
+        .get_client_by_id(&id, owner_id.as_deref())
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
 }
 
 /// GET /v1/auth-user/clients/all?owner=<id>
