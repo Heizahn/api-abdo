@@ -577,8 +577,9 @@ impl ProfileRepository for MongoDB {
         let detail = ClientDetail {
             id: raw.get_object_id("_id").map(|o| o.to_hex()).unwrap_or_default(),
             name: raw.get_str("sName").unwrap_or_default().to_string(),
-            dni: raw.get_str("sDni").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
-            rif: raw.get_str("sRif").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            dni: raw.get_str("sDni").ok().filter(|s| !s.is_empty())
+                .or_else(|| raw.get_str("sRif").ok().filter(|s| !s.is_empty()))
+                .map(|s| s.to_string()),
             phone: raw.get_str("sPhone").unwrap_or_default().to_string(),
             email: raw.get_str("sEmail").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
             status,

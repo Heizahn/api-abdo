@@ -180,7 +180,6 @@ pub struct ClientDetail {
     pub id: String,
     pub name: String,
     pub dni: Option<String>,
-    pub rif: Option<String>,
     pub phone: String,
     pub email: Option<String>,
     pub status: String,
