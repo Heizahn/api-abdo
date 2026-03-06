@@ -12,7 +12,7 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{auth, auth_user, calculation, dashboard, payment, profile, providers, receivable, utils},
+    handlers::{auth, auth_user, calculation, clients, dashboard, payment, profile, providers, receivable, utils},
     middleware::{auth::jwt_auth_middleware, auth_user::user_jwt_auth_middleware, rate_limit},
     state::AppState,
 };
@@ -62,6 +62,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     let auth_user_protected = Router::new()
         .route("/v1/auth-user/me", get(auth_user::me_handler))
+        .route(
+            "/v1/auth-user/clients/all",
+            get(clients::get_all_clients_handler),
+        )
         .route(
             "/v1/auth-user/dashboard/monthly-closing",
             get(dashboard::monthly_closing_handler),

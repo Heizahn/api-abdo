@@ -2,7 +2,8 @@ use super::MongoDB;
 use crate::db::mongo::ResultGroupedByDate;
 use crate::db::ProfileRepository;
 use crate::domain::customer::{Customer, CustomerView};
-use crate::models::db::{ActiveClientBalance, Client, SolvencyCounts, Tax};
+use crate::models::db::{ActiveClientBalance, Client, ClientListItem, SolvencyCounts, Tax};
+use crate::utils::get_bson_amount::get_bson_amount;
 use async_trait::async_trait;
 use futures::stream::StreamExt;
 use futures::TryStreamExt;
@@ -290,8 +291,6 @@ impl ProfileRepository for MongoDB {
     }
 
     async fn find_active_clients_for_closing(&self, owner_id: Option<&str>) -> Result<Vec<ActiveClientBalance>, String> {
-        use crate::utils::get_bson_amount::get_bson_amount;
-
         let mut filter = doc! { "sState": "Activo" };
         if let Some(owner) = owner_id {
             filter.insert("idOwner", owner);
@@ -324,5 +323,38 @@ impl ProfileRepository for MongoDB {
             Some(doc) => Ok(doc.get_str("sPhone").unwrap_or_default().to_string()),
             None => Err("Cliente no encontrado".to_string()),
         }
+    }
+
+    async fn get_all_clients(&self, owner_id: Option<&str>) -> Result<Vec<ClientListItem>, String> {
+        let collection: Collection<Document> = self.db.collection("Clients");
+
+        let mut filter = doc! { "sState": { "$in": ["Activo", "Suspendido"] } };
+        if let Some(owner) = owner_id {
+            filter.insert("idOwner", owner);
+        }
+
+        let options = mongodb::options::FindOptions::builder()
+            .projection(doc! { "_id": 1, "sName": 1, "nBalance": 1 })
+            .sort(doc! { "sName": 1 })
+            .build();
+
+        let mut cursor = collection
+            .find(filter)
+            .with_options(options)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut clients = Vec::with_capacity(256);
+        while let Some(Ok(doc)) = cursor.next().await {
+            let id = doc
+                .get_object_id("_id")
+                .map(|o| o.to_hex())
+                .unwrap_or_default();
+            let name = doc.get_str("sName").unwrap_or_default().to_string();
+            let balance = get_bson_amount(&doc, "nBalance");
+            clients.push(ClientListItem { id, name, balance });
+        }
+
+        Ok(clients)
     }
 }

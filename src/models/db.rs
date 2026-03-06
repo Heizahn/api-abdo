@@ -163,3 +163,10 @@ pub struct OnuIpUpdate {
 pub struct BcvResponse {
     pub bcv: f64,
 }
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ClientListItem {
+    pub id: String,
+    pub name: String,
+    pub balance: f64,
+}

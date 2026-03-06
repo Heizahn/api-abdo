@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod auth_user;
 pub mod calculation;
+pub mod clients;
 pub mod dashboard;
 pub mod payment;
 pub mod profile;
