@@ -70,9 +70,10 @@ pub async fn refresh_token_handler(
 ) -> Result<Json<RefreshTokenResponse>, ApiError> {
     let jwt_service = UserJwtService::new();
 
-    // 1. Verify old token (even if expired? LB4 verifyToken throws if expired usually)
+    // Decodificar ignorando expiración — solo valida la firma.
+    // Si la firma es inválida (token manipulado) sí rechaza.
     let claims = jwt_service
-        .verify_token(&payload.token)
+        .decode_ignoring_exp(&payload.token)
         .map_err(|_| ApiError::Unauthorized("Token inválido".to_string()))?;
 
     // 2. Check if user still exists

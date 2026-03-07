@@ -54,4 +54,17 @@ impl UserJwtService {
 
         Ok(decoded.claims)
     }
+
+    /// Decodifica el token ignorando si esta expirado.
+    /// Solo valida la firma — usado exclusivamente para refresh.
+    pub fn decode_ignoring_exp(&self, token: &str) -> Result<UserProfileClaims, String> {
+        let key = DecodingKey::from_secret(self.secret.as_bytes());
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.validate_exp = false;
+
+        let decoded =
+            decode::<UserProfileClaims>(token, &key, &validation).map_err(|e| e.to_string())?;
+
+        Ok(decoded.claims)
+    }
 }

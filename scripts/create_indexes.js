@@ -1,8 +1,10 @@
 // Script para crear índices optimizados en MongoDB
-// Ejecutar con: mongosh < scripts/create_indexes.js
-
-// Nota: Reemplazar 'nombre_base_datos' con el nombre real de tu base de datos
-// O ejecutar con: mongosh mongodb://localhost:27017/nombre_base_datos < scripts/create_indexes.js
+// Ejecutar con: mongosh mongodb://localhost:27017/NOMBRE_BD scripts/create_indexes.js
+//
+// Si requiere autenticación:
+//   mongosh "mongodb://user:pass@host:27017/NOMBRE_BD" scripts/create_indexes.js
+//
+// createIndex ignora silenciosamente si el índice ya existe.
 
 print("=".repeat(60));
 print("📊 CREANDO ÍNDICES PARA OPTIMIZACIÓN DE API-ABDO");
@@ -23,19 +25,34 @@ db.Clients.createIndex(
   { "sPhone": 1 },
   { name: "idx_clients_phone", background: true }
 );
-print("  ✅ Índice creado: Clients.sPhone");
-
-db.Clients.createIndex(
-  { "_id": 1, "sPhone": 1 },
-  { name: "idx_clients_id_phone", background: true }
-);
-print("  ✅ Índice compuesto: Clients._id + sPhone");
+print("  ✅ Clients.sPhone");
 
 db.Clients.createIndex(
   { "sName": 1 },
   { name: "idx_clients_name", background: true }
 );
-print("  ✅ Índice creado: Clients.sName");
+print("  ✅ Clients.sName");
+
+// Dashboard: filtro por owner (get_solvency_counts, find_active_clients_for_closing, get_latest_payments)
+db.Clients.createIndex(
+  { "idOwner": 1 },
+  { name: "idx_clients_owner", background: true }
+);
+print("  ✅ Clients.idOwner");
+
+// Dashboard: solvency counts y monthly-closing filtran por sState
+db.Clients.createIndex(
+  { "sState": 1 },
+  { name: "idx_clients_state", background: true }
+);
+print("  ✅ Clients.sState");
+
+// Dashboard: filtro combinado más común (solvency + monthly-closing con owner)
+db.Clients.createIndex(
+  { "sState": 1, "idOwner": 1 },
+  { name: "idx_clients_state_owner", background: true }
+);
+print("  ✅ Clients.sState + idOwner");
 
 print("");
 
@@ -74,29 +91,32 @@ print("");
 // ============================================
 print("📦 Colección: Payments");
 
+// Dashboard: get_latest_payments (sort global por fecha)
+db.Payments.createIndex(
+  { "dCreation": -1 },
+  { name: "idx_payments_date", background: true }
+);
+print("  ✅ Payments.dCreation");
+
+// Dashboard: get_latest_payments con owner ($in de client_ids + sort)
 db.Payments.createIndex(
   { "idClient": 1, "dCreation": -1 },
   { name: "idx_payments_client_date", background: true }
 );
-print("  ✅ Índice compuesto: Payments.idClient + dCreation");
+print("  ✅ Payments.idClient + dCreation");
+
+// Dashboard: sum_active_payments_in_range (idClient + sState + rango de fecha)
+db.Payments.createIndex(
+  { "idClient": 1, "sState": 1, "dCreation": -1 },
+  { name: "idx_payments_client_state_date", background: true }
+);
+print("  ✅ Payments.idClient + sState + dCreation");
 
 db.Payments.createIndex(
   { "sState": 1 },
   { name: "idx_payments_state", background: true }
 );
-print("  ✅ Índice creado: Payments.sState");
-
-db.Payments.createIndex(
-  { "dCreation": -1 },
-  { name: "idx_payments_date", background: true }
-);
-print("  ✅ Índice creado: Payments.dCreation");
-
-db.Payments.createIndex(
-  { "idClient": 1, "sState": 1 },
-  { name: "idx_payments_client_state", background: true }
-);
-print("  ✅ Índice compuesto: Payments.idClient + sState");
+print("  ✅ Payments.sState");
 
 print("");
 
@@ -105,42 +125,72 @@ print("");
 // ============================================
 print("📦 Colección: Debts");
 
+// find_active_debts_by_client_ids: filtra por idClient + sState
+db.Debts.createIndex(
+  { "idClient": 1, "sState": 1 },
+  { name: "idx_debts_client_state", background: true }
+);
+print("  ✅ Debts.idClient + sState");
+
 db.Debts.createIndex(
   { "idClient": 1 },
   { name: "idx_debts_client", background: true }
 );
-print("  ✅ Índice creado: Debts.idClient");
-
-db.Debts.createIndex(
-  { "nAmount": 1 },
-  { name: "idx_debts_amount", background: true }
-);
-print("  ✅ Índice creado: Debts.nAmount");
+print("  ✅ Debts.idClient");
 
 print("");
 
 // ============================================
-// COLECCIÓN: PartPayment
+// COLECCIÓN: PartPayments
 // ============================================
-print("📦 Colección: PartPayment");
+print("📦 Colección: PartPayments");
 
-db.PartPayment.createIndex(
+db.PartPayments.createIndex(
   { "idDebt": 1 },
-  { name: "idx_partpayment_debt", background: true }
+  { name: "idx_partpayments_debt", background: true }
 );
-print("  ✅ Índice creado: PartPayment.idDebt");
+print("  ✅ PartPayments.idDebt");
 
-db.PartPayment.createIndex(
+db.PartPayments.createIndex(
   { "idPayment": 1 },
-  { name: "idx_partpayment_payment", background: true }
+  { name: "idx_partpayments_payment", background: true }
 );
-print("  ✅ Índice creado: PartPayment.idPayment");
+print("  ✅ PartPayments.idPayment");
 
-db.PartPayment.createIndex(
-  { "idDebt": 1, "idPayment": 1 },
-  { name: "idx_partpayment_debt_payment", background: true }
+print("");
+
+// ============================================
+// COLECCIÓN: PaymentReports
+// ============================================
+print("📦 Colección: PaymentReports");
+
+// find_pending_reports_by_debt_ids: filtra por idDebt + sState
+db.PaymentReports.createIndex(
+  { "idDebt": 1, "sState": 1 },
+  { name: "idx_paymentreports_debt_state", background: true }
 );
-print("  ✅ Índice compuesto: PartPayment.idDebt + idPayment");
+print("  ✅ PaymentReports.idDebt + sState");
+
+// get_last_payments_by_id_client: lookup por idClient
+db.PaymentReports.createIndex(
+  { "idClient": 1 },
+  { name: "idx_paymentreports_client", background: true }
+);
+print("  ✅ PaymentReports.idClient");
+
+print("");
+
+// ============================================
+// COLECCIÓN: Users
+// ============================================
+print("📦 Colección: Users");
+
+// find_providers: filtra por nRole
+db.Users.createIndex(
+  { "nRole": 1 },
+  { name: "idx_users_role", background: true }
+);
+print("  ✅ Users.nRole");
 
 print("");
 
@@ -152,35 +202,14 @@ print("📋 VERIFICACIÓN DE ÍNDICES");
 print("=".repeat(60));
 print("");
 
-print("Clients:");
-db.Clients.getIndexes().forEach(idx => {
-  print("  - " + idx.name + " → " + JSON.stringify(idx.key));
+const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes"];
+toVerify.forEach(col => {
+  print(col + ":");
+  db.getCollection(col).getIndexes().forEach(idx => {
+    print("  - " + idx.name + " → " + JSON.stringify(idx.key));
+  });
+  print("");
 });
-print("");
-
-print("verification_codes:");
-db.verification_codes.getIndexes().forEach(idx => {
-  print("  - " + idx.name + " → " + JSON.stringify(idx.key));
-});
-print("");
-
-print("Payments:");
-db.Payments.getIndexes().forEach(idx => {
-  print("  - " + idx.name + " → " + JSON.stringify(idx.key));
-});
-print("");
-
-print("Debts:");
-db.Debts.getIndexes().forEach(idx => {
-  print("  - " + idx.name + " → " + JSON.stringify(idx.key));
-});
-print("");
-
-print("PartPayment:");
-db.PartPayment.getIndexes().forEach(idx => {
-  print("  - " + idx.name + " → " + JSON.stringify(idx.key));
-});
-print("");
 
 // ============================================
 // BASE DE DATOS: BCV (Tasas de Cambio)
@@ -223,12 +252,5 @@ print("=".repeat(60));
 print("✨ TODOS LOS ÍNDICES CREADOS EXITOSAMENTE");
 print("=".repeat(60));
 print("");
-print("📊 Impacto esperado:");
-print("  • Queries 10-50x más rápidas");
-print("  • Agregaciones optimizadas");
-print("  • Auto-limpieza de códigos de verificación expirados");
-print("");
-print("💡 Próximo paso:");
-print("  • Ejecutar: cargo build --release");
-print("  • Iniciar la nueva API con Axum");
+print("Índices existentes son ignorados automáticamente por MongoDB.");
 print("");

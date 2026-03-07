@@ -1,0 +1,12 @@
+# Artefactos de compilacion (grandes, no relevantes para contexto)
+target/
+
+# Lock file (generado automaticamente, no aporta contexto)
+Cargo.lock
+
+# Uploads de usuarios
+uploads/
+
+# Variables de entorno (secretos)
+.env
+.env.*
