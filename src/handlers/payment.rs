@@ -4,7 +4,6 @@ use axum::{
     Extension,
     Json,
 };
-use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -187,24 +186,38 @@ pub async fn report_payment_handler(
         let name = field.name().unwrap_or("").to_string();
 
         if name == "image" {
-            // ... (Mantiene tu lógica de guardado de imagen igual)
-            let file_name = field.file_name().unwrap_or("unknown.jpg").to_string();
-            let extension = Path::new(&file_name)
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("jpg");
+            // Determinar extensión por MIME type, no por el nombre del archivo
+            // (el nombre puede ser "blob", "image" u otro sin extensión real)
+            let content_type = field.content_type().unwrap_or("image/jpeg").to_string();
+            let extension = match content_type.as_str() {
+                "image/png"  => "png",
+                "image/webp" => "webp",
+                "image/gif"  => "gif",
+                _            => "jpg",
+            };
             let unique_name = format!("{}.{}", Uuid::new_v4(), extension);
             let file_path = format!("uploads/{}", unique_name);
+
             let data = field
                 .bytes()
                 .await
                 .map_err(|_| ApiError::InternalServerError)?;
+
+            if data.is_empty() {
+                tracing::error!("Imagen recibida esta vacia (0 bytes)");
+                return Err(ApiError::BadRequest("La imagen llego vacia al servidor".into()));
+            }
+
+            tracing::info!("Imagen recibida: {} bytes, tipo: {}", data.len(), content_type);
+
             let mut file = File::create(&file_path)
                 .await
                 .map_err(|_| ApiError::InternalServerError)?;
             file.write_all(&data)
                 .await
                 .map_err(|_| ApiError::InternalServerError)?;
+
+            // Solo asignar el path si todo fue exitoso
             saved_image_path = Some(format!("/uploads/{}", unique_name));
         } else {
             let text = field.text().await.unwrap_or_default();
