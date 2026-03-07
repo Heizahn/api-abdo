@@ -10,6 +10,7 @@ use crate::{
     db::{ProfileRepository, UserRepository},
     error::ApiError,
     models::db::{ClientDetail, ClientListItem},
+    services::get_ip_pppoe_mk::get_ip_pppoe_mk,
     state::AppState,
 };
 
@@ -41,13 +42,37 @@ pub async fn get_client_by_id_handler(
         None
     };
 
-    state
+    let mut detail = state
         .db
         .get_client_by_id(&id, owner_id.as_deref())
         .await
         .map_err(ApiError::DatabaseError)?
-        .map(Json)
-        .ok_or(ApiError::NotFound)
+        .ok_or(ApiError::NotFound)?;
+
+    // Buscar IP PPPoE en MikroTik si el cliente tiene SN
+    if let Some(sn) = detail.sn.clone() {
+        let port_mk = state.config.port_mk.clone();
+        let pass_mk = state.config.pass_mk.clone();
+        let routers = vec!["10.255.255.5", "10.255.255.8"];
+
+        let pppoe_ip = tokio::task::spawn_blocking(move || {
+            for router_ip in routers {
+                match get_ip_pppoe_mk(&sn, router_ip, &port_mk, "rust_api", &pass_mk) {
+                    Ok(ip) => return Some(ip),
+                    Err(_) => continue,
+                }
+            }
+            None
+        })
+        .await
+        .unwrap_or(None);
+
+        detail.ip = pppoe_ip;
+    } else {
+        detail.ip = None;
+    }
+
+    Ok(Json(detail))
 }
 
 /// GET /v1/auth-user/clients/all?owner=<id>
