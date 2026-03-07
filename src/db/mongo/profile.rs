@@ -564,6 +564,9 @@ impl ProfileRepository for MongoDB {
         let onu_sn  = onu_doc.as_ref().and_then(|d| d.get_str("sSn").ok()).filter(|s| !s.is_empty()).map(|s| s.to_string());
         let onu_mac = onu_doc.as_ref().and_then(|d| d.get_str("sMac").ok()).filter(|s| !s.is_empty()).map(|s| s.to_string());
 
+        // sn del cliente viene del documento Clients, no de Onus
+        let client_sn = raw.get_str("sSn").ok().filter(|s| !s.is_empty()).map(|s| s.to_string());
+
         let onu = onu_doc.as_ref().map(|d| ClientOnu {
             id: d.get_object_id("_id").map(|o| o.to_hex()).unwrap_or_default(),
             sn: onu_sn.clone(),
@@ -592,7 +595,7 @@ impl ProfileRepository for MongoDB {
             status,
             balance,
             ip: onu_ip,
-            sn: onu_sn,
+            sn: client_sn,
             mac: onu_mac,
             client_type: raw.get_str("sType").ok().map(|s| s.to_string()),
             payment: Some(get_bson_amount(&raw, "nPayment")).filter(|&v| v != 0.0),
