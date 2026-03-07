@@ -186,6 +186,7 @@ pub struct ClientDetail {
     pub status: String,
     pub balance: f64,
     pub ip: Option<String>,
+    pub ip_pppoe: Option<String>,
     pub sn: Option<String>,
     pub mac: Option<String>,
     pub client_type: Option<String>,

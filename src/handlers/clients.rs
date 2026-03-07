@@ -67,9 +67,7 @@ pub async fn get_client_by_id_handler(
         .await
         .unwrap_or(None);
 
-        detail.ip = pppoe_ip;
-    } else {
-        detail.ip = None;
+        detail.ip_pppoe = pppoe_ip;
     }
 
     Ok(Json(detail))

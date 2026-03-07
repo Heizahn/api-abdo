@@ -595,6 +595,7 @@ impl ProfileRepository for MongoDB {
             status,
             balance,
             ip: onu_ip,
+            ip_pppoe: None,
             sn: client_sn,
             mac: onu_mac,
             client_type: raw.get_str("sType").ok().map(|s| s.to_string()),
