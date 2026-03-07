@@ -552,21 +552,28 @@ impl ProfileRepository for MongoDB {
             .and_then(|v| v.as_document())
             .and_then(|d| d.get_i32("nTag").ok());
 
-        // ONU
-        let onu = raw
+        // ONU — fuente de verdad para ip, mac, sn, pon, motherboard, id_onu
+        let onu_doc = raw
             .get_array("onu")
             .ok()
             .and_then(|arr| arr.first())
             .and_then(|v| v.as_document())
-            .map(|d| ClientOnu {
-                id: d.get_object_id("_id").map(|o| o.to_hex()).unwrap_or_default(),
-                sn: d.get_str("sSn").ok().map(|s| s.to_string()),
-                mac: d.get_str("sMac").ok().map(|s| s.to_string()),
-                motherboard: d.get_i32("nMotherboard").ok(),
-                pon: d.get_i32("nPon").ok(),
-                id_onu: d.get_i32("nIdOnu").ok(),
-                olt_id: d.get_object_id("idOlt").ok().map(|o| o.to_hex()),
-            });
+            .cloned();
+
+        let onu_ip  = onu_doc.as_ref().and_then(|d| d.get_str("sIp").ok()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+        let onu_sn  = onu_doc.as_ref().and_then(|d| d.get_str("sSn").ok()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+        let onu_mac = onu_doc.as_ref().and_then(|d| d.get_str("sMac").ok()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+
+        let onu = onu_doc.as_ref().map(|d| ClientOnu {
+            id: d.get_object_id("_id").map(|o| o.to_hex()).unwrap_or_default(),
+            sn: onu_sn.clone(),
+            mac: onu_mac.clone(),
+            ip: onu_ip.clone(),
+            motherboard: d.get_i32("nMotherboard").ok(),
+            pon: d.get_i32("nPon").ok(),
+            id_onu: d.get_i32("nIdOnu").ok(),
+            olt_id: d.get_object_id("idOlt").ok().map(|o| o.to_hex()),
+        });
 
         // IDs de relacion como strings
         let subscription_id = raw.get_object_id("idSubscription").ok().map(|o| o.to_hex());
@@ -584,9 +591,9 @@ impl ProfileRepository for MongoDB {
             email: raw.get_str("sEmail").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
             status,
             balance,
-            ip: raw.get_str("sIp").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
-            sn: raw.get_str("sSn").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
-            mac: raw.get_str("sMac").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            ip: onu_ip,
+            sn: onu_sn,
+            mac: onu_mac,
             client_type: raw.get_str("sType").ok().map(|s| s.to_string()),
             payment: Some(get_bson_amount(&raw, "nPayment")).filter(|&v| v != 0.0),
             address: raw.get_str("sAddress").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),

@@ -169,6 +169,7 @@ pub struct ClientOnu {
     pub id: String,
     pub sn: Option<String>,
     pub mac: Option<String>,
+    pub ip: Option<String>,
     pub motherboard: Option<i32>,
     pub pon: Option<i32>,
     pub id_onu: Option<i32>,
