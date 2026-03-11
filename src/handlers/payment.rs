@@ -216,6 +216,9 @@ pub async fn report_payment_handler(
             file.write_all(&data)
                 .await
                 .map_err(|_| ApiError::InternalServerError)?;
+            file.flush()
+                .await
+                .map_err(|_| ApiError::InternalServerError)?;
 
             // Solo asignar el path si todo fue exitoso
             saved_image_path = Some(format!("/uploads/{}", unique_name));
