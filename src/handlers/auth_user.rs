@@ -1,14 +1,20 @@
 use axum::{extract::State, Extension, Json};
 use bcrypt::verify;
+use mongodb::bson::oid::ObjectId;
 use std::sync::Arc;
 
 use crate::{
     auth::user_jwt::{UserJwtService, UserProfileClaims},
-    db::UserRepository,
+    db::{SalesRepository, UserRepository},
     error::ApiError,
-    models::users::{
-        RefreshTokenRequest, RefreshTokenResponse, User, UserLoginRequest, UserLoginResponse,
-        UserResponse,
+    models::{
+        payment::{
+            CheckReferenceData, CheckReferenceRequest, CheckReferenceResponse, ReferenceDetails,
+        },
+        users::{
+            RefreshTokenRequest, RefreshTokenResponse, User, UserLoginRequest, UserLoginResponse,
+            UserResponse,
+        },
     },
     state::AppState,
 };
@@ -87,6 +93,65 @@ pub async fn refresh_token_handler(
         .map_err(|e| ApiError::Internal(e))?;
 
     Ok(Json(RefreshTokenResponse { token: new_token }))
+}
+
+/// POST /v1/auth-user/payments/check-reference
+pub async fn check_reference_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CheckReferenceRequest>,
+) -> Result<Json<CheckReferenceResponse>, ApiError> {
+    let id_client = ObjectId::parse_str(&payload.id_client)
+        .map_err(|_| ApiError::BadRequest("idClient inválido".to_string()))?;
+
+    let result = state
+        .db
+        .check_reference(&id_client, &payload.s_reference)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
+
+    let response = match result {
+        None => CheckReferenceResponse {
+            ok: true,
+            message: "Referencia disponible".to_string(),
+            data: CheckReferenceData {
+                status: "available".to_string(),
+                source: None,
+                details: None,
+            },
+        },
+        Some(info) if info.is_same_client => CheckReferenceResponse {
+            ok: true,
+            message: "El cliente ya tiene esta referencia registrada".to_string(),
+            data: CheckReferenceData {
+                status: "duplicate_own_client".to_string(),
+                source: Some(info.source),
+                details: Some(ReferenceDetails {
+                    s_name: None,
+                    s_reference: info.s_reference,
+                    n_amount: info.n_amount,
+                    n_bs: info.n_bs,
+                    s_state: info.s_state,
+                }),
+            },
+        },
+        Some(info) => CheckReferenceResponse {
+            ok: true,
+            message: "La referencia ya existe registrada para otro cliente".to_string(),
+            data: CheckReferenceData {
+                status: "duplicate_other_client".to_string(),
+                source: Some(info.source),
+                details: Some(ReferenceDetails {
+                    s_name: info.s_name,
+                    s_reference: info.s_reference,
+                    n_amount: info.n_amount,
+                    n_bs: info.n_bs,
+                    s_state: info.s_state,
+                }),
+            },
+        },
+    };
+
+    Ok(Json(response))
 }
 
 /// GET /v1/auth-user/me
