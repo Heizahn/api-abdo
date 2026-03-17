@@ -9,7 +9,7 @@ use mongodb::{error::Error as MongoError, Collection};
 use super::MongoDB;
 use crate::db::SalesRepository;
 use crate::models::db::{Debt, LatestPayment, PartPayment, Payment};
-use crate::models::payment::{Bank, ClientOwner, PaymentMethod, PaymentReport, UserPaymentInfo};
+use crate::models::payment::{Bank, ClientOwner, PaymentMethod, PaymentReport, ReferenceMatchInfo, UserPaymentInfo};
 
 #[async_trait]
 impl SalesRepository for MongoDB {
@@ -396,6 +396,82 @@ impl SalesRepository for MongoDB {
         Ok(banks)
     }
 
+    async fn check_reference(
+        &self,
+        id_client: &ObjectId,
+        s_reference: &str,
+    ) -> Result<Option<ReferenceMatchInfo>, String> {
+        let ref_or = build_ref_filter(s_reference);
+
+        // ── 1. Payments – mismo cliente ────────────────────────────────────
+        let payments_col = self.db.collection::<Document>("Payments");
+        let filter = doc! { "idClient": id_client, "$or": ref_or.clone() };
+        if let Some(doc) = payments_col.find_one(filter).await.map_err(|e| e.to_string())? {
+            return Ok(Some(ReferenceMatchInfo {
+                source: "payments".to_string(),
+                is_same_client: true,
+                s_name: None,
+                s_reference: doc.get_str("sReference").unwrap_or_default().to_string(),
+                n_amount: get_bson_amount(&doc, "nAmount"),
+                n_bs: get_bson_amount(&doc, "nBs"),
+                s_state: doc.get_str("sState").unwrap_or_default().to_string(),
+            }));
+        }
+
+        // ── 2. Payments – otro cliente ─────────────────────────────────────
+        let filter = doc! { "idClient": { "$ne": id_client }, "$or": ref_or.clone() };
+        if let Some(doc) = payments_col.find_one(filter).await.map_err(|e| e.to_string())? {
+            let s_name = match doc.get_object_id("idClient") {
+                Ok(cid) => fetch_client_name(&self.db, &cid).await?,
+                Err(_) => None,
+            };
+            return Ok(Some(ReferenceMatchInfo {
+                source: "payments".to_string(),
+                is_same_client: false,
+                s_name,
+                s_reference: doc.get_str("sReference").unwrap_or_default().to_string(),
+                n_amount: get_bson_amount(&doc, "nAmount"),
+                n_bs: get_bson_amount(&doc, "nBs"),
+                s_state: doc.get_str("sState").unwrap_or_default().to_string(),
+            }));
+        }
+
+        // ── 3. PaymentReports – mismo cliente ──────────────────────────────
+        let reports_col = self.db.collection::<Document>("PaymentReports");
+        let filter = doc! { "idClient": id_client, "$or": ref_or.clone() };
+        if let Some(doc) = reports_col.find_one(filter).await.map_err(|e| e.to_string())? {
+            return Ok(Some(ReferenceMatchInfo {
+                source: "payment_reports".to_string(),
+                is_same_client: true,
+                s_name: None,
+                s_reference: doc.get_str("sReference").unwrap_or_default().to_string(),
+                n_amount: get_bson_amount(&doc, "nAmountUSD"),
+                n_bs: get_bson_amount(&doc, "nBs"),
+                s_state: doc.get_str("sState").unwrap_or_default().to_string(),
+            }));
+        }
+
+        // ── 4. PaymentReports – otro cliente ───────────────────────────────
+        let filter = doc! { "idClient": { "$ne": id_client }, "$or": ref_or.clone() };
+        if let Some(doc) = reports_col.find_one(filter).await.map_err(|e| e.to_string())? {
+            let s_name = match doc.get_object_id("idClient") {
+                Ok(cid) => fetch_client_name(&self.db, &cid).await?,
+                Err(_) => None,
+            };
+            return Ok(Some(ReferenceMatchInfo {
+                source: "payment_reports".to_string(),
+                is_same_client: false,
+                s_name,
+                s_reference: doc.get_str("sReference").unwrap_or_default().to_string(),
+                n_amount: get_bson_amount(&doc, "nAmountUSD"),
+                n_bs: get_bson_amount(&doc, "nBs"),
+                s_state: doc.get_str("sState").unwrap_or_default().to_string(),
+            }));
+        }
+
+        Ok(None)
+    }
+
     async fn find_pending_reports_by_debt_ids(
         &self,
         debt_ids: &[ObjectId],
@@ -418,4 +494,65 @@ impl SalesRepository for MongoDB {
 
         Ok(reports)
     }
+}
+
+// ============================================================
+// Helpers para check_reference
+// ============================================================
+
+/// Genera un filtro $or que detecta coincidencia de sufijo bidireccional:
+///   - El campo almacenado termina con `s_reference` (campo más largo)
+///   - `s_reference` termina con el campo almacenado (ref enviada más larga)
+fn build_ref_filter(s_reference: &str) -> Vec<Document> {
+    // Sufijos del valor enviado → el campo almacenado puede ser cualquiera de ellos
+    let suffix_bson: Vec<mongodb::bson::Bson> = generate_suffixes(s_reference)
+        .into_iter()
+        .map(mongodb::bson::Bson::String)
+        .collect();
+
+    // Regex para el caso inverso: el campo almacenado es más largo y termina con s_reference
+    let escaped = regex_escape(s_reference);
+
+    vec![
+        doc! { "sReference": { "$in": suffix_bson } },
+        doc! { "sReference": { "$regex": format!("{}$", escaped) } },
+    ]
+}
+
+/// Genera todos los sufijos no vacíos de `s` (incluyendo `s` mismo)
+fn generate_suffixes(s: &str) -> Vec<String> {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    (0..len)
+        .map(|i| chars[i..].iter().collect::<String>())
+        .collect()
+}
+
+/// Escapa caracteres especiales de expresiones regulares
+fn regex_escape(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '^' | '$' | '|' | '\\' => {
+                format!("\\{}", c)
+            }
+            other => other.to_string(),
+        })
+        .collect()
+}
+
+/// Obtiene el `sName` de un cliente por su ObjectId
+async fn fetch_client_name(
+    db: &mongodb::Database,
+    client_id: &ObjectId,
+) -> Result<Option<String>, String> {
+    let col = db.collection::<Document>("Clients");
+    let options = mongodb::options::FindOneOptions::builder()
+        .projection(doc! { "sName": 1 })
+        .build();
+    let result = col
+        .find_one(doc! { "_id": client_id })
+        .with_options(options)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(result.and_then(|d| d.get_str("sName").ok().map(|s| s.to_string())))
 }

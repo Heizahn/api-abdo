@@ -1,7 +1,7 @@
 pub mod mongo;
 use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
 
-use crate::models::payment::{Bank, PaymentReport};
+use crate::models::payment::{Bank, PaymentReport, ReferenceMatchInfo};
 use crate::models::users::{User, UserCredentials}; // Import
 use crate::services::zte_parse_update::OnuDetected;
 use crate::{
@@ -129,6 +129,15 @@ pub trait SalesRepository {
         &self,
         debt_ids: &[ObjectId],
     ) -> Result<Vec<PaymentReport>, String>;
+
+    /// Verifica si una referencia ya existe en Payments o PaymentReports
+    /// Búsqueda bidireccional de derecha a izquierda (sufijo).
+    /// Orden: Payments (mismo cliente) → Payments (global) → PaymentReports (mismo cliente) → PaymentReports (global)
+    async fn check_reference(
+        &self,
+        id_client: &ObjectId,
+        s_reference: &str,
+    ) -> Result<Option<ReferenceMatchInfo>, String>;
 }
 
 // ============================================

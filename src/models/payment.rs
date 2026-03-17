@@ -2,6 +2,60 @@ use chrono::{DateTime, Utc};
 use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
 
+// ============================================
+// Check Reference
+// ============================================
+
+#[derive(Debug, Deserialize)]
+pub struct CheckReferenceRequest {
+    #[serde(rename = "idClient")]
+    pub id_client: String,
+    #[serde(rename = "sReference")]
+    pub s_reference: String,
+}
+
+/// Resultado de la búsqueda de referencia en DB (retornado por el repositorio)
+pub struct ReferenceMatchInfo {
+    pub source: String,          // "payments" | "payment_reports"
+    pub is_same_client: bool,
+    pub s_name: Option<String>,  // nombre del cliente si es diferente
+    pub s_reference: String,     // la referencia que coincidió en DB
+    pub n_amount: f64,
+    pub n_bs: f64,
+    pub s_state: String,
+}
+
+#[derive(Serialize)]
+pub struct CheckReferenceResponse {
+    pub ok: bool,
+    pub message: String,
+    pub data: CheckReferenceData,
+}
+
+#[derive(Serialize)]
+pub struct CheckReferenceData {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<ReferenceDetails>,
+}
+
+#[derive(Serialize)]
+pub struct ReferenceDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "sName")]
+    pub s_name: Option<String>,
+    #[serde(rename = "sReference")]
+    pub s_reference: String,
+    #[serde(rename = "nAmount")]
+    pub n_amount: f64,
+    #[serde(rename = "nBs")]
+    pub n_bs: f64,
+    #[serde(rename = "sState")]
+    pub s_state: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PaymentMethod {
     #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]

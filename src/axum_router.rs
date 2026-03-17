@@ -87,6 +87,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/utils/ip-pppoe/:sn", get(utils::get_ip_pppoe))
         .route("/v1/utils/image/:filename", get(utils::get_image))
         .route("/v1/utils/zabbix/:id_client", get(utils::get_zabbix))
+        .route(
+            "/v1/auth-user/payments/check-reference",
+            post(auth_user::check_reference_handler),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             user_jwt_auth_middleware,
