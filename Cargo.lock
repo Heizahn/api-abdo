@@ -103,6 +103,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "axum-client-ip",
  "axum-extra",
  "base64 0.22.1",
  "bcrypt",
@@ -211,6 +212,17 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "axum-client-ip"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9eefda7e2b27e1bda4d6fa8a06b50803b8793769045918bc37ad062d48a6efac"
+dependencies = [
+ "axum",
+ "forwarded-header-value",
+ "serde",
 ]
 
 [[package]]
