@@ -3,6 +3,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use axum_client_ip::SecureClientIpSource;
 use std::sync::Arc;
 use tower::ServiceBuilder;
 use tower_http::{
@@ -12,7 +13,10 @@ use tower_http::{
 };
 
 use crate::{
-    handlers::{auth, auth_user, calculation, clients, dashboard, payment, profile, providers, receivable, utils},
+    handlers::{
+        auth, auth_user, calculation, clients, dashboard, payment, profile, providers, receivable,
+        utils,
+    },
     middleware::{auth::jwt_auth_middleware, auth_user::user_jwt_auth_middleware, rate_limit},
     state::AppState,
 };
@@ -137,6 +141,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(static_routes)
         .layer(
             ServiceBuilder::new()
+                .layer(SecureClientIpSource::RightmostXForwardedFor.into_extension())
                 .layer(TraceLayer::new_for_http())
                 .layer(CompressionLayer::new())
                 .layer(cors),
