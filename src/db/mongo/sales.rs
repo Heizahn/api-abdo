@@ -17,21 +17,29 @@ impl SalesRepository for MongoDB {
         let db_bcv = self.client.database("BCV");
         let collection: Collection<Document> = db_bcv.collection("BCVRates");
 
-        // 1. Obtener el inicio del día usando tu librería (CORRIGE EL PROBLEMA DE LAS 8 PM)
-        // Esto devuelve un VenezuelaDateTime (que internamente tiene el UTC correcto: 04:00 AM)
+        // 1. Obtener el inicio y fin del día usando la librería de timezone
+        // Esto devuelve VenezuelaDateTime con el UTC correcto: 04:00 AM / 03:59:59 AM del día siguiente
         let start_of_day = tz_utils::start_of_today_venezuela();
+        let end_of_day = tz_utils::end_of_today_venezuela();
 
         // 2. Convertir a BSON para la query de Mongo
-        // (Usamos el impl From<VenezuelaDateTime> for BsonDateTime que definiste)
+        // (Usamos el impl From<VenezuelaDateTime> for BsonDateTime)
         let start_of_day_bson = mongodb::bson::DateTime::from(start_of_day.clone());
+        let end_of_day_bson = mongodb::bson::DateTime::from(end_of_day.clone());
 
-        // Opcional: Log para depurar y ver que la fecha es correcta
+        // Log para depurar y ver que las fechas son correctas
         tracing::info!(
-            "🔎 Buscando tasas desde: {} (Hora Vzla)",
-            start_of_day.datetime_string_venezuela()
+            "🔎 Buscando tasas desde: {} hasta: {} (Hora Vzla)",
+            start_of_day.datetime_string_venezuela(),
+            end_of_day.datetime_string_venezuela()
         );
 
-        let filter = doc! { "timestamp": { "$gte": start_of_day_bson } };
+        let filter = doc! {
+            "timestamp": {
+                "$gte": start_of_day_bson,
+                "$lte": end_of_day_bson
+            }
+        };
 
         let options = mongodb::options::FindOptions::builder()
             .sort(doc! { "timestamp": -1 })
