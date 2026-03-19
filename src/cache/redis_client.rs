@@ -1,5 +1,6 @@
 use redis::{Client, AsyncCommands, RedisError};
 use crate::config::Config;
+use crate::utils::timezone::VenezuelaDateTime;
 
 #[derive(Clone)]
 pub struct RedisClient {
@@ -25,21 +26,20 @@ impl RedisClient {
     /// Obtiene tasa de cambio del cache
     pub async fn get_exchange_rate(&self) -> Result<Option<f64>, RedisError> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
-        conn.get("exchange_rate:bcv").await
+        conn.get(exchange_rate_key()).await
     }
 
     /// Guarda tasa de cambio en cache con TTL
     pub async fn set_exchange_rate(&self, rate: f64, ttl_secs: u64) -> Result<(), RedisError> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
-        conn.set_ex("exchange_rate:bcv", rate, ttl_secs).await
+        conn.set_ex(exchange_rate_key(), rate, ttl_secs).await
     }
 
     /// Invalida cache de tasa de cambio
     #[allow(dead_code)]
     pub async fn invalidate_exchange_rate(&self) -> Result<(), RedisError> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
-        let key = format!("exchange_rate:bcv");
-        let _: () = conn.del(key).await?;
+        let _: () = conn.del(exchange_rate_key()).await?;
         Ok(())
     }
 
@@ -51,4 +51,13 @@ impl RedisClient {
         let _: () = conn.del(key).await?;
         Ok(())
     }
+}
+
+/// Genera la clave Redis para la tasa de cambio BCV, con scope de fecha venezolana.
+/// Formato: `exchange_rate:bcv:{YYYY-MM-DD}` donde la fecha es en hora de Venezuela.
+/// Esto garantiza que después de la medianoche VZT la clave cambia y se provoca un
+/// cache miss, forzando una nueva consulta a la BD.
+fn exchange_rate_key() -> String {
+    let today = VenezuelaDateTime::now().date_string_venezuela();
+    format!("exchange_rate:bcv:{}", today)
 }
