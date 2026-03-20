@@ -9,7 +9,7 @@ use crate::{
     auth::user_jwt::UserProfileClaims,
     db::{ProfileRepository, UserRepository},
     error::ApiError,
-    models::db::{ClientDetail, ClientListItem},
+    models::db::{ClientDetail, ClientListItem, ClientStatusHistoryItem},
     services::get_ip_pppoe_mk::get_ip_pppoe_mk,
     state::AppState,
 };
@@ -71,6 +71,20 @@ pub async fn get_client_by_id_handler(
     }
 
     Ok(Json(detail))
+}
+
+/// GET /v1/clients/:id/status-history
+pub async fn get_status_history_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(_claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<ClientStatusHistoryItem>>, ApiError> {
+    state
+        .db
+        .get_client_status_history(&id)
+        .await
+        .map(Json)
+        .map_err(ApiError::DatabaseError)
 }
 
 /// GET /v1/auth-user/clients/all?owner=<id>

@@ -122,3 +122,4 @@ pub async fn me_phone_handler(
     let phone = state.db.get_phone(&claims.sub).await.unwrap_or_default();
     Ok(Json(MePhoneResponse { ok: true, phone }))
 }
+

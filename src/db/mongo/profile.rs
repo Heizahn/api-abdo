@@ -2,7 +2,7 @@ use super::MongoDB;
 use crate::db::mongo::ResultGroupedByDate;
 use crate::db::ProfileRepository;
 use crate::domain::customer::{Customer, CustomerView};
-use crate::models::db::{ActiveClientBalance, Client, ClientDetail, ClientListItem, ClientOnu, SolvencyCounts, Tax};
+use crate::models::db::{ActiveClientBalance, Client, ClientDetail, ClientListItem, ClientOnu, ClientStatusHistoryItem, SolvencyCounts, Tax};
 use crate::utils::get_bson_amount::get_bson_amount;
 use crate::utils::timezone::VenezuelaDateTime;
 use async_trait::async_trait;
@@ -626,5 +626,55 @@ impl ProfileRepository for MongoDB {
         };
 
         Ok(Some(detail))
+    }
+
+    async fn get_client_status_history(
+        &self,
+        client_id: &str,
+    ) -> Result<Vec<ClientStatusHistoryItem>, String> {
+        let obj_id = ObjectId::parse_str(client_id).map_err(|e| e.to_string())?;
+
+        let pipeline = vec![
+            doc! { "$match": { "idClient": obj_id } },
+            doc! { "$lookup": { "from": "Users", "localField": "idActor", "foreignField": "_id", "as": "actor" } },
+            doc! { "$addFields": {
+                "_sortDate": {
+                    "$cond": {
+                        "if": { "$eq": [{ "$type": "$dCreation" }, "string"] },
+                        "then": { "$dateFromString": { "dateString": "$dCreation", "format": "%d/%m/%Y %H:%M", "onError": null, "onNull": null } },
+                        "else": "$dCreation"
+                    }
+                }
+            }},
+            doc! { "$sort": { "_sortDate": -1 } },
+        ];
+
+        let mut cursor = self.db.collection::<Document>("ClientStatusHistory")
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut results = Vec::new();
+        while let Some(Ok(doc)) = cursor.next().await {
+            let actor_name = doc
+                .get_array("actor").ok()
+                .and_then(|arr| arr.first())
+                .and_then(|v| v.as_document())
+                .and_then(|d| d.get_str("sName").ok())
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+
+            let item = ClientStatusHistoryItem {
+                id: doc.get_object_id("_id").map(|o| o.to_hex()).unwrap_or_default(),
+                client_id: doc.get_object_id("idClient").map(|o| o.to_hex()).unwrap_or_default(),
+                state: doc.get_str("sState").unwrap_or_default().to_string(),
+                previous_state: doc.get_str("sPreviousState").unwrap_or_default().to_string(),
+                actor_name,
+                created_at: doc.get_str("dCreation").unwrap_or_default().to_string(),
+            };
+            results.push(item);
+        }
+
+        Ok(results)
     }
 }
