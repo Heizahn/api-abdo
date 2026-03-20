@@ -632,8 +632,9 @@ impl ProfileRepository for MongoDB {
         &self,
         client_id: &str,
     ) -> Result<Vec<ClientStatusHistoryItem>, String> {
+        let obj_id = ObjectId::parse_str(client_id).map_err(|e| e.to_string())?;
         let collection: Collection<Document> = self.db.collection("ClientStatusHistory");
-        let filter = doc! { "idClient": client_id };
+        let filter = doc! { "idClient": obj_id };
 
         let mut cursor = collection
             .find(filter)
@@ -645,7 +646,7 @@ impl ProfileRepository for MongoDB {
         while let Some(Ok(doc)) = cursor.next().await {
             let item = ClientStatusHistoryItem {
                 id: doc.get_object_id("_id").map(|o| o.to_hex()).unwrap_or_default(),
-                client_id: doc.get_str("idClient").unwrap_or_default().to_string(),
+                client_id: doc.get_object_id("idClient").map(|o| o.to_hex()).unwrap_or_default(),
                 state: doc.get_str("sState").unwrap_or_default().to_string(),
                 previous_state: doc.get_str("sPreviousState").unwrap_or_default().to_string(),
                 actor_id: doc.get_str("idActor").unwrap_or_default().to_string(),
