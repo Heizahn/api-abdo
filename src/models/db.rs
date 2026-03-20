@@ -234,6 +234,6 @@ pub struct ClientStatusHistoryItem {
     pub client_id: String,
     pub state: String,
     pub previous_state: String,
-    pub actor_id: String,
+    pub actor_name: String,
     pub created_at: String,
 }
