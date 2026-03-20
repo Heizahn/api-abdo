@@ -637,7 +637,16 @@ impl ProfileRepository for MongoDB {
         let pipeline = vec![
             doc! { "$match": { "idClient": obj_id } },
             doc! { "$lookup": { "from": "Users", "localField": "idActor", "foreignField": "_id", "as": "actor" } },
-            doc! { "$sort": { "_id": -1 } },
+            doc! { "$addFields": {
+                "_sortDate": {
+                    "$cond": {
+                        "if": { "$eq": [{ "$type": "$dCreation" }, "string"] },
+                        "then": { "$dateFromString": { "dateString": "$dCreation", "format": "%d/%m/%Y %H:%M", "onError": null, "onNull": null } },
+                        "else": "$dCreation"
+                    }
+                }
+            }},
+            doc! { "$sort": { "_sortDate": -1 } },
         ];
 
         let mut cursor = self.db.collection::<Document>("ClientStatusHistory")
