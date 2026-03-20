@@ -2,7 +2,7 @@ use super::MongoDB;
 use crate::db::mongo::ResultGroupedByDate;
 use crate::db::ProfileRepository;
 use crate::domain::customer::{Customer, CustomerView};
-use crate::models::db::{ActiveClientBalance, Client, ClientDetail, ClientListItem, ClientOnu, SolvencyCounts, Tax};
+use crate::models::db::{ActiveClientBalance, Client, ClientDetail, ClientListItem, ClientOnu, ClientStatusHistoryItem, SolvencyCounts, Tax};
 use crate::utils::get_bson_amount::get_bson_amount;
 use crate::utils::timezone::VenezuelaDateTime;
 use async_trait::async_trait;
@@ -626,5 +626,34 @@ impl ProfileRepository for MongoDB {
         };
 
         Ok(Some(detail))
+    }
+
+    async fn get_client_status_history(
+        &self,
+        client_id: &str,
+    ) -> Result<Vec<ClientStatusHistoryItem>, String> {
+        let collection: Collection<Document> = self.db.collection("ClientStatusHistory");
+        let filter = doc! { "idClient": client_id };
+
+        let mut cursor = collection
+            .find(filter)
+            .sort(doc! { "dCreation": -1 })
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut results = Vec::new();
+        while let Some(Ok(doc)) = cursor.next().await {
+            let item = ClientStatusHistoryItem {
+                id: doc.get_object_id("_id").map(|o| o.to_hex()).unwrap_or_default(),
+                client_id: doc.get_str("idClient").unwrap_or_default().to_string(),
+                state: doc.get_str("sState").unwrap_or_default().to_string(),
+                previous_state: doc.get_str("sPreviousState").unwrap_or_default().to_string(),
+                actor_id: doc.get_str("idActor").unwrap_or_default().to_string(),
+                created_at: doc.get_str("dCreation").unwrap_or_default().to_string(),
+            };
+            results.push(item);
+        }
+
+        Ok(results)
     }
 }

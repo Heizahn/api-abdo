@@ -75,6 +75,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(clients::get_client_by_id_handler),
         )
         .route(
+            "/v1/clients/:id/status-history",
+            get(clients::get_status_history_handler),
+        )
+        .route(
             "/v1/auth-user/dashboard/monthly-closing",
             get(dashboard::monthly_closing_handler),
         )

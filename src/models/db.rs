@@ -227,3 +227,13 @@ pub struct ClientListItem {
     pub plan_name: Option<String>,
     pub plan_price: Option<f64>,
 }
+
+#[derive(Debug, Serialize)]
+pub struct ClientStatusHistoryItem {
+    pub id: String,
+    pub client_id: String,
+    pub state: String,
+    pub previous_state: String,
+    pub actor_id: String,
+    pub created_at: String,
+}
