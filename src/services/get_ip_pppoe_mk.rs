@@ -11,6 +11,13 @@ pub fn get_ip_pppoe_mk(
     user: &str,
     pass: &str,
 ) -> Result<String, String> {
+    // Guard: SN must be at least 8 characters to avoid false positives
+    if sn.len() < 8 {
+        let msg = format!("SN '{}' demasiado corto (mínimo 8 caracteres), búsqueda omitida", sn);
+        warn!(target: "api_abdo::mikrotik", "{}", msg);
+        return Err(msg);
+    }
+
     debug!("Intentando localizar SN: {} en BRAS {}:{}", sn, ip, port);
 
     // 1. Configurar la conexión TCP con manejo de error no fatal
@@ -62,7 +69,7 @@ pub fn get_ip_pppoe_mk(
 
     // Comando protegido con llaves y selección única
     let command = format!(
-        "{{ :do {{ :put [/ppp active get [:pick [find name~\"{}\"] 0] address] }} on-error={{ :put \"NOT_FOUND\" }} }}",
+        "{{ :do {{ :put [/ppp active get [:pick [find name~\"^{}$\"] 0] address] }} on-error={{ :put \"NOT_FOUND\" }} }}",
         regex_sn
     );
 
