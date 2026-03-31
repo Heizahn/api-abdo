@@ -69,7 +69,7 @@ pub fn get_ip_pppoe_mk(
 
     // Comando protegido con llaves y selección única
     let command = format!(
-        "{{ :do {{ :put [/ppp active get [:pick [find name~\"^{}$\"] 0] address] }} on-error={{ :put \"NOT_FOUND\" }} }}",
+        "{{ :do {{ :put [/ppp active get [:pick [find name~\"{}\"] 0] address] }} on-error={{ :put \"NOT_FOUND\" }} }}",
         regex_sn
     );
 
