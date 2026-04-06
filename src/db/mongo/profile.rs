@@ -666,7 +666,6 @@ impl ProfileRepository for MongoDB {
         }
 
         let projection = doc! {
-            "_id": 0,
             "sName": 1,
             "sDni": 1,
             "sRif": 1,
@@ -686,6 +685,10 @@ impl ProfileRepository for MongoDB {
         let mut items = Vec::with_capacity(docs.len());
 
         for doc in docs {
+            let id = doc
+                .get_object_id("_id")
+                .map(|oid| oid.to_hex())
+                .unwrap_or_default();
             let razon_social = doc.get_str("sName").unwrap_or_default().to_string();
 
             let dni = {
@@ -719,6 +722,7 @@ impl ProfileRepository for MongoDB {
                 .map(|s| s.to_string());
 
             items.push(CustomerInfoItem {
+                id,
                 razon_social,
                 dni,
                 direccion,

@@ -240,6 +240,7 @@ pub struct ClientStatusHistoryItem {
 
 #[derive(Debug, Serialize, Clone)]
 pub struct CustomerInfoItem {
+    pub id: String,
     pub razon_social: String,
     pub dni: Option<String>,
     pub direccion: Option<String>,
