@@ -103,6 +103,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/auth-user/payments/check-reference",
             post(auth_user::check_reference_handler),
         )
+        .route("/v1/auth-user/utils/list/banks", get(utils::get_bank_list_user))
+        .route("/v1/auth-user/payments/report", post(payment::report_payment_user_handler))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             user_jwt_auth_middleware,

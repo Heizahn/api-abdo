@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::claims::AccessClaims,
+    auth::user_jwt::UserProfileClaims,
     db::{ProfileRepository, SalesRepository},
     error::ApiError,
     // Importamos ambos modelos desde 'payment' como indicaste
@@ -163,6 +164,200 @@ pub async fn get_pago_movil_data_by_client_handler(
 /// POST /v1/payments/report
 pub async fn report_payment_handler(
     Extension(_claims): Extension<AccessClaims>,
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> Result<impl IntoResponse, ApiError> {
+    tracing::info!("📸 Iniciando reporte de pago (Abono o Deuda)");
+
+    let mut reference = None;
+    let mut date_str = None;
+    let mut amount_bs = None;
+    let mut bank = None;
+    let mut phone = None;
+    let mut saved_image_path = None;
+    let mut id_debt_str: Option<String> = None;
+    let mut id_client_str: Option<String> = None; // Nueva variable
+    let mut id_payment_method_str: Option<String> = None;
+
+    // 1. Procesar Multipart
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        tracing::error!("Error multipart: {}", e);
+        ApiError::BadRequest("Error leyendo formulario".into())
+    })? {
+        let name = field.name().unwrap_or("").to_string();
+
+        if name == "image" {
+            // Determinar extensión por MIME type, no por el nombre del archivo
+            // (el nombre puede ser "blob", "image" u otro sin extensión real)
+            let content_type = field.content_type().unwrap_or("image/jpeg").to_string();
+            let extension = match content_type.as_str() {
+                "image/png"  => "png",
+                "image/webp" => "webp",
+                "image/gif"  => "gif",
+                _            => "jpg",
+            };
+            let unique_name = format!("{}.{}", Uuid::new_v4(), extension);
+            let file_path = format!("uploads/{}", unique_name);
+
+            let data = field
+                .bytes()
+                .await
+                .map_err(|_| ApiError::InternalServerError)?;
+
+            if data.is_empty() {
+                tracing::error!("Imagen recibida esta vacia (0 bytes)");
+                return Err(ApiError::BadRequest("La imagen llego vacia al servidor".into()));
+            }
+
+            tracing::info!("Imagen recibida: {} bytes, tipo: {}", data.len(), content_type);
+
+            let mut file = File::create(&file_path)
+                .await
+                .map_err(|_| ApiError::InternalServerError)?;
+            file.write_all(&data)
+                .await
+                .map_err(|_| ApiError::InternalServerError)?;
+            file.flush()
+                .await
+                .map_err(|_| ApiError::InternalServerError)?;
+
+            // Solo asignar el path si todo fue exitoso
+            saved_image_path = Some(format!("/uploads/{}", unique_name));
+        } else {
+            let text = field.text().await.unwrap_or_default();
+            match name.as_str() {
+                "reference" => reference = Some(text),
+                "date" => date_str = Some(text),
+                "amount_bs" => amount_bs = text.parse::<f64>().ok(),
+                "bank" => bank = Some(text),
+                "phone" => phone = Some(text),
+                "id_debt" => id_debt_str = Some(text),
+                "id_client" => id_client_str = Some(text), // Capturar cliente
+                "id_payment_method" => id_payment_method_str = Some(text),
+                _ => {}
+            }
+        }
+    }
+
+    // 2. Validaciones Críticas
+    if reference.is_none()
+        || amount_bs.is_none()
+        || saved_image_path.is_none()
+        || id_payment_method_str.is_none()
+    {
+        return Err(ApiError::BadRequest(
+            "Faltan datos básicos (ref, monto, imagen o método)".into(),
+        ));
+    }
+
+    // Validación Lógica: Debe venir id_debt O id_client
+    if id_debt_str.is_none() && id_client_str.is_none() {
+        return Err(ApiError::BadRequest(
+            "Debe especificar una Deuda o un Cliente para el abono".into(),
+        ));
+    }
+
+    let id_pm_oid = ObjectId::parse_str(&id_payment_method_str.unwrap())
+        .map_err(|_| ApiError::BadRequest("Método de pago inválido".into()))?;
+
+    // 3. Determinar el Cliente Real y la Deuda (si aplica)
+    let mut id_debt_oid: Option<ObjectId> = None;
+    let real_client_id: ObjectId;
+
+    if let Some(d_str) = id_debt_str {
+        // Caso A: Reporte ligado a una deuda
+        let oid = ObjectId::parse_str(&d_str)
+            .map_err(|_| ApiError::BadRequest("ID deuda malformado".into()))?;
+        let debt_doc = state
+            .db
+            .find_debt_by_id(&oid.to_string())
+            .await
+            .map_err(|e| ApiError::DatabaseError(e))?
+            .ok_or(ApiError::BadRequest("La deuda no existe".into()))?;
+
+        real_client_id = debt_doc.id_client;
+        id_debt_oid = Some(oid);
+    } else {
+        // Caso B: Abono directo a cuenta de cliente (Adelanto)
+        let c_str = id_client_str.unwrap();
+        real_client_id = ObjectId::parse_str(&c_str)
+            .map_err(|_| ApiError::BadRequest("ID cliente malformado".into()))?;
+    }
+
+    // 4. Obtener Cliente e Impuestos
+    // Buscamos al cliente en la base de datos
+    let client = state
+        .db
+        .find_client_by_id(&real_client_id.to_string())
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    // Definimos una tasa por defecto (1.0 significa que no hay recargo/descuento de IVA)
+    let default_rate = 1.0;
+
+    // Resolvemos el IVA del cliente
+    let iva_rate = if let Some(tax_id) = client.id_tax {
+        state
+            .db
+            .find_tax_by_id(Some(tax_id))
+            .await
+            .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+            .map(|t| t.iva)
+            .unwrap_or(default_rate)
+    } else {
+        default_rate
+    };
+
+    // 5. Cálculos y Tasa
+    let exchange_rate = state
+        .db
+        .get_latest_exchange_rate()
+        .await
+        .map_err(|_| ApiError::InternalServerError)?;
+    let amount_bs_val = amount_bs.unwrap();
+    let amount_bs_neto = amount_bs_val / iva_rate;
+    let amount_usd = (amount_bs_neto / exchange_rate * 100.0).round() / 100.0;
+
+    // 6. Guardar Reporte
+    let new_report = PaymentReport {
+        id: None,
+        id_client: Some(real_client_id),
+        id_debt: id_debt_oid, // Será Some(id) o None (si es abono general)
+        id_payment_method: Some(id_pm_oid),
+        reference: reference.unwrap(),
+        payment_date: date_str
+            .and_then(|d| d.parse::<DateTime<Utc>>().ok())
+            .unwrap_or(Utc::now()),
+        amount_bs: amount_bs_val,
+        bank_origin: bank.unwrap_or_default(),
+        phone_number: phone.unwrap_or_default(),
+        image_url: saved_image_path.unwrap(),
+        amount_usd,
+        exchange_rate,
+        state: "Pendiente".to_string(),
+        created_at: Utc::now(),
+    };
+
+    let result = state
+        .db
+        .create_payment_report(new_report)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "message": if id_debt_oid.is_some() { "Pago a deuda registrado" } else { "Abono a cuenta registrado" },
+        "data": {
+            "id": result.inserted_id,
+            "amount_usd": amount_usd,
+            "is_advance": id_debt_oid.is_none()
+        }
+    })))
+}
+
+/// POST /v1/auth-user/payments/report
+pub async fn report_payment_user_handler(
+    Extension(_claims): Extension<UserProfileClaims>,
     State(state): State<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, ApiError> {
