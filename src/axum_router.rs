@@ -67,6 +67,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let auth_user_protected = Router::new()
         .route("/v1/auth-user/me", get(auth_user::me_handler))
         .route(
+            "/v1/auth-user/clients/contact-info",
+            get(clients::get_customers_info_handler),
+        )
+        .route(
             "/v1/auth-user/clients/all",
             get(clients::get_all_clients_handler),
         )

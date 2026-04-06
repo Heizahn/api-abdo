@@ -9,7 +9,7 @@ use crate::{
     auth::user_jwt::UserProfileClaims,
     db::{ProfileRepository, UserRepository},
     error::ApiError,
-    models::db::{ClientDetail, ClientListItem, ClientStatusHistoryItem},
+    models::db::{ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem},
     services::get_ip_pppoe_mk::get_ip_pppoe_mk,
     state::AppState,
 };
@@ -82,6 +82,36 @@ pub async fn get_status_history_handler(
     state
         .db
         .get_client_status_history(&id)
+        .await
+        .map(Json)
+        .map_err(ApiError::DatabaseError)
+}
+
+/// GET /v1/auth-user/clients/contact-info
+///
+/// Returns contact info (razon_social, dni, direccion, email, telefono) for all clients.
+/// - Rol 3 (provider): only returns clients belonging to their owner ID.
+/// - Otros roles: returns all clients.
+pub async fn get_customers_info_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+) -> Result<Json<Vec<CustomerInfoItem>>, ApiError> {
+    let user = state
+        .db
+        .find_user_by_id(&claims.id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| ApiError::Unauthorized("Usuario no encontrado".to_string()))?;
+
+    let owner_id: Option<String> = if (user.role - 3.0_f32).abs() < 0.01 {
+        Some(claims.id.clone())
+    } else {
+        None
+    };
+
+    state
+        .db
+        .get_customers_info(owner_id.as_deref())
         .await
         .map(Json)
         .map_err(ApiError::DatabaseError)

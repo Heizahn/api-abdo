@@ -237,3 +237,12 @@ pub struct ClientStatusHistoryItem {
     pub actor_name: String,
     pub created_at: String,
 }
+
+#[derive(Debug, Serialize, Clone)]
+pub struct CustomerInfoItem {
+    pub razon_social: String,
+    pub dni: Option<String>,
+    pub direccion: Option<String>,
+    pub email: Option<String>,
+    pub telefono: Option<String>,
+}

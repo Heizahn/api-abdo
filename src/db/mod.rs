@@ -1,5 +1,5 @@
 pub mod mongo;
-use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
+use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
 
 use crate::models::payment::{Bank, PaymentReport, ReferenceMatchInfo};
 use crate::models::users::{User, UserCredentials}; // Import
@@ -79,6 +79,11 @@ pub trait ProfileRepository {
         &self,
         client_id: &str,
     ) -> Result<Vec<ClientStatusHistoryItem>, String>;
+
+    async fn get_customers_info(
+        &self,
+        owner_id: Option<&str>,
+    ) -> Result<Vec<CustomerInfoItem>, String>;
 }
 
 // ============================================

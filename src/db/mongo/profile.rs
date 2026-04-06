@@ -2,7 +2,7 @@ use super::MongoDB;
 use crate::db::mongo::ResultGroupedByDate;
 use crate::db::ProfileRepository;
 use crate::domain::customer::{Customer, CustomerView};
-use crate::models::db::{ActiveClientBalance, Client, ClientDetail, ClientListItem, ClientOnu, ClientStatusHistoryItem, SolvencyCounts, Tax};
+use crate::models::db::{ActiveClientBalance, Client, ClientDetail, ClientListItem, ClientOnu, ClientStatusHistoryItem, CustomerInfoItem, SolvencyCounts, Tax};
 use crate::utils::get_bson_amount::get_bson_amount;
 use crate::utils::timezone::VenezuelaDateTime;
 use async_trait::async_trait;
@@ -13,6 +13,31 @@ use mongodb::bson::{doc, oid::ObjectId};
 use mongodb::error::Error as MongoError;
 use mongodb::Collection;
 use std::collections::HashMap;
+
+/// Format a raw DNI/RIF value into a prefixed string like `V-12345678` or `J-50001234`.
+/// If the value already has a letter prefix followed by `-`, it is returned as-is.
+/// `field` should be `"sDni"` or `"sRif"` to determine the default prefix.
+fn format_dni(value: &str, field: &str) -> String {
+    // Already has a letter-dash prefix (e.g. "V-", "J-", "G-", "E-")
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() >= 2 && chars[0].is_alphabetic() && chars[1] == '-' {
+        return value.to_string();
+    }
+    // Determine prefix
+    let prefix = if field == "sDni" {
+        "V-"
+    } else {
+        // sRif: if the value starts with a letter (but no dash), use that letter
+        if chars.first().map(|c| c.is_alphabetic()).unwrap_or(false) {
+            let letter = chars[0].to_uppercase().next().unwrap_or('J');
+            // Strip the leading letter and prefix with letter-dash
+            let rest = &value[1..];
+            return format!("{}-{}", letter, rest);
+        }
+        "J-"
+    };
+    format!("{}{}", prefix, value)
+}
 
 #[async_trait]
 impl ProfileRepository for MongoDB {
@@ -626,6 +651,78 @@ impl ProfileRepository for MongoDB {
         };
 
         Ok(Some(detail))
+    }
+
+    async fn get_customers_info(
+        &self,
+        owner_id: Option<&str>,
+    ) -> Result<Vec<CustomerInfoItem>, String> {
+        let mut filter = doc! {};
+        if let Some(owner) = owner_id {
+            filter.insert("idOwner", owner);
+        }
+
+        let projection = doc! {
+            "_id": 0,
+            "sName": 1,
+            "sDni": 1,
+            "sRif": 1,
+            "sAddress": 1,
+            "sEmail": 1,
+            "sPhone": 1,
+        };
+
+        let collection: Collection<Document> = self.db.collection("Clients");
+        let mut cursor = collection
+            .find(filter)
+            .projection(projection)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut items = Vec::new();
+        while let Some(Ok(doc)) = cursor.next().await {
+            let razon_social = doc.get_str("sName").unwrap_or_default().to_string();
+
+            let dni = {
+                let s_dni = doc.get_str("sDni").ok().filter(|s| !s.is_empty());
+                let s_rif = doc.get_str("sRif").ok().filter(|s| !s.is_empty());
+                if let Some(raw) = s_dni {
+                    Some(format_dni(raw, "sDni"))
+                } else if let Some(raw) = s_rif {
+                    Some(format_dni(raw, "sRif"))
+                } else {
+                    None
+                }
+            };
+
+            let direccion = doc
+                .get_str("sAddress")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+
+            let email = doc
+                .get_str("sEmail")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+
+            let telefono = doc
+                .get_str("sPhone")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+
+            items.push(CustomerInfoItem {
+                razon_social,
+                dni,
+                direccion,
+                email,
+                telefono,
+            });
+        }
+
+        Ok(items)
     }
 
     async fn get_client_status_history(
