@@ -105,6 +105,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/auth-user/utils/list/banks", get(utils::get_bank_list_user))
         .route("/v1/auth-user/payments/report", post(payment::report_payment_user_handler))
+        .route(
+            "/v1/auth-user/payments/methods/by-client/:client_id",
+            get(payment::get_pago_movil_data_by_client_user_handler),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             user_jwt_auth_middleware,
