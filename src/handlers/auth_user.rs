@@ -55,7 +55,7 @@ pub async fn login_handler(
     // 4. Generate Token
     let jwt_service = UserJwtService::new();
     let token = jwt_service
-        .generate_token(&user.id, &user.name)
+        .generate_token(&user.id, &user.name, user.role)
         .map_err(|e| ApiError::Internal(e))?;
 
     Ok(Json(UserLoginResponse { token }))
@@ -89,7 +89,7 @@ pub async fn refresh_token_handler(
 
     // 3. Generate new token
     let new_token = jwt_service
-        .generate_token(&user.id, &user.name)
+        .generate_token(&user.id, &user.name, user.role)
         .map_err(|e| ApiError::Internal(e))?;
 
     Ok(Json(RefreshTokenResponse { token: new_token }))

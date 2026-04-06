@@ -96,14 +96,9 @@ pub async fn get_customers_info_handler(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<UserProfileClaims>,
 ) -> Result<Json<Vec<CustomerInfoItem>>, ApiError> {
-    let user = state
-        .db
-        .find_user_by_id(&claims.id)
-        .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or_else(|| ApiError::Unauthorized("Usuario no encontrado".to_string()))?;
-
-    let owner_id: Option<String> = if (user.role - 3.0_f32).abs() < 0.01 {
+    // Role is embedded in the JWT claims (field added at login) — no extra DB round-trip needed.
+    let role = claims.role.unwrap_or(0.0);
+    let owner_id: Option<String> = if (role - 3.0_f32).abs() < 0.01 {
         Some(claims.id.clone())
     } else {
         None

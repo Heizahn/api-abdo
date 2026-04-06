@@ -7,6 +7,9 @@ use time::OffsetDateTime;
 pub struct UserProfileClaims {
     pub id: String,
     pub name: String,
+    /// nRole stored in the JWT to avoid an extra DB round-trip on every request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iat: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -28,13 +31,14 @@ impl UserJwtService {
         }
     }
 
-    pub fn generate_token(&self, user_id: &str, name: &str) -> Result<String, String> {
+    pub fn generate_token(&self, user_id: &str, name: &str, role: f32) -> Result<String, String> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let exp = now + self.expiration_time;
 
         let claims = UserProfileClaims {
             id: user_id.to_string(),
             name: name.to_string(),
+            role: Some(role),
             iat: Some(now),
             exp: Some(exp),
         };

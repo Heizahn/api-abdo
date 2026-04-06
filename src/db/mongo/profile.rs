@@ -18,25 +18,28 @@ use std::collections::HashMap;
 /// If the value already has a letter prefix followed by `-`, it is returned as-is.
 /// `field` should be `"sDni"` or `"sRif"` to determine the default prefix.
 fn format_dni(value: &str, field: &str) -> String {
+    let mut chars = value.chars();
+    let first = chars.next();
+    let second = chars.next();
+
     // Already has a letter-dash prefix (e.g. "V-", "J-", "G-", "E-")
-    let chars: Vec<char> = value.chars().collect();
-    if chars.len() >= 2 && chars[0].is_alphabetic() && chars[1] == '-' {
+    if matches!((first, second), (Some(c), Some('-')) if c.is_alphabetic()) {
         return value.to_string();
     }
-    // Determine prefix
-    let prefix = if field == "sDni" {
-        "V-"
-    } else {
-        // sRif: if the value starts with a letter (but no dash), use that letter
-        if chars.first().map(|c| c.is_alphabetic()).unwrap_or(false) {
-            let letter = chars[0].to_uppercase().next().unwrap_or('J');
-            // Strip the leading letter and prefix with letter-dash
-            let rest = &value[1..];
-            return format!("{}-{}", letter, rest);
+
+    if field == "sDni" {
+        return format!("V-{}", value);
+    }
+
+    // sRif: if the value starts with a letter (but no dash), use that letter
+    if let Some(c) = first {
+        if c.is_alphabetic() {
+            let letter = c.to_uppercase().next().unwrap_or('J');
+            return format!("{}-{}", letter, &value[c.len_utf8()..]);
         }
-        "J-"
-    };
-    format!("{}{}", prefix, value)
+    }
+
+    format!("J-{}", value)
 }
 
 #[async_trait]
@@ -673,14 +676,16 @@ impl ProfileRepository for MongoDB {
         };
 
         let collection: Collection<Document> = self.db.collection("Clients");
-        let mut cursor = collection
+        let cursor = collection
             .find(filter)
             .projection(projection)
             .await
             .map_err(|e| e.to_string())?;
 
-        let mut items = Vec::new();
-        while let Some(Ok(doc)) = cursor.next().await {
+        let docs: Vec<Document> = cursor.try_collect().await.map_err(|e| e.to_string())?;
+        let mut items = Vec::with_capacity(docs.len());
+
+        for doc in docs {
             let razon_social = doc.get_str("sName").unwrap_or_default().to_string();
 
             let dni = {
