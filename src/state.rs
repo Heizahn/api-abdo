@@ -1,7 +1,5 @@
-use std::collections::HashMap;
 use crate::{cache::RedisClient, config::Config, db::mongo::MongoDB};
-use std::sync::{Arc, RwLock};
-use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Estado compartido de la aplicación
 /// Se pasa a todos los handlers mediante Axum's State extractor

@@ -31,6 +31,7 @@ pub trait AuthRepository {
 // 6. UserRepository: Auth Users (Admin/Staff)
 // ============================================
 #[async_trait::async_trait]
+#[allow(dead_code)]
 pub trait UserRepository {
     async fn find_user_by_email(&self, email: &str) -> Result<Option<User>, String>;
     async fn find_user_credentials_by_user_id(
@@ -175,6 +176,7 @@ pub trait UtilsRepository {
 // 5. OnuRepository: Onu
 // ============================================
 #[async_trait::async_trait]
+#[allow(dead_code)]
 pub trait OnuRepository {
     // ZTE / Devices
     async fn get_device_serial_numbers(&self) -> Result<Vec<OnuIdentity>, String>;

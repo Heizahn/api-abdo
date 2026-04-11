@@ -1,4 +1,5 @@
 pub mod sms;
+pub mod whatsapp;
 pub mod timezone;
 pub mod get_bson_amount;
 pub mod bcv_scraper;

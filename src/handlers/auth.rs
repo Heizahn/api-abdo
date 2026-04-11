@@ -11,7 +11,12 @@ use crate::{
     error::ApiError,
     models::auth::*,
     state::AppState,
-    utils::{generate_verification_code, sms::send_sms, timezone::VenezuelaDateTime,},
+    utils::{
+        generate_verification_code,
+        sms::send_sms,
+        whatsapp::send_whatsapp_otp,
+        timezone::VenezuelaDateTime,
+    },
 };
 
 /// POST /v1/auth/verify_number
@@ -56,11 +61,25 @@ pub async fn verify_number_handler(
         payload.phone,
         now_vz.datetime_string_venezuela()
     );
-    // 4. Enviar SMS de forma asíncrona (no bloquea la respuesta)
+    // 4. Enviar OTP de forma asíncrona: WhatsApp primero, SMS como fallback
     let phone_clone = payload.phone.clone();
     tokio::spawn(async move {
-        if let Err(e) = send_sms(&phone_clone, code).await {
-            tracing::error!("Error enviando SMS a {}: {:?}", phone_clone, e);
+        match send_whatsapp_otp(&phone_clone, code).await {
+            Ok(()) => {
+                tracing::info!("OTP enviado por WhatsApp a {}", phone_clone);
+            }
+            Err(wa_err) => {
+                tracing::warn!(
+                    "WhatsApp OTP falló para {} ({:?}). Usando fallback SMS...",
+                    phone_clone, wa_err
+                );
+                if let Err(sms_err) = send_sms(&phone_clone, code).await {
+                    tracing::error!(
+                        "Fallback SMS también falló para {}: {:?}",
+                        phone_clone, sms_err
+                    );
+                }
+            }
         }
     });
 

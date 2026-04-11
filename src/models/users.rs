@@ -98,12 +98,14 @@ pub struct RefreshTokenResponse {
     pub token: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct CreateUserRequest {
     pub user: UserCreateData,
     pub password: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct UserCreateData {
     #[serde(rename = "sName")]

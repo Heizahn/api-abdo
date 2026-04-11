@@ -125,6 +125,7 @@ pub struct LatestVersion {
 // ============================================
 // ONU get DB
 // ============================================
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct OnuIdentity {
     #[serde(rename = "_id")]

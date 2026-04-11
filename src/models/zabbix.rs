@@ -17,6 +17,7 @@ pub struct MonthlyTraffic {
     pub upload_gb: f64,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 pub struct ClientOltData {
     client_zabbix_code: String, // O "sn", como lo tengas en tu DB
