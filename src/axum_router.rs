@@ -15,7 +15,7 @@ use tower_http::{
 use crate::{
     handlers::{
         auth, auth_user, calculation, clients, dashboard, payment, profile, providers, receivable,
-        utils,
+        utils, webhook,
     },
     middleware::{auth::jwt_auth_middleware, auth_user::user_jwt_auth_middleware, rate_limit},
     state::AppState,
@@ -37,6 +37,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     let auth_rate_limit =
         rate_limit::create_auth_rate_limiter(state.config.rate_limit_auth_per_minute);
+
+    let webhook_rate_limit = rate_limit::create_webhook_rate_limiter(200);
 
     // ✅ RUTAS PÚBLICAS (sin JWT)
     let public_routes = Router::new()
@@ -145,6 +147,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             jwt_auth_middleware,
         ));
 
+    // ✅ WEBHOOK ROUTES (Meta WhatsApp — sin JWT, rate limit propio 200/min)
+    let webhook_routes = Router::new()
+        .route(
+            "/v1/webhook/whatsapp",
+            get(webhook::verify_webhook).post(webhook::receive_webhook),
+        )
+        .layer(webhook_rate_limit);
+
     let static_routes = Router::new().route("/v1/privacy-policy", get(utils::get_privacy_policy));
 
     // ✅ ROUTER PRINCIPAL: merge + state al final
@@ -152,6 +162,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(auth_user_public)
         .merge(auth_user_protected)
         .merge(protected_routes)
+        .merge(webhook_routes)
         .merge(static_routes)
         .layer(
             ServiceBuilder::new()
