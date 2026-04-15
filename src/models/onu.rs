@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 // ============================================
 // ONU get DB
 // ============================================
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Onu {
     pub cliente: String,

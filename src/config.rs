@@ -32,6 +32,7 @@ pub struct Config {
     pub id_simcot: String,
 
     //ZTE
+    #[allow(dead_code)]
     pub olt_zte_pass: String,
 
     //MikroTik

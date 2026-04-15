@@ -2,7 +2,7 @@ use super::MongoDB;
 use crate::db::mongo::ResultGroupedByDate;
 use crate::db::ProfileRepository;
 use crate::domain::customer::{Customer, CustomerView};
-use crate::models::db::{ActiveClientBalance, Client, ClientDetail, ClientListItem, ClientOnu, ClientStatusHistoryItem, SolvencyCounts, Tax};
+use crate::models::db::{ActiveClientBalance, Client, ClientDetail, ClientListItem, ClientOnu, ClientStatusHistoryItem, CustomerInfoItem, SolvencyCounts, Tax};
 use crate::utils::get_bson_amount::get_bson_amount;
 use crate::utils::timezone::VenezuelaDateTime;
 use async_trait::async_trait;
@@ -13,6 +13,34 @@ use mongodb::bson::{doc, oid::ObjectId};
 use mongodb::error::Error as MongoError;
 use mongodb::Collection;
 use std::collections::HashMap;
+
+/// Format a raw DNI/RIF value into a prefixed string like `V-12345678` or `J-50001234`.
+/// If the value already has a letter prefix followed by `-`, it is returned as-is.
+/// `field` should be `"sDni"` or `"sRif"` to determine the default prefix.
+fn format_dni(value: &str, field: &str) -> String {
+    let mut chars = value.chars();
+    let first = chars.next();
+    let second = chars.next();
+
+    // Already has a letter-dash prefix (e.g. "V-", "J-", "G-", "E-")
+    if matches!((first, second), (Some(c), Some('-')) if c.is_alphabetic()) {
+        return value.to_string();
+    }
+
+    if field == "sDni" {
+        return format!("V-{}", value);
+    }
+
+    // sRif: if the value starts with a letter (but no dash), use that letter
+    if let Some(c) = first {
+        if c.is_alphabetic() {
+            let letter = c.to_uppercase().next().unwrap_or('J');
+            return format!("{}-{}", letter, &value[c.len_utf8()..]);
+        }
+    }
+
+    format!("J-{}", value)
+}
 
 #[async_trait]
 impl ProfileRepository for MongoDB {
@@ -626,6 +654,84 @@ impl ProfileRepository for MongoDB {
         };
 
         Ok(Some(detail))
+    }
+
+    async fn get_customers_info(
+        &self,
+        owner_id: Option<&str>,
+    ) -> Result<Vec<CustomerInfoItem>, String> {
+        let mut filter = doc! {};
+        if let Some(owner) = owner_id {
+            filter.insert("idOwner", owner);
+        }
+
+        let projection = doc! {
+            "sName": 1,
+            "sDni": 1,
+            "sRif": 1,
+            "sAddress": 1,
+            "sEmail": 1,
+            "sPhone": 1,
+        };
+
+        let collection: Collection<Document> = self.db.collection("Clients");
+        let cursor = collection
+            .find(filter)
+            .projection(projection)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let docs: Vec<Document> = cursor.try_collect().await.map_err(|e| e.to_string())?;
+        let mut items = Vec::with_capacity(docs.len());
+
+        for doc in docs {
+            let id = doc
+                .get_object_id("_id")
+                .map(|oid| oid.to_hex())
+                .unwrap_or_default();
+            let razon_social = doc.get_str("sName").unwrap_or_default().to_string();
+
+            let dni = {
+                let s_dni = doc.get_str("sDni").ok().filter(|s| !s.is_empty());
+                let s_rif = doc.get_str("sRif").ok().filter(|s| !s.is_empty());
+                if let Some(raw) = s_dni {
+                    Some(format_dni(raw, "sDni"))
+                } else if let Some(raw) = s_rif {
+                    Some(format_dni(raw, "sRif"))
+                } else {
+                    None
+                }
+            };
+
+            let direccion = doc
+                .get_str("sAddress")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+
+            let email = doc
+                .get_str("sEmail")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+
+            let telefono = doc
+                .get_str("sPhone")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+
+            items.push(CustomerInfoItem {
+                id,
+                razon_social,
+                dni,
+                direccion,
+                email,
+                telefono,
+            });
+        }
+
+        Ok(items)
     }
 
     async fn get_client_status_history(

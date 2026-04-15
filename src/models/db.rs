@@ -125,6 +125,7 @@ pub struct LatestVersion {
 // ============================================
 // ONU get DB
 // ============================================
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct OnuIdentity {
     #[serde(rename = "_id")]
@@ -236,4 +237,14 @@ pub struct ClientStatusHistoryItem {
     pub previous_state: String,
     pub actor_name: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct CustomerInfoItem {
+    pub id: String,
+    pub razon_social: String,
+    pub dni: Option<String>,
+    pub direccion: Option<String>,
+    pub email: Option<String>,
+    pub telefono: Option<String>,
 }

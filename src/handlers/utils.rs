@@ -4,8 +4,8 @@ use axum::response::{Html, Response};
 use axum::{extract::State, Extension, Json};
 use hyper::header;
 use std::sync::Arc;
-use serde::Deserialize;
 use crate::auth::claims::AccessClaims;
+use crate::auth::user_jwt::UserProfileClaims;
 
 use crate::db::UtilsRepository;
 use crate::models::db::{BcvResponse, LatestVersionResponse};
@@ -22,6 +22,29 @@ use crate::services::zabbix_service;
 
 pub async fn get_bank_list(
     Extension(_claims): Extension<AccessClaims>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<BankListResponse>, ApiError> {
+    let banks: Vec<Bank> = state.db.find_bank_list().await.or_else(|e| {
+        tracing::error!("Error finding bank list: {}", e);
+        Err(ApiError::DatabaseError(e.to_string()))
+    })?;
+    let banks_formatter = banks
+        .into_iter()
+        .map(|bank| Bank {
+            id: bank.id,
+            bank_code: bank.bank_code,
+            bank_name: bank.bank_name,
+        })
+        .collect::<Vec<Bank>>();
+
+    Ok(Json(BankListResponse {
+        ok: true,
+        data: banks_formatter,
+    }))
+}
+
+pub async fn get_bank_list_user(
+    Extension(_claims): Extension<UserProfileClaims>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<BankListResponse>, ApiError> {
     let banks: Vec<Bank> = state.db.find_bank_list().await.or_else(|e| {

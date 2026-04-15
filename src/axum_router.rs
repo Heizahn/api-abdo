@@ -67,6 +67,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let auth_user_protected = Router::new()
         .route("/v1/auth-user/me", get(auth_user::me_handler))
         .route(
+            "/v1/auth-user/clients/contact-info",
+            get(clients::get_customers_info_handler),
+        )
+        .route(
             "/v1/auth-user/clients/all",
             get(clients::get_all_clients_handler),
         )
@@ -98,6 +102,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/auth-user/payments/check-reference",
             post(auth_user::check_reference_handler),
+        )
+        .route("/v1/auth-user/utils/list/banks", get(utils::get_bank_list_user))
+        .route("/v1/auth-user/payments/report", post(payment::report_payment_user_handler))
+        .route(
+            "/v1/auth-user/payments/methods/by-client/:client_id",
+            get(payment::get_pago_movil_data_by_client_user_handler),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

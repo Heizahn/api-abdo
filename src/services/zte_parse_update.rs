@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::models::db::OnuIdentity;
 use anyhow::{Context, Result};
 use mongodb::bson::oid::ObjectId; // Necesario para comparar ID OLT

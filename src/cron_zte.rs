@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::config::Config;
 use crate::db::OnuRepository;
 use crate::services::zte_parse_update;

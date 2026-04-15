@@ -1,5 +1,5 @@
 pub mod mongo;
-use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
+use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
 
 use crate::models::payment::{Bank, PaymentReport, ReferenceMatchInfo};
 use crate::models::users::{User, UserCredentials}; // Import
@@ -31,6 +31,7 @@ pub trait AuthRepository {
 // 6. UserRepository: Auth Users (Admin/Staff)
 // ============================================
 #[async_trait::async_trait]
+#[allow(dead_code)]
 pub trait UserRepository {
     async fn find_user_by_email(&self, email: &str) -> Result<Option<User>, String>;
     async fn find_user_credentials_by_user_id(
@@ -79,6 +80,11 @@ pub trait ProfileRepository {
         &self,
         client_id: &str,
     ) -> Result<Vec<ClientStatusHistoryItem>, String>;
+
+    async fn get_customers_info(
+        &self,
+        owner_id: Option<&str>,
+    ) -> Result<Vec<CustomerInfoItem>, String>;
 }
 
 // ============================================
@@ -170,6 +176,7 @@ pub trait UtilsRepository {
 // 5. OnuRepository: Onu
 // ============================================
 #[async_trait::async_trait]
+#[allow(dead_code)]
 pub trait OnuRepository {
     // ZTE / Devices
     async fn get_device_serial_numbers(&self) -> Result<Vec<OnuIdentity>, String>;
