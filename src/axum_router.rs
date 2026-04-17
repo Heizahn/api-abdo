@@ -128,6 +128,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(receivable::get_receivable_by_id_handler),
         )
         .route(
+            "/v1/receivable/:id/payments/rejected",
+            get(receivable::get_rejected_payments_by_receivable_handler),
+        )
+        .route(
             "/v1/payments/methods/payment/:debt_id",
             get(payment::get_pago_movil_data_handler),
         )

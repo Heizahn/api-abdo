@@ -39,3 +39,19 @@ pub struct PaymentData {
     pub reference: Option<String>,
     pub is_report: bool, // true si viene de PaymentReport, false si es un Payment procesado
 }
+
+#[derive(Serialize)]
+pub struct RejectedPayment {
+    pub payment_id: String,
+    pub amount_usd: f64,
+    pub amount_bs: f64,
+    pub reference: String,
+    pub rejected_at: String,
+    pub rejection_reason: String,
+}
+
+#[derive(Serialize)]
+pub struct RejectedPaymentsResponse {
+    pub ok: bool,
+    pub payments: Vec<RejectedPayment>,
+}

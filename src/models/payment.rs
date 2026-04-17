@@ -163,6 +163,9 @@ pub struct PaymentReport {
     #[serde(rename = "sState")]
     pub state: String, // "Pendiente", "Aprobado", "Rechazado"
 
+    #[serde(rename = "sRejectionReason", default)]
+    pub rejection_reason: Option<String>,
+
     #[serde(rename = "dCreation")]
     pub created_at: DateTime<Utc>,
 }

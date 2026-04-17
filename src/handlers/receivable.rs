@@ -2,6 +2,8 @@ use axum::{extract::State, Extension, Json};
 use mongodb::bson;
 use std::{collections::HashMap, sync::Arc};
 
+use mongodb::bson::oid::ObjectId;
+
 use crate::{
     auth::claims::AccessClaims,
     auth::service::AuthService,
@@ -537,4 +539,60 @@ pub async fn get_receivable_by_id_handler(
         ok: true,
         receivable: receivable_data,
     }))
+}
+
+/// GET /v1/receivable/:id/payments/rejected
+/// Obtiene los pagos rechazados de una factura específica
+pub async fn get_rejected_payments_by_receivable_handler(
+    Extension(claims): Extension<AccessClaims>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(debt_id): axum::extract::Path<String>,
+) -> Result<Json<RejectedPaymentsResponse>, ApiError> {
+    tracing::info!("📋 GET /receivable/{}/payments/rejected for user: {}", debt_id, claims.sub);
+
+    let customer = AuthService::lookup_by_id(&state.db, &claims.sub)
+        .await
+        .ok_or(ApiError::NotFound)?;
+
+    let clients = state
+        .db
+        .find_clients_by_phone(&customer.phone)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    let client_ids: Vec<_> = clients.iter().map(|c| c._id).collect();
+
+    let debt = state
+        .db
+        .find_debt_by_id(&debt_id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    if !client_ids.contains(&debt.id_client) {
+        return Err(ApiError::Forbidden);
+    }
+
+    let debt_oid = ObjectId::parse_str(&debt_id)
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+
+    let rejected = state
+        .db
+        .find_rejected_reports_by_debt_id(&debt_oid)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    let payments = rejected
+        .into_iter()
+        .map(|r| RejectedPayment {
+            payment_id: r.id.map(|id| id.to_string()).unwrap_or_default(),
+            amount_usd: r.amount_usd,
+            amount_bs: r.amount_bs,
+            reference: r.reference,
+            rejected_at: r.created_at.to_rfc3339(),
+            rejection_reason: r.rejection_reason.unwrap_or_default(),
+        })
+        .collect();
+
+    Ok(Json(RejectedPaymentsResponse { ok: true, payments }))
 }
