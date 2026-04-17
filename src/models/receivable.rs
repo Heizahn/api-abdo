@@ -40,7 +40,7 @@ pub struct PaymentData {
     pub is_report: bool, // true si viene de PaymentReport, false si es un Payment procesado
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct RejectedPayment {
     pub payment_id: String,
     pub amount_usd: f64,

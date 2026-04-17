@@ -146,6 +146,11 @@ pub trait SalesRepository {
         debt_id: &ObjectId,
     ) -> Result<Vec<PaymentReport>, String>;
 
+    async fn find_rejected_reports_by_client_id(
+        &self,
+        client_id: &ObjectId,
+    ) -> Result<Vec<PaymentReport>, String>;
+
     /// Verifica si una referencia ya existe en Payments o PaymentReports
     /// Búsqueda bidireccional de derecha a izquierda (sufijo).
     /// Orden: Payments (mismo cliente) → Payments (global) → PaymentReports (mismo cliente) → PaymentReports (global)

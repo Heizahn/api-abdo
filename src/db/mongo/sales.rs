@@ -522,6 +522,27 @@ impl SalesRepository for MongoDB {
 
         Ok(reports)
     }
+
+    async fn find_rejected_reports_by_client_id(
+        &self,
+        client_id: &ObjectId,
+    ) -> Result<Vec<PaymentReport>, String> {
+        let collection = self.db.collection::<PaymentReport>("PaymentReports");
+
+        let filter = doc! {
+            "idClient": client_id,
+            "sState": "Rechazado"
+        };
+
+        let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
+        let mut reports = Vec::new();
+
+        while let Some(Ok(report)) = cursor.next().await {
+            reports.push(report);
+        }
+
+        Ok(reports)
+    }
 }
 
 // ============================================================

@@ -1,4 +1,5 @@
 use crate::db::mongo::ResultGroupedByDate;
+use crate::models::receivable::RejectedPayment;
 use serde::Serialize;
 
 // ============================================
@@ -17,6 +18,7 @@ pub struct ClientSummary {
     pub client: ClientData,
     pub balance_ves: f64,
     pub last_payments: Vec<ResultGroupedByDate>,
+    pub rejected_payments: Vec<RejectedPayment>,
 }
 
 // Estructura de respuesta principal

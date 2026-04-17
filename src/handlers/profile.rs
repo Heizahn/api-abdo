@@ -6,6 +6,7 @@ use crate::{
     db::{ProfileRepository, SalesRepository},
     error::ApiError,
     models::profile::*,
+    models::receivable::RejectedPayment,
     state::AppState,
 };
 
@@ -87,9 +88,31 @@ pub async fn me_group_handler(
                     client_id,
                     e
                 );
-                // Retornar un vector vacío en caso de error para no fallar todo el endpoint.
                 Vec::new()
             });
+
+        let rejected_payments = state
+            .db
+            .find_rejected_reports_by_client_id(&client_id_oid)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!(
+                    "❌ Error getting rejected payments for client {}: {:?}",
+                    client_id,
+                    e
+                );
+                Vec::new()
+            })
+            .into_iter()
+            .map(|r| RejectedPayment {
+                payment_id: r.id.map(|id| id.to_string()).unwrap_or_default(),
+                amount_usd: r.amount_usd,
+                amount_bs: r.amount_bs,
+                reference: r.reference,
+                rejected_at: r.created_at.to_rfc3339(),
+                rejection_reason: r.rejection_reason.unwrap_or_default(),
+            })
+            .collect();
 
         client_summaries.push(ClientSummary {
             client: ClientData {
@@ -100,6 +123,7 @@ pub async fn me_group_handler(
             },
             balance_ves: ves_balance_rounded,
             last_payments,
+            rejected_payments,
         });
     }
 
