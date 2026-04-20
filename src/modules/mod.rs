@@ -9,4 +9,5 @@ pub mod payments;
 pub mod profile;
 pub mod providers;
 pub mod receivables;
+pub mod whatsapp;
 pub mod zabbix;

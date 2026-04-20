@@ -12,7 +12,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
     middleware::{auth::jwt_auth_middleware, auth_user::user_jwt_auth_middleware, rate_limit},
-    modules::{api_utils, auth_client, auth_user, calculations, clients, dashboard, payments, profile, providers, receivables},
+    modules::{api_utils, auth_client, auth_user, calculations, clients, dashboard, payments, profile, providers, receivables, whatsapp},
     openapi::ApiDoc,
     state::AppState,
 };
@@ -34,6 +34,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(api_utils::public_routes())
         .layer(auth_rate_limit);
 
+    // Webhook de WhatsApp (público, sin rate limit — Meta reenvía si recibe != 200)
+    let webhook = whatsapp::webhook_routes();
+
     // Rutas protegidas con JWT de staff/admin
     let user_protected = Router::new()
         .merge(auth_user::protected_routes())
@@ -42,6 +45,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(providers::routes())
         .merge(api_utils::user_routes())
         .merge(payments::user_routes())
+        .merge(whatsapp::user_routes())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             user_jwt_auth_middleware,
@@ -59,6 +63,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         ));
 
     public
+        .merge(webhook)
         .merge(user_protected)
         .merge(client_protected)
         .merge(api_utils::static_routes())

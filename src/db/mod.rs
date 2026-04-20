@@ -1,5 +1,6 @@
 pub mod mongo;
 use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
+use crate::models::whatsapp::{WaConversation, WaMessage};
 
 use crate::models::payment::{Bank, PaymentReport, ReferenceMatchInfo};
 use crate::models::users::{User, UserCredentials}; // Import
@@ -198,6 +199,24 @@ pub trait OnuRepository {
 }
 
 // ============================================
+// 7. WhatsAppRepository: Soporte / Chat
+// ============================================
+#[async_trait::async_trait]
+pub trait WhatsAppRepository {
+    async fn find_conversation_by_phone(&self, phone: &str) -> Result<Option<WaConversation>, String>;
+    async fn find_conversation_by_id(&self, id: &ObjectId) -> Result<Option<WaConversation>, String>;
+    async fn upsert_conversation(&self, phone: &str, name: Option<String>) -> Result<WaConversation, String>;
+    async fn touch_conversation(&self, id: &ObjectId, preview: &str, increment_unread: bool) -> Result<(), String>;
+    async fn save_message(&self, message: WaMessage) -> Result<WaMessage, String>;
+    async fn get_conversations(&self, status: Option<&str>, assigned_to: Option<&str>, skip: u64, limit: i64) -> Result<(Vec<WaConversation>, u64), String>;
+    async fn get_messages(&self, conversation_id: &ObjectId, skip: u64, limit: i64) -> Result<(Vec<WaMessage>, u64), String>;
+    async fn update_conversation_status(&self, id: &ObjectId, status: &str) -> Result<(), String>;
+    async fn assign_conversation(&self, id: &ObjectId, assigned_to: Option<&str>) -> Result<(), String>;
+    async fn reset_unread(&self, id: &ObjectId) -> Result<(), String>;
+    async fn update_message_status(&self, wa_message_id: &str, status: &str) -> Result<(), String>;
+}
+
+// ============================================
 // TRAIT MAESTRO
 // ============================================
 pub trait Db:
@@ -207,6 +226,7 @@ pub trait Db:
     + SalesRepository
     + OnuRepository
     + UtilsRepository
+    + WhatsAppRepository
     + Clone
     + Send
     + Sync

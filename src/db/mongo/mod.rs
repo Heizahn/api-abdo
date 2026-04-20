@@ -4,6 +4,7 @@ pub mod profile;
 pub mod sales;
 pub mod users;
 pub mod utils;
+pub mod whatsapp;
 
 use crate::db::Db;
 use mongodb::bson::oid::ObjectId;

@@ -5,4 +5,5 @@ pub mod payment;
 pub mod profile;
 pub mod receivable;
 pub mod users;
+pub mod whatsapp;
 pub mod zabbix;
