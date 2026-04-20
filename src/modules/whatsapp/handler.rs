@@ -15,6 +15,8 @@ use crate::{
     state::AppState,
 };
 
+use super::assignment::assign_conversation;
+
 /// Número autorizado para soporte por ahora.
 /// Mover a env var (WHATSAPP_SUPPORT_NUMBER) cuando se abra a más números.
 const SUPPORT_NUMBER: &str = "584222236777";
@@ -188,6 +190,14 @@ pub async fn receive_webhook(
                     // Marcar como leído en WhatsApp (ticks azules)
                     if let Ok(wa) = WhatsAppService::from_env(state.reqwest_client.clone()) {
                         let _ = wa.mark_as_read(&msg.id).await;
+                    }
+
+                    // Si la conversación no tiene agente asignado, disparar asignación automática
+                    if conv.assigned_to.is_none() {
+                        let state_clone = state.clone();
+                        tokio::spawn(async move {
+                            assign_conversation(state_clone, conv_id).await;
+                        });
                     }
                 }
             }

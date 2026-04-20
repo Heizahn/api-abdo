@@ -7,7 +7,7 @@ edition = "2021"
 # ============================================
 # FRAMEWORK WEB
 # ============================================
-axum = { version = "0.7", features = ["macros", "multipart"] }
+axum = { version = "0.7", features = ["macros", "multipart", "ws"] }
 axum-extra = { version = "0.9", features = ["typed-header"] }
 axum-client-ip = "0.6"
 tower = { version = "0.5.2", features = ["full"] }

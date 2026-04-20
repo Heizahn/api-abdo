@@ -37,6 +37,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     // Webhook de WhatsApp (público, sin rate limit — Meta reenvía si recibe != 200)
     let webhook = whatsapp::webhook_routes();
 
+    // WebSocket (público en router, JWT validado internamente via query param)
+    let ws = whatsapp::ws_routes();
+
     // Rutas protegidas con JWT de staff/admin
     let user_protected = Router::new()
         .merge(auth_user::protected_routes())
@@ -64,6 +67,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
     public
         .merge(webhook)
+        .merge(ws)
         .merge(user_protected)
         .merge(client_protected)
         .merge(api_utils::static_routes())
