@@ -71,6 +71,21 @@ impl UserRepository for MongoDB {
         Ok(())
     }
 
+    async fn find_agents(&self) -> Result<Vec<User>, String> {
+        let collection: Collection<User> = self.db.collection("Users");
+        // nRole >= 0 AND nRole < 3 (excluye providers con nRole == 3.0)
+        let filter = doc! { "nRole": { "$gte": 0.0, "$lt": 3.0 } };
+
+        collection
+            .find(filter)
+            .sort(doc! { "sName": 1 })
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn find_providers(&self) -> Result<Vec<User>, String> {
         let collection: Collection<User> = self.db.collection("Users");
         let filter = doc! { "nRole": 3.0 };
