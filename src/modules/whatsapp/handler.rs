@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use crate::{
     auth::user_jwt::UserProfileClaims,
-    db::{ProfileRepository, WhatsAppRepository},
+    db::WhatsAppRepository,
     error::ApiError,
     models::whatsapp::*,
     state::AppState,
@@ -115,31 +115,26 @@ pub async fn receive_webhook(
             if let Some(messages) = value.messages {
                 let contacts = value.contacts.unwrap_or_default();
 
-                for msg in messages {
-                    // Verificar si el número está en la configuración de wa_settings
-                    let settings = match state.db.find_wa_settings_by_phone(&msg.from).await {
-                        Ok(Some(s)) => s,
-                        _ => {
-                            tracing::info!(
-                                "[webhook] número no configurado: {} | tipo: {} | id: {}",
-                                msg.from, msg.msg_type, msg.id
-                            );
-                            continue;
-                        }
-                    };
+                // El número del negocio que recibió el mensaje
+                let business_phone = value.metadata
+                    .as_ref()
+                    .and_then(|m| m.display_phone_number.clone())
+                    .unwrap_or_default();
 
-                    // Normalizar E.164 → formato local venezolano para buscar en Clients
-                    let local_phone = wa_to_local_phone(&msg.from);
-
-                    // Verificar si el remitente está registrado como cliente ISP
-                    if state.db.find_customer_by_phone(&local_phone).await.is_none() {
-                        tracing::info!(
-                            "[webhook] número no registrado en clientes: {} (local: {}) | tipo: {} | body: {:?}",
-                            msg.from, local_phone, msg.msg_type,
-                            msg.text.as_ref().map(|t| &t.body)
-                        );
+                // Verificar si el número de negocio está configurado en wa_settings
+                let settings = match state.db.find_wa_settings_by_phone(&business_phone).await {
+                    Ok(Some(s)) if s.active => s,
+                    Ok(Some(_)) => {
+                        tracing::info!("[webhook] número de negocio inactivo: {}", business_phone);
                         continue;
                     }
+                    _ => {
+                        tracing::info!("[webhook] número de negocio no configurado: {}", business_phone);
+                        continue;
+                    }
+                };
+
+                for msg in messages {
 
                     let agents = settings.agents.clone();
 
@@ -561,15 +556,6 @@ pub async fn delete_settings_handler(
 // ============================================
 // HELPERS INTERNOS
 // ============================================
-
-/// E.164 sin "+" → formato local venezolano ("04141234567")
-fn wa_to_local_phone(wa_phone: &str) -> String {
-    if let Some(rest) = wa_phone.strip_prefix("58") {
-        format!("0{}", rest)
-    } else {
-        wa_phone.to_string()
-    }
-}
 
 /// Normaliza cualquier formato de número venezolano a E.164 sin "+" (ej: "584141234567")
 fn normalize_to_e164(phone: &str) -> String {

@@ -72,7 +72,14 @@ pub struct WebhookChange {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct WebhookMetadata {
+    pub display_phone_number: Option<String>,
+    pub phone_number_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WebhookValue {
+    pub metadata: Option<WebhookMetadata>,
     pub contacts: Option<Vec<WebhookContact>>,
     pub messages: Option<Vec<InboundMessage>>,
     pub statuses: Option<Vec<MessageStatus>>,
