@@ -70,3 +70,9 @@ thiserror = "2.0.17"
 anyhow = "1.0.100"
 scraper = "0.25.0"
 bcrypt = "0.18.0"
+
+# ============================================
+# DOCUMENTACIÓN (OpenAPI / Swagger)
+# ============================================
+utoipa = { version = "4", features = ["axum_extras", "chrono", "uuid"] }
+utoipa-swagger-ui = { version = "7", features = ["axum"] }

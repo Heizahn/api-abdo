@@ -3,7 +3,7 @@ use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, Clien
 
 use crate::models::payment::{Bank, PaymentReport, ReferenceMatchInfo};
 use crate::models::users::{User, UserCredentials}; // Import
-use crate::services::zte_parse_update::OnuDetected;
+use crate::modules::network::zte::parser::OnuDetected;
 use crate::{
     auth::claims::VerificationCode,
     db::mongo::ResultGroupedByDate,

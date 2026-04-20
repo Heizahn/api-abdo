@@ -9,16 +9,14 @@ mod state;
 // Axum modules
 mod axum_router;
 mod cache;
-mod handlers;
 mod middleware;
 mod models;
+mod modules;
+mod openapi;
 mod utils;
 
 // Cron modules
 mod cron_bcv;
-mod cron_mikrotik;
-mod cron_zte;
-mod services;
 
 use config::Config;
 use state::AppState;
@@ -58,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state_for_mikrotik = state.clone();
     tokio::spawn(async move {
-        cron_mikrotik::run_mikrotik_sync_task(state_for_mikrotik).await;
+        modules::network::mikrotik::cron::run_mikrotik_sync_task(state_for_mikrotik).await;
     });
 
     tracing::info!("✅ Conexiones establecidas");
