@@ -5,7 +5,8 @@ use crate::models::auth::{
     TokenPair, VerifyNumberRequest, VerifyNumberResponse,
 };
 use crate::models::whatsapp::{
-    AssignConversationRequest, ConversationMessagesResponse, ConversationsListResponse,
+    AssignConversationRequest, ConversationDetail, ConversationListItem,
+    ConversationMessagesResponse, ConversationsListResponse, MessageItem,
     SendMessageRequest, SendMessageResponse, UpdateConversationStatusRequest, UpdateResponse,
 };
 
@@ -42,7 +43,10 @@ use crate::models::whatsapp::{
             UpdateConversationStatusRequest,
             AssignConversationRequest,
             ConversationsListResponse,
+            ConversationListItem,
             ConversationMessagesResponse,
+            ConversationDetail,
+            MessageItem,
             UpdateResponse,
         )
     ),
