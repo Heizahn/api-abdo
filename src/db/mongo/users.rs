@@ -74,7 +74,7 @@ impl UserRepository for MongoDB {
     async fn find_agents(&self) -> Result<Vec<User>, String> {
         let collection: Collection<User> = self.db.collection("Users");
         // nRole >= 0 AND nRole < 3 (excluye providers con nRole == 3.0)
-        let filter = doc! { "nRole": { "$gte": 0.0, "$lt": 3.0 } };
+        let filter = doc! { "nRole": { "$gte": 0.0, "$lt": 3.0 }, "visible": true };
 
         collection
             .find(filter)
