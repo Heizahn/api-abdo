@@ -6,8 +6,9 @@ use crate::models::auth::{
 };
 use crate::models::whatsapp::{
     AssignConversationRequest, ConversationDetail, ConversationListItem,
-    ConversationMessagesResponse, ConversationsListResponse, MessageItem,
-    SendMessageRequest, SendMessageResponse, UpdateConversationStatusRequest, UpdateResponse,
+    ConversationMessagesResponse, ConversationsListResponse, CreateSettingsRequest,
+    MessageItem, SendMessageRequest, SendMessageResponse, SettingsItem, SettingsListResponse,
+    SettingsResponse, UpdateConversationStatusRequest, UpdateResponse, UpdateSettingsRequest,
 };
 
 #[derive(OpenApi)]
@@ -30,6 +31,10 @@ use crate::models::whatsapp::{
         crate::modules::whatsapp::handler::send_message_handler,
         crate::modules::whatsapp::handler::update_status_handler,
         crate::modules::whatsapp::handler::assign_conversation_handler,
+        crate::modules::whatsapp::handler::list_settings_handler,
+        crate::modules::whatsapp::handler::create_settings_handler,
+        crate::modules::whatsapp::handler::update_settings_handler,
+        crate::modules::whatsapp::handler::delete_settings_handler,
     ),
     components(
         schemas(
@@ -48,6 +53,8 @@ use crate::models::whatsapp::{
             ConversationDetail,
             MessageItem,
             UpdateResponse,
+            CreateSettingsRequest, UpdateSettingsRequest,
+            SettingsListResponse, SettingsResponse, SettingsItem,
         )
     ),
     tags(

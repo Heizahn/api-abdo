@@ -17,10 +17,6 @@ use crate::{
 
 use super::assignment::assign_conversation;
 
-/// Número autorizado para soporte por ahora.
-/// Mover a env var (WHATSAPP_SUPPORT_NUMBER) cuando se abra a más números.
-const SUPPORT_NUMBER: &str = "584222236777";
-
 use super::service::WhatsAppService;
 
 // ============================================
@@ -96,19 +92,22 @@ pub async fn receive_webhook(
                 let contacts = value.contacts.unwrap_or_default();
 
                 for msg in messages {
-                    // Solo procesamos mensajes del número autorizado por ahora
-                    if msg.from != SUPPORT_NUMBER {
-                        tracing::info!(
-                            "[webhook] número no autorizado: {} | tipo: {} | id: {}",
-                            msg.from, msg.msg_type, msg.id
-                        );
-                        continue;
-                    }
+                    // Verificar si el número está en la configuración de wa_settings
+                    let settings = match state.db.find_wa_settings_by_phone(&msg.from).await {
+                        Ok(Some(s)) => s,
+                        _ => {
+                            tracing::info!(
+                                "[webhook] número no configurado: {} | tipo: {} | id: {}",
+                                msg.from, msg.msg_type, msg.id
+                            );
+                            continue;
+                        }
+                    };
 
                     // Normalizar E.164 → formato local venezolano para buscar en Clients
                     let local_phone = wa_to_local_phone(&msg.from);
 
-                    // Verificar si el número existe en la base de clientes ISP
+                    // Verificar si el remitente está registrado como cliente ISP
                     if state.db.find_customer_by_phone(&local_phone).await.is_none() {
                         tracing::info!(
                             "[webhook] número no registrado en clientes: {} (local: {}) | tipo: {} | body: {:?}",
@@ -117,6 +116,8 @@ pub async fn receive_webhook(
                         );
                         continue;
                     }
+
+                    let agents = settings.agents.clone();
 
                     let name = contacts.iter()
                         .find(|c| c.wa_id.as_deref() == Some(&msg.from))
@@ -196,7 +197,7 @@ pub async fn receive_webhook(
                     if conv.assigned_to.is_none() {
                         let state_clone = state.clone();
                         tokio::spawn(async move {
-                            assign_conversation(state_clone, conv_id).await;
+                            assign_conversation(state_clone, conv_id, agents).await;
                         });
                     }
                 }
@@ -432,15 +433,129 @@ pub async fn assign_conversation_handler(
 }
 
 // ============================================
+// SETTINGS — Configuración de números y agentes
+// ============================================
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/settings",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Lista de configuraciones", body = SettingsListResponse),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn list_settings_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<SettingsListResponse>, ApiError> {
+    let items = state.db.get_all_wa_settings().await.map_err(|e| ApiError::DatabaseError(e))?;
+    Ok(Json(SettingsListResponse {
+        ok: true,
+        data: items.into_iter().map(settings_to_item).collect(),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/settings",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    request_body = CreateSettingsRequest,
+    responses(
+        (status = 200, description = "Configuración creada", body = SettingsResponse),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn create_settings_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<CreateSettingsRequest>,
+) -> Result<Json<SettingsResponse>, ApiError> {
+    // Normalizar el número a E.164 venezolano sin "+"
+    let phone = normalize_to_e164(&payload.phone);
+    let now = mongodb::bson::DateTime::now();
+
+    let doc = WaSettings {
+        id: None,
+        phone,
+        agents: payload.agents,
+        active: true,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let created = state.db.create_wa_settings(doc).await.map_err(|e| ApiError::DatabaseError(e))?;
+    Ok(Json(SettingsResponse { ok: true, data: settings_to_item(created) }))
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/auth-user/whatsapp/settings/{id}",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ID de la configuración")),
+    request_body = UpdateSettingsRequest,
+    responses(
+        (status = 200, description = "Configuración actualizada", body = UpdateResponse),
+        (status = 404, description = "No encontrada"),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn update_settings_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(payload): Json<UpdateSettingsRequest>,
+) -> Result<Json<UpdateResponse>, ApiError> {
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+    state.db
+        .update_wa_settings(&oid, payload.agents, payload.active)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
+    Ok(Json(UpdateResponse { ok: true }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/auth-user/whatsapp/settings/{id}",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ID de la configuración")),
+    responses(
+        (status = 200, description = "Configuración eliminada", body = UpdateResponse),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn delete_settings_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<UpdateResponse>, ApiError> {
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+    state.db.delete_wa_settings(&oid).await.map_err(|e| ApiError::DatabaseError(e))?;
+    Ok(Json(UpdateResponse { ok: true }))
+}
+
+// ============================================
 // HELPERS INTERNOS
 // ============================================
 
-/// Convierte número WhatsApp E.164 sin "+" (ej: "584141234567") al formato local venezolano ("04141234567").
+/// E.164 sin "+" → formato local venezolano ("04141234567")
 fn wa_to_local_phone(wa_phone: &str) -> String {
     if let Some(rest) = wa_phone.strip_prefix("58") {
         format!("0{}", rest)
     } else {
         wa_phone.to_string()
+    }
+}
+
+/// Normaliza cualquier formato de número venezolano a E.164 sin "+" (ej: "584141234567")
+fn normalize_to_e164(phone: &str) -> String {
+    let digits: String = phone.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.starts_with("58") {
+        digits
+    } else if let Some(rest) = digits.strip_prefix('0') {
+        format!("58{}", rest)
+    } else {
+        format!("58{}", digits)
     }
 }
 
@@ -471,6 +586,17 @@ fn conv_to_detail(c: WaConversation) -> ConversationDetail {
         assigned_to: c.assigned_to,
         last_message_at: c.last_message_at.to_string(),
         unread_count: c.unread_count,
+    }
+}
+
+fn settings_to_item(s: WaSettings) -> SettingsItem {
+    SettingsItem {
+        id: s.id.map(|o| o.to_hex()).unwrap_or_default(),
+        phone: s.phone,
+        agents: s.agents,
+        active: s.active,
+        created_at: s.created_at.to_string(),
+        updated_at: s.updated_at.to_string(),
     }
 }
 

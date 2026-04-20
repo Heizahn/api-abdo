@@ -1,6 +1,6 @@
 pub mod mongo;
 use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
-use crate::models::whatsapp::{WaConversation, WaMessage};
+use crate::models::whatsapp::{WaConversation, WaMessage, WaSettings};
 
 use crate::models::payment::{Bank, PaymentReport, ReferenceMatchInfo};
 use crate::models::users::{User, UserCredentials}; // Import
@@ -214,6 +214,13 @@ pub trait WhatsAppRepository {
     async fn assign_conversation(&self, id: &ObjectId, assigned_to: Option<&str>) -> Result<(), String>;
     async fn reset_unread(&self, id: &ObjectId) -> Result<(), String>;
     async fn update_message_status(&self, wa_message_id: &str, status: &str) -> Result<(), String>;
+
+    // Settings
+    async fn find_wa_settings_by_phone(&self, phone: &str) -> Result<Option<WaSettings>, String>;
+    async fn get_all_wa_settings(&self) -> Result<Vec<WaSettings>, String>;
+    async fn create_wa_settings(&self, settings: WaSettings) -> Result<WaSettings, String>;
+    async fn update_wa_settings(&self, id: &ObjectId, agents: Option<Vec<String>>, active: Option<bool>) -> Result<(), String>;
+    async fn delete_wa_settings(&self, id: &ObjectId) -> Result<(), String>;
 }
 
 // ============================================

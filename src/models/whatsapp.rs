@@ -208,3 +208,57 @@ pub struct SendMessageResponse {
 pub struct UpdateResponse {
     pub ok: bool,
 }
+
+// ============================================
+// CONFIGURACIÓN DE NÚMEROS (wa_settings)
+// ============================================
+
+/// Documento en colección `wa_settings`
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WaSettings {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    /// Número en E.164 sin "+" (ej: "584222236777")
+    pub phone: String,
+    /// UUIDs de los agentes asignados a este número
+    pub agents: Vec<String>,
+    pub active: bool,
+    pub created_at: DateTime,
+    pub updated_at: DateTime,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateSettingsRequest {
+    /// Número en formato venezolano o E.164 (se normaliza automáticamente)
+    pub phone: String,
+    /// UUIDs de los agentes que atenderán este número
+    pub agents: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateSettingsRequest {
+    pub agents: Option<Vec<String>>,
+    pub active: Option<bool>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SettingsItem {
+    pub id: String,
+    pub phone: String,
+    pub agents: Vec<String>,
+    pub active: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SettingsListResponse {
+    pub ok: bool,
+    pub data: Vec<SettingsItem>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SettingsResponse {
+    pub ok: bool,
+    pub data: SettingsItem,
+}

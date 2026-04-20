@@ -5,7 +5,7 @@ use futures::TryStreamExt;
 
 use crate::db::WhatsAppRepository;
 use crate::db::mongo::MongoDB;
-use crate::models::whatsapp::{WaConversation, WaMessage};
+use crate::models::whatsapp::{WaConversation, WaMessage, WaSettings};
 
 impl MongoDB {
     pub(crate) fn wa_conversations(&self) -> mongodb::Collection<WaConversation> {
@@ -14,6 +14,10 @@ impl MongoDB {
 
     pub(crate) fn wa_messages(&self) -> mongodb::Collection<WaMessage> {
         self.db.collection::<WaMessage>("wa_messages")
+    }
+
+    pub(crate) fn wa_settings(&self) -> mongodb::Collection<WaSettings> {
+        self.db.collection::<WaSettings>("wa_settings")
     }
 }
 
@@ -219,6 +223,65 @@ impl WhatsAppRepository for MongoDB {
                 doc! { "wa_message_id": wa_message_id },
                 doc! { "$set": { "status": status } },
             )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn find_wa_settings_by_phone(&self, phone: &str) -> Result<Option<WaSettings>, String> {
+        self.wa_settings()
+            .find_one(doc! { "phone": phone, "active": true })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn get_all_wa_settings(&self) -> Result<Vec<WaSettings>, String> {
+        self.wa_settings()
+            .find(doc! {})
+            .sort(doc! { "created_at": -1 })
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn create_wa_settings(&self, settings: WaSettings) -> Result<WaSettings, String> {
+        let result = self.wa_settings()
+            .insert_one(&settings)
+            .await
+            .map_err(|e| e.to_string())?;
+        let id = result.inserted_id.as_object_id().unwrap();
+        self.wa_settings()
+            .find_one(doc! { "_id": id })
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "settings not found after insert".to_string())
+    }
+
+    async fn update_wa_settings(
+        &self,
+        id: &ObjectId,
+        agents: Option<Vec<String>>,
+        active: Option<bool>,
+    ) -> Result<(), String> {
+        let mut set_doc = doc! { "updated_at": DateTime::now() };
+        if let Some(a) = agents {
+            set_doc.insert("agents", mongodb::bson::to_bson(&a).unwrap());
+        }
+        if let Some(act) = active {
+            set_doc.insert("active", act);
+        }
+        self.wa_settings()
+            .update_one(doc! { "_id": id }, doc! { "$set": set_doc })
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn delete_wa_settings(&self, id: &ObjectId) -> Result<(), String> {
+        self.wa_settings()
+            .delete_one(doc! { "_id": id })
             .await
             .map_err(|e| e.to_string())?;
         Ok(())

@@ -5,20 +5,9 @@ use crate::{db::WhatsAppRepository, state::AppState};
 
 use super::ws::{broadcast_all, send_to_agent, WsServerEvent};
 
-/// Lee la lista de IDs de agentes desde la variable de entorno WA_AGENT_IDS.
-/// Formato: "uuid1,uuid2,uuid3"
-pub fn get_agent_ids() -> Vec<String> {
-    std::env::var("WA_AGENT_IDS")
-        .unwrap_or_default()
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
 /// Selecciona el agente con menor carga y le asigna la conversación.
-/// Usa un lock Redis para evitar doble asignación en condición de carrera.
-pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId) {
+/// `agents` viene de la configuración `wa_settings` del número que originó el mensaje.
+pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents: Vec<String>) {
     let conv_id_str = conv_id.to_hex();
 
     // Lock de asignación para evitar duplicados
@@ -27,9 +16,8 @@ pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId) {
         return;
     }
 
-    let agents = get_agent_ids();
     if agents.is_empty() {
-        tracing::warn!("[assignment] WA_AGENT_IDS vacío, no se puede asignar conv {}", conv_id_str);
+        tracing::warn!("[assignment] lista de agentes vacía para conv {}", conv_id_str);
         return;
     }
 
