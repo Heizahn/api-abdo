@@ -53,43 +53,43 @@ pub struct WaMessage {
 // PAYLOAD DEL WEBHOOK DE META
 // ============================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WebhookPayload {
     #[allow(dead_code)]
     pub object: Option<String>,
     pub entry: Option<Vec<WebhookEntry>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WebhookEntry {
     pub changes: Option<Vec<WebhookChange>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WebhookChange {
     pub value: Option<WebhookValue>,
     pub field: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WebhookValue {
     pub contacts: Option<Vec<WebhookContact>>,
     pub messages: Option<Vec<InboundMessage>>,
     pub statuses: Option<Vec<MessageStatus>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WebhookContact {
     pub profile: Option<WebhookProfile>,
     pub wa_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WebhookProfile {
     pub name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct InboundMessage {
     pub from: String,
     pub id: String,
@@ -104,18 +104,18 @@ pub struct InboundMessage {
     pub video: Option<InboundMedia>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct InboundText {
     pub body: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct InboundMedia {
     pub id: Option<String>,
     pub caption: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MessageStatus {
     pub id: String,
     pub status: String,

@@ -4,6 +4,15 @@ use axum::{
     response::IntoResponse,
     Extension, Json,
 };
+use std::sync::OnceLock;
+use tokio::sync::Mutex;
+
+/// Almacena el último payload crudo recibido de Meta (solo para debug).
+static LAST_WEBHOOK_PAYLOAD: OnceLock<Mutex<Option<serde_json::Value>>> = OnceLock::new();
+
+fn last_payload_store() -> &'static Mutex<Option<serde_json::Value>> {
+    LAST_WEBHOOK_PAYLOAD.get_or_init(|| Mutex::new(None))
+}
 use mongodb::bson::{oid::ObjectId, DateTime};
 use std::sync::Arc;
 
@@ -51,6 +60,16 @@ pub async fn verify_webhook(
     }
 }
 
+/// GET /v1/auth-user/whatsapp/debug/last-webhook
+/// Retorna el último payload crudo recibido de Meta. Solo para diagnóstico.
+pub async fn debug_last_webhook_handler() -> Json<serde_json::Value> {
+    let store = last_payload_store().lock().await;
+    match store.as_ref() {
+        Some(payload) => Json(serde_json::json!({ "ok": true, "received": true, "payload": payload })),
+        None => Json(serde_json::json!({ "ok": true, "received": false, "payload": null })),
+    }
+}
+
 /// POST /v1/webhook/whatsapp
 /// Recibe notificaciones de Meta (mensajes entrantes + actualizaciones de estado).
 /// Meta espera siempre HTTP 200 — cualquier otro código provoca reenvíos.
@@ -58,6 +77,11 @@ pub async fn receive_webhook(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<WebhookPayload>,
 ) -> StatusCode {
+    // Guardar payload crudo para diagnóstico
+    {
+        let raw = serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null);
+        *last_payload_store().lock().await = Some(raw);
+    }
     let entries = match payload.entry {
         Some(e) => e,
         None => return StatusCode::OK,

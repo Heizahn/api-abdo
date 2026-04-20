@@ -37,4 +37,6 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route("/v1/auth-user/whatsapp/settings", post(handler::create_settings_handler))
         .route("/v1/auth-user/whatsapp/settings/:id", put(handler::update_settings_handler))
         .route("/v1/auth-user/whatsapp/settings/:id", delete(handler::delete_settings_handler))
+        // Debug
+        .route("/v1/auth-user/whatsapp/debug/last-webhook", get(handler::debug_last_webhook_handler))
 }
