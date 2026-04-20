@@ -9,11 +9,15 @@ use std::sync::Arc;
 
 use crate::{
     auth::user_jwt::UserProfileClaims,
-    db::WhatsAppRepository,
+    db::{ProfileRepository, WhatsAppRepository},
     error::ApiError,
     models::whatsapp::*,
     state::AppState,
 };
+
+/// Número autorizado para soporte por ahora.
+/// Mover a env var (WHATSAPP_SUPPORT_NUMBER) cuando se abra a más números.
+const SUPPORT_NUMBER: &str = "584222236777";
 
 use super::service::WhatsAppService;
 
@@ -90,6 +94,28 @@ pub async fn receive_webhook(
                 let contacts = value.contacts.unwrap_or_default();
 
                 for msg in messages {
+                    // Solo procesamos mensajes del número autorizado por ahora
+                    if msg.from != SUPPORT_NUMBER {
+                        tracing::info!(
+                            "[webhook] número no autorizado: {} | tipo: {} | id: {}",
+                            msg.from, msg.msg_type, msg.id
+                        );
+                        continue;
+                    }
+
+                    // Normalizar E.164 → formato local venezolano para buscar en Clients
+                    let local_phone = wa_to_local_phone(&msg.from);
+
+                    // Verificar si el número existe en la base de clientes ISP
+                    if state.db.find_customer_by_phone(&local_phone).await.is_none() {
+                        tracing::info!(
+                            "[webhook] número no registrado en clientes: {} (local: {}) | tipo: {} | body: {:?}",
+                            msg.from, local_phone, msg.msg_type,
+                            msg.text.as_ref().map(|t| &t.body)
+                        );
+                        continue;
+                    }
+
                     let name = contacts.iter()
                         .find(|c| c.wa_id.as_deref() == Some(&msg.from))
                         .and_then(|c| c.profile.as_ref())
@@ -131,6 +157,11 @@ pub async fn receive_webhook(
                     };
 
                     let preview = body.clone().unwrap_or_else(|| format!("[{}]", msg.msg_type));
+
+                    tracing::info!(
+                        "[webhook] guardando mensaje de cliente registrado: {} | tipo: {} | preview: {}",
+                        msg.from, msg.msg_type, preview
+                    );
 
                     let wa_msg = WaMessage {
                         id: None,
@@ -388,6 +419,19 @@ pub async fn assign_conversation_handler(
         .map_err(|e| ApiError::DatabaseError(e))?;
 
     Ok(Json(UpdateResponse { ok: true }))
+}
+
+// ============================================
+// HELPERS INTERNOS
+// ============================================
+
+/// Convierte número WhatsApp E.164 sin "+" (ej: "584141234567") al formato local venezolano ("04141234567").
+fn wa_to_local_phone(wa_phone: &str) -> String {
+    if let Some(rest) = wa_phone.strip_prefix("58") {
+        format!("0{}", rest)
+    } else {
+        wa_phone.to_string()
+    }
 }
 
 // ============================================
