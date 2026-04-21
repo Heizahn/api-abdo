@@ -18,6 +18,11 @@ pub struct User {
     #[serde(rename = "visible", default)]
     pub visible: bool,
 
+    /// Permiso para atender chats de WhatsApp. Cuando es `true`, el usuario aparece
+    /// en el dropdown de transferencia de conversaciones.
+    #[serde(rename = "bCanChat", default)]
+    pub can_chat: bool,
+
     #[serde(rename = "nTag", skip_serializing_if = "Option::is_none")]
     pub tag: Option<u32>,
 

@@ -9,23 +9,27 @@ use crate::models::whatsapp::{WaConversation, WaMessage, WaSettings};
 
 impl MongoDB {
     pub(crate) fn wa_conversations(&self) -> mongodb::Collection<WaConversation> {
-        self.db.collection::<WaConversation>("wa_conversations")
+        self.db.collection::<WaConversation>("WaConversations")
     }
 
     pub(crate) fn wa_messages(&self) -> mongodb::Collection<WaMessage> {
-        self.db.collection::<WaMessage>("wa_messages")
+        self.db.collection::<WaMessage>("WaMessages")
     }
 
     pub(crate) fn wa_settings(&self) -> mongodb::Collection<WaSettings> {
-        self.db.collection::<WaSettings>("wa_settings")
+        self.db.collection::<WaSettings>("WaSettings")
     }
 }
 
 #[async_trait]
 impl WhatsAppRepository for MongoDB {
-    async fn find_conversation_by_phone(&self, phone: &str) -> Result<Option<WaConversation>, String> {
+    async fn find_conversation_by_phones(
+        &self,
+        contact_phone: &str,
+        business_phone: &str,
+    ) -> Result<Option<WaConversation>, String> {
         self.wa_conversations()
-            .find_one(doc! { "phone": phone })
+            .find_one(doc! { "phone": contact_phone, "business_phone": business_phone })
             .await
             .map_err(|e| e.to_string())
     }
@@ -39,21 +43,23 @@ impl WhatsAppRepository for MongoDB {
 
     async fn upsert_conversation(
         &self,
-        phone: &str,
+        contact_phone: &str,
+        business_phone: &str,
         name: Option<String>,
-    ) -> Result<WaConversation, String> {
+    ) -> Result<(WaConversation, bool), String> {
         let now = DateTime::now();
         let col = self.wa_conversations();
 
         let mut set_on_insert = doc! {
-            "phone": phone,
-            "status": "open",
+            "phone": contact_phone,
+            "business_phone": business_phone,
+            "status": "pending",
             "unread_count": 0,
             "created_at": now,
             "last_message_at": now,
         };
 
-        let mut update = doc! { "$setOnInsert": {} };
+        let mut update = doc! {};
 
         if let Some(n) = name.as_ref() {
             update.insert("$set", doc! { "name": n });
@@ -64,14 +70,23 @@ impl WhatsAppRepository for MongoDB {
         update.insert("$setOnInsert", set_on_insert);
 
         let opts = UpdateOptions::builder().upsert(true).build();
-        col.update_one(doc! { "phone": phone }, update)
+        let res = col
+            .update_one(
+                doc! { "phone": contact_phone, "business_phone": business_phone },
+                update,
+            )
             .with_options(opts)
             .await
             .map_err(|e| e.to_string())?;
 
-        self.find_conversation_by_phone(phone)
+        let created = res.upserted_id.is_some();
+
+        let conv = self
+            .find_conversation_by_phones(contact_phone, business_phone)
             .await?
-            .ok_or_else(|| "conversation not found after upsert".to_string())
+            .ok_or_else(|| "conversation not found after upsert".to_string())?;
+
+        Ok((conv, created))
     }
 
     async fn touch_conversation(
@@ -79,8 +94,9 @@ impl WhatsAppRepository for MongoDB {
         id: &ObjectId,
         preview: &str,
         increment_unread: bool,
+        last_message_at: Option<DateTime>,
     ) -> Result<(), String> {
-        let now = DateTime::now();
+        let ts = last_message_at.unwrap_or_else(DateTime::now);
         let unread_update: i32 = if increment_unread { 1 } else { 0 };
 
         self.wa_conversations()
@@ -88,7 +104,7 @@ impl WhatsAppRepository for MongoDB {
                 doc! { "_id": id },
                 doc! {
                     "$set": {
-                        "last_message_at": now,
+                        "last_message_at": ts,
                         "last_message_preview": preview,
                     },
                     "$inc": { "unread_count": unread_update }
@@ -123,9 +139,10 @@ impl WhatsAppRepository for MongoDB {
         &self,
         status: Option<&str>,
         assigned_to: Option<&str>,
-        skip: u64,
+        business_phone: Option<&str>,
+        cursor: Option<&str>,
         limit: i64,
-    ) -> Result<(Vec<WaConversation>, u64), String> {
+    ) -> Result<Vec<WaConversation>, String> {
         let mut filter = Document::new();
         if let Some(s) = status {
             filter.insert("status", s);
@@ -133,59 +150,70 @@ impl WhatsAppRepository for MongoDB {
         if let Some(a) = assigned_to {
             filter.insert("assigned_to", a);
         }
+        if let Some(bp) = business_phone {
+            filter.insert("business_phone", bp);
+        }
 
-        let total = self.wa_conversations()
-            .count_documents(filter.clone())
-            .await
-            .map_err(|e| e.to_string())?;
+        if let Some(c) = cursor {
+            if let Some((ts, oid)) = decode_cursor(c) {
+                filter.insert(
+                    "$or",
+                    vec![
+                        doc! { "last_message_at": { "$lt": ts } },
+                        doc! { "last_message_at": ts, "_id": { "$lt": oid } },
+                    ],
+                );
+            }
+        }
 
         let opts = FindOptions::builder()
-            .sort(doc! { "last_message_at": -1 })
-            .skip(skip)
+            .sort(doc! { "last_message_at": -1, "_id": -1 })
             .limit(limit)
             .build();
 
-        let items = self.wa_conversations()
+        self.wa_conversations()
             .find(filter)
             .with_options(opts)
             .await
             .map_err(|e| e.to_string())?
             .try_collect::<Vec<_>>()
             .await
-            .map_err(|e| e.to_string())?;
-
-        Ok((items, total))
+            .map_err(|e| e.to_string())
     }
 
     async fn get_messages(
         &self,
         conversation_id: &ObjectId,
-        skip: u64,
+        cursor: Option<&str>,
         limit: i64,
-    ) -> Result<(Vec<WaMessage>, u64), String> {
-        let filter = doc! { "conversation_id": conversation_id };
+    ) -> Result<Vec<WaMessage>, String> {
+        let mut filter = doc! { "conversation_id": conversation_id };
 
-        let total = self.wa_messages()
-            .count_documents(filter.clone())
-            .await
-            .map_err(|e| e.to_string())?;
+        if let Some(c) = cursor {
+            if let Some((ts, oid)) = decode_cursor(c) {
+                filter.insert(
+                    "$or",
+                    vec![
+                        doc! { "timestamp": { "$lt": ts } },
+                        doc! { "timestamp": ts, "_id": { "$lt": oid } },
+                    ],
+                );
+            }
+        }
 
         let opts = FindOptions::builder()
-            .sort(doc! { "timestamp": -1 })
-            .skip(skip)
+            .sort(doc! { "timestamp": -1, "_id": -1 })
             .limit(limit)
             .build();
 
-        let items = self.wa_messages()
+        self.wa_messages()
             .find(filter)
             .with_options(opts)
             .await
             .map_err(|e| e.to_string())?
             .try_collect::<Vec<_>>()
             .await
-            .map_err(|e| e.to_string())?;
-
-        Ok((items, total))
+            .map_err(|e| e.to_string())
     }
 
     async fn update_conversation_status(&self, id: &ObjectId, status: &str) -> Result<(), String> {
@@ -202,14 +230,39 @@ impl WhatsAppRepository for MongoDB {
         assigned_to: Option<&str>,
     ) -> Result<(), String> {
         let update = match assigned_to {
-            Some(uid) => doc! { "$set": { "assigned_to": uid } },
-            None => doc! { "$unset": { "assigned_to": "" } },
+            Some(uid) => doc! { "$set": { "assigned_to": uid, "status": "in_progress" } },
+            None => doc! { "$unset": { "assigned_to": "" }, "$set": { "status": "pending" } },
         };
         self.wa_conversations()
             .update_one(doc! { "_id": id }, update)
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    async fn take_conversation(
+        &self,
+        id: &ObjectId,
+        agent_id: &str,
+    ) -> Result<Option<WaConversation>, String> {
+        use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+        let opts = FindOneAndUpdateOptions::builder()
+            .return_document(ReturnDocument::After)
+            .build();
+        // Atómico: solo toma si sigue siendo pending y sin agente asignado.
+        // `assigned_to: null` matchea tanto null como "campo ausente".
+        self.wa_conversations()
+            .find_one_and_update(
+                doc! {
+                    "_id": id,
+                    "status": "pending",
+                    "assigned_to": mongodb::bson::Bson::Null,
+                },
+                doc! { "$set": { "assigned_to": agent_id, "status": "in_progress" } },
+            )
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn reset_unread(&self, id: &ObjectId) -> Result<(), String> {
@@ -293,4 +346,13 @@ impl WhatsAppRepository for MongoDB {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+}
+
+/// Decodifica cursor con formato `<millis>_<hex_id>`.
+/// Retorna `None` si el formato es inválido (se ignora silenciosamente → primera página).
+fn decode_cursor(cursor: &str) -> Option<(DateTime, ObjectId)> {
+    let (millis_str, oid_str) = cursor.split_once('_')?;
+    let millis: i64 = millis_str.parse().ok()?;
+    let oid = ObjectId::parse_str(oid_str).ok()?;
+    Some((DateTime::from_millis(millis), oid))
 }

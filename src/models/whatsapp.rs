@@ -7,12 +7,18 @@ use utoipa::ToSchema;
 // ============================================
 
 /// Conversación de WhatsApp (colección `wa_conversations`)
+///
+/// Un chat queda identificado de forma única por el par
+/// `(phone, business_phone)`: el mismo contacto escribiendo a dos números
+/// de negocio distintos genera dos conversaciones separadas.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WaConversation {
     #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
     pub id: Option<ObjectId>,
-    /// Número en formato E.164 sin "+" (ej: "584141234567")
+    /// Número del contacto en E.164 sin "+" (ej: "584141234567")
     pub phone: String,
+    /// Número de negocio (Meta) que recibió el mensaje, en E.164 sin "+"
+    pub business_phone: String,
     /// Nombre del contacto (provisto por WhatsApp)
     pub name: Option<String>,
     /// Cliente ISP vinculado si el número coincide
@@ -163,78 +169,97 @@ pub struct StatusError {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SendMessageRequest {
     /// Texto del mensaje a enviar
-    pub body: String,
+    pub content: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-pub struct UpdateConversationStatusRequest {
-    /// "open" | "closed" | "waiting"
-    pub status: String,
+pub struct TransferConversationRequest {
+    /// UUID del agente destino. Acepta cualquier staff/admin
+    /// (aun si no está en `wa_settings.agents` — es override puntual).
+    pub user_id: String,
+    /// Nota opcional que acompaña la transferencia.
+    pub note: Option<String>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct AssignConversationRequest {
-    /// UUID del agente. Null para desasignar.
-    pub assigned_to: Option<String>,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ConversationListItem {
+/// Response estándar para conversaciones en listados y detalle.
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct ConversationItem {
     pub id: String,
-    pub phone: String,
-    pub name: Option<String>,
+    /// Número del contacto (quien escribe) en E.164 sin "+"
+    pub customer_phone: String,
+    pub customer_name: Option<String>,
+    /// Número de negocio (WA) que recibió el mensaje, en E.164 sin "+"
+    pub business_phone: String,
+    /// "pending" | "in_progress" | "closed"
     pub status: String,
     pub assigned_to: Option<String>,
+    /// ISO-8601 (RFC 3339) UTC, ej: "2026-04-21T14:32:10.123Z"
     pub last_message_at: String,
     pub last_message_preview: Option<String>,
     pub unread_count: i32,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ConversationDetail {
-    pub id: String,
-    pub phone: String,
-    pub name: Option<String>,
+    /// ISO-8601 (RFC 3339) UTC
+    pub created_at: String,
+    /// Cliente ISP vinculado (si aplica). Solo se rellena en el detalle.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
-    pub status: String,
-    pub assigned_to: Option<String>,
-    pub last_message_at: String,
-    pub last_message_preview: Option<String>,
-    pub unread_count: i32,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct MessageItem {
     pub id: String,
+    pub conversation_id: String,
     pub wa_message_id: String,
+    /// "in" | "out"
     pub direction: String,
+    /// "text" | "image" | "audio" | "video" | "document" | "sticker" | otros
+    #[serde(rename = "type")]
     pub msg_type: String,
-    pub body: Option<String>,
+    pub content: Option<String>,
     pub media_id: Option<String>,
+    /// "sending" (solo front optimistic) | "sent" | "delivered" | "read" | "failed"
     pub status: Option<String>,
+    /// UUID del agente que envió el mensaje (solo cuando direction="out")
     pub sent_by: Option<String>,
-    pub timestamp: String,
+    /// Nombre del agente que envió el mensaje (best-effort).
+    pub sent_by_name: Option<String>,
+    /// ISO-8601 (RFC 3339) UTC
+    pub created_at: String,
+}
+
+/// Respuesta paginable con cursor: el front envía `next_cursor` de nuevo para la siguiente página.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ConversationsListResponse {
+    pub ok: bool,
+    pub data: Vec<ConversationItem>,
+    /// Cursor opaco para la siguiente página. `null` cuando no hay más.
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ConversationDetailResponse {
+    pub ok: bool,
+    pub conversation: ConversationItem,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ConversationMessagesResponse {
     pub ok: bool,
-    pub conversation: ConversationDetail,
+    pub conversation: ConversationItem,
+    /// Mensajes ordenados del más reciente al más antiguo.
     pub messages: Vec<MessageItem>,
-    pub total: u64,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct ConversationsListResponse {
-    pub ok: bool,
-    pub data: Vec<ConversationListItem>,
-    pub total: u64,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SendMessageResponse {
     pub ok: bool,
-    pub message_id: String,
+    pub message: MessageItem,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TakeConversationResponse {
+    pub ok: bool,
+    pub conversation: ConversationItem,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -280,7 +305,9 @@ pub struct SettingsItem {
     pub phone: String,
     pub agents: Vec<String>,
     pub active: bool,
+    /// ISO-8601 (RFC 3339) UTC
     pub created_at: String,
+    /// ISO-8601 (RFC 3339) UTC
     pub updated_at: String,
 }
 
@@ -294,4 +321,22 @@ pub struct SettingsListResponse {
 pub struct SettingsResponse {
     pub ok: bool,
     pub data: SettingsItem,
+}
+
+// ============================================
+// AGENTES TRANSFERIBLES
+// ============================================
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TransferableAgentItem {
+    pub id: String,
+    pub name: String,
+    pub email: String,
+    pub role: f32,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TransferableAgentsResponse {
+    pub ok: bool,
+    pub data: Vec<TransferableAgentItem>,
 }

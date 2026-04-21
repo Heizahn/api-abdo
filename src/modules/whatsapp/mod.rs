@@ -4,7 +4,7 @@ pub mod service;
 pub mod ws;
 
 use axum::{
-    routing::{delete, get, patch, post, put},
+    routing::{delete, get, post, put},
     Router,
 };
 use crate::state::AppState;
@@ -28,10 +28,14 @@ pub fn user_routes() -> Router<Arc<AppState>> {
     Router::new()
         // Conversaciones
         .route("/v1/auth-user/whatsapp/conversations", get(handler::list_conversations_handler))
+        .route("/v1/auth-user/whatsapp/conversations/:id", get(handler::get_conversation_handler))
         .route("/v1/auth-user/whatsapp/conversations/:id/messages", get(handler::get_conversation_messages_handler))
         .route("/v1/auth-user/whatsapp/conversations/:id/messages", post(handler::send_message_handler))
-        .route("/v1/auth-user/whatsapp/conversations/:id/status", patch(handler::update_status_handler))
-        .route("/v1/auth-user/whatsapp/conversations/:id/assign", patch(handler::assign_conversation_handler))
+        .route("/v1/auth-user/whatsapp/conversations/:id/take", post(handler::take_conversation_handler))
+        .route("/v1/auth-user/whatsapp/conversations/:id/transfer", post(handler::transfer_conversation_handler))
+        .route("/v1/auth-user/whatsapp/conversations/:id/close", post(handler::close_conversation_handler))
+        // Agentes con permiso de chat (para dropdown de transferencia)
+        .route("/v1/auth-user/whatsapp/transferable-agents", get(handler::list_transferable_agents_handler))
         // Configuración de números y agentes
         .route("/v1/auth-user/whatsapp/settings", get(handler::list_settings_handler))
         .route("/v1/auth-user/whatsapp/settings", post(handler::create_settings_handler))

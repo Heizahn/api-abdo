@@ -44,6 +44,9 @@ pub trait UserRepository {
     async fn create_user_credentials(&self, creds: UserCredentials) -> Result<(), String>;
     async fn find_providers(&self) -> Result<Vec<User>, String>;
     async fn find_agents(&self) -> Result<Vec<User>, String>;
+    /// Usuarios con permiso para atender chats (campo `bCanChat == true` y `visible == true`).
+    /// Usado para poblar el dropdown de transferencia de conversaciones.
+    async fn find_chat_agents(&self) -> Result<Vec<User>, String>;
 }
 
 // ============================================
@@ -204,15 +207,22 @@ pub trait OnuRepository {
 // ============================================
 #[async_trait::async_trait]
 pub trait WhatsAppRepository {
-    async fn find_conversation_by_phone(&self, phone: &str) -> Result<Option<WaConversation>, String>;
+    async fn find_conversation_by_phones(&self, contact_phone: &str, business_phone: &str) -> Result<Option<WaConversation>, String>;
     async fn find_conversation_by_id(&self, id: &ObjectId) -> Result<Option<WaConversation>, String>;
-    async fn upsert_conversation(&self, phone: &str, name: Option<String>) -> Result<WaConversation, String>;
-    async fn touch_conversation(&self, id: &ObjectId, preview: &str, increment_unread: bool) -> Result<(), String>;
+    /// Crea o recupera una conversación identificada por el par `(contact_phone, business_phone)`.
+    /// Retorna `(conv, created)` — `created = true` cuando se insertó en esta llamada.
+    async fn upsert_conversation(&self, contact_phone: &str, business_phone: &str, name: Option<String>) -> Result<(WaConversation, bool), String>;
+    async fn touch_conversation(&self, id: &ObjectId, preview: &str, increment_unread: bool, last_message_at: Option<mongodb::bson::DateTime>) -> Result<(), String>;
     async fn save_message(&self, message: WaMessage) -> Result<WaMessage, String>;
-    async fn get_conversations(&self, status: Option<&str>, assigned_to: Option<&str>, skip: u64, limit: i64) -> Result<(Vec<WaConversation>, u64), String>;
-    async fn get_messages(&self, conversation_id: &ObjectId, skip: u64, limit: i64) -> Result<(Vec<WaMessage>, u64), String>;
+    /// Cursor-based: `cursor` de la forma `<millis>_<hex_id>` para paginación descendente por `last_message_at`.
+    async fn get_conversations(&self, status: Option<&str>, assigned_to: Option<&str>, business_phone: Option<&str>, cursor: Option<&str>, limit: i64) -> Result<Vec<WaConversation>, String>;
+    /// Cursor-based: `cursor` de la forma `<millis>_<hex_id>` para paginación descendente por `timestamp`.
+    async fn get_messages(&self, conversation_id: &ObjectId, cursor: Option<&str>, limit: i64) -> Result<Vec<WaMessage>, String>;
     async fn update_conversation_status(&self, id: &ObjectId, status: &str) -> Result<(), String>;
     async fn assign_conversation(&self, id: &ObjectId, assigned_to: Option<&str>) -> Result<(), String>;
+    /// Intenta tomar una conversación pendiente. Retorna `None` si ya estaba asignada a otro
+    /// (o no estaba en status `pending`), `Some(conv)` si la toma fue exitosa.
+    async fn take_conversation(&self, id: &ObjectId, agent_id: &str) -> Result<Option<WaConversation>, String>;
     async fn reset_unread(&self, id: &ObjectId) -> Result<(), String>;
     async fn update_message_status(&self, wa_message_id: &str, status: &str) -> Result<Option<WaMessage>, String>;
 

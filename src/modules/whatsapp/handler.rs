@@ -32,7 +32,7 @@ use crate::{
 use super::assignment::assign_conversation;
 
 use super::service::WhatsAppService;
-use super::ws::{broadcast_all, send_to_agent, WsServerEvent};
+use super::ws::{broadcast_all, WsServerEvent};
 
 // ============================================
 // WEBHOOK (público)
@@ -148,16 +148,12 @@ pub async fn receive_webhook(
                     }
                     match state.db.update_message_status(&s.id, &s.status).await {
                         Ok(Some(updated)) => {
-                            let event = WsServerEvent::MensajeStatusActualizado {
+                            let event = WsServerEvent::MensajeActualizado {
                                 conversation_id: updated.conversation_id.to_hex(),
-                                wa_message_id: updated.wa_message_id.clone(),
+                                message_id: updated.wa_message_id.clone(),
                                 status: s.status.clone(),
                             };
-                            if let Some(agent) = updated.sent_by.as_deref() {
-                                send_to_agent(&state.ws_registry, agent, &event).await;
-                            } else {
-                                broadcast_all(&state.ws_registry, &event).await;
-                            }
+                            broadcast_all(&state.ws_registry, &event).await;
                         }
                         Ok(None) => {
                             // mensaje no encontrado en DB — normal si es status de un mensaje no nuestro
@@ -205,9 +201,9 @@ pub async fn receive_webhook(
                         .and_then(|c| c.profile.as_ref())
                         .and_then(|p| p.name.clone());
 
-                    // Upsert conversación
-                    let conv = match state.db.upsert_conversation(&msg.from, name).await {
-                        Ok(c) => c,
+                    // Upsert conversación (clave compuesta: contacto + número de negocio)
+                    let (conv, conv_created) = match state.db.upsert_conversation(&msg.from, &business_phone, name).await {
+                        Ok(v) => v,
                         Err(e) => {
                             tracing::error!("upsert_conversation error: {}", e);
                             continue;
@@ -247,17 +243,22 @@ pub async fn receive_webhook(
                         msg.from, msg.msg_type, preview
                     );
 
+                    // Timestamp real desde Meta (Unix seconds en string), fallback a ahora.
+                    let msg_ts = msg.timestamp.as_deref()
+                        .and_then(parse_unix_seconds_to_bson)
+                        .unwrap_or_else(DateTime::now);
+
                     let wa_msg = WaMessage {
                         id: None,
                         conversation_id: conv_id,
                         wa_message_id: msg.id.clone(),
-                        direction: "inbound".to_string(),
+                        direction: "in".to_string(),
                         msg_type: msg.msg_type.clone(),
                         body,
                         media_id,
                         status: None,
                         sent_by: None,
-                        timestamp: DateTime::now(),
+                        timestamp: msg_ts,
                     };
 
                     let saved = match state.db.save_message(wa_msg).await {
@@ -268,31 +269,37 @@ pub async fn receive_webhook(
                         }
                     };
 
-                    if let Err(e) = state.db.touch_conversation(&conv_id, &preview, true).await {
+                    if let Err(e) = state.db.touch_conversation(&conv_id, &preview, true, Some(msg_ts)).await {
                         tracing::warn!("touch_conversation error: {}", e);
                     }
 
-                    // Emitir MENSAJE_RECIBIDO por WebSocket
-                    let new_unread = conv.unread_count + 1;
-                    let message_item = msg_to_item(saved);
-                    let event = WsServerEvent::MensajeRecibido {
-                        conversation_id: conv_id.to_hex(),
-                        phone: conv.phone.clone(),
-                        name: conv.name.clone(),
-                        unread_count: new_unread,
-                        message: message_item,
-                    };
-                    if let Some(agent) = conv.assigned_to.as_deref() {
-                        send_to_agent(&state.ws_registry, agent, &event).await;
-                    } else {
-                        // Sin asignar: notificar a todos los agentes del número
-                        for agent in &agents {
-                            send_to_agent(&state.ws_registry, agent, &event).await;
-                        }
+                    // Releer conversación para emitir estado actualizado (unread_count, last_*).
+                    let conv_now = state
+                        .db
+                        .find_conversation_by_id(&conv_id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or(conv);
+
+                    // Si la conversación es nueva, avisar al front antes del mensaje.
+                    if conv_created {
+                        let new_ev = WsServerEvent::ConversacionNueva {
+                            conversation: conv_to_item(conv_now.clone(), false),
+                        };
+                        broadcast_all(&state.ws_registry, &new_ev).await;
                     }
 
-                    // Si la conversación no tiene agente asignado, disparar asignación automática
-                    if conv.assigned_to.is_none() {
+                    // MENSAJE_NUEVO a todos los conectados; el front filtra por conversación abierta.
+                    let message_item = msg_to_item(saved, None);
+                    let msg_ev = WsServerEvent::MensajeNuevo {
+                        conversation_id: conv_id.to_hex(),
+                        message: message_item,
+                    };
+                    broadcast_all(&state.ws_registry, &msg_ev).await;
+
+                    // Auto-asignación: solo si sigue pending sin dueño.
+                    if conv_now.assigned_to.is_none() {
                         let state_clone = state.clone();
                         tokio::spawn(async move {
                             assign_conversation(state_clone, conv_id, agents).await;
@@ -314,7 +321,14 @@ pub async fn receive_webhook(
 pub struct ConversationsQuery {
     pub status: Option<String>,
     pub assigned_to: Option<String>,
-    pub page: Option<u64>,
+    pub business_phone: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct MessagesQuery {
+    pub cursor: Option<String>,
     pub limit: Option<i64>,
 }
 
@@ -324,10 +338,11 @@ pub struct ConversationsQuery {
     tag = "WhatsApp — Soporte",
     security(("bearerAuth" = [])),
     params(
-        ("status" = Option<String>, Query, description = "Filtrar por estado: open | closed | waiting"),
+        ("status" = Option<String>, Query, description = "Filtrar por estado: pending | in_progress | closed"),
         ("assigned_to" = Option<String>, Query, description = "Filtrar por UUID de agente"),
-        ("page" = Option<u64>, Query, description = "Página (default: 1)"),
-        ("limit" = Option<i64>, Query, description = "Resultados por página (default: 20)"),
+        ("business_phone" = Option<String>, Query, description = "Filtrar por número de negocio (E.164 sin '+')"),
+        ("cursor" = Option<String>, Query, description = "Cursor opaco para paginación (copiar de next_cursor)"),
+        ("limit" = Option<i64>, Query, description = "Resultados por página (default: 20, max: 100)"),
     ),
     responses(
         (status = 200, description = "Lista de conversaciones", body = ConversationsListResponse),
@@ -338,23 +353,64 @@ pub async fn list_conversations_handler(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ConversationsQuery>,
 ) -> Result<Json<ConversationsListResponse>, ApiError> {
-    let page = q.page.unwrap_or(1).max(1);
-    let limit = q.limit.unwrap_or(20).min(100);
-    let skip = (page - 1) * limit as u64;
+    let limit = q.limit.unwrap_or(20).clamp(1, 100);
+    let business_phone_norm = q.business_phone.as_deref().map(normalize_to_e164);
 
-    let (convs, total) = state.db
+    let convs = state.db
         .get_conversations(
             q.status.as_deref(),
             q.assigned_to.as_deref(),
-            skip,
+            business_phone_norm.as_deref(),
+            q.cursor.as_deref(),
             limit,
         )
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
 
-    let data = convs.into_iter().map(conv_to_list_item).collect();
+    let next_cursor = if (convs.len() as i64) < limit {
+        None
+    } else {
+        convs.last().and_then(|c| {
+            Some(format!(
+                "{}_{}",
+                c.last_message_at.timestamp_millis(),
+                c.id?.to_hex()
+            ))
+        })
+    };
 
-    Ok(Json(ConversationsListResponse { ok: true, data, total }))
+    let data = convs.into_iter().map(|c| conv_to_item(c, false)).collect();
+
+    Ok(Json(ConversationsListResponse { ok: true, data, next_cursor }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/conversations/{id}",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ID de la conversación")),
+    responses(
+        (status = 200, description = "Detalle de conversación", body = ConversationDetailResponse),
+        (status = 404, description = "Conversación no encontrada"),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn get_conversation_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ConversationDetailResponse>, ApiError> {
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+    let conv = state.db
+        .find_conversation_by_id(&oid)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?
+        .ok_or(ApiError::NotFound)?;
+
+    Ok(Json(ConversationDetailResponse {
+        ok: true,
+        conversation: conv_to_item(conv, true),
+    }))
 }
 
 #[utoipa::path(
@@ -364,11 +420,11 @@ pub async fn list_conversations_handler(
     security(("bearerAuth" = [])),
     params(
         ("id" = String, Path, description = "ID de la conversación"),
-        ("page" = Option<u64>, Query, description = "Página (default: 1)"),
-        ("limit" = Option<i64>, Query, description = "Mensajes por página (default: 50)"),
+        ("cursor" = Option<String>, Query, description = "Cursor opaco (copiar de next_cursor)"),
+        ("limit" = Option<i64>, Query, description = "Mensajes por página (default: 50, max: 200)"),
     ),
     responses(
-        (status = 200, description = "Detalle de conversación + mensajes", body = ConversationMessagesResponse),
+        (status = 200, description = "Detalle de conversación + mensajes (más recientes primero)", body = ConversationMessagesResponse),
         (status = 404, description = "Conversación no encontrada"),
         (status = 401, description = "No autorizado"),
     )
@@ -376,7 +432,7 @@ pub async fn list_conversations_handler(
 pub async fn get_conversation_messages_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Query(q): Query<ConversationsQuery>,
+    Query(q): Query<MessagesQuery>,
 ) -> Result<Json<ConversationMessagesResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
@@ -386,22 +442,22 @@ pub async fn get_conversation_messages_handler(
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
+    let is_first_page = q.cursor.is_none();
     let had_unread = conv.unread_count > 0;
-    let _ = state.db.reset_unread(&oid).await;
+    if is_first_page {
+        let _ = state.db.reset_unread(&oid).await;
+    }
 
-    let page = q.page.unwrap_or(1).max(1);
-    let limit = q.limit.unwrap_or(50).min(200);
-    let skip = (page - 1) * limit as u64;
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
 
-    let (messages, total) = state.db
-        .get_messages(&oid, skip, limit)
+    let messages = state.db
+        .get_messages(&oid, q.cursor.as_deref(), limit)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
 
-    // Si había mensajes sin leer y estamos en la primera página, marcar el último
-    // inbound como leído en WhatsApp. Meta marca automáticamente todos los anteriores.
-    if had_unread && page == 1 {
-        if let Some(latest_inbound) = messages.iter().find(|m| m.direction == "inbound") {
+    // Marcar último inbound como leído en Meta (ticks azules).
+    if had_unread && is_first_page {
+        if let Some(latest_inbound) = messages.iter().find(|m| m.direction == "in") {
             let wa_message_id = latest_inbound.wa_message_id.clone();
             let client = state.reqwest_client.clone();
             tokio::spawn(async move {
@@ -412,11 +468,31 @@ pub async fn get_conversation_messages_handler(
         }
     }
 
+    let agent_names = resolve_sent_by_names(&state, &messages).await;
+
+    let next_cursor = if (messages.len() as i64) < limit {
+        None
+    } else {
+        messages.last().and_then(|m| {
+            Some(format!(
+                "{}_{}",
+                m.timestamp.timestamp_millis(),
+                m.id?.to_hex()
+            ))
+        })
+    };
+
     Ok(Json(ConversationMessagesResponse {
         ok: true,
-        conversation: conv_to_detail(conv),
-        messages: messages.into_iter().map(msg_to_item).collect(),
-        total,
+        conversation: conv_to_item(conv, true),
+        messages: messages
+            .into_iter()
+            .map(|m| {
+                let name = m.sent_by.as_deref().and_then(|id| agent_names.get(id).cloned());
+                msg_to_item(m, name)
+            })
+            .collect(),
+        next_cursor,
     }))
 }
 
@@ -450,7 +526,7 @@ pub async fn send_message_handler(
     let wa = WhatsAppService::from_env(state.reqwest_client.clone())
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let wa_id = wa.send_text(&conv.phone, &payload.body)
+    let wa_id = wa.send_text(&conv.phone, &payload.content)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -458,98 +534,232 @@ pub async fn send_message_handler(
         id: None,
         conversation_id: oid,
         wa_message_id: wa_id.clone(),
-        direction: "outbound".to_string(),
+        direction: "out".to_string(),
         msg_type: "text".to_string(),
-        body: Some(payload.body.clone()),
+        body: Some(payload.content.clone()),
         media_id: None,
         status: Some("sent".to_string()),
         sent_by: Some(claims.id.clone()),
         timestamp: DateTime::now(),
     };
 
-    state.db.save_message(msg).await.map_err(|e| ApiError::DatabaseError(e))?;
-    state.db.touch_conversation(&oid, &payload.body, false).await.map_err(|e| ApiError::DatabaseError(e))?;
+    let saved = state.db.save_message(msg).await.map_err(|e| ApiError::DatabaseError(e))?;
+    state.db.touch_conversation(&oid, &payload.content, false, None).await.map_err(|e| ApiError::DatabaseError(e))?;
 
-    // Broadcast: otros agentes viendo la misma conversación reciben la respuesta en vivo
-    let broadcast = WsServerEvent::MensajeRespondido {
+    let item = msg_to_item(saved, Some(claims.name.clone()));
+
+    // Broadcast del mensaje outbound para que otros sockets del mismo usuario / otros agentes viendo el chat lo reciban.
+    let ev = WsServerEvent::MensajeNuevo {
         conversation_id: id.clone(),
-        respondido_por: claims.id.clone(),
-        respondido_por_nombre: claims.name.clone(),
+        message: item.clone(),
     };
-    broadcast_all(&state.ws_registry, &broadcast).await;
+    broadcast_all(&state.ws_registry, &ev).await;
 
-    Ok(Json(SendMessageResponse { ok: true, message_id: wa_id }))
+    Ok(Json(SendMessageResponse { ok: true, message: item }))
 }
 
 #[utoipa::path(
-    patch,
-    path = "/v1/auth-user/whatsapp/conversations/{id}/status",
+    post,
+    path = "/v1/auth-user/whatsapp/conversations/{id}/take",
     tag = "WhatsApp — Soporte",
     security(("bearerAuth" = [])),
     params(("id" = String, Path, description = "ID de la conversación")),
-    request_body = UpdateConversationStatusRequest,
     responses(
-        (status = 200, description = "Estado actualizado", body = UpdateResponse),
+        (status = 200, description = "Conversación tomada", body = TakeConversationResponse),
+        (status = 409, description = "Ya fue tomada por otro agente"),
         (status = 404, description = "Conversación no encontrada"),
         (status = 401, description = "No autorizado"),
     )
 )]
-pub async fn update_status_handler(
+pub async fn take_conversation_handler(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
     Path(id): Path<String>,
-    Json(payload): Json<UpdateConversationStatusRequest>,
-) -> Result<Json<UpdateResponse>, ApiError> {
-    let valid = ["open", "closed", "waiting"];
-    if !valid.contains(&payload.status.as_str()) {
-        return Err(ApiError::BadRequest("status debe ser open | closed | waiting".into()));
+) -> Result<Json<TakeConversationResponse>, ApiError> {
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+
+    // Verificar existencia para distinguir 404 de 409.
+    state.db
+        .find_conversation_by_id(&oid)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?
+        .ok_or(ApiError::NotFound)?;
+
+    let taken = state.db
+        .take_conversation(&oid, &claims.id)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
+
+    let conv = match taken {
+        Some(c) => c,
+        None => return Err(ApiError::Conflict("conversacion_ya_tomada".into())),
+    };
+
+    state.redis.incr_agent_load(&claims.id).await;
+
+    let ev = WsServerEvent::ChatTomado {
+        conversation_id: id.clone(),
+        taken_by: claims.id.clone(),
+        status: "in_progress".to_string(),
+    };
+    broadcast_all(&state.ws_registry, &ev).await;
+
+    Ok(Json(TakeConversationResponse {
+        ok: true,
+        conversation: conv_to_item(conv, true),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/conversations/{id}/transfer",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ID de la conversación")),
+    request_body = TransferConversationRequest,
+    responses(
+        (status = 200, description = "Conversación transferida", body = ConversationDetailResponse),
+        (status = 404, description = "Conversación o usuario destino no encontrado"),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn transfer_conversation_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+    Json(payload): Json<TransferConversationRequest>,
+) -> Result<Json<ConversationDetailResponse>, ApiError> {
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+
+    let conv = state.db
+        .find_conversation_by_id(&oid)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?
+        .ok_or(ApiError::NotFound)?;
+
+    // Validar que el usuario destino exista.
+    use crate::db::UserRepository;
+    let _target = state.db
+        .find_user_by_id(&payload.user_id)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?
+        .ok_or_else(|| ApiError::NotFound)?;
+
+    let from_agent = conv.assigned_to.clone();
+
+    state.db.assign_conversation(&oid, Some(&payload.user_id))
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
+
+    if let Some(prev) = from_agent.as_deref() {
+        if prev != payload.user_id {
+            state.redis.decr_agent_load(prev).await;
+        }
+    }
+    state.redis.incr_agent_load(&payload.user_id).await;
+
+    if let Some(note) = payload.note.as_deref() {
+        tracing::info!(
+            "[transfer] conv={} de {:?} → {} por {} ({}): {}",
+            id, from_agent, payload.user_id, claims.id, claims.name, note
+        );
     }
 
-    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+    let ev = WsServerEvent::ChatTransferido {
+        conversation_id: id.clone(),
+        from_user_id: from_agent,
+        to_user_id: payload.user_id.clone(),
+    };
+    broadcast_all(&state.ws_registry, &ev).await;
 
-    state.db
+    let conv_after = state.db
         .find_conversation_by_id(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
-    state.db.update_conversation_status(&oid, &payload.status)
-        .await
-        .map_err(|e| ApiError::DatabaseError(e))?;
-
-    Ok(Json(UpdateResponse { ok: true }))
+    Ok(Json(ConversationDetailResponse {
+        ok: true,
+        conversation: conv_to_item(conv_after, true),
+    }))
 }
 
 #[utoipa::path(
-    patch,
-    path = "/v1/auth-user/whatsapp/conversations/{id}/assign",
+    post,
+    path = "/v1/auth-user/whatsapp/conversations/{id}/close",
     tag = "WhatsApp — Soporte",
     security(("bearerAuth" = [])),
     params(("id" = String, Path, description = "ID de la conversación")),
-    request_body = AssignConversationRequest,
     responses(
-        (status = 200, description = "Conversación asignada", body = UpdateResponse),
+        (status = 200, description = "Conversación cerrada", body = ConversationDetailResponse),
         (status = 404, description = "Conversación no encontrada"),
         (status = 401, description = "No autorizado"),
     )
 )]
-pub async fn assign_conversation_handler(
+pub async fn close_conversation_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(payload): Json<AssignConversationRequest>,
-) -> Result<Json<UpdateResponse>, ApiError> {
+) -> Result<Json<ConversationDetailResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
-    state.db
+    let conv = state.db
         .find_conversation_by_id(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
-    state.db.assign_conversation(&oid, payload.assigned_to.as_deref())
+    state.db.update_conversation_status(&oid, "closed")
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
 
-    Ok(Json(UpdateResponse { ok: true }))
+    if let Some(agent) = conv.assigned_to.as_deref() {
+        state.redis.decr_agent_load(agent).await;
+    }
+
+    let ev = WsServerEvent::ChatCerrado { conversation_id: id.clone() };
+    broadcast_all(&state.ws_registry, &ev).await;
+
+    let conv_after = state.db
+        .find_conversation_by_id(&oid)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?
+        .ok_or(ApiError::NotFound)?;
+
+    Ok(Json(ConversationDetailResponse {
+        ok: true,
+        conversation: conv_to_item(conv_after, true),
+    }))
+}
+
+// ============================================
+// AGENTES TRANSFERIBLES
+// ============================================
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/transferable-agents",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Usuarios con permiso para atender chats (bCanChat == true)", body = TransferableAgentsResponse),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn list_transferable_agents_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<TransferableAgentsResponse>, ApiError> {
+    use crate::db::UserRepository;
+    let users = state.db.find_chat_agents().await.map_err(|e| ApiError::DatabaseError(e))?;
+    let data = users
+        .into_iter()
+        .map(|u| TransferableAgentItem {
+            id: u.id,
+            name: u.name,
+            email: u.email,
+            role: u.role,
+        })
+        .collect();
+    Ok(Json(TransferableAgentsResponse { ok: true, data }))
 }
 
 // ============================================
@@ -715,30 +925,23 @@ fn normalize_to_e164(phone: &str) -> String {
 // HELPERS DE MAPEO
 // ============================================
 
-fn conv_to_list_item(c: WaConversation) -> ConversationListItem {
-    ConversationListItem {
-        id: c.id.map(|o| o.to_hex()).unwrap_or_default(),
-        phone: c.phone,
-        name: c.name,
-        status: c.status,
-        assigned_to: c.assigned_to,
-        last_message_at: c.last_message_at.to_string(),
-        last_message_preview: c.last_message_preview,
-        unread_count: c.unread_count,
-    }
+fn iso8601(dt: DateTime) -> String {
+    dt.try_to_rfc3339_string().unwrap_or_default()
 }
 
-fn conv_to_detail(c: WaConversation) -> ConversationDetail {
-    ConversationDetail {
+fn conv_to_item(c: WaConversation, include_client_id: bool) -> ConversationItem {
+    ConversationItem {
         id: c.id.map(|o| o.to_hex()).unwrap_or_default(),
-        phone: c.phone,
-        name: c.name,
-        client_id: c.client_id.map(|o| o.to_hex()),
+        customer_phone: c.phone,
+        customer_name: c.name,
+        business_phone: c.business_phone,
         status: c.status,
         assigned_to: c.assigned_to,
-        last_message_at: c.last_message_at.to_string(),
+        last_message_at: iso8601(c.last_message_at),
         last_message_preview: c.last_message_preview,
         unread_count: c.unread_count,
+        created_at: iso8601(c.created_at),
+        client_id: if include_client_id { c.client_id.map(|o| o.to_hex()) } else { None },
     }
 }
 
@@ -748,21 +951,53 @@ fn settings_to_item(s: WaSettings) -> SettingsItem {
         phone: s.phone,
         agents: s.agents,
         active: s.active,
-        created_at: s.created_at.to_string(),
-        updated_at: s.updated_at.to_string(),
+        created_at: iso8601(s.created_at),
+        updated_at: iso8601(s.updated_at),
     }
 }
 
-fn msg_to_item(m: WaMessage) -> MessageItem {
+fn msg_to_item(m: WaMessage, sent_by_name: Option<String>) -> MessageItem {
     MessageItem {
         id: m.id.map(|o| o.to_hex()).unwrap_or_default(),
+        conversation_id: m.conversation_id.to_hex(),
         wa_message_id: m.wa_message_id,
         direction: m.direction,
         msg_type: m.msg_type,
-        body: m.body,
+        content: m.body,
         media_id: m.media_id,
         status: m.status,
         sent_by: m.sent_by,
-        timestamp: m.timestamp.to_string(),
+        sent_by_name,
+        created_at: iso8601(m.timestamp),
     }
+}
+
+/// Convierte un timestamp de Meta (Unix seconds en string) a `bson::DateTime`.
+fn parse_unix_seconds_to_bson(s: &str) -> Option<DateTime> {
+    let secs: i64 = s.parse().ok()?;
+    Some(DateTime::from_millis(secs.checked_mul(1000)?))
+}
+
+/// Resuelve nombres de agentes para un batch de mensajes, deduplicando UUIDs
+/// y leyendo de `Users` en paralelo.
+async fn resolve_sent_by_names(
+    state: &Arc<AppState>,
+    messages: &[WaMessage],
+) -> std::collections::HashMap<String, String> {
+    use crate::db::UserRepository;
+
+    let mut ids: Vec<String> = messages
+        .iter()
+        .filter_map(|m| m.sent_by.clone())
+        .collect();
+    ids.sort();
+    ids.dedup();
+
+    let mut out = std::collections::HashMap::new();
+    for id in ids {
+        if let Ok(Some(u)) = state.db.find_user_by_id(&id).await {
+            out.insert(id, u.name);
+        }
+    }
+    out
 }

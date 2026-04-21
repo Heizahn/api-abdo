@@ -86,6 +86,20 @@ impl UserRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
+    async fn find_chat_agents(&self) -> Result<Vec<User>, String> {
+        let collection: Collection<User> = self.db.collection("Users");
+        let filter = doc! { "bCanChat": true, "visible": true };
+
+        collection
+            .find(filter)
+            .sort(doc! { "sName": 1 })
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn find_providers(&self) -> Result<Vec<User>, String> {
         let collection: Collection<User> = self.db.collection("Users");
         let filter = doc! { "nRole": 3.0 };

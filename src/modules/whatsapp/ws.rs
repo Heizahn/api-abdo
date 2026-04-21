@@ -6,19 +6,15 @@ use axum::{
     response::IntoResponse,
 };
 use futures::{SinkExt, StreamExt};
-use mongodb::bson::{oid::ObjectId, DateTime};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::{
     auth::user_jwt::UserJwtService,
-    db::WhatsAppRepository,
-    models::whatsapp::{MessageItem, WaMessage},
+    models::whatsapp::{ConversationItem, MessageItem},
     state::{AppState, WsRegistry},
 };
-
-use super::service::WhatsAppService;
 
 // ============================================
 // TIPOS DE EVENTOS
@@ -27,62 +23,63 @@ use super::service::WhatsAppService;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "tipo", content = "datos")]
 pub enum WsClientEvent {
+    /// Handshake opcional que el front envía tras conectar.
     #[serde(rename = "CONECTAR")]
     Conectar { usuario_id: String, nombre: String },
 
-    #[serde(rename = "RESPONDER")]
-    Responder {
-        conversacion_id: String,
-        respuesta: String,
-    },
+    /// (Opcional) Marca una conversación como "activa" para este socket.
+    /// Hoy es no-op: el backend emite por broadcast y el front filtra.
+    /// Lo dejamos aceptado para compatibilidad futura.
+    #[serde(rename = "SUSCRIBIR_CONVERSACION")]
+    SuscribirConversacion { conversation_id: String },
 }
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(tag = "tipo", content = "datos")]
 pub enum WsServerEvent {
-    #[serde(rename = "MENSAJE_ASIGNADO")]
-    MensajeAsignado {
+    /// Mensaje nuevo en una conversación existente.
+    #[serde(rename = "MENSAJE_NUEVO")]
+    MensajeNuevo {
         conversation_id: String,
-        phone: String,
-        name: Option<String>,
-        last_message_preview: Option<String>,
-        assigned_to: String,
-    },
-
-    #[serde(rename = "MENSAJE_RECIBIDO")]
-    MensajeRecibido {
-        conversation_id: String,
-        phone: String,
-        name: Option<String>,
-        unread_count: i32,
         message: MessageItem,
     },
 
-    #[serde(rename = "MENSAJE_STATUS_ACTUALIZADO")]
-    MensajeStatusActualizado {
+    /// Se creó una conversación nueva (primer mensaje inbound de ese `(customer_phone, business_phone)`).
+    #[serde(rename = "CONVERSACION_NUEVA")]
+    ConversacionNueva { conversation: ConversationItem },
+
+    /// Un agente tomó una conversación pendiente.
+    #[serde(rename = "CHAT_TOMADO")]
+    ChatTomado {
         conversation_id: String,
-        wa_message_id: String,
+        taken_by: String,
         status: String,
     },
 
-    #[serde(rename = "CONVERSACION_ACTUALIZADA")]
-    ConversacionActualizada {
+    /// Transferencia entre agentes. `from_user_id` puede ser null si la conversación no tenía dueño.
+    #[serde(rename = "CHAT_TRANSFERIDO")]
+    ChatTransferido {
         conversation_id: String,
-        status: String,
-        assigned_to: Option<String>,
-        unread_count: i32,
+        from_user_id: Option<String>,
+        to_user_id: String,
     },
 
-    #[serde(rename = "MENSAJE_RESPONDIDO")]
-    MensajeRespondido {
+    /// Conversación cerrada.
+    #[serde(rename = "CHAT_CERRADO")]
+    ChatCerrado { conversation_id: String },
+
+    /// Cambio de status de un mensaje (sent/delivered/read/failed).
+    #[serde(rename = "MENSAJE_ACTUALIZADO")]
+    MensajeActualizado {
         conversation_id: String,
-        respondido_por: String,
-        respondido_por_nombre: String,
+        message_id: String,
+        status: String,
     },
 
     #[serde(rename = "ERROR")]
     Error { error: String },
 
+    /// Confirmación de conexión tras el upgrade WebSocket.
     #[serde(rename = "CONECTADO")]
     Conectado { usuario_id: String },
 }
@@ -186,7 +183,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, user_id: String,
     while let Some(Ok(msg)) = stream.next().await {
         match msg {
             Message::Text(text) => {
-                handle_client_message(&state, &user_id, &user_name, &text).await;
+                handle_client_message(&user_id, &user_name, &text).await;
             }
             Message::Close(_) => break,
             Message::Ping(data) => {
@@ -206,12 +203,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, user_id: String,
     tracing::info!("[ws] agente desconectado: {} ({})", user_name, user_id);
 }
 
-async fn handle_client_message(
-    state: &Arc<AppState>,
-    user_id: &str,
-    user_name: &str,
-    text: &str,
-) {
+async fn handle_client_message(user_id: &str, user_name: &str, text: &str) {
     let event: WsClientEvent = match serde_json::from_str(text) {
         Ok(e) => e,
         Err(_) => {
@@ -223,93 +215,20 @@ async fn handle_client_message(
     match event {
         WsClientEvent::Conectar { usuario_id, nombre } => {
             tracing::info!("[ws] CONECTAR recibido de {} ({})", nombre, usuario_id);
+            let _ = user_name;
         }
 
-        WsClientEvent::Responder { conversacion_id, respuesta } => {
-            handle_responder(state, user_id, user_name, &conversacion_id, &respuesta).await;
+        WsClientEvent::SuscribirConversacion { conversation_id } => {
+            tracing::debug!(
+                "[ws] SUSCRIBIR_CONVERSACION de {}: {}",
+                user_id, conversation_id
+            );
+            // No-op: los eventos van por broadcast y el front filtra.
         }
     }
 }
 
-async fn handle_responder(
-    state: &Arc<AppState>,
-    user_id: &str,
-    user_name: &str,
-    conversacion_id: &str,
-    respuesta: &str,
-) {
-    let oid = match ObjectId::parse_str(conversacion_id) {
-        Ok(id) => id,
-        Err(_) => {
-            send_error(state, user_id, "conversacion_id inválido").await;
-            return;
-        }
-    };
-
-    let conv = match state.db.find_conversation_by_id(&oid).await {
-        Ok(Some(c)) => c,
-        _ => {
-            send_error(state, user_id, "conversación no encontrada").await;
-            return;
-        }
-    };
-
-    // Enviar mensaje por WhatsApp
-    let wa = match WhatsAppService::from_env(state.reqwest_client.clone()) {
-        Ok(s) => s,
-        Err(e) => {
-            send_error(state, user_id, &e.to_string()).await;
-            return;
-        }
-    };
-
-    let wa_id = match wa.send_text(&conv.phone, respuesta).await {
-        Ok(id) => id,
-        Err(e) => {
-            send_error(state, user_id, &format!("error enviando a WhatsApp: {}", e)).await;
-            return;
-        }
-    };
-
-    // Guardar mensaje saliente
-    let msg = WaMessage {
-        id: None,
-        conversation_id: oid,
-        wa_message_id: wa_id,
-        direction: "outbound".to_string(),
-        msg_type: "text".to_string(),
-        body: Some(respuesta.to_string()),
-        media_id: None,
-        status: Some("sent".to_string()),
-        sent_by: Some(user_id.to_string()),
-        timestamp: DateTime::now(),
-    };
-
-    if let Err(e) = state.db.save_message(msg).await {
-        tracing::error!("[ws] save_message error: {}", e);
-    }
-
-    if let Err(e) = state.db.touch_conversation(&oid, respuesta, false).await {
-        tracing::warn!("[ws] touch_conversation error: {}", e);
-    }
-
-    // Decrementar carga del agente
-    state.redis.decr_agent_load(user_id).await;
-
-    tracing::info!(
-        "[ws] {} ({}) respondió a conversación {}",
-        user_name, user_id, conversacion_id
-    );
-
-    // Broadcast a todos: la conversación fue respondida
-    let broadcast = WsServerEvent::MensajeRespondido {
-        conversation_id: conversacion_id.to_string(),
-        respondido_por: user_id.to_string(),
-        respondido_por_nombre: user_name.to_string(),
-    };
-    broadcast_all(&state.ws_registry, &broadcast).await;
-}
-
+#[allow(dead_code)]
 async fn send_error(state: &Arc<AppState>, user_id: &str, error: &str) {
     tracing::warn!("[ws] error para agente {}: {}", user_id, error);
     send_to_agent(

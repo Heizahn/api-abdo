@@ -144,15 +144,15 @@ Traits en `db/mod.rs`, implementaciones en `db/mongo/`. Los módulos acceden via
 
 ### WhatsApp — Patrones específicos
 
-**Colecciones MongoDB**: `wa_conversations`, `wa_messages`, `wa_settings`
+**Colecciones MongoDB** (PascalCase, como el resto del proyecto): `WaConversations`, `WaMessages`, `WaSettings`
 
-**Webhook** (`POST /v1/webhook/whatsapp`): Meta siempre espera HTTP 200. El número de negocio se lee de `value.metadata.display_phone_number` (no del remitente) y se valida contra `wa_settings`.
+**Webhook** (`POST /v1/webhook/whatsapp`): Meta siempre espera HTTP 200. El número de negocio se lee de `value.metadata.display_phone_number` (no del remitente) y se valida contra `WaSettings`.
 
 **Auto-asignación** (`assignment.rs`): Al llegar un mensaje a una conversación sin agente, se dispara en `tokio::spawn`. Usa Redis para:
 - `try_lock_conversation` — lock distribuido (evita duplicados en race conditions)
-- `get_agent_load` / `incr_agent_load` / `decr_agent_load` — min-load sobre la lista de `agents` de `wa_settings`
+- `get_agent_load` / `incr_agent_load` / `decr_agent_load` — min-load sobre la lista de `agents` de `WaSettings`
 
-**WebSocket** (`ws.rs`): `GET /v1/ws/chat?token=<user_jwt>`. JWT validado antes del upgrade. Eventos JSON con discriminante `tipo`: `CONECTAR`, `RESPONDER` (cliente→servidor) y `MENSAJE_ASIGNADO`, `CONVERSACION_ACTUALIZADA`, `MENSAJE_RESPONDIDO`, `ERROR`, `CONECTADO` (servidor→cliente).
+**WebSocket** (`ws.rs`): `GET /v1/ws/chat?token=<user_jwt>`. JWT validado antes del upgrade. Eventos JSON con discriminante `tipo`: `CONECTAR`, `SUSCRIBIR_CONVERSACION` (cliente→servidor) y `MENSAJE_NUEVO`, `CONVERSACION_NUEVA`, `CHAT_TOMADO`, `CHAT_TRANSFERIDO`, `CHAT_CERRADO`, `MENSAJE_ACTUALIZADO`, `ERROR`, `CONECTADO` (servidor→cliente).
 
 ---
 

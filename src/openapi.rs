@@ -5,10 +5,11 @@ use crate::models::auth::{
     TokenPair, VerifyNumberRequest, VerifyNumberResponse,
 };
 use crate::models::whatsapp::{
-    AssignConversationRequest, ConversationDetail, ConversationListItem,
-    ConversationMessagesResponse, ConversationsListResponse, CreateSettingsRequest,
-    MessageItem, SendMessageRequest, SendMessageResponse, SettingsItem, SettingsListResponse,
-    SettingsResponse, UpdateConversationStatusRequest, UpdateResponse, UpdateSettingsRequest,
+    ConversationDetailResponse, ConversationItem, ConversationMessagesResponse,
+    ConversationsListResponse, CreateSettingsRequest, MessageItem, SendMessageRequest,
+    SendMessageResponse, SettingsItem, SettingsListResponse, SettingsResponse,
+    TakeConversationResponse, TransferConversationRequest, TransferableAgentItem,
+    TransferableAgentsResponse, UpdateResponse, UpdateSettingsRequest,
 };
 
 #[derive(OpenApi)]
@@ -27,10 +28,13 @@ use crate::models::whatsapp::{
         crate::modules::auth_client::handler::refresh_handler,
         // WhatsApp — Soporte
         crate::modules::whatsapp::handler::list_conversations_handler,
+        crate::modules::whatsapp::handler::get_conversation_handler,
         crate::modules::whatsapp::handler::get_conversation_messages_handler,
         crate::modules::whatsapp::handler::send_message_handler,
-        crate::modules::whatsapp::handler::update_status_handler,
-        crate::modules::whatsapp::handler::assign_conversation_handler,
+        crate::modules::whatsapp::handler::take_conversation_handler,
+        crate::modules::whatsapp::handler::transfer_conversation_handler,
+        crate::modules::whatsapp::handler::close_conversation_handler,
+        crate::modules::whatsapp::handler::list_transferable_agents_handler,
         crate::modules::whatsapp::handler::list_settings_handler,
         crate::modules::whatsapp::handler::create_settings_handler,
         crate::modules::whatsapp::handler::update_settings_handler,
@@ -43,18 +47,21 @@ use crate::models::whatsapp::{
             LoginRequest, LoginResponse,
             RefreshRequest, RefreshResponse,
             TokenPair,
-            // WhatsApp
-            SendMessageRequest, SendMessageResponse,
-            UpdateConversationStatusRequest,
-            AssignConversationRequest,
-            ConversationsListResponse,
-            ConversationListItem,
-            ConversationMessagesResponse,
-            ConversationDetail,
-            MessageItem,
-            UpdateResponse,
+            // WhatsApp — Requests
+            SendMessageRequest, TransferConversationRequest,
             CreateSettingsRequest, UpdateSettingsRequest,
-            SettingsListResponse, SettingsResponse, SettingsItem,
+            // WhatsApp — Responses
+            ConversationsListResponse,
+            ConversationDetailResponse,
+            ConversationMessagesResponse,
+            SendMessageResponse,
+            TakeConversationResponse,
+            TransferableAgentsResponse,
+            SettingsListResponse, SettingsResponse,
+            UpdateResponse,
+            // WhatsApp — Items
+            ConversationItem, MessageItem, SettingsItem,
+            TransferableAgentItem,
         )
     ),
     tags(
