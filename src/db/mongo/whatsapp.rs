@@ -3,9 +3,11 @@ use mongodb::bson::{doc, oid::ObjectId, DateTime, Document};
 use mongodb::options::{FindOptions, UpdateOptions};
 use futures::TryStreamExt;
 
+use std::collections::HashMap;
+
 use crate::db::WhatsAppRepository;
 use crate::db::mongo::MongoDB;
-use crate::models::whatsapp::{WaConversation, WaMessage, WaSettings};
+use crate::models::whatsapp::{WaConversation, WaConversationOpen, WaMessage, WaSettings};
 
 impl MongoDB {
     pub(crate) fn wa_conversations(&self) -> mongodb::Collection<WaConversation> {
@@ -18,6 +20,10 @@ impl MongoDB {
 
     pub(crate) fn wa_settings(&self) -> mongodb::Collection<WaSettings> {
         self.db.collection::<WaSettings>("WaSettings")
+    }
+
+    pub(crate) fn wa_conversation_opens(&self) -> mongodb::Collection<WaConversationOpen> {
+        self.db.collection::<WaConversationOpen>("WaConversationOpens")
     }
 }
 
@@ -229,8 +235,11 @@ impl WhatsAppRepository for MongoDB {
         id: &ObjectId,
         assigned_to: Option<&str>,
     ) -> Result<(), String> {
+        // Tanto transfer (Some) como release (None) dejan la conversación en
+        // `pending`. El status sólo pasa a `in_progress` cuando el agente
+        // asignado abre el chat por primera vez (primer GET /messages).
         let update = match assigned_to {
-            Some(uid) => doc! { "$set": { "assigned_to": uid, "status": "in_progress" } },
+            Some(uid) => doc! { "$set": { "assigned_to": uid, "status": "pending" } },
             None => doc! { "$unset": { "assigned_to": "" }, "$set": { "status": "pending" } },
         };
         self.wa_conversations()
@@ -249,20 +258,28 @@ impl WhatsAppRepository for MongoDB {
         let opts = FindOneAndUpdateOptions::builder()
             .return_document(ReturnDocument::After)
             .build();
-        // Atómico: solo toma si sigue siendo pending y sin agente asignado.
-        // `assigned_to: null` matchea tanto null como "campo ausente".
-        self.wa_conversations()
+
+        // Atómico: toma si sigue pending Y (no tiene dueño O el dueño soy yo).
+        // Idempotente: un agente puede "re-tomar" su propia conversación pending.
+        // Mantiene `status = pending` — la transición a `in_progress` ocurre en
+        // el primer GET /messages del asignado.
+        let res = self.wa_conversations()
             .find_one_and_update(
                 doc! {
                     "_id": id,
                     "status": "pending",
-                    "assigned_to": mongodb::bson::Bson::Null,
+                    "$or": [
+                        { "assigned_to": mongodb::bson::Bson::Null },
+                        { "assigned_to": agent_id },
+                    ],
                 },
-                doc! { "$set": { "assigned_to": agent_id, "status": "in_progress" } },
+                doc! { "$set": { "assigned_to": agent_id } },
             )
             .with_options(opts)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+
+        Ok(res)
     }
 
     async fn reset_unread(&self, id: &ObjectId) -> Result<(), String> {
@@ -271,6 +288,52 @@ impl WhatsAppRepository for MongoDB {
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    async fn mark_inbound_as_read(&self, conversation_id: &ObjectId) -> Result<Vec<String>, String> {
+        let col = self.wa_messages();
+
+        // Buscar inbound no leídos antes del update para poder devolverlos.
+        let filter = doc! {
+            "conversation_id": conversation_id,
+            "direction": "in",
+            "$or": [
+                { "status": { "$exists": false } },
+                { "status": { "$ne": "read" } },
+            ],
+        };
+
+        let projection = FindOptions::builder()
+            .projection(doc! { "wa_message_id": 1 })
+            .build();
+
+        let mut ids = Vec::new();
+        let mut cursor = col
+            .find(filter.clone())
+            .with_options(projection)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        while let Some(doc) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            ids.push(doc.wa_message_id);
+        }
+
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        col.update_many(filter, doc! { "$set": { "status": "read" } })
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(ids)
+    }
+
+    async fn find_message_by_wa_id(&self, wa_message_id: &str) -> Result<Option<WaMessage>, String> {
+        self.wa_messages()
+            .find_one(doc! { "wa_message_id": wa_message_id })
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn update_message_status(&self, wa_message_id: &str, status: &str) -> Result<Option<WaMessage>, String> {
@@ -345,6 +408,54 @@ impl WhatsAppRepository for MongoDB {
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    async fn record_conversation_open(
+        &self,
+        user_id: &str,
+        conversation_id: &ObjectId,
+    ) -> Result<(), String> {
+        let now = DateTime::now();
+        let opts = UpdateOptions::builder().upsert(true).build();
+        self.wa_conversation_opens()
+            .update_one(
+                doc! { "user_id": user_id, "conversation_id": conversation_id },
+                doc! {
+                    "$set": { "last_opened_at": now },
+                    "$setOnInsert": {
+                        "user_id": user_id,
+                        "conversation_id": conversation_id,
+                    },
+                },
+            )
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn get_conversation_opens(
+        &self,
+        user_id: &str,
+        conversation_ids: &[ObjectId],
+    ) -> Result<HashMap<ObjectId, DateTime>, String> {
+        if conversation_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let filter = doc! {
+            "user_id": user_id,
+            "conversation_id": { "$in": conversation_ids },
+        };
+        let mut out = HashMap::new();
+        let mut cursor = self
+            .wa_conversation_opens()
+            .find(filter)
+            .await
+            .map_err(|e| e.to_string())?;
+        while let Some(open) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            out.insert(open.conversation_id, open.last_opened_at);
+        }
+        Ok(out)
     }
 }
 

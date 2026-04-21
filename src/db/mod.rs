@@ -1,6 +1,7 @@
 pub mod mongo;
 use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
 use crate::models::whatsapp::{WaConversation, WaMessage, WaSettings};
+use std::collections::HashMap;
 
 use crate::models::payment::{Bank, PaymentReport, ReferenceMatchInfo};
 use crate::models::users::{User, UserCredentials}; // Import
@@ -225,6 +226,21 @@ pub trait WhatsAppRepository {
     async fn take_conversation(&self, id: &ObjectId, agent_id: &str) -> Result<Option<WaConversation>, String>;
     async fn reset_unread(&self, id: &ObjectId) -> Result<(), String>;
     async fn update_message_status(&self, wa_message_id: &str, status: &str) -> Result<Option<WaMessage>, String>;
+    /// Marca todos los inbound de una conversación con status != "read" como "read".
+    /// Retorna la lista de `wa_message_id` que cambiaron (para emitir MENSAJES_VISTOS).
+    async fn mark_inbound_as_read(&self, conversation_id: &ObjectId) -> Result<Vec<String>, String>;
+    /// Busca un mensaje por su `wa_message_id` (usado para reconstruir respuestas idempotentes).
+    async fn find_message_by_wa_id(&self, wa_message_id: &str) -> Result<Option<WaMessage>, String>;
+
+    // Per-agent "last opened" tracking
+    /// Upsert del último momento en que `user_id` abrió `conversation_id`.
+    async fn record_conversation_open(&self, user_id: &str, conversation_id: &ObjectId) -> Result<(), String>;
+    /// Batch lookup: para un agente, devuelve `last_opened_at` por conversación.
+    async fn get_conversation_opens(
+        &self,
+        user_id: &str,
+        conversation_ids: &[ObjectId],
+    ) -> Result<HashMap<ObjectId, mongodb::bson::DateTime>, String>;
 
     // Settings
     async fn find_wa_settings_by_phone(&self, phone: &str) -> Result<Option<WaSettings>, String>;

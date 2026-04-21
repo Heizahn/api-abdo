@@ -6,10 +6,10 @@ use crate::models::auth::{
 };
 use crate::models::whatsapp::{
     ConversationDetailResponse, ConversationItem, ConversationMessagesResponse,
-    ConversationsListResponse, CreateSettingsRequest, MessageItem, SendMessageRequest,
-    SendMessageResponse, SettingsItem, SettingsListResponse, SettingsResponse,
-    TakeConversationResponse, TransferConversationRequest, TransferableAgentItem,
-    TransferableAgentsResponse, UpdateResponse, UpdateSettingsRequest,
+    ConversationsListResponse, CreateSettingsRequest, MarkReadResponse, MessageItem,
+    SendMessageRequest, SendMessageResponse, SettingsItem, SettingsListResponse,
+    SettingsResponse, TakeConversationResponse, TransferConversationRequest,
+    TransferableAgentItem, TransferableAgentsResponse, UpdateResponse, UpdateSettingsRequest,
 };
 
 #[derive(OpenApi)]
@@ -31,6 +31,7 @@ use crate::models::whatsapp::{
         crate::modules::whatsapp::handler::get_conversation_handler,
         crate::modules::whatsapp::handler::get_conversation_messages_handler,
         crate::modules::whatsapp::handler::send_message_handler,
+        crate::modules::whatsapp::handler::mark_read_handler,
         crate::modules::whatsapp::handler::take_conversation_handler,
         crate::modules::whatsapp::handler::transfer_conversation_handler,
         crate::modules::whatsapp::handler::close_conversation_handler,
@@ -55,6 +56,7 @@ use crate::models::whatsapp::{
             ConversationDetailResponse,
             ConversationMessagesResponse,
             SendMessageResponse,
+            MarkReadResponse,
             TakeConversationResponse,
             TransferableAgentsResponse,
             SettingsListResponse, SettingsResponse,

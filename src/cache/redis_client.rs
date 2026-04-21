@@ -87,6 +87,24 @@ impl RedisClient {
         }
     }
 
+    /// Busca un `wa_message_id` previamente asociado a un `idempotency_key`.
+    /// Usado para devolver el mismo mensaje si el front reintenta con la misma clave.
+    pub async fn get_idempotent_message(&self, idempotency_key: &str) -> Option<String> {
+        let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;
+        let key = format!("wa:idempotency:{}", idempotency_key);
+        conn.get(key).await.ok()
+    }
+
+    /// Asocia `idempotency_key → wa_message_id` con TTL de 24h.
+    pub async fn set_idempotent_message(&self, idempotency_key: &str, wa_message_id: &str) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let key = format!("wa:idempotency:{}", idempotency_key);
+        let _: Result<(), _> = conn.set_ex(key, wa_message_id, 86_400).await;
+    }
+
     /// Intenta adquirir un lock de asignación para una conversación.
     /// Retorna true si el lock fue adquirido (esta instancia debe proceder).
     /// TTL de 15 segundos para evitar locks eternos.

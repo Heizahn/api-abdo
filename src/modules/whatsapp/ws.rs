@@ -76,6 +76,23 @@ pub enum WsServerEvent {
         status: String,
     },
 
+    /// Batch de inbound marcados como leídos por el agente (visto en la UI).
+    /// `message_ids` son los `wa_message_id` (los mismos que llegan en `MENSAJE_ACTUALIZADO`).
+    #[serde(rename = "MENSAJES_VISTOS")]
+    MensajesVistos {
+        conversation_id: String,
+        message_ids: Vec<String>,
+        status: String,
+    },
+
+    /// Cambio de estado de una conversación (pending → in_progress, etc).
+    /// Se emite cuando el primer `GET /messages` del agente asignado dispara la transición.
+    #[serde(rename = "CHAT_ESTADO_CAMBIO")]
+    ChatEstadoCambio {
+        conversation_id: String,
+        new_status: String,
+    },
+
     #[serde(rename = "ERROR")]
     Error { error: String },
 
@@ -114,6 +131,25 @@ pub async fn broadcast_all(registry: &WsRegistry, event: &WsServerEvent) {
     };
     let registry = registry.read().await;
     for sender in registry.values() {
+        let _ = sender.send(json.clone());
+    }
+}
+
+/// Broadcast a todos los agentes conectados excepto el indicado.
+/// Útil para eventos como CHAT_TOMADO, donde el que tomó ya tiene la respuesta HTTP.
+pub async fn broadcast_except(registry: &WsRegistry, skip_agent_id: &str, event: &WsServerEvent) {
+    let json = match serde_json::to_string(event) {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::error!("[ws] serialize error: {}", e);
+            return;
+        }
+    };
+    let registry = registry.read().await;
+    for (agent_id, sender) in registry.iter() {
+        if agent_id == skip_agent_id {
+            continue;
+        }
         let _ = sender.send(json.clone());
     }
 }

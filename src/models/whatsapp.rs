@@ -33,6 +33,17 @@ pub struct WaConversation {
     pub created_at: DateTime,
 }
 
+/// Registro "conversación abierta por agente X en fecha Y" (colección `WaConversationOpens`).
+/// Se upserta en el primer `GET /messages` de cada agente; es per-user, por conversación.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WaConversationOpen {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    pub user_id: String,
+    pub conversation_id: ObjectId,
+    pub last_opened_at: DateTime,
+}
+
 /// Mensaje individual de WhatsApp (colección `wa_messages`)
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WaMessage {
@@ -52,6 +63,9 @@ pub struct WaMessage {
     pub status: Option<String>,
     /// UUID del agente que envió (solo outbound)
     pub sent_by: Option<String>,
+    /// Clave de idempotencia con la que el front disparó el envío. Usada para
+    /// asociar respuesta HTTP con evento WS y deduplicar en la UI.
+    pub idempotency_key: Option<String>,
     pub timestamp: DateTime,
 }
 
@@ -170,6 +184,11 @@ pub struct StatusError {
 pub struct SendMessageRequest {
     /// Texto del mensaje a enviar
     pub content: String,
+    /// Clave de idempotencia generada por el front (ej: UUID v4).
+    /// Si se repite dentro de 24h, el backend devuelve el mensaje ya creado
+    /// en vez de reenviarlo a Meta. Permite al front deduplicar contra el
+    /// evento WS `MENSAJE_NUEVO`.
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -202,6 +221,10 @@ pub struct ConversationItem {
     /// Cliente ISP vinculado (si aplica). Solo se rellena en el detalle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    /// Fecha (ISO-8601) en que el agente actual abrió este chat por última vez.
+    /// `null` si nunca lo abrió.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_opened_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema)]
@@ -216,12 +239,18 @@ pub struct MessageItem {
     pub msg_type: String,
     pub content: Option<String>,
     pub media_id: Option<String>,
-    /// "sending" (solo front optimistic) | "sent" | "delivered" | "read" | "failed"
+    /// `pending` (solo optimistic UI) | `sent` | `delivered` | `read` | `failed`.
+    /// - En `direction="out"`: refleja el estado de entrega reportado por Meta.
+    /// - En `direction="in"`: `read` indica que un agente ya lo vio en la UI
+    ///   (marcado vía `POST /:id/mark-read`). Antes de eso, el campo es `null`.
     pub status: Option<String>,
     /// UUID del agente que envió el mensaje (solo cuando direction="out")
     pub sent_by: Option<String>,
     /// Nombre del agente que envió el mensaje (best-effort).
     pub sent_by_name: Option<String>,
+    /// Clave de idempotencia provista por el front al enviar (eco en la respuesta).
+    /// El front la usa para deduplicar contra el evento WS `MENSAJE_NUEVO`.
+    pub idempotency_key: Option<String>,
     /// ISO-8601 (RFC 3339) UTC
     pub created_at: String,
 }
@@ -254,6 +283,14 @@ pub struct ConversationMessagesResponse {
 pub struct SendMessageResponse {
     pub ok: bool,
     pub message: MessageItem,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MarkReadResponse {
+    pub ok: bool,
+    /// Lista de `wa_message_id` que pasaron a `read` en esta llamada.
+    /// Vacía si no había inbound sin leer.
+    pub message_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

@@ -32,7 +32,7 @@ use crate::{
 use super::assignment::assign_conversation;
 
 use super::service::WhatsAppService;
-use super::ws::{broadcast_all, WsServerEvent};
+use super::ws::{broadcast_all, broadcast_except, WsServerEvent};
 
 // ============================================
 // WEBHOOK (público)
@@ -258,6 +258,7 @@ pub async fn receive_webhook(
                         media_id,
                         status: None,
                         sent_by: None,
+                        idempotency_key: None,
                         timestamp: msg_ts,
                     };
 
@@ -285,7 +286,7 @@ pub async fn receive_webhook(
                     // Si la conversación es nueva, avisar al front antes del mensaje.
                     if conv_created {
                         let new_ev = WsServerEvent::ConversacionNueva {
-                            conversation: conv_to_item(conv_now.clone(), false),
+                            conversation: conv_to_item(conv_now.clone(), false, None),
                         };
                         broadcast_all(&state.ws_registry, &new_ev).await;
                     }
@@ -351,6 +352,7 @@ pub struct MessagesQuery {
 )]
 pub async fn list_conversations_handler(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
     Query(q): Query<ConversationsQuery>,
 ) -> Result<Json<ConversationsListResponse>, ApiError> {
     let limit = q.limit.unwrap_or(20).clamp(1, 100);
@@ -379,7 +381,20 @@ pub async fn list_conversations_handler(
         })
     };
 
-    let data = convs.into_iter().map(|c| conv_to_item(c, false)).collect();
+    // Batch-fetch last_opened_at del agente actual para todas las conversaciones.
+    let ids: Vec<ObjectId> = convs.iter().filter_map(|c| c.id).collect();
+    let opens = state.db
+        .get_conversation_opens(&claims.id, &ids)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
+
+    let data = convs
+        .into_iter()
+        .map(|c| {
+            let last_opened = c.id.and_then(|id| opens.get(&id).copied());
+            conv_to_item(c, false, last_opened)
+        })
+        .collect();
 
     Ok(Json(ConversationsListResponse { ok: true, data, next_cursor }))
 }
@@ -398,6 +413,7 @@ pub async fn list_conversations_handler(
 )]
 pub async fn get_conversation_handler(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
     Path(id): Path<String>,
 ) -> Result<Json<ConversationDetailResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
@@ -407,9 +423,15 @@ pub async fn get_conversation_handler(
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
+    let opens = state.db
+        .get_conversation_opens(&claims.id, &[oid])
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
+    let last_opened = opens.get(&oid).copied();
+
     Ok(Json(ConversationDetailResponse {
         ok: true,
-        conversation: conv_to_item(conv, true),
+        conversation: conv_to_item(conv, true, last_opened),
     }))
 }
 
@@ -431,6 +453,7 @@ pub async fn get_conversation_handler(
 )]
 pub async fn get_conversation_messages_handler(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
     Path(id): Path<String>,
     Query(q): Query<MessagesQuery>,
 ) -> Result<Json<ConversationMessagesResponse>, ApiError> {
@@ -442,31 +465,13 @@ pub async fn get_conversation_messages_handler(
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
-    let is_first_page = q.cursor.is_none();
-    let had_unread = conv.unread_count > 0;
-    if is_first_page {
-        let _ = state.db.reset_unread(&oid).await;
-    }
-
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let is_first_page = q.cursor.is_none();
 
     let messages = state.db
         .get_messages(&oid, q.cursor.as_deref(), limit)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
-
-    // Marcar último inbound como leído en Meta (ticks azules).
-    if had_unread && is_first_page {
-        if let Some(latest_inbound) = messages.iter().find(|m| m.direction == "in") {
-            let wa_message_id = latest_inbound.wa_message_id.clone();
-            let client = state.reqwest_client.clone();
-            tokio::spawn(async move {
-                if let Ok(wa) = WhatsAppService::from_env(client) {
-                    let _ = wa.mark_as_read(&wa_message_id).await;
-                }
-            });
-        }
-    }
 
     let agent_names = resolve_sent_by_names(&state, &messages).await;
 
@@ -482,9 +487,40 @@ pub async fn get_conversation_messages_handler(
         })
     };
 
+    // Registrar "chat abierto" por este agente (siempre, incluso en paginaciones).
+    if let Err(e) = state.db.record_conversation_open(&claims.id, &oid).await {
+        tracing::warn!("record_conversation_open error: {}", e);
+    }
+
+    // Transición pending → in_progress: sólo en la primera página, si el
+    // agente actual es el asignado y la conversación sigue pending.
+    let mut conv_after = conv;
+    if is_first_page
+        && conv_after.status == "pending"
+        && conv_after.assigned_to.as_deref() == Some(claims.id.as_str())
+    {
+        if let Err(e) = state.db.update_conversation_status(&oid, "in_progress").await {
+            tracing::warn!("update_conversation_status error: {}", e);
+        } else {
+            conv_after.status = "in_progress".to_string();
+            let ev = WsServerEvent::ChatEstadoCambio {
+                conversation_id: id.clone(),
+                new_status: "in_progress".to_string(),
+            };
+            broadcast_all(&state.ws_registry, &ev).await;
+        }
+    }
+
+    // Releer `last_opened_at` del agente para incluirlo en la respuesta.
+    let opens = state.db
+        .get_conversation_opens(&claims.id, &[oid])
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
+    let last_opened = opens.get(&oid).copied();
+
     Ok(Json(ConversationMessagesResponse {
         ok: true,
-        conversation: conv_to_item(conv, true),
+        conversation: conv_to_item(conv_after, true, last_opened),
         messages: messages
             .into_iter()
             .map(|m| {
@@ -517,6 +553,22 @@ pub async fn send_message_handler(
 ) -> Result<Json<SendMessageResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
+    // Idempotency: si el front reintenta con la misma clave en menos de 24h,
+    // devolvemos el mensaje ya creado en vez de reenviarlo a Meta.
+    if let Some(key) = payload.idempotency_key.as_deref() {
+        if let Some(wa_id) = state.redis.get_idempotent_message(key).await {
+            if let Some(existing) = state.db.find_message_by_wa_id(&wa_id).await
+                .map_err(|e| ApiError::DatabaseError(e))?
+            {
+                let name = existing.sent_by.as_deref().map(|_| claims.name.clone());
+                return Ok(Json(SendMessageResponse {
+                    ok: true,
+                    message: msg_to_item(existing, name),
+                }));
+            }
+        }
+    }
+
     let conv = state.db
         .find_conversation_by_id(&oid)
         .await
@@ -540,15 +592,21 @@ pub async fn send_message_handler(
         media_id: None,
         status: Some("sent".to_string()),
         sent_by: Some(claims.id.clone()),
+        idempotency_key: payload.idempotency_key.clone(),
         timestamp: DateTime::now(),
     };
 
     let saved = state.db.save_message(msg).await.map_err(|e| ApiError::DatabaseError(e))?;
     state.db.touch_conversation(&oid, &payload.content, false, None).await.map_err(|e| ApiError::DatabaseError(e))?;
 
+    if let Some(key) = payload.idempotency_key.as_deref() {
+        state.redis.set_idempotent_message(key, &wa_id).await;
+    }
+
     let item = msg_to_item(saved, Some(claims.name.clone()));
 
-    // Broadcast del mensaje outbound para que otros sockets del mismo usuario / otros agentes viendo el chat lo reciban.
+    // Broadcast del mensaje outbound. El front deduplica contra `idempotency_key`
+    // si ya recibió la respuesta HTTP.
     let ev = WsServerEvent::MensajeNuevo {
         conversation_id: id.clone(),
         message: item.clone(),
@@ -560,13 +618,70 @@ pub async fn send_message_handler(
 
 #[utoipa::path(
     post,
+    path = "/v1/auth-user/whatsapp/conversations/{id}/mark-read",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ID de la conversación")),
+    responses(
+        (status = 200, description = "Mensajes marcados como leídos", body = MarkReadResponse),
+        (status = 404, description = "Conversación no encontrada"),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn mark_read_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<MarkReadResponse>, ApiError> {
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+
+    state.db
+        .find_conversation_by_id(&oid)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?
+        .ok_or(ApiError::NotFound)?;
+
+    // Actualizar status de inbound en DB y obtener los que cambiaron.
+    let changed_ids = state.db
+        .mark_inbound_as_read(&oid)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
+
+    // Resetear contador local en la conversación.
+    let _ = state.db.reset_unread(&oid).await;
+
+    // Notificar a Meta (ticks azules) con el último inbound. Meta marca como
+    // leídos automáticamente todos los anteriores.
+    if let Some(latest) = changed_ids.last().cloned() {
+        let client = state.reqwest_client.clone();
+        tokio::spawn(async move {
+            if let Ok(wa) = WhatsAppService::from_env(client) {
+                let _ = wa.mark_as_read(&latest).await;
+            }
+        });
+    }
+
+    // Broadcast del batch. El front propaga `status: "read"` en la UI local.
+    if !changed_ids.is_empty() {
+        let ev = WsServerEvent::MensajesVistos {
+            conversation_id: id.clone(),
+            message_ids: changed_ids.clone(),
+            status: "read".to_string(),
+        };
+        broadcast_all(&state.ws_registry, &ev).await;
+    }
+
+    Ok(Json(MarkReadResponse { ok: true, message_ids: changed_ids }))
+}
+
+#[utoipa::path(
+    post,
     path = "/v1/auth-user/whatsapp/conversations/{id}/take",
     tag = "WhatsApp — Soporte",
     security(("bearerAuth" = [])),
     params(("id" = String, Path, description = "ID de la conversación")),
     responses(
-        (status = 200, description = "Conversación tomada", body = TakeConversationResponse),
-        (status = 409, description = "Ya fue tomada por otro agente"),
+        (status = 200, description = "Conversación tomada (idempotente si ya era del agente)", body = TakeConversationResponse),
+        (status = 409, description = "Ya fue tomada por otro agente o no está pending"),
         (status = 404, description = "Conversación no encontrada"),
         (status = 401, description = "No autorizado"),
     )
@@ -578,13 +693,15 @@ pub async fn take_conversation_handler(
 ) -> Result<Json<TakeConversationResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
-    // Verificar existencia para distinguir 404 de 409.
-    state.db
+    let existing = state.db
         .find_conversation_by_id(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
+    let was_already_mine = existing.assigned_to.as_deref() == Some(claims.id.as_str());
+
+    // `take_conversation` solo avanza si status=pending Y (sin dueño O dueño=self).
     let taken = state.db
         .take_conversation(&oid, &claims.id)
         .await
@@ -595,18 +712,29 @@ pub async fn take_conversation_handler(
         None => return Err(ApiError::Conflict("conversacion_ya_tomada".into())),
     };
 
-    state.redis.incr_agent_load(&claims.id).await;
+    // Sólo incrementamos la carga si es la primera vez (no idempotente).
+    if !was_already_mine {
+        state.redis.incr_agent_load(&claims.id).await;
 
-    let ev = WsServerEvent::ChatTomado {
-        conversation_id: id.clone(),
-        taken_by: claims.id.clone(),
-        status: "in_progress".to_string(),
-    };
-    broadcast_all(&state.ws_registry, &ev).await;
+        // CHAT_TOMADO al resto: el agente que tomó ya tiene la respuesta HTTP.
+        let ev = WsServerEvent::ChatTomado {
+            conversation_id: id.clone(),
+            taken_by: claims.id.clone(),
+            status: conv.status.clone(),
+        };
+        broadcast_except(&state.ws_registry, &claims.id, &ev).await;
+    }
+
+    // `last_opened_at` del agente (si ya había abierto antes).
+    let opens = state.db
+        .get_conversation_opens(&claims.id, &[oid])
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
+    let last_opened = opens.get(&oid).copied();
 
     Ok(Json(TakeConversationResponse {
         ok: true,
-        conversation: conv_to_item(conv, true),
+        conversation: conv_to_item(conv, true, last_opened),
     }))
 }
 
@@ -678,9 +806,15 @@ pub async fn transfer_conversation_handler(
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
+    let opens = state.db
+        .get_conversation_opens(&claims.id, &[oid])
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
+    let last_opened = opens.get(&oid).copied();
+
     Ok(Json(ConversationDetailResponse {
         ok: true,
-        conversation: conv_to_item(conv_after, true),
+        conversation: conv_to_item(conv_after, true, last_opened),
     }))
 }
 
@@ -698,6 +832,7 @@ pub async fn transfer_conversation_handler(
 )]
 pub async fn close_conversation_handler(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
     Path(id): Path<String>,
 ) -> Result<Json<ConversationDetailResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
@@ -725,9 +860,15 @@ pub async fn close_conversation_handler(
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
+    let opens = state.db
+        .get_conversation_opens(&claims.id, &[oid])
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
+    let last_opened = opens.get(&oid).copied();
+
     Ok(Json(ConversationDetailResponse {
         ok: true,
-        conversation: conv_to_item(conv_after, true),
+        conversation: conv_to_item(conv_after, true, last_opened),
     }))
 }
 
@@ -929,7 +1070,11 @@ fn iso8601(dt: DateTime) -> String {
     dt.try_to_rfc3339_string().unwrap_or_default()
 }
 
-fn conv_to_item(c: WaConversation, include_client_id: bool) -> ConversationItem {
+fn conv_to_item(
+    c: WaConversation,
+    include_client_id: bool,
+    last_opened_at: Option<DateTime>,
+) -> ConversationItem {
     ConversationItem {
         id: c.id.map(|o| o.to_hex()).unwrap_or_default(),
         customer_phone: c.phone,
@@ -942,6 +1087,7 @@ fn conv_to_item(c: WaConversation, include_client_id: bool) -> ConversationItem 
         unread_count: c.unread_count,
         created_at: iso8601(c.created_at),
         client_id: if include_client_id { c.client_id.map(|o| o.to_hex()) } else { None },
+        last_opened_at: last_opened_at.map(iso8601),
     }
 }
 
@@ -968,6 +1114,7 @@ fn msg_to_item(m: WaMessage, sent_by_name: Option<String>) -> MessageItem {
         status: m.status,
         sent_by: m.sent_by,
         sent_by_name,
+        idempotency_key: m.idempotency_key,
         created_at: iso8601(m.timestamp),
     }
 }

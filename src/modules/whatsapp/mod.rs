@@ -31,6 +31,7 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route("/v1/auth-user/whatsapp/conversations/:id", get(handler::get_conversation_handler))
         .route("/v1/auth-user/whatsapp/conversations/:id/messages", get(handler::get_conversation_messages_handler))
         .route("/v1/auth-user/whatsapp/conversations/:id/messages", post(handler::send_message_handler))
+        .route("/v1/auth-user/whatsapp/conversations/:id/mark-read", post(handler::mark_read_handler))
         .route("/v1/auth-user/whatsapp/conversations/:id/take", post(handler::take_conversation_handler))
         .route("/v1/auth-user/whatsapp/conversations/:id/transfer", post(handler::transfer_conversation_handler))
         .route("/v1/auth-user/whatsapp/conversations/:id/close", post(handler::close_conversation_handler))

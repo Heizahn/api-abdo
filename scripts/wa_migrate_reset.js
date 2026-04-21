@@ -71,11 +71,27 @@ db.WaMessages.createIndex(
 
 print("  ✅ WaMessages: índices (conversation_id,timestamp) + unique(wa_message_id)");
 
+// WaConversationOpens: timestamp del último open de cada agente por conversación.
+// Un doc por par (user_id, conversation_id).
+db.WaConversationOpens.createIndex(
+  { "user_id": 1, "conversation_id": 1 },
+  { name: "uniq_wa_conv_open_user_conv", unique: true, background: true }
+);
+// Lookup batch por agente (filtra por user_id, $in conversation_id).
+db.WaConversationOpens.createIndex(
+  { "user_id": 1 },
+  { name: "idx_wa_conv_open_user", background: true }
+);
+print("  ✅ WaConversationOpens: unique(user_id, conversation_id)");
+
 print("");
 print("📋 Índices actuales en WaConversations:");
 db.WaConversations.getIndexes().forEach(i => print("  - " + i.name + " → " + JSON.stringify(i.key)));
 print("");
 print("📋 Índices actuales en WaMessages:");
 db.WaMessages.getIndexes().forEach(i => print("  - " + i.name + " → " + JSON.stringify(i.key)));
+print("");
+print("📋 Índices actuales en WaConversationOpens:");
+db.WaConversationOpens.getIndexes().forEach(i => print("  - " + i.name + " → " + JSON.stringify(i.key)));
 print("");
 print("✨ Reset + índices OK");
