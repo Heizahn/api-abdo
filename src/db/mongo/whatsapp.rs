@@ -220,15 +220,19 @@ impl WhatsAppRepository for MongoDB {
         Ok(())
     }
 
-    async fn update_message_status(&self, wa_message_id: &str, status: &str) -> Result<(), String> {
+    async fn update_message_status(&self, wa_message_id: &str, status: &str) -> Result<Option<WaMessage>, String> {
+        use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+        let opts = FindOneAndUpdateOptions::builder()
+            .return_document(ReturnDocument::After)
+            .build();
         self.wa_messages()
-            .update_one(
+            .find_one_and_update(
                 doc! { "wa_message_id": wa_message_id },
                 doc! { "$set": { "status": status } },
             )
+            .with_options(opts)
             .await
-            .map_err(|e| e.to_string())?;
-        Ok(())
+            .map_err(|e| e.to_string())
     }
 
     async fn find_wa_settings_by_phone(&self, phone: &str) -> Result<Option<WaSettings>, String> {

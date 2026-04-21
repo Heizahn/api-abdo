@@ -32,6 +32,7 @@ use crate::{
 use super::assignment::assign_conversation;
 
 use super::service::WhatsAppService;
+use super::ws::{broadcast_all, send_to_agent, WsServerEvent};
 
 // ============================================
 // WEBHOOK (público)
@@ -145,8 +146,25 @@ pub async fn receive_webhook(
                             tracing::warn!("[webhook] mensaje {} falló sin detalles", s.id);
                         }
                     }
-                    if let Err(e) = state.db.update_message_status(&s.id, &s.status).await {
-                        tracing::warn!("update_message_status error: {}", e);
+                    match state.db.update_message_status(&s.id, &s.status).await {
+                        Ok(Some(updated)) => {
+                            let event = WsServerEvent::MensajeStatusActualizado {
+                                conversation_id: updated.conversation_id.to_hex(),
+                                wa_message_id: updated.wa_message_id.clone(),
+                                status: s.status.clone(),
+                            };
+                            if let Some(agent) = updated.sent_by.as_deref() {
+                                send_to_agent(&state.ws_registry, agent, &event).await;
+                            } else {
+                                broadcast_all(&state.ws_registry, &event).await;
+                            }
+                        }
+                        Ok(None) => {
+                            // mensaje no encontrado en DB — normal si es status de un mensaje no nuestro
+                        }
+                        Err(e) => {
+                            tracing::warn!("update_message_status error: {}", e);
+                        }
                     }
                 }
             }
@@ -242,13 +260,35 @@ pub async fn receive_webhook(
                         timestamp: DateTime::now(),
                     };
 
-                    if let Err(e) = state.db.save_message(wa_msg).await {
-                        tracing::error!("save_message error: {}", e);
-                        continue;
-                    }
+                    let saved = match state.db.save_message(wa_msg).await {
+                        Ok(m) => m,
+                        Err(e) => {
+                            tracing::error!("save_message error: {}", e);
+                            continue;
+                        }
+                    };
 
                     if let Err(e) = state.db.touch_conversation(&conv_id, &preview, true).await {
                         tracing::warn!("touch_conversation error: {}", e);
+                    }
+
+                    // Emitir MENSAJE_RECIBIDO por WebSocket
+                    let new_unread = conv.unread_count + 1;
+                    let message_item = msg_to_item(saved);
+                    let event = WsServerEvent::MensajeRecibido {
+                        conversation_id: conv_id.to_hex(),
+                        phone: conv.phone.clone(),
+                        name: conv.name.clone(),
+                        unread_count: new_unread,
+                        message: message_item,
+                    };
+                    if let Some(agent) = conv.assigned_to.as_deref() {
+                        send_to_agent(&state.ws_registry, agent, &event).await;
+                    } else {
+                        // Sin asignar: notificar a todos los agentes del número
+                        for agent in &agents {
+                            send_to_agent(&state.ws_registry, agent, &event).await;
+                        }
                     }
 
                     // Si la conversación no tiene agente asignado, disparar asignación automática
@@ -429,6 +469,14 @@ pub async fn send_message_handler(
 
     state.db.save_message(msg).await.map_err(|e| ApiError::DatabaseError(e))?;
     state.db.touch_conversation(&oid, &payload.body, false).await.map_err(|e| ApiError::DatabaseError(e))?;
+
+    // Broadcast: otros agentes viendo la misma conversación reciben la respuesta en vivo
+    let broadcast = WsServerEvent::MensajeRespondido {
+        conversation_id: id.clone(),
+        respondido_por: claims.id.clone(),
+        respondido_por_nombre: claims.name.clone(),
+    };
+    broadcast_all(&state.ws_registry, &broadcast).await;
 
     Ok(Json(SendMessageResponse { ok: true, message_id: wa_id }))
 }

@@ -214,7 +214,7 @@ pub trait WhatsAppRepository {
     async fn update_conversation_status(&self, id: &ObjectId, status: &str) -> Result<(), String>;
     async fn assign_conversation(&self, id: &ObjectId, assigned_to: Option<&str>) -> Result<(), String>;
     async fn reset_unread(&self, id: &ObjectId) -> Result<(), String>;
-    async fn update_message_status(&self, wa_message_id: &str, status: &str) -> Result<(), String>;
+    async fn update_message_status(&self, wa_message_id: &str, status: &str) -> Result<Option<WaMessage>, String>;
 
     // Settings
     async fn find_wa_settings_by_phone(&self, phone: &str) -> Result<Option<WaSettings>, String>;

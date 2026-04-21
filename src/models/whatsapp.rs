@@ -203,7 +203,7 @@ pub struct ConversationDetail {
     pub unread_count: i32,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct MessageItem {
     pub id: String,
     pub wa_message_id: String,

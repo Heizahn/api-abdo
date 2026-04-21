@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use crate::{
     auth::user_jwt::UserJwtService,
     db::WhatsAppRepository,
-    models::whatsapp::WaMessage,
+    models::whatsapp::{MessageItem, WaMessage},
     state::{AppState, WsRegistry},
 };
 
@@ -47,6 +47,22 @@ pub enum WsServerEvent {
         name: Option<String>,
         last_message_preview: Option<String>,
         assigned_to: String,
+    },
+
+    #[serde(rename = "MENSAJE_RECIBIDO")]
+    MensajeRecibido {
+        conversation_id: String,
+        phone: String,
+        name: Option<String>,
+        unread_count: i32,
+        message: MessageItem,
+    },
+
+    #[serde(rename = "MENSAJE_STATUS_ACTUALIZADO")]
+    MensajeStatusActualizado {
+        conversation_id: String,
+        wa_message_id: String,
+        status: String,
     },
 
     #[serde(rename = "CONVERSACION_ACTUALIZADA")]
