@@ -251,11 +251,6 @@ pub async fn receive_webhook(
                         tracing::warn!("touch_conversation error: {}", e);
                     }
 
-                    // Marcar como leído en WhatsApp (ticks azules)
-                    if let Ok(wa) = WhatsAppService::from_env(state.reqwest_client.clone()) {
-                        let _ = wa.mark_as_read(&msg.id).await;
-                    }
-
                     // Si la conversación no tiene agente asignado, disparar asignación automática
                     if conv.assigned_to.is_none() {
                         let state_clone = state.clone();
@@ -351,7 +346,7 @@ pub async fn get_conversation_messages_handler(
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
-    // Reset unread al abrir la conversación
+    let had_unread = conv.unread_count > 0;
     let _ = state.db.reset_unread(&oid).await;
 
     let page = q.page.unwrap_or(1).max(1);
@@ -362,6 +357,20 @@ pub async fn get_conversation_messages_handler(
         .get_messages(&oid, skip, limit)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
+
+    // Si había mensajes sin leer y estamos en la primera página, marcar el último
+    // inbound como leído en WhatsApp. Meta marca automáticamente todos los anteriores.
+    if had_unread && page == 1 {
+        if let Some(latest_inbound) = messages.iter().find(|m| m.direction == "inbound") {
+            let wa_message_id = latest_inbound.wa_message_id.clone();
+            let client = state.reqwest_client.clone();
+            tokio::spawn(async move {
+                if let Ok(wa) = WhatsAppService::from_env(client) {
+                    let _ = wa.mark_as_read(&wa_message_id).await;
+                }
+            });
+        }
+    }
 
     Ok(Json(ConversationMessagesResponse {
         ok: true,
