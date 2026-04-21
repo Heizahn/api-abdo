@@ -1,11 +1,16 @@
 use axum::{
+    body::Bytes,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Extension, Json,
 };
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use std::sync::OnceLock;
 use tokio::sync::Mutex;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Almacena el último payload crudo recibido de Meta (solo para debug).
 static LAST_WEBHOOK_PAYLOAD: OnceLock<Mutex<Option<serde_json::Value>>> = OnceLock::new();
@@ -75,8 +80,31 @@ pub async fn debug_last_webhook_handler() -> Json<serde_json::Value> {
 /// Meta espera siempre HTTP 200 — cualquier otro código provoca reenvíos.
 pub async fn receive_webhook(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<WebhookPayload>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> StatusCode {
+    // Verificar firma HMAC-SHA256 si WHATSAPP_APP_SECRET está configurado
+    if let Ok(app_secret) = std::env::var("WHATSAPP_APP_SECRET") {
+        if !app_secret.is_empty() {
+            let header_val = headers
+                .get("x-hub-signature-256")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if !verify_meta_signature(app_secret.as_bytes(), &body, header_val) {
+                tracing::warn!("[webhook] firma inválida — request rechazada");
+                return StatusCode::FORBIDDEN;
+            }
+        }
+    }
+
+    let payload: WebhookPayload = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("[webhook] JSON inválido: {}", e);
+            return StatusCode::OK;
+        }
+    };
+
     // Guardar payload crudo para diagnóstico
     {
         let raw = serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null);
@@ -102,9 +130,21 @@ pub async fn receive_webhook(
                 None => continue,
             };
 
-            // Procesar actualizaciones de estado (delivered / read)
+            // Procesar actualizaciones de estado (delivered / read / failed)
             if let Some(statuses) = value.statuses {
                 for s in statuses {
+                    if s.status == "failed" {
+                        if let Some(errs) = s.errors.as_ref() {
+                            for e in errs {
+                                tracing::warn!(
+                                    "[webhook] mensaje {} falló: code={:?} title={:?} message={:?}",
+                                    s.id, e.code, e.title, e.message
+                                );
+                            }
+                        } else {
+                            tracing::warn!("[webhook] mensaje {} falló sin detalles", s.id);
+                        }
+                    }
                     if let Err(e) = state.db.update_message_status(&s.id, &s.status).await {
                         tracing::warn!("update_message_status error: {}", e);
                     }
@@ -115,21 +155,25 @@ pub async fn receive_webhook(
             if let Some(messages) = value.messages {
                 let contacts = value.contacts.unwrap_or_default();
 
-                // El número del negocio que recibió el mensaje
-                let business_phone = value.metadata
+                // El número del negocio que recibió el mensaje (normalizado a E.164 sin "+")
+                let business_phone_raw = value.metadata
                     .as_ref()
                     .and_then(|m| m.display_phone_number.clone())
                     .unwrap_or_default();
+                let business_phone = normalize_to_e164(&business_phone_raw);
 
-                // Verificar si el número de negocio está configurado en wa_settings
+                // find_wa_settings_by_phone ya filtra por active: true
                 let settings = match state.db.find_wa_settings_by_phone(&business_phone).await {
-                    Ok(Some(s)) if s.active => s,
-                    Ok(Some(_)) => {
-                        tracing::info!("[webhook] número de negocio inactivo: {}", business_phone);
+                    Ok(Some(s)) => s,
+                    Ok(None) => {
+                        tracing::info!(
+                            "[webhook] número de negocio no configurado o inactivo: raw={} norm={}",
+                            business_phone_raw, business_phone
+                        );
                         continue;
                     }
-                    _ => {
-                        tracing::info!("[webhook] número de negocio no configurado: {}", business_phone);
+                    Err(e) => {
+                        tracing::error!("[webhook] error buscando wa_settings: {}", e);
                         continue;
                     }
                 };
@@ -158,22 +202,22 @@ pub async fn receive_webhook(
 
                     // Extraer contenido según tipo
                     let (body, media_id) = match msg.msg_type.as_str() {
-                        "text" => (msg.text.map(|t| t.body), None),
-                        "image" => {
-                            let m = msg.image.unwrap_or(InboundMedia { id: None, caption: None });
-                            (m.caption, m.id)
-                        }
-                        "document" => {
-                            let m = msg.document.unwrap_or(InboundMedia { id: None, caption: None });
-                            (m.caption, m.id)
-                        }
-                        "audio" => {
-                            let m = msg.audio.unwrap_or(InboundMedia { id: None, caption: None });
-                            (m.caption, m.id)
-                        }
-                        "video" => {
-                            let m = msg.video.unwrap_or(InboundMedia { id: None, caption: None });
-                            (m.caption, m.id)
+                        "text" => (msg.text.as_ref().map(|t| t.body.clone()), None),
+                        "image" => msg.image.as_ref().map(|m| (m.caption.clone(), m.id.clone())).unwrap_or((None, None)),
+                        "document" => msg.document.as_ref().map(|m| (m.caption.clone(), m.id.clone())).unwrap_or((None, None)),
+                        "audio" => msg.audio.as_ref().map(|m| (m.caption.clone(), m.id.clone())).unwrap_or((None, None)),
+                        "video" => msg.video.as_ref().map(|m| (m.caption.clone(), m.id.clone())).unwrap_or((None, None)),
+                        "sticker" => msg.sticker.as_ref().map(|m| (None, m.id.clone())).unwrap_or((None, None)),
+                        "location" => {
+                            let label = msg.location.as_ref().and_then(|l| {
+                                l.name.clone().or_else(|| l.address.clone()).or_else(|| {
+                                    match (l.latitude, l.longitude) {
+                                        (Some(lat), Some(lng)) => Some(format!("{},{}", lat, lng)),
+                                        _ => None,
+                                    }
+                                })
+                            });
+                            (label, None)
                         }
                         _ => (None, None),
                     };
@@ -557,6 +601,47 @@ pub async fn delete_settings_handler(
 // HELPERS INTERNOS
 // ============================================
 
+/// Verifica la firma `X-Hub-Signature-256` de Meta: `sha256=<hex>` sobre el body crudo.
+fn verify_meta_signature(app_secret: &[u8], body: &[u8], header_val: &str) -> bool {
+    let expected_hex = match header_val.strip_prefix("sha256=") {
+        Some(h) => h,
+        None => return false,
+    };
+    let expected_bytes = match hex_decode(expected_hex) {
+        Some(b) => b,
+        None => return false,
+    };
+    let mut mac = match HmacSha256::new_from_slice(app_secret) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    mac.update(body);
+    mac.verify_slice(&expected_bytes).is_ok()
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let bytes = s.as_bytes();
+    for i in (0..bytes.len()).step_by(2) {
+        let hi = hex_nibble(bytes[i])?;
+        let lo = hex_nibble(bytes[i + 1])?;
+        out.push((hi << 4) | lo);
+    }
+    Some(out)
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Normaliza cualquier formato de número venezolano a E.164 sin "+" (ej: "584141234567")
 fn normalize_to_e164(phone: &str) -> String {
     let digits: String = phone.chars().filter(|c| c.is_ascii_digit()).collect();
@@ -595,6 +680,7 @@ fn conv_to_detail(c: WaConversation) -> ConversationDetail {
         status: c.status,
         assigned_to: c.assigned_to,
         last_message_at: c.last_message_at.to_string(),
+        last_message_preview: c.last_message_preview,
         unread_count: c.unread_count,
     }
 }
@@ -617,6 +703,7 @@ fn msg_to_item(m: WaMessage) -> MessageItem {
         direction: m.direction,
         msg_type: m.msg_type,
         body: m.body,
+        media_id: m.media_id,
         status: m.status,
         sent_by: m.sent_by,
         timestamp: m.timestamp.to_string(),

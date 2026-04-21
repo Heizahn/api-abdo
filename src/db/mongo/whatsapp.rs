@@ -45,25 +45,29 @@ impl WhatsAppRepository for MongoDB {
         let now = DateTime::now();
         let col = self.wa_conversations();
 
+        let mut set_on_insert = doc! {
+            "phone": phone,
+            "status": "open",
+            "unread_count": 0,
+            "created_at": now,
+            "last_message_at": now,
+        };
+
+        let mut update = doc! { "$setOnInsert": {} };
+
+        if let Some(n) = name.as_ref() {
+            update.insert("$set", doc! { "name": n });
+        } else {
+            set_on_insert.insert("name", mongodb::bson::Bson::Null);
+        }
+
+        update.insert("$setOnInsert", set_on_insert);
+
         let opts = UpdateOptions::builder().upsert(true).build();
-        col.update_one(
-            doc! { "phone": phone },
-            doc! {
-                "$setOnInsert": {
-                    "phone": phone,
-                    "status": "open",
-                    "unread_count": 0,
-                    "created_at": now,
-                    "last_message_at": now,
-                },
-                "$set": {
-                    "name": &name,
-                }
-            },
-        )
-        .with_options(opts)
-        .await
-        .map_err(|e| e.to_string())?;
+        col.update_one(doc! { "phone": phone }, update)
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())?;
 
         self.find_conversation_by_phone(phone)
             .await?
@@ -99,21 +103,20 @@ impl WhatsAppRepository for MongoDB {
     async fn save_message(&self, message: WaMessage) -> Result<WaMessage, String> {
         let col = self.wa_messages();
 
-        // Deduplicar por wa_message_id
-        if let Ok(Some(existing)) = col
-            .find_one(doc! { "wa_message_id": &message.wa_message_id })
-            .await
-        {
-            return Ok(existing);
-        }
+        let insert_doc = mongodb::bson::to_document(&message).map_err(|e| e.to_string())?;
+        let opts = UpdateOptions::builder().upsert(true).build();
+        col.update_one(
+            doc! { "wa_message_id": &message.wa_message_id },
+            doc! { "$setOnInsert": insert_doc },
+        )
+        .with_options(opts)
+        .await
+        .map_err(|e| e.to_string())?;
 
-        let result = col.insert_one(&message).await.map_err(|e| e.to_string())?;
-        let id = result.inserted_id.as_object_id().unwrap();
-
-        col.find_one(doc! { "_id": id })
+        col.find_one(doc! { "wa_message_id": &message.wa_message_id })
             .await
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "message not found after insert".to_string())
+            .ok_or_else(|| "message not found after upsert".to_string())
     }
 
     async fn get_conversations(

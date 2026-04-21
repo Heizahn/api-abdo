@@ -101,7 +101,7 @@ pub struct InboundMessage {
     pub from: String,
     pub id: String,
     #[allow(dead_code)]
-    pub timestamp: String,
+    pub timestamp: Option<String>,
     #[serde(rename = "type")]
     pub msg_type: String,
     pub text: Option<InboundText>,
@@ -109,6 +109,20 @@ pub struct InboundMessage {
     pub document: Option<InboundMedia>,
     pub audio: Option<InboundMedia>,
     pub video: Option<InboundMedia>,
+    pub sticker: Option<InboundMedia>,
+    pub location: Option<InboundLocation>,
+    pub contacts: Option<serde_json::Value>,
+    pub interactive: Option<serde_json::Value>,
+    pub button: Option<serde_json::Value>,
+    pub reaction: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InboundLocation {
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub name: Option<String>,
+    pub address: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -127,9 +141,19 @@ pub struct MessageStatus {
     pub id: String,
     pub status: String,
     #[allow(dead_code)]
-    pub timestamp: String,
+    pub timestamp: Option<String>,
     #[allow(dead_code)]
     pub recipient_id: Option<String>,
+    pub errors: Option<Vec<StatusError>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StatusError {
+    pub code: Option<i64>,
+    pub title: Option<String>,
+    pub message: Option<String>,
+    #[serde(rename = "error_data")]
+    pub error_data: Option<serde_json::Value>,
 }
 
 // ============================================
@@ -175,6 +199,7 @@ pub struct ConversationDetail {
     pub status: String,
     pub assigned_to: Option<String>,
     pub last_message_at: String,
+    pub last_message_preview: Option<String>,
     pub unread_count: i32,
 }
 
@@ -185,6 +210,7 @@ pub struct MessageItem {
     pub direction: String,
     pub msg_type: String,
     pub body: Option<String>,
+    pub media_id: Option<String>,
     pub status: Option<String>,
     pub sent_by: Option<String>,
     pub timestamp: String,

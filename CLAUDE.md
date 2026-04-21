@@ -1,315 +1,15 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # api-abdo — Contexto del Proyecto
 
-API REST construida en **Rust** con **Axum 0.7** para gestión de clientes ISP (Internet Service Provider). Incluye autenticación JWT, pagos, solvencia, dashboard y sincronización con equipos de red (MikroTik, ZTE OLT).
-
-## Stack Tecnológico
-
-### Framework Web
-- `axum 0.7` + `axum-extra 0.9` — router principal, extractors, typed headers
-- `tower 0.5` / `tower-http 0.6` — middleware stack (CORS, compresión, tracing)
-- `tower_governor 0.3` + `governor 0.6` — rate limiting
-- `tokio 1.39` — async runtime
-- `hyper 1` — HTTP subyacente
-
-### Base de Datos
-- `mongodb 3.0` — base de datos principal (colecciones: clientes, pagos, cuentas por cobrar, ONUs, usuarios)
-- `redis 0.32` con `connection-manager` — cache, sesiones, tokens refresh, tasa BCV
-
-### Serialización
-- `serde 1.0` + `serde_json 1.0` — serializar/deserializar structs <-> JSON/BSON
-
-### Autenticación y Criptografía
-- `jsonwebtoken 10.2` — JWT con `rust_crypto`
-- `aes-gcm 0.10` — cifrado simétrico AES-256-GCM
-- `bcrypt 0.18` — hashing de contraseñas
-- `hmac 0.12` + `sha2 0.10` — HMAC-SHA256
-- `base64 0.22` — encoding
-
-### HTTP Client
-- `reqwest 0.12` con feature `json` — llamadas externas (BCV, Zabbix, SMS)
-
-### Documentación
-- `utoipa 4` con features `axum_extras`, `chrono`, `uuid` — anotaciones OpenAPI en handlers y modelos
-- `utoipa-swagger-ui 7` con feature `axum` — Swagger UI en `/docs`
-
-### Utilidades
-- `dotenvy 0.15` — variables de entorno desde `.env`
-- `uuid 1.18` (v4, serde) — IDs únicos
-- `chrono 0.4` + `chrono-tz 0.10` — fechas/horas con timezone (America/Caracas)
-- `async-trait 0.1` — traits async
-- `futures 0.3` — combinators async
-- `regex 1.10` — validaciones
-- `ssh2 0.9` — conexión SSH a MikroTik / ZTE OLT
-- `scraper 0.25` — scraping HTML del BCV
-
-### Observabilidad
-- `tracing 0.1` + `tracing-subscriber 0.3` — logs estructurados (JSON en prod, pretty en dev)
-
-### Manejo de Errores
-- `thiserror 2.0` — errores tipados con derive
-- `anyhow 1.0` — propagación de errores en capas de infraestructura
-
----
-
-## Estructura del Proyecto
-
-```
-src/
-  main.rs              # Entrypoint: init config, conexiones, crons, servidor
-  axum_router.rs       # Router: orquestador delgado, hace merge de rutas por grupo de auth
-  openapi.rs           # ApiDoc: spec OpenAPI central (paths + schemas de todos los módulos)
-  state.rs             # AppState: MongoDB + Redis + Config + reqwest::Client
-  config.rs            # Config desde env vars
-  error.rs             # ApiError enum -> respuestas HTTP JSON { ok: false, error: "..." }
-
-  # Infraestructura (cross-cutting, sin dependencias entre features)
-  auth/                # JWT claims, service de autenticación clientes
-  middleware/          # jwt_auth_middleware, user_jwt_auth_middleware, rate_limit
-  crypto/              # JWT, AES, verify
-  cache/               # RedisClient wrapper
-  domain/              # Tipos de dominio (Customer, etc.)
-
-  # Capa de datos (traits + implementaciones MongoDB)
-  db/
-    mod.rs             # Traits: AuthRepository, ProfileRepository, SalesRepository, etc.
-    mongo/             # Implementaciones MongoDB por colección
-
-  # Modelos compartidos (usados por db/ y múltiples módulos)
-  models/
-    auth.rs            # VerifyNumberRequest/Response, LoginRequest/Response, RefreshRequest/Response, TokenPair
-    db.rs              # Client, Debt, Payment, Tax, ClientListItem, ClientDetail, ClientOnu
-    payment.rs         # PaymentReport, PaymentMethod, Bank, CheckReferenceRequest/Response
-    users.rs           # User, UserLoginRequest/Response, UserResponse, RefreshTokenRequest/Response
-    onu.rs             # ONU structs
-    zabbix.rs          # ZabbixTrafficResponse, MonthlyTraffic
-    profile.rs         # ClientSummary, MeGroupResponse, etc.
-    receivable.rs      # ReceivableData, RejectedPayment, etc.
-
-  # Utilidades compartidas
-  utils/               # BCV scraper, timezone (VenezuelaDateTime), SMS, WhatsApp OTP, BSON helpers
-  cron_bcv.rs          # Tarea periódica: actualizar tasa BCV en Redis
-
-  # Módulos de feature (cada uno auto-contenido: handler + rutas propias)
-  modules/
-    mod.rs             # pub mod de todos los módulos
-
-    auth_client/       # Autenticación de clientes via teléfono + OTP
-      mod.rs           # pub fn routes() -> Router
-      handler.rs       # POST /v1/auth/verify_number, /v1/auth/login, /v1/auth/refresh
-
-    auth_user/         # Autenticación de staff/admin
-      mod.rs           # pub fn public_routes(), pub fn protected_routes()
-      handler.rs       # POST /v1/auth-user/login, refresh-token | GET /v1/auth-user/me, check-reference
-
-    clients/           # Gestión de clientes ISP
-      mod.rs           # pub fn routes()
-      handler.rs       # GET /v1/auth-user/clients/all, /:id, /contact-info | /v1/clients/:id/status-history
-
-    payments/          # Pagos y reportes de pago
-      mod.rs           # pub fn client_routes(), pub fn user_routes()
-      handler.rs       # GET/POST /v1/payments/* (cliente) | /v1/auth-user/payments/* (admin)
-
-    receivables/       # Cuentas por cobrar (deudas)
-      mod.rs           # pub fn routes()
-      handler.rs       # GET /v1/receivable/me, /me/paid, /:id, /:id/payments/rejected
-
-    profile/           # Perfil del cliente (app móvil)
-      mod.rs           # pub fn routes()
-      handler.rs       # GET /v1/profile/me/group, /v1/profile/me/phone
-
-    dashboard/         # Dashboard admin: cierre mensual, solvencia, últimos pagos
-      mod.rs           # pub fn routes()
-      handler.rs       # GET /v1/auth-user/dashboard/monthly-closing, /solvency, /latest-payments
-
-    calculations/      # Cálculo USD <-> BS con tasa BCV
-      mod.rs           # pub fn routes()
-      handler.rs       # POST /v1/utils/calculate/bs, /v2/utils/calculate
-
-    providers/         # Listado de proveedores
-      mod.rs           # pub fn routes()
-      handler.rs       # GET /v1/users/providers
-
-    api_utils/         # Endpoints utilitarios (BCV, ping, imágenes, bancos, IP PPPoE, Zabbix)
-      mod.rs           # pub fn public_routes(), user_routes(), client_routes(), static_routes()
-      handler.rs       # GET /v1/utils/ping, /latest-version, /bcv, /ip-pppoe/:sn, /image/:filename,
-                       #     /zabbix/:id_client, /utils/list/banks, /auth-user/utils/list/banks,
-                       #     /v1/privacy-policy
-
-    network/           # Integraciones con equipos de red (sin rutas HTTP propias)
-      mikrotik/
-        service.rs     # SSH: descarga de leases DHCP
-        parser.rs      # Parseo de leases y detección de cambios de IP
-        ip_pppoe.rs    # Búsqueda de IP PPPoE activa por SN (usada por clients/ y api_utils/)
-        cron.rs        # Tarea periódica: sincronizar IPs ONU cada 20 min
-      zte/
-        service.rs     # SSH: descarga de reporte ONUs ZTE OLT
-        parser.rs      # Parseo del reporte y detección de cambios (exporta OnuDetected)
-        cron.rs        # Tarea periódica: sincronizar ONUs ZTE (desactivado)
-
-    zabbix/            # Integración con Zabbix para tráfico de red
-      service.rs       # Cliente HTTP Zabbix API: historial de tráfico por ONU
-```
-
----
-
-## Patrones de Arquitectura
-
-### Router (`axum_router.rs`)
-`build_router` es un orquestador delgado que agrupa módulos por nivel de protección y aplica middleware:
-
-```rust
-// Rutas públicas + rate limit
-Router::new()
-    .merge(auth_client::routes())
-    .merge(auth_user::public_routes())
-    .merge(calculations::routes())
-    .merge(api_utils::public_routes())
-    .layer(auth_rate_limit)
-
-// Rutas protegidas con JWT de staff/admin
-Router::new()
-    .merge(auth_user::protected_routes())
-    .merge(clients::routes())
-    .merge(dashboard::routes())
-    // ...
-    .route_layer(middleware::from_fn_with_state(state, user_jwt_auth_middleware))
-
-// Rutas protegidas con JWT de cliente
-Router::new()
-    .merge(profile::routes())
-    .merge(receivables::routes())
-    // ...
-    .route_layer(middleware::from_fn_with_state(state, jwt_auth_middleware))
-```
-
-Cada módulo expone una o varias funciones `pub fn routes() -> Router<Arc<AppState>>` en su `mod.rs`.
-
-### Módulos de Feature
-Cada feature en `modules/<nombre>/` es auto-contenida:
-- `mod.rs` — declara sub-módulos y expone las funciones de rutas
-- `handler.rs` — handlers HTTP con anotaciones `#[utoipa::path]`
-- Sub-módulos opcionales según complejidad (services, parsers, crons)
-
-### AppState
-Compartido via `Arc<AppState>` inyectado en todos los handlers. Contiene MongoDB, Redis, Config y el cliente HTTP `reqwest`.
-
-### Dos tipos de JWT
-- **Clientes**: `jwt_auth_middleware` — emitido en `/v1/auth/login`
-- **Staff/Admin**: `user_jwt_auth_middleware` — emitido en `/v1/auth-user/login`
-
-### Roles de usuario
-- `nRole == 3.0` → provider (solo ve sus clientes via `idOwner == claims.id`)
-- Otros roles → acceso completo, pueden filtrar con `?owner=<id>`
-
-### DB Layer
-Traits en `db/mod.rs`, implementaciones en `db/mongo/`. Los módulos acceden via el trait `Db` (master trait que combina todos los repositorios).
-
-### Errores
-`ApiError` implementa `IntoResponse` → siempre retorna `{ "ok": false, "error": "<code>" }` con el status HTTP correspondiente.
-
----
-
-## Documentación OpenAPI
-
-La spec vive en `src/openapi.rs` y se sirve en:
-- **`/docs`** — Swagger UI interactivo (público, sin JWT)
-- **`/docs/openapi.json`** — spec OpenAPI raw
-
-### Agregar documentación a un handler nuevo (3 pasos)
-
-**1. Modelo** — agregar `ToSchema` al derive:
-```rust
-use utoipa::ToSchema;
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct MiResponse {
-    pub ok: bool,
-    /// Descripción inline del campo (opcional)
-    pub data: String,
-}
-```
-
-**2. Handler** — agregar macro encima de la función:
-```rust
-#[utoipa::path(
-    post,                              // método HTTP
-    path = "/v1/mi-ruta",
-    tag = "Mi Módulo",                 // agrupa en Swagger UI
-    request_body = MiRequest,          // omitir si es GET
-    responses(
-        (status = 200, description = "OK", body = MiResponse),
-        (status = 401, description = "No autorizado"),
-        (status = 404, description = "No encontrado"),
-    )
-)]
-pub async fn mi_handler(...) { ... }
-```
-
-Para rutas con JWT, agregar `security`:
-```rust
-#[utoipa::path(
-    get,
-    path = "/v1/mi-ruta-protegida",
-    tag = "Mi Módulo",
-    security(("bearerAuth" = [])),
-    responses(...)
-)]
-```
-
-**3. `openapi.rs`** — registrar path + schemas:
-```rust
-paths(
-    // ... paths existentes ...
-    crate::modules::mi_modulo::handler::mi_handler,
-),
-components(schemas(
-    // ... schemas existentes ...
-    MiRequest, MiResponse,
-))
-```
-
----
-
-## Agregar un Módulo Nuevo
-
-Para agregar una feature completa (ej: WhatsApp, banking, reportes PDF):
-
-1. Crear `src/modules/<nombre>/mod.rs`:
-   ```rust
-   pub mod handler;
-
-   use axum::{routing::{get, post}, Router};
-   use crate::state::AppState;
-   use std::sync::Arc;
-
-   pub fn routes() -> Router<Arc<AppState>> {
-       Router::new()
-           .route("/v1/<nombre>/...", get(handler::mi_handler))
-   }
-   ```
-
-2. Crear `src/modules/<nombre>/handler.rs` con los handlers HTTP y anotaciones `#[utoipa::path]`
-
-3. Declarar el módulo en `src/modules/mod.rs`:
-   ```rust
-   pub mod <nombre>;
-   ```
-
-4. Registrar las rutas en `src/axum_router.rs` en el grupo de protección correcto:
-   ```rust
-   .merge(<nombre>::routes())
-   ```
-
-5. Si necesita DB: agregar métodos al trait correspondiente en `src/db/mod.rs` e implementar en `src/db/mongo/`
-
-6. Registrar en `src/openapi.rs`: paths + schemas del módulo nuevo
-
----
+API REST construida en **Rust** con **Axum 0.7** para gestión de clientes ISP (Internet Service Provider). Incluye autenticación JWT, pagos, solvencia, dashboard, sincronización con equipos de red (MikroTik, ZTE OLT) y soporte WhatsApp via Meta Cloud API.
 
 ## Comandos de Desarrollo
 
 ```bash
-# Chequear sin compilar (más rápido)
+# Chequear sin compilar (más rápido — preferir sobre build)
 cargo check
 
 # Compilar
@@ -322,13 +22,188 @@ cargo run
 cargo test
 ```
 
-> En Windows usar `cd "C:/Users/Humberto/Develop/api-abdo" && cargo check`
+> En Windows: `cd "C:/Users/Humberto/Develop/api-abdo" && cargo check`
+
+---
+
+## Stack Tecnológico
+
+- **Axum 0.7** + tower-http — router, middleware (CORS, compresión, tracing)
+- **MongoDB 3.0** — base de datos principal
+- **Redis 0.32** — cache, sesiones, carga de agentes WA, tasa BCV
+- **tokio 1.39** — async runtime
+- **serde/serde_json** — serialización JSON/BSON
+- **jsonwebtoken 10.2** — JWT (dos tipos: clientes y staff)
+- **reqwest 0.12** — HTTP client externo (BCV, Zabbix, Meta API)
+- **utoipa 4** + utoipa-swagger-ui 7 — OpenAPI/Swagger en `/docs`
+- **tower_governor + governor** — rate limiting
+- **ssh2 0.9** — SSH a MikroTik / ZTE OLT
+- **tracing + tracing-subscriber** — logs (JSON prod, pretty dev)
+- **thiserror 2.0** — errores tipados; **anyhow 1.0** — propagación
+
+---
+
+## Estructura del Proyecto
+
+```
+src/
+  main.rs              # Entrypoint: init config, conexiones, crons, servidor
+  axum_router.rs       # Router: 4 grupos de auth + webhook + ws
+  openapi.rs           # ApiDoc: spec OpenAPI central
+  state.rs             # AppState: MongoDB + Redis + Config + reqwest + WsRegistry
+  config.rs            # Config desde env vars
+  error.rs             # ApiError → { ok: false, error: "<code>" }
+
+  auth/                # JWT claims, service de autenticación clientes
+  middleware/          # jwt_auth_middleware, user_jwt_auth_middleware, rate_limit
+  crypto/              # JWT, AES, verify
+  cache/               # RedisClient wrapper (incluye agent load + ws locks)
+  domain/              # Tipos de dominio (Customer, etc.)
+
+  db/
+    mod.rs             # Traits: AuthRepository, ProfileRepository, SalesRepository,
+                       #         OnuRepository, UserRepository, UtilsRepository, WhatsAppRepository
+                       #         + Db (master trait)
+    mongo/             # Implementaciones MongoDB por colección
+
+  models/              # Structs compartidos (auth, db, payment, users, onu, profile,
+                       #                      receivable, zabbix, whatsapp)
+
+  utils/               # BCV scraper, timezone (VenezuelaDateTime), SMS, WhatsApp OTP, BSON helpers
+  cron_bcv.rs          # Tarea periódica: actualizar tasa BCV en Redis
+
+  modules/
+    auth_client/       # POST /v1/auth/verify_number, /login, /refresh
+    auth_user/         # POST /v1/auth-user/login, refresh-token | GET /me, check-reference
+    clients/           # GET /v1/auth-user/clients/all, /:id, /contact-info
+    payments/          # GET/POST /v1/payments/* (cliente) | /v1/auth-user/payments/* (admin)
+    receivables/       # GET /v1/receivable/me, /me/paid, /:id, /:id/payments/rejected
+    profile/           # GET /v1/profile/me/group, /v1/profile/me/phone
+    dashboard/         # GET /v1/auth-user/dashboard/monthly-closing, /solvency, /latest-payments
+    calculations/      # POST /v1/utils/calculate/bs, /v2/utils/calculate
+    providers/         # GET /v1/users/providers
+    api_utils/         # ping, latest-version, bcv, ip-pppoe, image, zabbix, banks
+    whatsapp/
+      mod.rs           # 3 grupos de rutas: webhook_routes, ws_routes, user_routes
+      handler.rs       # Webhook Meta + CRUD conversaciones + settings + debug
+      ws.rs            # WebSocket /v1/ws/chat?token=<jwt> — WsRegistry, eventos JSON
+      assignment.rs    # Auto-asignación: min-load sobre agentes de wa_settings
+      service.rs       # WhatsAppService: send_text, mark_as_read via Meta Cloud API
+    network/
+      mikrotik/        # SSH: leases DHCP, IP PPPoE, cron (cada 20 min)
+      zte/             # SSH: reporte ONUs ZTE OLT
+    zabbix/            # Cliente HTTP Zabbix API: tráfico por ONU
+```
+
+---
+
+## Patrones de Arquitectura
+
+### Router (`axum_router.rs`)
+`build_router` tiene **4 grupos** de protección:
+
+```
+webhook   — /v1/webhook/whatsapp (GET verify + POST receive, sin JWT, sin rate limit)
+ws        — /v1/ws/chat (JWT validado internamente via ?token=)
+public    — auth, calculations, api_utils públicos → rate limit
+user_protected  — JWT staff/admin (user_jwt_auth_middleware)
+client_protected — JWT cliente (jwt_auth_middleware)
+```
+
+### AppState (`state.rs`)
+```rust
+pub struct AppState {
+    pub db: MongoDB,
+    pub redis: RedisClient,
+    pub config: Arc<Config>,
+    pub reqwest_client: reqwest::Client,
+    pub ws_registry: WsRegistry,  // Arc<RwLock<HashMap<user_id, UnboundedSender<String>>>>
+}
+```
+`WsRegistry` mapea UUID de agente → canal mpsc para enviar eventos JSON al WebSocket.
+
+### Módulos de Feature
+Cada feature en `modules/<nombre>/` es auto-contenida:
+- `mod.rs` — declara sub-módulos y expone funciones `pub fn routes() -> Router<Arc<AppState>>`
+- `handler.rs` — handlers HTTP con anotaciones `#[utoipa::path]`
+- Sub-módulos opcionales según complejidad (services, parsers, crons)
+
+### Dos tipos de JWT
+- **Clientes**: `jwt_auth_middleware` — emitido en `/v1/auth/login`
+- **Staff/Admin**: `user_jwt_auth_middleware` — emitido en `/v1/auth-user/login`
+
+### Roles de usuario
+- `nRole == 3.0` → provider (solo ve sus clientes via `idOwner == claims.id`)
+- Otros roles → acceso completo, pueden filtrar con `?owner=<id>`
+
+### DB Layer
+Traits en `db/mod.rs`, implementaciones en `db/mongo/`. Los módulos acceden via el trait `Db` (master trait que combina todos los repositorios). Nunca hay `$lookup` sobre colecciones grandes — se prefieren queries paralelas + join en Rust.
+
+### Errores
+`ApiError` implementa `IntoResponse` → siempre retorna `{ "ok": false, "error": "<code>" }`.
+
+### WhatsApp — Patrones específicos
+
+**Colecciones MongoDB**: `wa_conversations`, `wa_messages`, `wa_settings`
+
+**Webhook** (`POST /v1/webhook/whatsapp`): Meta siempre espera HTTP 200. El número de negocio se lee de `value.metadata.display_phone_number` (no del remitente) y se valida contra `wa_settings`.
+
+**Auto-asignación** (`assignment.rs`): Al llegar un mensaje a una conversación sin agente, se dispara en `tokio::spawn`. Usa Redis para:
+- `try_lock_conversation` — lock distribuido (evita duplicados en race conditions)
+- `get_agent_load` / `incr_agent_load` / `decr_agent_load` — min-load sobre la lista de `agents` de `wa_settings`
+
+**WebSocket** (`ws.rs`): `GET /v1/ws/chat?token=<user_jwt>`. JWT validado antes del upgrade. Eventos JSON con discriminante `tipo`: `CONECTAR`, `RESPONDER` (cliente→servidor) y `MENSAJE_ASIGNADO`, `CONVERSACION_ACTUALIZADA`, `MENSAJE_RESPONDIDO`, `ERROR`, `CONECTADO` (servidor→cliente).
+
+---
+
+## Documentación OpenAPI
+
+La spec vive en `src/openapi.rs` y se sirve en:
+- **`/docs`** — Swagger UI interactivo
+- **`/docs/openapi.json`** — spec OpenAPI raw
+
+### Agregar documentación a un handler nuevo (3 pasos)
+
+**1. Modelo** — agregar `ToSchema`:
+```rust
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MiResponse { pub ok: bool, pub data: String }
+```
+
+**2. Handler** — macro encima de la función:
+```rust
+#[utoipa::path(
+    post, path = "/v1/mi-ruta", tag = "Mi Módulo",
+    security(("bearerAuth" = [])),   // omitir en rutas públicas
+    request_body = MiRequest,        // omitir en GET
+    responses(
+        (status = 200, description = "OK", body = MiResponse),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn mi_handler(...) { ... }
+```
+
+**3. `openapi.rs`** — registrar path + schemas:
+```rust
+paths(crate::modules::mi_modulo::handler::mi_handler, ...)
+components(schemas(MiRequest, MiResponse, ...))
+```
+
+---
+
+## Agregar un Módulo Nuevo
+
+1. Crear `src/modules/<nombre>/mod.rs` con `pub fn routes() -> Router<Arc<AppState>>`
+2. Crear `src/modules/<nombre>/handler.rs` con handlers y anotaciones `#[utoipa::path]`
+3. Declarar en `src/modules/mod.rs`: `pub mod <nombre>;`
+4. Registrar rutas en `src/axum_router.rs` en el grupo de protección correcto
+5. Si necesita DB: agregar métodos al trait en `src/db/mod.rs` e implementar en `src/db/mongo/`
+6. Registrar en `src/openapi.rs`: paths + schemas
 
 ---
 
 ## Variables de Entorno (`.env`)
-
-El proyecto usa `dotenvy`. Variables principales:
 
 | Variable | Descripción |
 |---|---|
@@ -343,3 +218,6 @@ El proyecto usa `dotenvy`. Variables principales:
 | `OLT_ZTE_PASS` | Password SSH ZTE OLT |
 | `ZABBIX_URL` / `ZABBIX_TOKEN` | API Zabbix |
 | `ID_SIMCOT` | ID del editor para operaciones automáticas (crons) |
+| `WHATSAPP_VERIFY_TOKEN` | Token de verificación del webhook de Meta |
+| `WHATSAPP_ACCESS_TOKEN` | Bearer token de Meta Cloud API |
+| `WHATSAPP_PHONE_NUMBER_ID` | ID del número de teléfono en Meta |

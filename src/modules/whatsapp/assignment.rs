@@ -16,6 +16,23 @@ pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents
         return;
     }
 
+    // Re-leer conversación dentro del lock — otro webhook pudo haberla asignado ya
+    match state.db.find_conversation_by_id(&conv_id).await {
+        Ok(Some(c)) if c.assigned_to.is_some() => {
+            tracing::debug!("[assignment] conv {} ya asignada, skip", conv_id_str);
+            return;
+        }
+        Ok(None) => {
+            tracing::warn!("[assignment] conv {} no existe, skip", conv_id_str);
+            return;
+        }
+        Err(e) => {
+            tracing::error!("[assignment] error releyendo conv {}: {}", conv_id_str, e);
+            return;
+        }
+        _ => {}
+    }
+
     if agents.is_empty() {
         tracing::warn!("[assignment] lista de agentes vacía para conv {}", conv_id_str);
         return;
