@@ -423,11 +423,21 @@ impl WhatsAppRepository for MongoDB {
         if phones.is_empty() {
             return Ok(HashMap::new());
         }
-        let mut cursor = self.wa_settings()
+        // Struct de proyección dedicado: `WaSettings` completo tiene campos sin `#[serde(default)]`
+        // (agents, active, timestamps) que la proyección no devuelve.
+        #[derive(serde::Deserialize)]
+        struct WorkspaceProj {
+            phone: String,
+            #[serde(default)]
+            workspace_name: String,
+        }
+
+        let mut cursor = self.db
+            .collection::<WorkspaceProj>("WaSettings")
             .find(doc! { "phone": { "$in": phones } })
             .with_options(
                 FindOptions::builder()
-                    .projection(doc! { "phone": 1, "workspace_name": 1 })
+                    .projection(doc! { "phone": 1, "workspace_name": 1, "_id": 0 })
                     .build(),
             )
             .await
