@@ -543,16 +543,16 @@ pub async fn get_conversation_messages_handler(
     }
 
     // Transición pending → in_progress: sólo en la primera página, si el
-    // agente actual es el asignado y la conversación sigue pending.
-    let mut conv_after = conv;
+    // agente actual es el asignado y la conversación sigue pending. El detalle
+    // actualizado se obtiene con GET /conversations/:id — acá solo emitimos el
+    // evento WS para que la UI reaccione.
     if is_first_page
-        && conv_after.status == "pending"
-        && conv_after.assigned_to.as_deref() == Some(claims.id.as_str())
+        && conv.status == "pending"
+        && conv.assigned_to.as_deref() == Some(claims.id.as_str())
     {
         if let Err(e) = state.db.update_conversation_status(&oid, "in_progress").await {
             tracing::warn!("update_conversation_status error: {}", e);
         } else {
-            conv_after.status = "in_progress".to_string();
             let ev = WsServerEvent::ChatEstadoCambio {
                 conversation_id: id.clone(),
                 new_status: "in_progress".to_string(),
@@ -561,18 +561,9 @@ pub async fn get_conversation_messages_handler(
         }
     }
 
-    // Releer `last_opened_at` del agente para incluirlo en la respuesta.
-    let opens = state.db
-        .get_conversation_opens(&claims.id, &[oid])
-        .await
-        .map_err(|e| ApiError::DatabaseError(e))?;
-    let last_opened = opens.get(&oid).copied();
-    let workspace_name = resolve_workspace_name(&state, &conv_after.business_phone).await;
-
     Ok(Json(ConversationMessagesResponse {
         ok: true,
-        conversation: conv_to_item(conv_after, true, last_opened, workspace_name),
-        messages: messages
+        data: messages
             .into_iter()
             .map(|m| {
                 let name = m.sent_by.as_deref().and_then(|id| agent_names.get(id).cloned());
@@ -1310,7 +1301,7 @@ fn settings_to_item(s: WaSettings) -> SettingsItem {
     }
 }
 
-fn msg_to_item(m: WaMessage, sent_by_name: Option<String>) -> MessageItem {
+fn msg_to_item(m: WaMessage, from_user_name: Option<String>) -> MessageItem {
     MessageItem {
         id: m.id.map(|o| o.to_hex()).unwrap_or_default(),
         conversation_id: m.conversation_id.to_hex(),
@@ -1320,8 +1311,8 @@ fn msg_to_item(m: WaMessage, sent_by_name: Option<String>) -> MessageItem {
         content: m.body,
         media_id: m.media_id,
         status: m.status,
-        sent_by: m.sent_by,
-        sent_by_name,
+        from_user_id: m.sent_by,
+        from_user_name,
         idempotency_key: m.idempotency_key,
         created_at: iso8601(m.timestamp),
     }

@@ -253,9 +253,9 @@ pub struct MessageItem {
     ///   (marcado vía `POST /:id/mark-read`). Antes de eso, el campo es `null`.
     pub status: Option<String>,
     /// UUID del agente que envió el mensaje (solo cuando direction="out")
-    pub sent_by: Option<String>,
+    pub from_user_id: Option<String>,
     /// Nombre del agente que envió el mensaje (best-effort).
-    pub sent_by_name: Option<String>,
+    pub from_user_name: Option<String>,
     /// Clave de idempotencia provista por el front al enviar (eco en la respuesta).
     /// El front la usa para deduplicar contra el evento WS `MENSAJE_NUEVO`.
     pub idempotency_key: Option<String>,
@@ -281,9 +281,9 @@ pub struct ConversationDetailResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ConversationMessagesResponse {
     pub ok: bool,
-    pub conversation: ConversationItem,
-    /// Mensajes ordenados del más reciente al más antiguo.
-    pub messages: Vec<MessageItem>,
+    /// Mensajes ordenados del más reciente al más antiguo. Para el detalle de
+    /// la conversación, usar `GET /conversations/:id`.
+    pub data: Vec<MessageItem>,
     pub next_cursor: Option<String>,
 }
 
