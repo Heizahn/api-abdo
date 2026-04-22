@@ -42,6 +42,11 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route("/v1/auth-user/whatsapp/settings", post(handler::create_settings_handler))
         .route("/v1/auth-user/whatsapp/settings/:id", put(handler::update_settings_handler))
         .route("/v1/auth-user/whatsapp/settings/:id", delete(handler::delete_settings_handler))
+        // Alias: el frontend se refiere a estas configs como "WhatsApp Numbers"
+        .route("/v1/auth-user/whatsapp/whatsapp-numbers", get(handler::list_settings_handler))
+        .route("/v1/auth-user/whatsapp/whatsapp-numbers", post(handler::create_settings_handler))
+        .route("/v1/auth-user/whatsapp/whatsapp-numbers/:id", put(handler::update_settings_handler))
+        .route("/v1/auth-user/whatsapp/whatsapp-numbers/:id", delete(handler::delete_settings_handler))
         // Debug
         .route("/v1/auth-user/whatsapp/debug/last-webhook", get(handler::debug_last_webhook_handler))
 }
