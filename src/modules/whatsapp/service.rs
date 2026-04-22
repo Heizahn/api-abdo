@@ -165,7 +165,9 @@ impl WhatsAppService {
         Ok((bytes.to_vec(), mime, file_name))
     }
 
-    /// Marca un mensaje entrante como leído (actualiza los ticks en el cliente).
+    /// Marca un mensaje entrante como leído (ticks azules en texto, mic azul
+    /// en voice notes). Meta requiere una llamada POR mensaje — no propaga el
+    /// read a los anteriores.
     pub async fn mark_as_read(&self, wa_message_id: &str) -> Result<()> {
         let payload = json!({
             "messaging_product": "whatsapp",
@@ -173,17 +175,16 @@ impl WhatsAppService {
             "message_id": wa_message_id
         });
 
-        let resp = self.client
-            .post(self.messages_url())
-            .bearer_auth(&self.access_token)
-            .json(&payload)
-            .send()
-            .await?;
+        let url = self.messages_url();
+        let resp = send_with_retry("mark_as_read", || {
+            self.client.post(&url).bearer_auth(&self.access_token).json(&payload)
+        }).await
+            .map_err(|e| describe_reqwest_error("mark_as_read request", e))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            tracing::warn!("mark_as_read error [{}]: {}", status, body);
+            return Err(anyhow::anyhow!("WhatsApp mark_as_read error [{}]: {}", status, body));
         }
 
         Ok(())

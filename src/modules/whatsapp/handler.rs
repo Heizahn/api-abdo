@@ -754,14 +754,36 @@ pub async fn mark_read_handler(
     // Resetear contador local en la conversación.
     let _ = state.db.reset_unread(&oid).await;
 
-    // Notificar a Meta (ticks azules) con el último inbound. Meta marca como
-    // leídos automáticamente todos los anteriores. Best-effort: si faltan
-    // credenciales para este business_phone, logueamos y seguimos.
-    if let Some(latest) = changed_ids.last().cloned() {
+    // Notificar a Meta (ticks azules + mic azul en voice notes) para cada
+    // inbound del batch. Meta NO propaga `read` a mensajes anteriores — en
+    // particular, los audios sólo muestran el mic azul en el teléfono del
+    // cliente si se llama `status: "read"` sobre ese `wa_message_id` puntual.
+    // Best-effort: si falta credencial o Meta responde error, logueamos y
+    // seguimos (no bloquea el endpoint, va en spawn).
+    if !changed_ids.is_empty() {
         match resolve_service_for_phone(&state, &conv.business_phone).await {
             Ok(wa) => {
+                let ids_to_ack = changed_ids.clone();
+                let conv_hex = oid.to_hex();
                 tokio::spawn(async move {
-                    let _ = wa.mark_as_read(&latest).await;
+                    let mut ok = 0usize;
+                    let mut err = 0usize;
+                    for wamid in &ids_to_ack {
+                        match wa.mark_as_read(wamid).await {
+                            Ok(()) => ok += 1,
+                            Err(e) => {
+                                err += 1;
+                                tracing::warn!(
+                                    "[mark-read] Meta mark_as_read falló conv={} wamid={}: {}",
+                                    conv_hex, wamid, e
+                                );
+                            }
+                        }
+                    }
+                    tracing::info!(
+                        "[mark-read] Meta ACK conv={} total={} ok={} err={}",
+                        conv_hex, ids_to_ack.len(), ok, err
+                    );
                 });
             }
             Err(e) => {
