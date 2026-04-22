@@ -1612,6 +1612,7 @@ pub async fn create_settings_handler(
         access_token: encrypted,
         agents: payload.agents,
         active: true,
+        purposes: payload.purposes.unwrap_or_default(),
         created_at: now,
         updated_at: now,
     };
@@ -1665,6 +1666,7 @@ pub async fn update_settings_handler(
             encrypted_token,
             payload.agents,
             payload.active,
+            payload.purposes,
         )
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
@@ -2423,6 +2425,7 @@ fn settings_to_item(s: WaSettings) -> SettingsItem {
         has_access_token: !s.access_token.is_empty(),
         agents: s.agents,
         active: s.active,
+        purposes: s.purposes,
         created_at: iso8601(s.created_at),
         updated_at: iso8601(s.updated_at),
     }

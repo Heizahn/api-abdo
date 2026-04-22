@@ -14,7 +14,8 @@ use crate::models::whatsapp::{
     SettingsItem, SettingsListResponse, SettingsResponse, TakeConversationResponse,
     TemplatesListResponse, ToggleActiveRequest, TransferConversationRequest,
     TransferableAgentItem, TransferableAgentsResponse, UpdateQuickReplyRequest, UpdateResponse,
-    UpdateSettingsRequest, UrlPreview, WhatsAppTemplate,
+    UpdateSettingsRequest, UrlPreview, WaPurposeConfig, WaPurposes, WaPurposesPatch,
+    WhatsAppTemplate,
 };
 
 #[derive(OpenApi)]
@@ -66,6 +67,7 @@ use crate::models::whatsapp::{
             SendMessageRequest, SendTemplatePayload, InitiateConversationRequest,
             TransferConversationRequest,
             CreateSettingsRequest, UpdateSettingsRequest,
+            WaPurposeConfig, WaPurposes, WaPurposesPatch,
             CreateQuickReplyRequest, UpdateQuickReplyRequest, DuplicateQuickReplyRequest,
             ToggleActiveRequest,
             QuickReplyHeader, QuickReplyButton, QuickReplyList, QuickReplyListSection,

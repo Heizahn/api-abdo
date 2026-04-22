@@ -360,8 +360,16 @@ pub trait WhatsAppRepository {
         access_token_cipher: Option<String>,
         agents: Option<Vec<String>>,
         active: Option<bool>,
+        purposes: Option<crate::models::whatsapp::WaPurposesPatch>,
     ) -> Result<(), String>;
     async fn delete_wa_settings(&self, id: &ObjectId) -> Result<(), String>;
+    /// Busca `WaSettings` activos con el propósito `purpose` configurado.
+    /// `purpose` es uno de: `"otp"`, `"notifications"`, `"payment_reminder"`.
+    /// Devuelve todos los candidatos; el caller elige (p.ej. round-robin o el primero).
+    async fn find_wa_settings_for_purpose(
+        &self,
+        purpose: &str,
+    ) -> Result<Vec<WaSettings>, String>;
 
     // Quick replies (snippets)
     /// Devuelve los `WaSettings._id` donde `user_id` aparece en `agents`.

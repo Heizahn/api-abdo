@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::db::{UpdateQuickReplyPatch, WhatsAppRepository};
 use crate::db::mongo::MongoDB;
-use crate::models::whatsapp::{UrlPreview, WaConversation, WaConversationOpen, WaMessage, WaQuickReply, WaSettings};
+use crate::models::whatsapp::{UrlPreview, WaConversation, WaConversationOpen, WaMessage, WaPurposesPatch, WaQuickReply, WaSettings};
 
 impl MongoDB {
     pub(crate) fn wa_conversations(&self) -> mongodb::Collection<WaConversation> {
@@ -625,8 +625,10 @@ impl WhatsAppRepository for MongoDB {
         access_token_cipher: Option<String>,
         agents: Option<Vec<String>>,
         active: Option<bool>,
+        purposes: Option<WaPurposesPatch>,
     ) -> Result<(), String> {
         let mut set_doc = doc! { "updated_at": DateTime::now() };
+        let mut unset_doc = Document::new();
         if let Some(w) = workspace_name {
             set_doc.insert("workspace_name", w);
         }
@@ -648,11 +650,77 @@ impl WhatsAppRepository for MongoDB {
         if let Some(act) = active {
             set_doc.insert("active", act);
         }
+
+        // purposes: tri-state per key. `None` = no tocar ese propósito;
+        // `Some(None)` = limpiar (unset); `Some(Some(cfg))` = setear.
+        if let Some(p) = purposes {
+            // OTP
+            match p.otp {
+                None => {}
+                Some(None) => { unset_doc.insert("purposes.otp", ""); }
+                Some(Some(cfg)) => {
+                    set_doc.insert(
+                        "purposes.otp",
+                        mongodb::bson::to_bson(&cfg).map_err(|e| e.to_string())?,
+                    );
+                }
+            }
+            // Notifications
+            match p.notifications {
+                None => {}
+                Some(None) => { unset_doc.insert("purposes.notifications", ""); }
+                Some(Some(cfg)) => {
+                    set_doc.insert(
+                        "purposes.notifications",
+                        mongodb::bson::to_bson(&cfg).map_err(|e| e.to_string())?,
+                    );
+                }
+            }
+            // Payment reminder
+            match p.payment_reminder {
+                None => {}
+                Some(None) => { unset_doc.insert("purposes.payment_reminder", ""); }
+                Some(Some(cfg)) => {
+                    set_doc.insert(
+                        "purposes.payment_reminder",
+                        mongodb::bson::to_bson(&cfg).map_err(|e| e.to_string())?,
+                    );
+                }
+            }
+        }
+
+        let mut update_doc = doc! { "$set": set_doc };
+        if !unset_doc.is_empty() {
+            update_doc.insert("$unset", unset_doc);
+        }
         self.wa_settings()
-            .update_one(doc! { "_id": id }, doc! { "$set": set_doc })
+            .update_one(doc! { "_id": id }, update_doc)
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    async fn find_wa_settings_for_purpose(
+        &self,
+        purpose: &str,
+    ) -> Result<Vec<WaSettings>, String> {
+        let field = match purpose {
+            "otp" => "purposes.otp",
+            "notifications" => "purposes.notifications",
+            "payment_reminder" => "purposes.payment_reminder",
+            _ => return Err(format!("unknown purpose: {}", purpose)),
+        };
+        let filter = doc! {
+            "active": true,
+            field: { "$exists": true, "$ne": null },
+        };
+        self.wa_settings()
+            .find(filter)
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())
     }
 
     async fn find_wa_settings_by_phone_number_id(&self, phone_number_id: &str) -> Result<Option<WaSettings>, String> {

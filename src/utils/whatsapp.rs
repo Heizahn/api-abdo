@@ -1,11 +1,12 @@
 use reqwest::Client;
 use serde_json::json;
-use std::env;
 use anyhow::Result;
 
-const WA_API_VERSION:  &str = "v25.0";
-const WA_TEMPLATE:     &str = "code_verification";
-const WA_TEMPLATE_LANG:&str = "es";
+use crate::crypto::aes::decrypt_payload;
+use crate::db::WhatsAppRepository;
+use crate::state::AppState;
+
+const WA_API_VERSION: &str = "v25.0";
 
 /// Convierte "0414..." → "58414..." y elimina cualquier símbolo no numérico.
 fn normalize_phone(phone: &str) -> String {
@@ -16,26 +17,48 @@ fn normalize_phone(phone: &str) -> String {
     }
 }
 
-/// Envía el código OTP por WhatsApp usando el template "code_verification" (aprobado).
-///
-/// El template tiene dos componentes con parámetro `{{1}}`:
-///  - BODY   → texto del mensaje
-///  - BUTTON → sub_type `url`, sufijo dinámico de la URL del botón nativo
-///
-/// Variables de entorno requeridas:
-///  - `WHATSAPP_ACCESS_TOKEN`    — Bearer token de la Meta Cloud API
-///  - `WHATSAPP_PHONE_NUMBER_ID` — ID del número de teléfono registrado en WhatsApp Business
-pub async fn send_whatsapp_otp(phone: &str, code: u32) -> Result<()> {
-    let access_token    = env::var("WHATSAPP_ACCESS_TOKEN")
-        .map_err(|_| anyhow::anyhow!("Falta variable de entorno: WHATSAPP_ACCESS_TOKEN"))?;
-    let phone_number_id = env::var("WHATSAPP_PHONE_NUMBER_ID")
-        .map_err(|_| anyhow::anyhow!("Falta variable de entorno: WHATSAPP_PHONE_NUMBER_ID"))?;
+/// Secreto AES para descifrar `WaSettings.access_token`. Mismo valor que usa
+/// el módulo `whatsapp/handler.rs` — reutilizamos `JWT_SECRET` porque tiene
+/// alta entropía y es estrictamente privado del backend.
+fn settings_secret() -> String {
+    std::env::var("JWT_SECRET").unwrap_or_default()
+}
 
-    let to  = normalize_phone(phone);
+/// Envía el código OTP por WhatsApp usando el template configurado en
+/// `WaSettings.purposes.otp` del primer número activo que lo tenga declarado.
+///
+/// El template debe tener:
+///  - BODY   con parámetro `{{1}}` → se reemplaza por el código
+///  - BUTTON sub_type `url` con parámetro `{{1}}` → sufijo dinámico del botón
+///
+/// Si no hay ningún `WaSettings` activo con `purposes.otp` configurado,
+/// devuelve `Err` para que el caller use el fallback (SMS).
+pub async fn send_whatsapp_otp(state: &AppState, phone: &str, code: u32) -> Result<()> {
+    let candidates = state
+        .db
+        .find_wa_settings_for_purpose("otp")
+        .await
+        .map_err(|e| anyhow::anyhow!("DB error buscando WaSettings OTP: {}", e))?;
+
+    let settings = candidates
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("No hay WaSettings activos con purposes.otp configurado"))?;
+
+    let otp_cfg = settings
+        .purposes
+        .otp
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("WaSettings sin otp.template_name — inconsistencia"))?;
+
+    let access_token = decrypt_payload(&settings_secret(), &settings.access_token)
+        .ok_or_else(|| anyhow::anyhow!("No se pudo descifrar access_token de WaSettings"))?;
+
+    let to = normalize_phone(phone);
     let otp = code.to_string();
     let url = format!(
         "https://graph.facebook.com/{}/{}/messages",
-        WA_API_VERSION, phone_number_id
+        WA_API_VERSION, settings.phone_number_id
     );
 
     let payload = json!({
@@ -43,8 +66,8 @@ pub async fn send_whatsapp_otp(phone: &str, code: u32) -> Result<()> {
         "to": to,
         "type": "template",
         "template": {
-            "name":     WA_TEMPLATE,
-            "language": { "code": WA_TEMPLATE_LANG },
+            "name":     otp_cfg.template_name,
+            "language": { "code": otp_cfg.language },
             "components": [
                 // BODY: reemplaza {{1}} en el texto del mensaje
                 {
@@ -79,6 +102,11 @@ pub async fn send_whatsapp_otp(phone: &str, code: u32) -> Result<()> {
         return Err(anyhow::anyhow!("WhatsApp API error [{}]", status));
     }
 
-    tracing::info!("WhatsApp OTP enviado exitosamente a {}", phone);
+    tracing::info!(
+        "WhatsApp OTP enviado a {} via WaSettings {} (template: {})",
+        phone,
+        settings.phone,
+        otp_cfg.template_name
+    );
     Ok(())
 }

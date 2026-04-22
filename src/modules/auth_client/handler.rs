@@ -67,8 +67,9 @@ pub async fn verify_number_handler(
     );
 
     let phone_clone = payload.phone.clone();
+    let state_clone = state.clone();
     tokio::spawn(async move {
-        match send_whatsapp_otp(&phone_clone, code).await {
+        match send_whatsapp_otp(&state_clone, &phone_clone, code).await {
             Ok(()) => {
                 tracing::info!("OTP enviado por WhatsApp a {}", phone_clone);
             }

@@ -542,8 +542,36 @@ pub struct WaSettings {
     /// UUIDs de los agentes asignados a este número
     pub agents: Vec<String>,
     pub active: bool,
+    /// Propósitos configurados (OTP, notificaciones, recordatorios de pago).
+    /// Cada clave es opcional — un número puede tener uno, varios o ninguno.
+    /// Los docs viejos llegan con `WaPurposes::default()` (todos `None`).
+    #[serde(default)]
+    pub purposes: WaPurposes,
     pub created_at: DateTime,
     pub updated_at: DateTime,
+}
+
+/// Configuración de un template aprobado en Meta que se usará para un propósito dado.
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+pub struct WaPurposeConfig {
+    /// Nombre del template tal como está registrado y aprobado en Meta
+    pub template_name: String,
+    /// Código de idioma del template (ej: "es", "en_US")
+    pub language: String,
+}
+
+/// Propósitos disponibles para un número de WhatsApp. Todos opcionales —
+/// un número puede declarar uno, varios o ninguno. Cuando llega un evento
+/// (OTP, notificación, recordatorio), el módulo correspondiente busca un
+/// `WaSettings` activo con el propósito configurado.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, ToSchema)]
+pub struct WaPurposes {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub otp: Option<WaPurposeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notifications: Option<WaPurposeConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payment_reminder: Option<WaPurposeConfig>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -560,8 +588,14 @@ pub struct CreateSettingsRequest {
     pub access_token: String,
     /// UUIDs de los agentes que atenderán este número
     pub agents: Vec<String>,
+    /// Propósitos configurados. Si se omite, el número no se usará para ningún template.
+    #[serde(default)]
+    pub purposes: Option<WaPurposes>,
 }
 
+/// PATCH-style body. Para `purposes`, usar el sub-patch `WaPurposesPatch`:
+/// cada propósito acepta tri-state (`undefined` = no tocar, `null` = limpiar,
+/// objeto = setear).
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateSettingsRequest {
     pub workspace_name: Option<String>,
@@ -571,6 +605,22 @@ pub struct UpdateSettingsRequest {
     pub access_token: Option<String>,
     pub agents: Option<Vec<String>>,
     pub active: Option<bool>,
+    #[serde(default)]
+    pub purposes: Option<WaPurposesPatch>,
+}
+
+/// Patch per-purpose. Cada campo es tri-state:
+/// - ausente (`None`) → no tocar
+/// - `null` (`Some(None)`) → limpiar ese propósito
+/// - objeto (`Some(Some(cfg))`) → setear
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct WaPurposesPatch {
+    #[serde(default, deserialize_with = "deserialize_some_opt")]
+    pub otp: Option<Option<WaPurposeConfig>>,
+    #[serde(default, deserialize_with = "deserialize_some_opt")]
+    pub notifications: Option<Option<WaPurposeConfig>>,
+    #[serde(default, deserialize_with = "deserialize_some_opt")]
+    pub payment_reminder: Option<Option<WaPurposeConfig>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -585,6 +635,8 @@ pub struct SettingsItem {
     pub has_access_token: bool,
     pub agents: Vec<String>,
     pub active: bool,
+    /// Propósitos configurados (OTP, notificaciones, recordatorios).
+    pub purposes: WaPurposes,
     /// ISO-8601 (RFC 3339) UTC
     pub created_at: String,
     /// ISO-8601 (RFC 3339) UTC
