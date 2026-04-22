@@ -37,6 +37,8 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route("/v1/auth-user/whatsapp/conversations/:id/close", post(handler::close_conversation_handler))
         // Agentes con permiso de chat (para dropdown de transferencia)
         .route("/v1/auth-user/whatsapp/transferable-agents", get(handler::list_transferable_agents_handler))
+        // Media: proxy de descarga (el binario vive en la CDN de Meta)
+        .route("/v1/auth-user/whatsapp/media/:media_id", get(handler::get_media_handler))
         // Configuración de números y agentes
         .route("/v1/auth-user/whatsapp/settings", get(handler::list_settings_handler))
         .route("/v1/auth-user/whatsapp/settings", post(handler::create_settings_handler))

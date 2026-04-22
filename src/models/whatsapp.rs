@@ -61,6 +61,13 @@ pub struct WaMessage {
     /// ID de media en WhatsApp (para imágenes/documentos)
     #[serde(default)]
     pub media_id: Option<String>,
+    /// MIME type reportado por Meta en el webhook (ej. "image/jpeg", "application/pdf").
+    /// Útil para que el front decida cómo renderizar sin esperar la descarga.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_mime_type: Option<String>,
+    /// Nombre original del archivo (solo documentos).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_filename: Option<String>,
     /// Solo para outbound: "sent" | "delivered" | "read" | "failed"
     #[serde(default)]
     pub status: Option<String>,
@@ -174,6 +181,8 @@ pub struct InboundText {
 pub struct InboundMedia {
     pub id: Option<String>,
     pub caption: Option<String>,
+    pub mime_type: Option<String>,
+    pub filename: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -266,6 +275,12 @@ pub struct MessageItem {
     pub msg_type: String,
     pub content: Option<String>,
     pub media_id: Option<String>,
+    /// MIME type del media (ej. "image/jpeg"). `null` cuando no aplica.
+    /// El front lo usa como hint; la descarga real va por
+    /// `GET /auth-user/whatsapp/media/:media_id`.
+    pub media_mime_type: Option<String>,
+    /// Nombre original del archivo (solo documentos).
+    pub media_filename: Option<String>,
     /// `pending` (solo optimistic UI) | `sent` | `delivered` | `read` | `failed`.
     /// - En `direction="out"`: refleja el estado de entrega reportado por Meta.
     /// - En `direction="in"`: `read` indica que un agente ya lo vio en la UI

@@ -239,14 +239,19 @@ pub async fn receive_webhook(
                         false
                     };
 
-                    // Extraer contenido según tipo
-                    let (body, media_id) = match msg.msg_type.as_str() {
-                        "text" => (msg.text.as_ref().map(|t| t.body.clone()), None),
-                        "image" => msg.image.as_ref().map(|m| (m.caption.clone(), m.id.clone())).unwrap_or((None, None)),
-                        "document" => msg.document.as_ref().map(|m| (m.caption.clone(), m.id.clone())).unwrap_or((None, None)),
-                        "audio" => msg.audio.as_ref().map(|m| (m.caption.clone(), m.id.clone())).unwrap_or((None, None)),
-                        "video" => msg.video.as_ref().map(|m| (m.caption.clone(), m.id.clone())).unwrap_or((None, None)),
-                        "sticker" => msg.sticker.as_ref().map(|m| (None, m.id.clone())).unwrap_or((None, None)),
+                    // Extraer contenido según tipo (body, media_id, mime, filename)
+                    let extract_media = |m: Option<&InboundMedia>| m
+                        .map(|x| (x.caption.clone(), x.id.clone(), x.mime_type.clone(), x.filename.clone()))
+                        .unwrap_or((None, None, None, None));
+                    let (body, media_id, media_mime_type, media_filename) = match msg.msg_type.as_str() {
+                        "text" => (msg.text.as_ref().map(|t| t.body.clone()), None, None, None),
+                        "image" => extract_media(msg.image.as_ref()),
+                        "document" => extract_media(msg.document.as_ref()),
+                        "audio" => extract_media(msg.audio.as_ref()),
+                        "video" => extract_media(msg.video.as_ref()),
+                        "sticker" => msg.sticker.as_ref()
+                            .map(|m| (None, m.id.clone(), m.mime_type.clone(), None))
+                            .unwrap_or((None, None, None, None)),
                         "location" => {
                             let label = msg.location.as_ref().and_then(|l| {
                                 l.name.clone().or_else(|| l.address.clone()).or_else(|| {
@@ -256,9 +261,9 @@ pub async fn receive_webhook(
                                     }
                                 })
                             });
-                            (label, None)
+                            (label, None, None, None)
                         }
-                        _ => (None, None),
+                        _ => (None, None, None, None),
                     };
 
                     let preview = body.clone().unwrap_or_else(|| format!("[{}]", msg.msg_type));
@@ -281,6 +286,8 @@ pub async fn receive_webhook(
                         msg_type: msg.msg_type.clone(),
                         body,
                         media_id,
+                        media_mime_type,
+                        media_filename,
                         status: None,
                         sent_by: None,
                         idempotency_key: None,
@@ -684,6 +691,8 @@ pub async fn send_message_handler(
         msg_type: "text".to_string(),
         body: Some(payload.content.clone()),
         media_id: None,
+        media_mime_type: None,
+        media_filename: None,
         status: Some("sent".to_string()),
         sent_by: Some(claims.id.clone()),
         idempotency_key: payload.idempotency_key.clone(),
@@ -1143,6 +1152,100 @@ pub async fn delete_settings_handler(
 }
 
 // ============================================
+// MEDIA (descarga proxy)
+// ============================================
+
+/// Proxy de descarga para media subido por el cliente. El binario real vive en la
+/// CDN de Meta y sólo es accesible con el access token del negocio — por eso la
+/// ruta pasa por el backend en vez de entregar la URL directa al front.
+///
+/// Autorización: el agente debe estar en `WaSettings.agents` del `business_phone`
+/// de la conversación a la que pertenece el media.
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/media/{media_id}",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(("media_id" = String, Path, description = "ID del media reportado por Meta en el webhook")),
+    responses(
+        (status = 200, description = "Binario del media con el Content-Type correcto",
+            content_type = "application/octet-stream"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Agente no asignado al número de negocio"),
+        (status = 404, description = "Media no encontrado"),
+    )
+)]
+pub async fn get_media_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(media_id): Path<String>,
+) -> Result<axum::response::Response, ApiError> {
+    // 1. Mensaje que contiene el media.
+    let msg = state.db
+        .find_message_by_media_id(&media_id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    // 2. Conversación → business_phone.
+    let conv = state.db
+        .find_conversation_by_id(&msg.conversation_id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    // 3. Settings del negocio (auth + credenciales en un solo lookup).
+    let settings = state.db
+        .find_wa_settings_by_phone(&conv.business_phone)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| ApiError::Internal(format!(
+            "wa_settings inactivo o no encontrado para {}",
+            conv.business_phone
+        )))?;
+
+    if !settings.agents.iter().any(|id| id == &claims.id) {
+        return Err(ApiError::Forbidden);
+    }
+    if settings.phone_number_id.is_empty() || settings.access_token.is_empty() {
+        return Err(ApiError::Internal(
+            "wa_settings sin phone_number_id o access_token configurados".into(),
+        ));
+    }
+
+    // 4. Service con el token descifrado → descarga.
+    let token = decrypt_payload(&settings_secret(), &settings.access_token)
+        .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
+    let wa = WhatsAppService::new(state.reqwest_client.clone(), settings.phone_number_id, token);
+
+    let (bytes, mime, remote_filename) = wa.download_media(&media_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // 5. Respuesta binaria. `inline` para que el browser lo renderice (imagen/pdf)
+    // en lugar de forzar la descarga. Front puede hacer `<img src="...">`.
+    let filename = msg.media_filename
+        .clone()
+        .or(remote_filename)
+        .unwrap_or_else(|| media_id.clone());
+
+    let mut resp = axum::response::Response::new(axum::body::Body::from(bytes));
+    let headers = resp.headers_mut();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&mime) {
+        headers.insert(axum::http::header::CONTENT_TYPE, v);
+    }
+    if let Ok(v) = axum::http::HeaderValue::from_str(&format!("inline; filename=\"{}\"", filename.replace('"', "'"))) {
+        headers.insert(axum::http::header::CONTENT_DISPOSITION, v);
+    }
+    // Cache agresivo: el `media_id` es estable e inmutable en Meta.
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("private, max-age=86400"),
+    );
+    Ok(resp)
+}
+
+// ============================================
 // HELPERS INTERNOS
 // ============================================
 
@@ -1325,6 +1428,8 @@ fn msg_to_item(
         msg_type: m.msg_type,
         content: m.body,
         media_id: m.media_id,
+        media_mime_type: m.media_mime_type,
+        media_filename: m.media_filename,
         status: m.status,
         from_user_id: m.sent_by,
         from_user_name,

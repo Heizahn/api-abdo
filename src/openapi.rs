@@ -9,7 +9,8 @@ use crate::models::whatsapp::{
     ConversationsListResponse, CreateSettingsRequest, MarkReadResponse, MessageItem,
     SendMessageRequest, SendMessageResponse, SettingsItem, SettingsListResponse,
     SettingsResponse, TakeConversationResponse, TransferConversationRequest,
-    TransferableAgentItem, TransferableAgentsResponse, UpdateResponse, UpdateSettingsRequest,
+    ReplyToItem, TransferableAgentItem, TransferableAgentsResponse, UpdateResponse,
+    UpdateSettingsRequest,
 };
 
 #[derive(OpenApi)]
@@ -40,6 +41,7 @@ use crate::models::whatsapp::{
         crate::modules::whatsapp::handler::create_settings_handler,
         crate::modules::whatsapp::handler::update_settings_handler,
         crate::modules::whatsapp::handler::delete_settings_handler,
+        crate::modules::whatsapp::handler::get_media_handler,
     ),
     components(
         schemas(
@@ -63,7 +65,7 @@ use crate::models::whatsapp::{
             UpdateResponse,
             // WhatsApp — Items
             ConversationItem, MessageItem, SettingsItem,
-            TransferableAgentItem,
+            TransferableAgentItem, ReplyToItem,
         )
     ),
     tags(

@@ -88,6 +88,59 @@ impl WhatsAppService {
         Ok(wa_id)
     }
 
+    /// Descarga el binario de un media subido por un contacto vía webhook.
+    ///
+    /// Son dos llamadas contra Meta:
+    /// 1. `GET /v25.0/{media_id}` → devuelve `{ url, mime_type, file_size, ... }`.
+    /// 2. `GET <url>` (con el mismo bearer) → binario.
+    ///
+    /// Se fuerza `Accept: */*` porque la CDN de Meta a veces responde 406 con
+    /// los headers por defecto de reqwest.
+    pub async fn download_media(&self, media_id: &str) -> Result<(Vec<u8>, String, Option<String>)> {
+        let info_url = format!("https://graph.facebook.com/{}/{}", WA_API_VERSION, media_id);
+        let resp = self.client
+            .get(&info_url)
+            .bearer_auth(&self.access_token)
+            .send()
+            .await
+            .map_err(|e| describe_reqwest_error("download_media info", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("WhatsApp media info error [{}]: {}", status, body));
+        }
+
+        let info: serde_json::Value = resp.json().await
+            .map_err(|e| describe_reqwest_error("download_media info decode", e))?;
+        let url = info["url"].as_str()
+            .ok_or_else(|| anyhow::anyhow!("Meta media response sin campo `url`"))?
+            .to_string();
+        let mime = info["mime_type"].as_str()
+            .unwrap_or("application/octet-stream")
+            .to_string();
+        let file_name = info["file_name"].as_str().map(|s| s.to_string());
+
+        let bin = self.client
+            .get(&url)
+            .bearer_auth(&self.access_token)
+            .header(reqwest::header::ACCEPT, "*/*")
+            .send()
+            .await
+            .map_err(|e| describe_reqwest_error("download_media bytes", e))?;
+
+        if !bin.status().is_success() {
+            let status = bin.status();
+            let body = bin.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("WhatsApp media download error [{}]: {}", status, body));
+        }
+
+        let bytes = bin.bytes().await
+            .map_err(|e| describe_reqwest_error("download_media body", e))?;
+
+        Ok((bytes.to_vec(), mime, file_name))
+    }
+
     /// Marca un mensaje entrante como leído (actualiza los ticks en el cliente).
     pub async fn mark_as_read(&self, wa_message_id: &str) -> Result<()> {
         let payload = json!({

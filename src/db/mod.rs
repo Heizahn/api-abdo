@@ -255,6 +255,13 @@ pub trait WhatsAppRepository {
         &self,
         wa_ids: &[String],
     ) -> Result<HashMap<String, WaMessage>, String>;
+    /// Lookup por `media_id` (el id que Meta reporta en el webhook). Devuelve el
+    /// primer mensaje que lo contiene. Usado por el endpoint que sirve el media
+    /// para validar autorización y encontrar el `business_phone`.
+    async fn find_message_by_media_id(
+        &self,
+        media_id: &str,
+    ) -> Result<Option<WaMessage>, String>;
 
     // Per-agent "last opened" tracking
     /// Upsert del último momento en que `user_id` abrió `conversation_id`.
