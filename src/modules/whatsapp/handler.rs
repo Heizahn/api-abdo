@@ -1126,6 +1126,10 @@ pub async fn create_settings_handler(
     if payload.phone_number_id.trim().is_empty() {
         return Err(ApiError::BadRequest("phone_number_id requerido".into()));
     }
+    let waba_id = payload.whatsapp_business_account_id.trim().to_string();
+    if waba_id.is_empty() {
+        return Err(ApiError::BadRequest("whatsapp_business_account_id requerido".into()));
+    }
 
     let encrypted = encrypt_payload(&settings_secret(), access_token);
 
@@ -1134,6 +1138,7 @@ pub async fn create_settings_handler(
         phone,
         workspace_name: payload.workspace_name,
         phone_number_id: payload.phone_number_id,
+        whatsapp_business_account_id: waba_id,
         access_token: encrypted,
         agents: payload.agents,
         active: true,
@@ -1174,11 +1179,19 @@ pub async fn update_settings_handler(
         _ => None,
     };
 
+    // WABA id: `Some("")` se ignora (permitir payloads sin borrar el campo).
+    let waba = payload.whatsapp_business_account_id
+        .and_then(|v| {
+            let t = v.trim().to_string();
+            if t.is_empty() { None } else { Some(t) }
+        });
+
     state.db
         .update_wa_settings(
             &oid,
             payload.workspace_name,
             payload.phone_number_id,
+            waba,
             encrypted_token,
             payload.agents,
             payload.active,
@@ -1737,6 +1750,7 @@ fn settings_to_item(s: WaSettings) -> SettingsItem {
         phone: s.phone,
         workspace_name: s.workspace_name,
         phone_number_id: s.phone_number_id,
+        whatsapp_business_account_id: s.whatsapp_business_account_id,
         has_access_token: !s.access_token.is_empty(),
         agents: s.agents,
         active: s.active,
@@ -1999,4 +2013,161 @@ fn quick_reply_to_item(q: WaQuickReply) -> QuickReplyItem {
         created_at: iso8601(q.created_at),
         updated_at: iso8601(q.updated_at),
     }
+}
+
+// ============================================
+// TEMPLATES (Meta Cloud API)
+// ============================================
+
+#[derive(serde::Deserialize)]
+pub struct TemplatesQuery {
+    /// `phone_number_id` del workspace (lo identifica en Meta). El backend
+    /// resuelve el WABA asociado para llamar a Meta.
+    pub phone_number_id: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/templates",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(
+        ("phone_number_id" = String, Query, description = "phone_number_id del workspace"),
+    ),
+    responses(
+        (status = 200, description = "Templates APPROVED del WABA", body = TemplatesListResponse),
+        (status = 400, description = "Parámetros inválidos o WABA no configurado"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "El usuario no tiene permiso de chat o no es agente del workspace"),
+        (status = 404, description = "Workspace no encontrado"),
+    )
+)]
+pub async fn list_templates_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Query(q): Query<TemplatesQuery>,
+) -> Result<Json<TemplatesListResponse>, ApiError> {
+    require_can_chat(&state, &claims.id).await?;
+
+    let phone_number_id = q.phone_number_id.trim();
+    if phone_number_id.is_empty() {
+        return Err(ApiError::BadRequest("phone_number_id requerido".into()));
+    }
+
+    let settings = state.db
+        .find_wa_settings_by_phone_number_id(phone_number_id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    if !settings.agents.iter().any(|a| a == &claims.id) {
+        return Err(ApiError::Forbidden);
+    }
+
+    let waba_id = settings.whatsapp_business_account_id.trim().to_string();
+    if waba_id.is_empty() {
+        return Err(ApiError::BadRequest(
+            "workspace sin whatsapp_business_account_id configurado".into(),
+        ));
+    }
+
+    if let Some(cached) = state.redis.get_templates(&waba_id).await {
+        return Ok(Json(TemplatesListResponse {
+            ok: true,
+            data: parse_templates(&cached),
+        }));
+    }
+
+    if settings.access_token.is_empty() {
+        return Err(ApiError::BadRequest(
+            "workspace sin access_token configurado".into(),
+        ));
+    }
+    let token = decrypt_payload(&settings_secret(), &settings.access_token)
+        .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
+
+    let wa = WhatsAppService::new(
+        state.reqwest_client.clone(),
+        settings.phone_number_id.clone(),
+        token,
+    );
+
+    let json = wa.list_templates(&waba_id).await.map_err(|e| {
+        tracing::warn!("list_templates Meta error: {:#}", e);
+        ApiError::Internal("no se pudieron obtener templates de Meta".into())
+    })?;
+
+    state.redis.set_templates(&waba_id, &json).await;
+
+    Ok(Json(TemplatesListResponse {
+        ok: true,
+        data: parse_templates(&json),
+    }))
+}
+
+/// Extrae templates APPROVED desde la respuesta de Meta y calcula
+/// `body_placeholders` contando `{{N}}` únicos dentro del componente BODY.
+fn parse_templates(raw: &serde_json::Value) -> Vec<WhatsAppTemplate> {
+    let items = match raw.get("data").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+
+    items.iter().filter_map(|t| {
+        let status = t.get("status").and_then(|v| v.as_str()).unwrap_or("");
+        if !status.eq_ignore_ascii_case("APPROVED") {
+            return None;
+        }
+        let name = t.get("name").and_then(|v| v.as_str())?.to_string();
+        let language = t.get("language").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let category = t.get("category").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let components = t.get("components")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let body_placeholders = components.iter()
+            .filter(|c| c.get("type").and_then(|v| v.as_str())
+                .map(|s| s.eq_ignore_ascii_case("BODY"))
+                .unwrap_or(false))
+            .find_map(|c| c.get("text").and_then(|v| v.as_str()))
+            .map(count_placeholders)
+            .unwrap_or(0);
+
+        Some(WhatsAppTemplate {
+            name,
+            language,
+            category,
+            status: status.to_string(),
+            components,
+            body_placeholders,
+        })
+    }).collect()
+}
+
+/// Cuenta placeholders únicos `{{1}}..{{N}}` en un string. Devuelve el máximo
+/// índice encontrado (los placeholders en Meta son consecutivos).
+fn count_placeholders(text: &str) -> u32 {
+    let bytes = text.as_bytes();
+    let mut max_idx: u32 = 0;
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        if bytes[i] == b'{' && bytes[i + 1] == b'{' {
+            let mut j = i + 2;
+            let start = j;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > start && j + 1 < bytes.len() && bytes[j] == b'}' && bytes[j + 1] == b'}' {
+                if let Ok(n) = std::str::from_utf8(&bytes[start..j]).unwrap_or("").parse::<u32>() {
+                    if n > max_idx {
+                        max_idx = n;
+                    }
+                }
+                i = j + 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    max_idx
 }

@@ -59,6 +59,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         modules::network::mikrotik::cron::run_mikrotik_sync_task(state_for_mikrotik).await;
     });
 
+    let state_for_waba = state.clone();
+    tokio::spawn(async move {
+        modules::whatsapp::backfill::run_waba_backfill(state_for_waba).await;
+    });
+
     tracing::info!("✅ Conexiones establecidas");
     // 4. Construir router de Axum
     let app = axum_router::build_router(state);

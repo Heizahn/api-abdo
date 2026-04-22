@@ -165,6 +165,63 @@ impl WhatsAppService {
         Ok((bytes.to_vec(), mime, file_name))
     }
 
+    /// Lista las plantillas (`message_templates`) de una cuenta WABA. La llamada
+    /// requiere WABA ID (no phone_number_id) y el mismo bearer de Meta Cloud.
+    /// Devuelve el JSON crudo; el filtrado/shaping vive en el handler.
+    pub async fn list_templates(&self, waba_id: &str) -> Result<serde_json::Value> {
+        let url = format!(
+            "https://graph.facebook.com/{}/{}/message_templates?fields=name,language,category,status,components&limit=100",
+            WA_API_VERSION, waba_id
+        );
+
+        let resp = send_with_retry("list_templates", || {
+            self.client.get(&url).bearer_auth(&self.access_token)
+        }).await
+            .map_err(|e| describe_reqwest_error("list_templates request", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("WhatsApp list_templates error [{}]: {}", status, body));
+        }
+
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| describe_reqwest_error("list_templates response decode", e))?;
+
+        Ok(json)
+    }
+
+    /// Obtiene el WABA ID (`whatsapp_business_account`) asociado a un phone_number_id.
+    /// Útil para backfill: admins que ya configuraron `WaSettings` sin WABA no
+    /// tienen cómo listar templates hasta que lo llenemos.
+    pub async fn get_whatsapp_business_account_id(&self) -> Result<String> {
+        let url = format!(
+            "https://graph.facebook.com/{}/{}?fields=whatsapp_business_account",
+            WA_API_VERSION, self.phone_number_id
+        );
+
+        let resp = send_with_retry("get_waba_id", || {
+            self.client.get(&url).bearer_auth(&self.access_token)
+        }).await
+            .map_err(|e| describe_reqwest_error("get_waba_id request", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("WhatsApp get_waba_id error [{}]: {}", status, body));
+        }
+
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| describe_reqwest_error("get_waba_id decode", e))?;
+
+        let waba_id = json["whatsapp_business_account"]["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Meta response sin whatsapp_business_account.id"))?
+            .to_string();
+
+        Ok(waba_id)
+    }
+
     /// Marca un mensaje entrante como leído (ticks azules en texto, mic azul
     /// en voice notes). Meta requiere una llamada POR mensaje — no propaga el
     /// read a los anteriores.

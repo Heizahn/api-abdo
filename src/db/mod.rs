@@ -283,6 +283,16 @@ pub trait WhatsAppRepository {
 
     // Settings
     async fn find_wa_settings_by_phone(&self, phone: &str) -> Result<Option<WaSettings>, String>;
+    /// Lookup por `phone_number_id` (el string de Meta, no el E.164). Usado por
+    /// el endpoint de templates. No filtra por `active` — un admin puede listar
+    /// templates de un número pausado.
+    async fn find_wa_settings_by_phone_number_id(&self, phone_number_id: &str) -> Result<Option<WaSettings>, String>;
+    /// Listado de WaSettings cuyo `whatsapp_business_account_id` está vacío.
+    /// Usado por la tarea de backfill al arrancar.
+    async fn find_wa_settings_missing_waba(&self) -> Result<Vec<WaSettings>, String>;
+    /// Setea el `whatsapp_business_account_id` para un doc puntual.
+    /// Usado sólo por el backfill — el CRUD normal pasa por `update_wa_settings`.
+    async fn set_wa_settings_waba_id(&self, id: &ObjectId, waba_id: &str) -> Result<(), String>;
     /// Batch-lookup: `business_phone → workspace_name`. Ignora el flag `active` (es sólo display).
     /// Los números sin `WaSettings` configurado o con `workspace_name` vacío quedan fuera del mapa.
     async fn get_workspace_names(&self, phones: &[String]) -> Result<HashMap<String, String>, String>;
@@ -296,6 +306,7 @@ pub trait WhatsAppRepository {
         id: &ObjectId,
         workspace_name: Option<String>,
         phone_number_id: Option<String>,
+        whatsapp_business_account_id: Option<String>,
         access_token_cipher: Option<String>,
         agents: Option<Vec<String>>,
         active: Option<bool>,

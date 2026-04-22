@@ -122,6 +122,27 @@ impl RedisClient {
         let _: Result<(), _> = conn.set_ex(url_preview_key(url), raw, 86_400).await;
     }
 
+    // ============================================
+    // WhatsApp — cache de templates por WABA
+    // ============================================
+
+    /// Lee el cache de templates para un WABA id. Retorna el JSON serializado.
+    pub async fn get_templates(&self, waba_id: &str) -> Option<serde_json::Value> {
+        let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;
+        let raw: Option<String> = conn.get(templates_key(waba_id)).await.ok().flatten();
+        serde_json::from_str::<serde_json::Value>(&raw?).ok()
+    }
+
+    /// Guarda templates para un WABA id con TTL de 300s (5 minutos).
+    pub async fn set_templates(&self, waba_id: &str, value: &serde_json::Value) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let raw = value.to_string();
+        let _: Result<(), _> = conn.set_ex(templates_key(waba_id), raw, 300).await;
+    }
+
     /// Intenta adquirir un lock de asignación para una conversación.
     /// Retorna true si el lock fue adquirido (esta instancia debe proceder).
     /// TTL de 15 segundos para evitar locks eternos.
@@ -161,6 +182,10 @@ fn url_preview_key(url: &str) -> String {
         hex.push_str(&format!("{:02x}", b));
     }
     format!("wa:url_preview:{}", hex)
+}
+
+fn templates_key(waba_id: &str) -> String {
+    format!("wa:templates:{}", waba_id)
 }
 
 fn exchange_rate_key() -> String {

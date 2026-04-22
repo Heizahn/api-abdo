@@ -430,6 +430,10 @@ pub struct WaSettings {
     /// Phone Number ID de WhatsApp Cloud API
     #[serde(default)]
     pub phone_number_id: String,
+    /// WhatsApp Business Account ID (WABA). Necesario para listar message templates.
+    /// Puede venir vacío en docs viejos — se rellena por backfill al arrancar.
+    #[serde(default)]
+    pub whatsapp_business_account_id: String,
     /// Access token permanente de Meta (AES-GCM ciphertext Base64URL). Nunca se expone al front.
     #[serde(default)]
     pub access_token: String,
@@ -448,6 +452,8 @@ pub struct CreateSettingsRequest {
     pub workspace_name: String,
     /// Phone Number ID de WhatsApp Cloud API
     pub phone_number_id: String,
+    /// WhatsApp Business Account ID (WABA). Requerido para poder listar templates.
+    pub whatsapp_business_account_id: String,
     /// Access token permanente de Meta (se cifra antes de guardar)
     pub access_token: String,
     /// UUIDs de los agentes que atenderán este número
@@ -458,6 +464,7 @@ pub struct CreateSettingsRequest {
 pub struct UpdateSettingsRequest {
     pub workspace_name: Option<String>,
     pub phone_number_id: Option<String>,
+    pub whatsapp_business_account_id: Option<String>,
     /// Si viene vacío o ausente, **no** se toca el token guardado.
     pub access_token: Option<String>,
     pub agents: Option<Vec<String>>,
@@ -470,6 +477,8 @@ pub struct SettingsItem {
     pub phone: String,
     pub workspace_name: String,
     pub phone_number_id: String,
+    /// Puede venir vacío si el doc es viejo y el backfill todavía no corrió.
+    pub whatsapp_business_account_id: String,
     /// `true` si hay un token guardado (cifrado). **Nunca** se devuelve el token en claro.
     pub has_access_token: bool,
     pub agents: Vec<String>,
@@ -586,4 +595,32 @@ pub struct QuickRepliesListResponse {
 pub struct QuickReplyResponse {
     pub ok: bool,
     pub data: QuickReplyItem,
+}
+
+// ============================================
+// TEMPLATES DE META
+// ============================================
+
+/// Plantilla aprobada por Meta. Se sirve tal cual viene del endpoint de Meta,
+/// filtrando sólo `status: "APPROVED"`.
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+pub struct WhatsAppTemplate {
+    pub name: String,
+    pub language: String,
+    /// "UTILITY" | "MARKETING" | "AUTHENTICATION" | otros (lo que Meta devuelva).
+    pub category: String,
+    /// Siempre "APPROVED" en el response (filtramos los demás).
+    pub status: String,
+    /// Estructura de Meta: array con items `{ type, format?, text?, buttons?, ... }`.
+    /// Se pasa tal cual — el front conoce el shape (ver spec del endpoint).
+    pub components: Vec<serde_json::Value>,
+    /// Cantidad de placeholders `{{n}}` detectados en el `text` del componente
+    /// `BODY` (N distintos). 0 si no hay BODY o no tiene placeholders.
+    pub body_placeholders: u32,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TemplatesListResponse {
+    pub ok: bool,
+    pub data: Vec<WhatsAppTemplate>,
 }

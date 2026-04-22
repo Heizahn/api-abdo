@@ -1,4 +1,5 @@
 pub mod assignment;
+pub mod backfill;
 pub mod handler;
 pub mod service;
 pub mod url_preview;
@@ -56,6 +57,8 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route("/v1/auth-user/whatsapp/quick-replies/:id", put(handler::update_quick_reply_handler))
         .route("/v1/auth-user/whatsapp/quick-replies/:id", delete(handler::delete_quick_reply_handler))
         .route("/v1/auth-user/whatsapp/quick-replies/:id/duplicate", post(handler::duplicate_quick_reply_handler))
+        // Templates (Meta Cloud API, cached 5min en Redis)
+        .route("/v1/auth-user/whatsapp/templates", get(handler::list_templates_handler))
         // Debug
         .route("/v1/auth-user/whatsapp/debug/last-webhook", get(handler::debug_last_webhook_handler))
 }

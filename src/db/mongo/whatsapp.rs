@@ -539,6 +539,7 @@ impl WhatsAppRepository for MongoDB {
         id: &ObjectId,
         workspace_name: Option<String>,
         phone_number_id: Option<String>,
+        whatsapp_business_account_id: Option<String>,
         access_token_cipher: Option<String>,
         agents: Option<Vec<String>>,
         active: Option<bool>,
@@ -549,6 +550,9 @@ impl WhatsAppRepository for MongoDB {
         }
         if let Some(p) = phone_number_id {
             set_doc.insert("phone_number_id", p);
+        }
+        if let Some(wa) = whatsapp_business_account_id {
+            set_doc.insert("whatsapp_business_account_id", wa);
         }
         // Sólo tocar el token si viene no-vacío — `Some("")` no debe borrarlo.
         if let Some(t) = access_token_cipher {
@@ -564,6 +568,46 @@ impl WhatsAppRepository for MongoDB {
         }
         self.wa_settings()
             .update_one(doc! { "_id": id }, doc! { "$set": set_doc })
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn find_wa_settings_by_phone_number_id(&self, phone_number_id: &str) -> Result<Option<WaSettings>, String> {
+        self.wa_settings()
+            .find_one(doc! { "phone_number_id": phone_number_id })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn find_wa_settings_missing_waba(&self) -> Result<Vec<WaSettings>, String> {
+        // "Vacío" = ausente o string "". Necesitamos $or para cubrir ambos.
+        let filter = doc! {
+            "$or": [
+                { "whatsapp_business_account_id": { "$exists": false } },
+                { "whatsapp_business_account_id": "" },
+            ]
+        };
+        self.wa_settings()
+            .find(filter)
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn set_wa_settings_waba_id(&self, id: &ObjectId, waba_id: &str) -> Result<(), String> {
+        self.wa_settings()
+            .update_one(
+                doc! { "_id": id },
+                doc! {
+                    "$set": {
+                        "whatsapp_business_account_id": waba_id,
+                        "updated_at": DateTime::now(),
+                    }
+                },
+            )
             .await
             .map_err(|e| e.to_string())?;
         Ok(())

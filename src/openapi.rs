@@ -10,8 +10,9 @@ use crate::models::whatsapp::{
     DuplicateQuickReplyRequest, MarkReadResponse, MessageItem, QuickRepliesListResponse,
     QuickReplyItem, QuickReplyResponse, ReplyToItem, SendMessageRequest, SendMessageResponse,
     SettingsItem, SettingsListResponse, SettingsResponse, TakeConversationResponse,
-    TransferConversationRequest, TransferableAgentItem, TransferableAgentsResponse,
-    UpdateQuickReplyRequest, UpdateResponse, UpdateSettingsRequest, UrlPreview,
+    TemplatesListResponse, TransferConversationRequest, TransferableAgentItem,
+    TransferableAgentsResponse, UpdateQuickReplyRequest, UpdateResponse, UpdateSettingsRequest,
+    UrlPreview, WhatsAppTemplate,
 };
 
 #[derive(OpenApi)]
@@ -48,6 +49,7 @@ use crate::models::whatsapp::{
         crate::modules::whatsapp::handler::update_quick_reply_handler,
         crate::modules::whatsapp::handler::delete_quick_reply_handler,
         crate::modules::whatsapp::handler::duplicate_quick_reply_handler,
+        crate::modules::whatsapp::handler::list_templates_handler,
     ),
     components(
         schemas(
@@ -70,10 +72,12 @@ use crate::models::whatsapp::{
             TransferableAgentsResponse,
             SettingsListResponse, SettingsResponse,
             QuickRepliesListResponse, QuickReplyResponse,
+            TemplatesListResponse,
             UpdateResponse,
             // WhatsApp — Items
             ConversationItem, MessageItem, SettingsItem,
             TransferableAgentItem, ReplyToItem, UrlPreview, QuickReplyItem,
+            WhatsAppTemplate,
         )
     ),
     tags(
