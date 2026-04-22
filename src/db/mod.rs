@@ -261,6 +261,9 @@ pub trait WhatsAppRepository {
 
     // Settings
     async fn find_wa_settings_by_phone(&self, phone: &str) -> Result<Option<WaSettings>, String>;
+    /// Batch-lookup: `business_phone → workspace_name`. Ignora el flag `active` (es sólo display).
+    /// Los números sin `WaSettings` configurado o con `workspace_name` vacío quedan fuera del mapa.
+    async fn get_workspace_names(&self, phones: &[String]) -> Result<HashMap<String, String>, String>;
     async fn get_all_wa_settings(&self) -> Result<Vec<WaSettings>, String>;
     async fn create_wa_settings(&self, settings: WaSettings) -> Result<WaSettings, String>;
     /// Actualiza campos mutables de `WaSettings`. Todos opcionales: `None` significa "no tocar".

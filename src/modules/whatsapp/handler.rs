@@ -300,8 +300,10 @@ pub async fn receive_webhook(
 
                     // Si la conversación es nueva, avisar al front antes del mensaje.
                     if conv_created {
+                        let ws_name = Some(settings.workspace_name.clone())
+                            .filter(|w| !w.is_empty());
                         let new_ev = WsServerEvent::ConversacionNueva {
-                            conversation: conv_to_item(conv_now.clone(), false, None),
+                            conversation: conv_to_item(conv_now.clone(), false, None, ws_name),
                         };
                         broadcast_all(&state.ws_registry, &new_ev).await;
                     } else if was_reopened {
@@ -410,11 +412,21 @@ pub async fn list_conversations_handler(
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
 
+    // Batch-fetch workspace_name por business_phone único.
+    let mut unique_phones: Vec<String> = convs.iter().map(|c| c.business_phone.clone()).collect();
+    unique_phones.sort();
+    unique_phones.dedup();
+    let workspaces = state.db
+        .get_workspace_names(&unique_phones)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
+
     let data = convs
         .into_iter()
         .map(|c| {
             let last_opened = c.id.and_then(|id| opens.get(&id).copied());
-            conv_to_item(c, false, last_opened)
+            let ws = workspaces.get(&c.business_phone).cloned();
+            conv_to_item(c, false, last_opened, ws)
         })
         .collect();
 
@@ -450,10 +462,11 @@ pub async fn get_conversation_handler(
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
     let last_opened = opens.get(&oid).copied();
+    let workspace_name = resolve_workspace_name(&state, &conv.business_phone).await;
 
     Ok(Json(ConversationDetailResponse {
         ok: true,
-        conversation: conv_to_item(conv, true, last_opened),
+        conversation: conv_to_item(conv, true, last_opened, workspace_name),
     }))
 }
 
@@ -539,10 +552,11 @@ pub async fn get_conversation_messages_handler(
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
     let last_opened = opens.get(&oid).copied();
+    let workspace_name = resolve_workspace_name(&state, &conv_after.business_phone).await;
 
     Ok(Json(ConversationMessagesResponse {
         ok: true,
-        conversation: conv_to_item(conv_after, true, last_opened),
+        conversation: conv_to_item(conv_after, true, last_opened, workspace_name),
         messages: messages
             .into_iter()
             .map(|m| {
@@ -801,10 +815,11 @@ pub async fn take_conversation_handler(
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
     let last_opened = opens.get(&oid).copied();
+    let workspace_name = resolve_workspace_name(&state, &conv.business_phone).await;
 
     Ok(Json(TakeConversationResponse {
         ok: true,
-        conversation: conv_to_item(conv, true, last_opened),
+        conversation: conv_to_item(conv, true, last_opened, workspace_name),
     }))
 }
 
@@ -863,13 +878,6 @@ pub async fn transfer_conversation_handler(
         );
     }
 
-    let ev = WsServerEvent::ChatTransferido {
-        conversation_id: id.clone(),
-        from_user_id: from_agent,
-        to_user_id: payload.user_id.clone(),
-    };
-    broadcast_all(&state.ws_registry, &ev).await;
-
     let conv_after = state.db
         .find_conversation_by_id(&oid)
         .await
@@ -881,10 +889,21 @@ pub async fn transfer_conversation_handler(
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
     let last_opened = opens.get(&oid).copied();
+    let workspace_name = resolve_workspace_name(&state, &conv_after.business_phone).await;
+    let conv_item = conv_to_item(conv_after, true, last_opened, workspace_name);
+
+    // Emitir tras tener el item listo — incluye el estado actualizado con workspace_name y assigned_to nuevo.
+    let ev = WsServerEvent::ChatTransferido {
+        conversation_id: id.clone(),
+        from_user_id: from_agent,
+        to_user_id: payload.user_id.clone(),
+        conversation: conv_item.clone(),
+    };
+    broadcast_all(&state.ws_registry, &ev).await;
 
     Ok(Json(ConversationDetailResponse {
         ok: true,
-        conversation: conv_to_item(conv_after, true, last_opened),
+        conversation: conv_item,
     }))
 }
 
@@ -938,10 +957,11 @@ pub async fn close_conversation_handler(
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
     let last_opened = opens.get(&oid).copied();
+    let workspace_name = resolve_workspace_name(&state, &conv_after.business_phone).await;
 
     Ok(Json(ConversationDetailResponse {
         ok: true,
-        conversation: conv_to_item(conv_after, true, last_opened),
+        conversation: conv_to_item(conv_after, true, last_opened, workspace_name),
     }))
 }
 
@@ -1213,12 +1233,14 @@ fn conv_to_item(
     c: WaConversation,
     include_client_id: bool,
     last_opened_at: Option<DateTime>,
+    workspace_name: Option<String>,
 ) -> ConversationItem {
     ConversationItem {
         id: c.id.map(|o| o.to_hex()).unwrap_or_default(),
         customer_phone: c.phone,
         customer_name: c.name,
         business_phone: c.business_phone,
+        workspace_name,
         status: c.status,
         assigned_to: c.assigned_to,
         last_message_at: iso8601(c.last_message_at),
@@ -1228,6 +1250,20 @@ fn conv_to_item(
         client_id: if include_client_id { c.client_id.map(|o| o.to_hex()) } else { None },
         last_opened_at: last_opened_at.map(iso8601),
     }
+}
+
+/// Atajo para handlers que tocan una sola conversación: resuelve `workspace_name`
+/// por su `business_phone` vía `WaSettings`.
+async fn resolve_workspace_name(state: &Arc<AppState>, business_phone: &str) -> Option<String> {
+    if business_phone.is_empty() {
+        return None;
+    }
+    state
+        .db
+        .get_workspace_names(&[business_phone.to_string()])
+        .await
+        .ok()
+        .and_then(|m| m.get(business_phone).cloned())
 }
 
 fn settings_to_item(s: WaSettings) -> SettingsItem {

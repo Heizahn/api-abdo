@@ -419,6 +419,29 @@ impl WhatsAppRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
+    async fn get_workspace_names(&self, phones: &[String]) -> Result<HashMap<String, String>, String> {
+        if phones.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut cursor = self.wa_settings()
+            .find(doc! { "phone": { "$in": phones } })
+            .with_options(
+                FindOptions::builder()
+                    .projection(doc! { "phone": 1, "workspace_name": 1 })
+                    .build(),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut out = HashMap::with_capacity(phones.len());
+        while let Some(s) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            if !s.workspace_name.is_empty() {
+                out.insert(s.phone, s.workspace_name);
+            }
+        }
+        Ok(out)
+    }
+
     async fn get_all_wa_settings(&self) -> Result<Vec<WaSettings>, String> {
         self.wa_settings()
             .find(doc! {})

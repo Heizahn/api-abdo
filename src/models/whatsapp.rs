@@ -209,6 +209,9 @@ pub struct ConversationItem {
     pub customer_name: Option<String>,
     /// Número de negocio (WA) que recibió el mensaje, en E.164 sin "+"
     pub business_phone: String,
+    /// Nombre legible del workspace (Meta Business) correspondiente al `business_phone`.
+    /// `null` si no hay `WaSettings` configurado para ese número.
+    pub workspace_name: Option<String>,
     /// "pending" | "in_progress" | "closed"
     pub status: String,
     pub assigned_to: Option<String>,

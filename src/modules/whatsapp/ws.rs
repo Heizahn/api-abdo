@@ -62,6 +62,8 @@ pub enum WsServerEvent {
         conversation_id: String,
         from_user_id: Option<String>,
         to_user_id: String,
+        /// Estado actualizado de la conversación (incluye `workspace_name` y `assigned_to` nuevo).
+        conversation: ConversationItem,
     },
 
     /// Conversación cerrada.
