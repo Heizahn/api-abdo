@@ -78,6 +78,16 @@ pub enum WsServerEvent {
         status: String,
     },
 
+    /// Preview de URL listo para un mensaje ya existente. El front debe
+    /// mergear `message.url_preview` en la burbuja que ya tiene, sin crear
+    /// duplicado (el `id` coincide con el `MessageItem` ya entregado vía
+    /// `MENSAJE_NUEVO` o el response HTTP de envío).
+    #[serde(rename = "URL_PREVIEW_READY")]
+    UrlPreviewReady {
+        conversation_id: String,
+        message: MessageItem,
+    },
+
     /// Batch de inbound marcados como leídos por el agente (visto en la UI).
     /// `message_ids` son los `wa_message_id` (los mismos que llegan en `MENSAJE_ACTUALIZADO`).
     #[serde(rename = "MENSAJES_VISTOS")]

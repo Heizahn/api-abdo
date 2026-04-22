@@ -10,7 +10,7 @@ use crate::models::whatsapp::{
     SendMessageRequest, SendMessageResponse, SettingsItem, SettingsListResponse,
     SettingsResponse, TakeConversationResponse, TransferConversationRequest,
     ReplyToItem, TransferableAgentItem, TransferableAgentsResponse, UpdateResponse,
-    UpdateSettingsRequest,
+    UpdateSettingsRequest, UrlPreview,
 };
 
 #[derive(OpenApi)]
@@ -65,7 +65,7 @@ use crate::models::whatsapp::{
             UpdateResponse,
             // WhatsApp — Items
             ConversationItem, MessageItem, SettingsItem,
-            TransferableAgentItem, ReplyToItem,
+            TransferableAgentItem, ReplyToItem, UrlPreview,
         )
     ),
     tags(

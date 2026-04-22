@@ -83,7 +83,34 @@ pub struct WaMessage {
     /// `context.id` cuando el cliente cita un mensaje del negocio.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_wa_message_id: Option<String>,
+    /// Preview de URL (OG/Twitter Card). Se rellena async tras guardar el mensaje:
+    /// el handler persiste el mensaje con `None`, dispara un job que fetchea la
+    /// primera URL del cuerpo, y cuando termina hace `$set` aquí y emite
+    /// `URL_PREVIEW_READY` por WS. `None` si el mensaje no tiene URL o el fetch
+    /// no produjo un preview válido.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_preview: Option<UrlPreview>,
     pub timestamp: DateTime,
+}
+
+/// Preview de URL extraído server-side del cuerpo de un mensaje.
+///
+/// El fetch se hace desde el backend (no desde el browser del agente) para:
+/// - Evitar CORS del servidor de destino.
+/// - Cachear por URL (Redis, SHA-256 de la URL, TTL 24h).
+/// - No filtrar la IP del agente al sitio de destino.
+/// - Aplicar SSRF guard: no se permite resolver a IPs privadas / loopback.
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+pub struct UrlPreview {
+    /// URL canónica (después de seguir redirects; hasta 3 hops).
+    pub url: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    /// URL absoluta (og:image / twitter:image). El front la consume directo.
+    pub image_url: Option<String>,
+    /// `og:site_name` o, si falta, el hostname final.
+    pub site_name: Option<String>,
+    pub favicon_url: Option<String>,
 }
 
 // ============================================
@@ -296,6 +323,10 @@ pub struct MessageItem {
     /// Mensaje citado (quoted reply). `null` si no es respuesta o si el
     /// mensaje original ya no existe en la DB.
     pub reply_to: Option<ReplyToItem>,
+    /// Preview de URL (OG/Twitter Card). `null` mientras el job de fetch no
+    /// haya terminado, si el mensaje no tenía URL, o si el fetch falló.
+    /// Cuando llega, el front lo recibe también por WS (`URL_PREVIEW_READY`).
+    pub url_preview: Option<UrlPreview>,
     /// ISO-8601 (RFC 3339) UTC
     pub created_at: String,
 }

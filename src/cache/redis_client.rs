@@ -1,4 +1,5 @@
 use redis::{Client, AsyncCommands, RedisError};
+use sha2::{Digest, Sha256};
 use crate::config::Config;
 use crate::utils::timezone::VenezuelaDateTime;
 
@@ -87,6 +88,40 @@ impl RedisClient {
         }
     }
 
+    // ============================================
+    // WhatsApp — cache de URL previews
+    // ============================================
+
+    /// Lee el cache de preview por URL. Retorna:
+    /// - `Some(Some(json))` → hit con preview
+    /// - `Some(None)`       → hit negativo (URL ya intentada sin preview; no re-fetchear)
+    /// - `None`             → miss (hay que fetchear)
+    ///
+    /// Se guarda como JSON: `"null"` para miss negativo, el objeto serializado para hit.
+    pub async fn get_url_preview(&self, url: &str) -> Option<Option<serde_json::Value>> {
+        let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;
+        let raw: Option<String> = conn.get(url_preview_key(url)).await.ok().flatten();
+        let s = raw?;
+        // `null` literal = hit negativo (URL mala, no re-fetchear hasta expirar TTL).
+        if s.trim() == "null" {
+            return Some(None);
+        }
+        serde_json::from_str::<serde_json::Value>(&s).ok().map(Some)
+    }
+
+    /// Guarda preview (o miss negativo con `None`) por URL con TTL de 24h.
+    pub async fn set_url_preview(&self, url: &str, preview: Option<&serde_json::Value>) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let raw = match preview {
+            Some(v) => v.to_string(),
+            None => "null".to_string(),
+        };
+        let _: Result<(), _> = conn.set_ex(url_preview_key(url), raw, 86_400).await;
+    }
+
     /// Intenta adquirir un lock de asignación para una conversación.
     /// Retorna true si el lock fue adquirido (esta instancia debe proceder).
     /// TTL de 15 segundos para evitar locks eternos.
@@ -115,6 +150,17 @@ impl RedisClient {
 /// cache miss, forzando una nueva consulta a la BD.
 fn agent_load_key(agent_id: &str) -> String {
     format!("wa:load:{}", agent_id)
+}
+
+/// Hash de la URL para evitar keys gigantes. URL-sensitive: cualquier diferencia
+/// (scheme, case del path, fragment) genera keys distintas.
+fn url_preview_key(url: &str) -> String {
+    let digest = Sha256::digest(url.as_bytes());
+    let mut hex = String::with_capacity(64);
+    for b in digest.iter() {
+        hex.push_str(&format!("{:02x}", b));
+    }
+    format!("wa:url_preview:{}", hex)
 }
 
 fn exchange_rate_key() -> String {

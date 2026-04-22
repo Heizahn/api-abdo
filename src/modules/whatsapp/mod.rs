@@ -1,6 +1,7 @@
 pub mod assignment;
 pub mod handler;
 pub mod service;
+pub mod url_preview;
 pub mod ws;
 
 use axum::{

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::db::WhatsAppRepository;
 use crate::db::mongo::MongoDB;
-use crate::models::whatsapp::{WaConversation, WaConversationOpen, WaMessage, WaSettings};
+use crate::models::whatsapp::{UrlPreview, WaConversation, WaConversationOpen, WaMessage, WaSettings};
 
 impl MongoDB {
     pub(crate) fn wa_conversations(&self) -> mongodb::Collection<WaConversation> {
@@ -400,6 +400,26 @@ impl WhatsAppRepository for MongoDB {
                         "timestamp": DateTime::now(),
                     },
                 },
+            )
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn set_message_url_preview(
+        &self,
+        id: &ObjectId,
+        preview: &UrlPreview,
+    ) -> Result<Option<WaMessage>, String> {
+        use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+        let bson_preview = mongodb::bson::to_bson(preview).map_err(|e| e.to_string())?;
+        let opts = FindOneAndUpdateOptions::builder()
+            .return_document(ReturnDocument::After)
+            .build();
+        self.wa_messages()
+            .find_one_and_update(
+                doc! { "_id": id },
+                doc! { "$set": { "url_preview": bson_preview } },
             )
             .with_options(opts)
             .await

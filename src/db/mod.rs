@@ -1,6 +1,6 @@
 pub mod mongo;
 use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
-use crate::models::whatsapp::{WaConversation, WaMessage, WaSettings};
+use crate::models::whatsapp::{UrlPreview, WaConversation, WaMessage, WaSettings};
 use std::collections::HashMap;
 
 use crate::models::payment::{Bank, PaymentReport, ReferenceMatchInfo};
@@ -247,6 +247,14 @@ pub trait WhatsAppRepository {
         id: &ObjectId,
         new_wa_message_id: &str,
         status: &str,
+    ) -> Result<Option<WaMessage>, String>;
+    /// Setea el `url_preview` del mensaje tras el fetch async. Devuelve el doc
+    /// actualizado para que el handler arme el `MessageItem` completo y lo
+    /// broadcastee por WS.
+    async fn set_message_url_preview(
+        &self,
+        id: &ObjectId,
+        preview: &UrlPreview,
     ) -> Result<Option<WaMessage>, String>;
     /// Batch-lookup por `wa_message_id`: devuelve un mapa `wamid → mensaje` para los
     /// que existan. Usado para enriquecer `MessageItem.reply_to` con un preview del

@@ -292,6 +292,7 @@ pub async fn receive_webhook(
                         sent_by: None,
                         idempotency_key: None,
                         reply_to_wa_message_id: msg.context.as_ref().map(|c| c.id.clone()),
+                        url_preview: None,
                         timestamp: msg_ts,
                     };
 
@@ -335,6 +336,8 @@ pub async fn receive_webhook(
 
                     // MENSAJE_NUEVO a todos los conectados; el front filtra por conversación abierta.
                     let reply_to = resolve_reply_to_for_one(&state, &saved).await;
+                    let saved_oid = saved.id;
+                    let preview_text = saved.body.clone();
                     let message_item = msg_to_item(saved, None, reply_to);
                     let agent_count = state.ws_registry.read().await.len();
                     tracing::info!(
@@ -346,6 +349,17 @@ pub async fn receive_webhook(
                         message: message_item,
                     };
                     broadcast_all(&state.ws_registry, &msg_ev).await;
+
+                    // URL preview: fire-and-forget. Si el cuerpo trae una URL,
+                    // el job fetchea OG tags y emite URL_PREVIEW_READY cuando termina.
+                    if let (Some(msg_oid), Some(text)) = (saved_oid, preview_text) {
+                        super::url_preview::spawn_preview_job(
+                            state.clone(),
+                            msg_oid,
+                            conv_id,
+                            text,
+                        );
+                    }
 
                     // Auto-asignación: solo si sigue pending sin dueño.
                     if conv_now.assigned_to.is_none() {
@@ -697,6 +711,7 @@ pub async fn send_message_handler(
         sent_by: Some(claims.id.clone()),
         idempotency_key: payload.idempotency_key.clone(),
         reply_to_wa_message_id: payload.reply_to.clone(),
+        url_preview: None,
         timestamp: DateTime::now(),
     };
 
@@ -704,6 +719,7 @@ pub async fn send_message_handler(
     state.db.touch_conversation(&oid, &payload.content, false, None).await.map_err(|e| ApiError::DatabaseError(e))?;
 
     let rto = resolve_reply_to_for_one(&state, &saved).await;
+    let saved_oid = saved.id;
     let item = msg_to_item(saved, Some(claims.name.clone()), rto);
 
     // Broadcast del mensaje outbound. El front deduplica contra `idempotency_key`
@@ -713,6 +729,18 @@ pub async fn send_message_handler(
         message: item.clone(),
     };
     broadcast_all(&state.ws_registry, &ev).await;
+
+    // URL preview async: si el agente mandó una URL, fetcheamos OG tags y
+    // emitimos URL_PREVIEW_READY cuando termina. El preview respeta cache
+    // Redis por URL, así que re-enviar el mismo link no re-fetchea.
+    if let Some(msg_oid) = saved_oid {
+        super::url_preview::spawn_preview_job(
+            state.clone(),
+            msg_oid,
+            oid,
+            payload.content.clone(),
+        );
+    }
 
     Ok(Json(SendMessageResponse {
         ok: true,
@@ -1457,8 +1485,22 @@ fn msg_to_item(
         from_user_name,
         idempotency_key: m.idempotency_key,
         reply_to,
+        url_preview: m.url_preview,
         created_at: iso8601(m.timestamp),
     }
+}
+
+/// Atajo usado por jobs async (`url_preview`) para armar un `MessageItem`
+/// completo a partir de un `WaMessage` recién releído: resuelve `sent_by_name`
+/// y `reply_to` en un solo call. Costo: 1-2 queries a `Users` / `WaMessages`.
+pub(super) async fn build_message_item(state: &Arc<AppState>, m: WaMessage) -> MessageItem {
+    use crate::db::UserRepository;
+    let name = match m.sent_by.as_deref() {
+        Some(id) => state.db.find_user_by_id(id).await.ok().flatten().map(|u| u.name),
+        None => None,
+    };
+    let reply_to = resolve_reply_to_for_one(state, &m).await;
+    msg_to_item(m, name, reply_to)
 }
 
 /// Trunca el cuerpo del mensaje citado a ~80 chars (seguro en UTF-8).
