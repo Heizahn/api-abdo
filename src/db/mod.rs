@@ -218,6 +218,16 @@ pub trait WhatsAppRepository {
     /// desde el webhook al recibir un mensaje entrante para llevar la ventana
     /// de 24h (freeform) alineada con Meta.
     async fn update_last_inbound_at(&self, id: &ObjectId, when: mongodb::bson::DateTime) -> Result<(), String>;
+    /// Setea `client_id` (link al cliente ISP) de una conversación. Usado por
+    /// `POST /conversations/initiate` al crear una nueva conversación que
+    /// matchea por teléfono con un cliente existente.
+    async fn update_conversation_client_id(&self, id: &ObjectId, client_id: &ObjectId) -> Result<(), String>;
+    /// Backfill one-shot: rellena `last_inbound_at` en conversaciones que no lo
+    /// tengan, usando el `timestamp` más reciente de los mensajes inbound. Se
+    /// corre al arrancar para que la ventana de 24h funcione sobre datos
+    /// existentes anteriores al deploy de Feature 3. Retorna la cantidad de
+    /// documentos actualizados.
+    async fn backfill_last_inbound_at(&self) -> Result<u64, String>;
     async fn save_message(&self, message: WaMessage) -> Result<WaMessage, String>;
     /// Cursor-based: `cursor` de la forma `<millis>_<hex_id>` para paginación descendente por `last_message_at`.
     async fn get_conversations(&self, status: Option<&str>, assigned_to: Option<&str>, business_phone: Option<&str>, cursor: Option<&str>, limit: i64) -> Result<Vec<WaConversation>, String>;
@@ -287,6 +297,9 @@ pub trait WhatsAppRepository {
 
     // Settings
     async fn find_wa_settings_by_phone(&self, phone: &str) -> Result<Option<WaSettings>, String>;
+    /// Lookup por `_id` (hex de ObjectId). Usado por `POST /conversations/initiate`
+    /// para resolver el workspace emisor desde el payload. No filtra por `active`.
+    async fn find_wa_settings_by_id(&self, id: &ObjectId) -> Result<Option<WaSettings>, String>;
     /// Lookup por `phone_number_id` (el string de Meta, no el E.164). Usado por
     /// el endpoint de templates. No filtra por `active` — un admin puede listar
     /// templates de un número pausado.

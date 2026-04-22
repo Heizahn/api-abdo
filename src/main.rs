@@ -64,6 +64,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         modules::whatsapp::backfill::run_waba_backfill(state_for_waba).await;
     });
 
+    let state_for_last_inbound = state.clone();
+    tokio::spawn(async move {
+        modules::whatsapp::backfill::run_last_inbound_backfill(state_for_last_inbound).await;
+    });
+
     tracing::info!("✅ Conexiones establecidas");
     // 4. Construir router de Axum
     let app = axum_router::build_router(state);

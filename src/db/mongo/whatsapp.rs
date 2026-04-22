@@ -141,6 +141,66 @@ impl WhatsAppRepository for MongoDB {
         Ok(())
     }
 
+    async fn update_conversation_client_id(
+        &self,
+        id: &ObjectId,
+        client_id: &ObjectId,
+    ) -> Result<(), String> {
+        self.wa_conversations()
+            .update_one(
+                doc! { "_id": id },
+                doc! { "$set": { "client_id": client_id } },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn backfill_last_inbound_at(&self) -> Result<u64, String> {
+        let messages = self.wa_messages();
+        let conversations = self.wa_conversations();
+
+        // Max timestamp de inbound por conversación.
+        let pipeline = vec![
+            doc! { "$match": { "direction": "in" } },
+            doc! { "$group": { "_id": "$conversation_id", "maxTs": { "$max": "$timestamp" } } },
+        ];
+
+        let mut cursor = messages.aggregate(pipeline).await.map_err(|e| e.to_string())?;
+
+        let mut updated: u64 = 0;
+        while let Some(doc) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            let conv_id = match doc.get_object_id("_id") {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let ts = match doc.get_datetime("maxTs") {
+                Ok(v) => *v,
+                Err(_) => continue,
+            };
+
+            // Sólo setea si falta o está en null — no pisa valores ya seteados
+            // por el webhook (que son la verdad más fresca).
+            let res = conversations
+                .update_one(
+                    doc! {
+                        "_id": conv_id,
+                        "$or": [
+                            { "last_inbound_at": { "$exists": false } },
+                            { "last_inbound_at": null },
+                        ],
+                    },
+                    doc! { "$set": { "last_inbound_at": ts } },
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+
+            updated += res.modified_count;
+        }
+
+        Ok(updated)
+    }
+
     async fn save_message(&self, message: WaMessage) -> Result<WaMessage, String> {
         let col = self.wa_messages();
 
@@ -488,6 +548,13 @@ impl WhatsAppRepository for MongoDB {
     async fn find_wa_settings_by_phone(&self, phone: &str) -> Result<Option<WaSettings>, String> {
         self.wa_settings()
             .find_one(doc! { "phone": phone, "active": true })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn find_wa_settings_by_id(&self, id: &ObjectId) -> Result<Option<WaSettings>, String> {
+        self.wa_settings()
+            .find_one(doc! { "_id": id })
             .await
             .map_err(|e| e.to_string())
     }

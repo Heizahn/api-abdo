@@ -1182,6 +1182,211 @@ pub async fn close_conversation_handler(
 }
 
 // ============================================
+// INICIAR CONVERSACIÓN (agent outbound first)
+// ============================================
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/conversations/initiate",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    request_body = InitiateConversationRequest,
+    responses(
+        (status = 200, description = "Template enviado y conversación creada/reutilizada", body = SendMessageResponse),
+        (status = 400, description = "Parámetros inválidos o template mal formado"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "El usuario no tiene permiso de chat o no pertenece al workspace"),
+        (status = 404, description = "Workspace (business_phone_id) no encontrado"),
+    )
+)]
+pub async fn initiate_conversation_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Json(payload): Json<InitiateConversationRequest>,
+) -> Result<Json<SendMessageResponse>, ApiError> {
+    require_can_chat(&state, &claims.id).await?;
+
+    let workspace_oid = ObjectId::parse_str(payload.business_phone_id.trim())
+        .map_err(|_| ApiError::BadRequest("business_phone_id inválido".into()))?;
+
+    let settings = state.db
+        .find_wa_settings_by_id(&workspace_oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    if !settings.agents.iter().any(|a| a == &claims.id) {
+        return Err(ApiError::Forbidden);
+    }
+
+    if !settings.active {
+        return Err(ApiError::BadRequest("workspace inactivo".into()));
+    }
+
+    if settings.phone_number_id.is_empty() || settings.access_token.is_empty() {
+        return Err(ApiError::BadRequest(
+            "workspace sin phone_number_id o access_token configurados".into(),
+        ));
+    }
+
+    let tpl = payload.template;
+    let tpl_name = tpl.name.trim();
+    let tpl_lang = tpl.language.trim();
+    if tpl_name.is_empty() || tpl_lang.is_empty() {
+        return Err(ApiError::MissingTemplateParams);
+    }
+
+    let idempotency_key = payload.idempotency_key.trim().to_string();
+    if idempotency_key.is_empty() {
+        return Err(ApiError::BadRequest("idempotency_key requerido".into()));
+    }
+
+    let to = normalize_to_e164(&payload.to);
+    if to.is_empty() {
+        return Err(ApiError::BadRequest("to inválido".into()));
+    }
+
+    // Linkear con cliente ISP si el teléfono matchea (best-effort — el link
+    // sirve para mostrar datos del cliente en la UI, no bloquea el envío).
+    let client_id = {
+        use crate::db::ProfileRepository;
+        state.db
+            .find_clients_by_phone(&to)
+            .await
+            .ok()
+            .and_then(|list| list.into_iter().next().map(|c| c._id))
+    };
+
+    // Upsert conversación. El nombre lo dejamos en None — si hay inbound
+    // posterior, Meta lo trae y se actualiza automáticamente.
+    let (conv, conv_created) = state.db
+        .upsert_conversation(&to, &settings.phone, None)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    let conv_id = conv.id
+        .ok_or_else(|| ApiError::Internal("conversación sin _id tras upsert".into()))?;
+
+    // Si se creó nueva y matcheó cliente, persistir el link. No reescribimos
+    // client_id en conversaciones existentes para no pisar un link manual.
+    if conv_created {
+        if let Some(cid) = client_id {
+            if let Err(e) = state.db.update_conversation_client_id(&conv_id, &cid).await {
+                tracing::warn!("initiate: no se pudo vincular client_id: {}", e);
+            }
+        }
+    }
+
+    // Asignar al iniciador si la conversación no tiene dueño. Esto evita que
+    // el auto-assign la reasigne a otro agente al primer inbound.
+    let needs_assign = conv.assigned_to.is_none();
+    if needs_assign {
+        if let Err(e) = state.db.assign_conversation(&conv_id, Some(&claims.id)).await {
+            tracing::warn!("initiate: assign_conversation error: {}", e);
+        } else {
+            state.redis.incr_agent_load(&claims.id).await;
+        }
+    }
+
+    // Idempotencia: si ya existe un mensaje con la misma key para esta
+    // conversación, devolverlo sin re-enviar (salvo que esté `failed`).
+    if let Some(existing) = state.db
+        .find_message_by_idempotency(&conv_id, &idempotency_key)
+        .await
+        .map_err(ApiError::DatabaseError)?
+    {
+        let is_failed = existing.status.as_deref() == Some("failed");
+        if !is_failed {
+            let rto = resolve_reply_to_for_one(&state, &existing).await;
+            let item = msg_to_item(existing, Some(claims.name.clone()), rto);
+            return Ok(Json(SendMessageResponse {
+                ok: true,
+                message_id: item.id.clone(),
+                message: item,
+            }));
+        }
+    }
+
+    // Descifrar access_token y construir el cliente Meta.
+    let token = decrypt_payload(&settings_secret(), &settings.access_token)
+        .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
+    let wa = WhatsAppService::new(
+        state.reqwest_client.clone(),
+        settings.phone_number_id.clone(),
+        token,
+    );
+
+    let components_value = tpl.components.as_ref()
+        .map(|v| serde_json::Value::Array(v.clone()));
+    let wa_id = wa.send_template(&to, tpl_name, tpl_lang, components_value.as_ref())
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let preview = tpl.rendered_text.as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("[plantilla: {}]", tpl_name));
+
+    let msg = WaMessage {
+        id: None,
+        conversation_id: conv_id,
+        wa_message_id: wa_id,
+        direction: "out".to_string(),
+        msg_type: "template".to_string(),
+        body: Some(preview.clone()),
+        media_id: None,
+        media_mime_type: None,
+        media_filename: None,
+        status: Some("sent".to_string()),
+        sent_by: Some(claims.id.clone()),
+        idempotency_key: Some(idempotency_key),
+        reply_to_wa_message_id: None,
+        url_preview: None,
+        voice: false,
+        template_name: Some(tpl_name.to_string()),
+        template_language: Some(tpl_lang.to_string()),
+        template_components: components_value,
+        timestamp: DateTime::now(),
+    };
+
+    let saved = state.db.save_message(msg).await.map_err(ApiError::DatabaseError)?;
+    state.db.touch_conversation(&conv_id, &preview, false, None)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    // Releer para emitir `ConversacionNueva` con el estado final (assigned_to,
+    // client_id, etc).
+    let conv_now = state.db
+        .find_conversation_by_id(&conv_id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .unwrap_or(conv);
+
+    let rto = resolve_reply_to_for_one(&state, &saved).await;
+    let item = msg_to_item(saved, Some(claims.name.clone()), rto);
+
+    if conv_created {
+        let ws_name = Some(settings.workspace_name.clone()).filter(|w| !w.is_empty());
+        let new_ev = WsServerEvent::ConversacionNueva {
+            conversation: conv_to_item(conv_now, false, None, ws_name),
+        };
+        broadcast_all(&state.ws_registry, &new_ev).await;
+    }
+
+    let msg_ev = WsServerEvent::MensajeNuevo {
+        conversation_id: conv_id.to_hex(),
+        message: item.clone(),
+    };
+    broadcast_all(&state.ws_registry, &msg_ev).await;
+
+    Ok(Json(SendMessageResponse {
+        ok: true,
+        message_id: item.id.clone(),
+        message: item,
+    }))
+}
+
+// ============================================
 // AGENTES TRANSFERIBLES
 // ============================================
 
@@ -2283,6 +2488,9 @@ fn parse_templates(raw: &serde_json::Value) -> Vec<WhatsAppTemplate> {
             return None;
         }
         let name = t.get("name").and_then(|v| v.as_str())?.to_string();
+        if !name.starts_with("sistema_abdo") {
+            return None;
+        }
         let language = t.get("language").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let category = t.get("category").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let components = t.get("components")

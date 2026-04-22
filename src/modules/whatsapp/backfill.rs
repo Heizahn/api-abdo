@@ -8,6 +8,18 @@ use crate::{
 
 use super::service::WhatsAppService;
 
+/// Backfill one-shot al arrancar: rellena `last_inbound_at` en conversaciones
+/// que no lo tengan (doc anterior al deploy de Feature 3), usando el timestamp
+/// máximo de los mensajes inbound. Sin esto, la ventana de 24h queda cerrada
+/// para toda conversación legacy aunque el cliente haya escrito hace minutos.
+pub async fn run_last_inbound_backfill(state: Arc<AppState>) {
+    match state.db.backfill_last_inbound_at().await {
+        Ok(0) => tracing::info!("last-inbound-backfill: nada que hacer"),
+        Ok(n) => tracing::info!("last-inbound-backfill: {} conversaciones actualizadas", n),
+        Err(e) => tracing::warn!("last-inbound-backfill: {}", e),
+    }
+}
+
 /// Backfill one-shot al arrancar: por cada `WaSettings` sin
 /// `whatsapp_business_account_id`, consulta a Meta con el access_token propio
 /// del workspace y persiste el WABA ID. Best-effort: un fallo por número no

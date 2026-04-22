@@ -7,9 +7,9 @@ use crate::models::auth::{
 use crate::models::whatsapp::{
     ConversationDetailResponse, ConversationItem, ConversationMessagesResponse,
     ConversationsListResponse, CreateQuickReplyRequest, CreateSettingsRequest,
-    DuplicateQuickReplyRequest, MarkReadResponse, MessageItem, QuickRepliesListResponse,
-    QuickReplyItem, QuickReplyResponse, ReplyToItem, SendMessageRequest, SendMessageResponse,
-    SendTemplatePayload,
+    DuplicateQuickReplyRequest, InitiateConversationRequest, MarkReadResponse, MessageItem,
+    QuickRepliesListResponse, QuickReplyItem, QuickReplyResponse, ReplyToItem,
+    SendMessageRequest, SendMessageResponse, SendTemplatePayload,
     SettingsItem, SettingsListResponse, SettingsResponse, TakeConversationResponse,
     TemplatesListResponse, TransferConversationRequest, TransferableAgentItem,
     TransferableAgentsResponse, UpdateQuickReplyRequest, UpdateResponse, UpdateSettingsRequest,
@@ -39,6 +39,7 @@ use crate::models::whatsapp::{
         crate::modules::whatsapp::handler::take_conversation_handler,
         crate::modules::whatsapp::handler::transfer_conversation_handler,
         crate::modules::whatsapp::handler::close_conversation_handler,
+        crate::modules::whatsapp::handler::initiate_conversation_handler,
         crate::modules::whatsapp::handler::list_transferable_agents_handler,
         crate::modules::whatsapp::handler::list_settings_handler,
         crate::modules::whatsapp::handler::create_settings_handler,
@@ -60,7 +61,8 @@ use crate::models::whatsapp::{
             RefreshRequest, RefreshResponse,
             TokenPair,
             // WhatsApp — Requests
-            SendMessageRequest, SendTemplatePayload, TransferConversationRequest,
+            SendMessageRequest, SendTemplatePayload, InitiateConversationRequest,
+            TransferConversationRequest,
             CreateSettingsRequest, UpdateSettingsRequest,
             CreateQuickReplyRequest, UpdateQuickReplyRequest, DuplicateQuickReplyRequest,
             // WhatsApp — Responses

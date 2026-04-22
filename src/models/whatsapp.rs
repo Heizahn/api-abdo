@@ -300,6 +300,22 @@ pub struct SendTemplatePayload {
     pub rendered_text: Option<String>,
 }
 
+/// Iniciar una conversación desde el agente (sin esperar mensaje inbound).
+/// Siempre envía un template aprobado por Meta — al no haber inbounds
+/// previos, la ventana de 24h está cerrada por definición.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct InitiateConversationRequest {
+    /// Hex de `WaSettings._id` desde donde sale el mensaje (workspace emisor).
+    pub business_phone_id: String,
+    /// Teléfono del destinatario. Cualquier formato VE es aceptado; el
+    /// backend normaliza a E.164 sin "+" (ej: "584141234567").
+    pub to: String,
+    /// Template aprobado con los parámetros ya interpolados.
+    pub template: SendTemplatePayload,
+    /// Clave de idempotencia: evita enviar duplicados si el cliente reintenta.
+    pub idempotency_key: String,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct TransferConversationRequest {
     /// UUID del agente destino. Acepta cualquier staff/admin
