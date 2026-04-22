@@ -154,13 +154,23 @@ pub async fn receive_webhook(
                                 message_id: updated.wa_message_id.clone(),
                                 status: s.status.clone(),
                             };
+                            tracing::info!(
+                                "[webhook] status {} → broadcast MENSAJE_ACTUALIZADO (wa_id={}, conv={})",
+                                s.status, updated.wa_message_id, updated.conversation_id.to_hex()
+                            );
                             broadcast_all(&state.ws_registry, &event).await;
                         }
                         Ok(None) => {
-                            // mensaje no encontrado en DB — normal si es status de un mensaje no nuestro
+                            tracing::debug!(
+                                "[webhook] status {} para wa_id={} sin doc en DB (ignorado)",
+                                s.status, s.id
+                            );
                         }
                         Err(e) => {
-                            tracing::warn!("update_message_status error: {}", e);
+                            tracing::error!(
+                                "[webhook] update_message_status error (wa_id={}, status={}): {}",
+                                s.id, s.status, e
+                            );
                         }
                     }
                 }

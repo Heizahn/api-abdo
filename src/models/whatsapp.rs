@@ -56,15 +56,20 @@ pub struct WaMessage {
     pub direction: String,
     /// "text" | "image" | "document" | "audio" | "video" | "template" | "interactive" | "unknown"
     pub msg_type: String,
+    #[serde(default)]
     pub body: Option<String>,
     /// ID de media en WhatsApp (para imágenes/documentos)
+    #[serde(default)]
     pub media_id: Option<String>,
     /// Solo para outbound: "sent" | "delivered" | "read" | "failed"
+    #[serde(default)]
     pub status: Option<String>,
     /// UUID del agente que envió (solo outbound)
+    #[serde(default)]
     pub sent_by: Option<String>,
     /// Clave de idempotencia con la que el front disparó el envío. Usada para
     /// asociar respuesta HTTP con evento WS y deduplicar en la UI.
+    #[serde(default)]
     pub idempotency_key: Option<String>,
     pub timestamp: DateTime,
 }
