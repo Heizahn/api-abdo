@@ -66,6 +66,65 @@ impl ProfileRepository for MongoDB {
         })
     }
 
+    async fn get_client_names_by_ids(
+        &self,
+        ids: &[ObjectId],
+    ) -> Result<HashMap<ObjectId, String>, String> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let filter = doc! { "_id": { "$in": ids } };
+        let projection = doc! { "_id": 1, "sName": 1 };
+        let mut cursor = self
+            .customers()
+            .find(filter)
+            .projection(projection)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut out = HashMap::with_capacity(ids.len());
+        while let Some(doc) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            if let Ok(id) = doc.get_object_id("_id") {
+                let name = doc.get_str("sName").unwrap_or_default().trim().to_string();
+                if !name.is_empty() {
+                    out.insert(id, name);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn get_client_names_by_phones(
+        &self,
+        phones: &[String],
+    ) -> Result<HashMap<String, String>, String> {
+        if phones.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let filter = doc! { "sPhone": { "$in": phones } };
+        let projection = doc! { "sPhone": 1, "sName": 1 };
+        let mut cursor = self
+            .customers()
+            .find(filter)
+            .projection(projection)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut out: HashMap<String, String> = HashMap::with_capacity(phones.len());
+        while let Some(doc) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            let phone = doc.get_str("sPhone").unwrap_or_default().to_string();
+            if phone.is_empty() {
+                continue;
+            }
+            let name = doc.get_str("sName").unwrap_or_default().trim().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            // Primer match por teléfono gana; si hay más de un cliente con el
+            // mismo teléfono, el resto se descarta.
+            out.entry(phone).or_insert(name);
+        }
+        Ok(out)
+    }
+
     async fn find_clients_by_phone(&self, s_phone: &str) -> Result<Vec<Client>, String> {
         let filter = doc! { "sPhone": s_phone };
         let mut cursor = self

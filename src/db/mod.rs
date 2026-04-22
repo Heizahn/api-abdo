@@ -60,6 +60,14 @@ pub trait ProfileRepository {
 
     async fn find_clients_by_phone(&self, s_phone: &str) -> Result<Vec<Client>, String>;
     async fn find_client_by_id(&self, id: &str) -> Result<Client, String>;
+    /// Batch-lookup de `sName` por `_id` para un conjunto de clientes. Devuelve
+    /// solo los que existen y tienen nombre no vacío. Usado para resolver el
+    /// nombre de contacto en listados de WhatsApp sin caer en N+1.
+    async fn get_client_names_by_ids(&self, ids: &[ObjectId]) -> Result<HashMap<ObjectId, String>, String>;
+    /// Batch-lookup de `sName` por `sPhone`. Si más de un cliente comparte
+    /// teléfono, devuelve el primero que encuentre Mongo. Usado para resolver
+    /// el nombre cuando la conversación todavía no tiene `client_id` linkeado.
+    async fn get_client_names_by_phones(&self, phones: &[String]) -> Result<HashMap<String, String>, String>;
     async fn find_tax_by_id(&self, id: Option<ObjectId>) -> Result<Option<Tax>, String>;
 
     async fn get_clients_by_phone_group(&self, phone: String) -> Result<Vec<Document>, MongoError>;

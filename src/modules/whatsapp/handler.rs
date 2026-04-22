@@ -335,8 +335,9 @@ pub async fn receive_webhook(
                     if conv_created {
                         let ws_name = Some(settings.workspace_name.clone())
                             .filter(|w| !w.is_empty());
+                        let resolved = resolve_customer_name(&state, &conv_now).await;
                         let new_ev = WsServerEvent::ConversacionNueva {
-                            conversation: conv_to_item(conv_now.clone(), false, None, ws_name),
+                            conversation: conv_to_item(conv_now.clone(), false, None, ws_name, resolved),
                         };
                         broadcast_all(&state.ws_registry, &new_ev).await;
                     } else if was_reopened {
@@ -486,12 +487,36 @@ pub async fn list_conversations_handler(
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
 
+    // Batch-resolve nombre del contacto contra Clients: primero por client_id,
+    // luego por teléfono para los que no tienen link. Evita N+1 en listados.
+    let (names_by_id, names_by_phone) = {
+        use crate::db::ProfileRepository;
+        let client_ids: Vec<ObjectId> = convs.iter().filter_map(|c| c.client_id).collect();
+        let mut customer_phones: Vec<String> = convs.iter()
+            .filter(|c| c.client_id.is_none())
+            .map(|c| c.phone.clone())
+            .collect();
+        customer_phones.sort();
+        customer_phones.dedup();
+        let (ids_res, phones_res) = tokio::join!(
+            state.db.get_client_names_by_ids(&client_ids),
+            state.db.get_client_names_by_phones(&customer_phones),
+        );
+        (
+            ids_res.map_err(ApiError::DatabaseError)?,
+            phones_res.map_err(ApiError::DatabaseError)?,
+        )
+    };
+
     let data = convs
         .into_iter()
         .map(|c| {
             let last_opened = c.id.and_then(|id| opens.get(&id).copied());
             let ws = workspaces.get(&c.business_phone).cloned();
-            conv_to_item(c, false, last_opened, ws)
+            let resolved = c.client_id
+                .and_then(|id| names_by_id.get(&id).cloned())
+                .or_else(|| names_by_phone.get(&c.phone).cloned());
+            conv_to_item(c, false, last_opened, ws, resolved)
         })
         .collect();
 
@@ -528,10 +553,11 @@ pub async fn get_conversation_handler(
         .map_err(|e| ApiError::DatabaseError(e))?;
     let last_opened = opens.get(&oid).copied();
     let workspace_name = resolve_workspace_name(&state, &conv.business_phone).await;
+    let resolved = resolve_customer_name(&state, &conv).await;
 
     Ok(Json(ConversationDetailResponse {
         ok: true,
-        conversation: conv_to_item(conv, true, last_opened, workspace_name),
+        conversation: conv_to_item(conv, true, last_opened, workspace_name, resolved),
     }))
 }
 
@@ -1032,10 +1058,11 @@ pub async fn take_conversation_handler(
         .map_err(|e| ApiError::DatabaseError(e))?;
     let last_opened = opens.get(&oid).copied();
     let workspace_name = resolve_workspace_name(&state, &conv.business_phone).await;
+    let resolved = resolve_customer_name(&state, &conv).await;
 
     Ok(Json(TakeConversationResponse {
         ok: true,
-        conversation: conv_to_item(conv, true, last_opened, workspace_name),
+        conversation: conv_to_item(conv, true, last_opened, workspace_name, resolved),
     }))
 }
 
@@ -1106,7 +1133,8 @@ pub async fn transfer_conversation_handler(
         .map_err(|e| ApiError::DatabaseError(e))?;
     let last_opened = opens.get(&oid).copied();
     let workspace_name = resolve_workspace_name(&state, &conv_after.business_phone).await;
-    let conv_item = conv_to_item(conv_after, true, last_opened, workspace_name);
+    let resolved = resolve_customer_name(&state, &conv_after).await;
+    let conv_item = conv_to_item(conv_after, true, last_opened, workspace_name, resolved);
 
     // Emitir tras tener el item listo — incluye el estado actualizado con workspace_name y assigned_to nuevo.
     let ev = WsServerEvent::ChatTransferido {
@@ -1174,10 +1202,11 @@ pub async fn close_conversation_handler(
         .map_err(|e| ApiError::DatabaseError(e))?;
     let last_opened = opens.get(&oid).copied();
     let workspace_name = resolve_workspace_name(&state, &conv_after.business_phone).await;
+    let resolved = resolve_customer_name(&state, &conv_after).await;
 
     Ok(Json(ConversationDetailResponse {
         ok: true,
-        conversation: conv_to_item(conv_after, true, last_opened, workspace_name),
+        conversation: conv_to_item(conv_after, true, last_opened, workspace_name, resolved),
     }))
 }
 
@@ -1367,8 +1396,9 @@ pub async fn initiate_conversation_handler(
 
     if conv_created {
         let ws_name = Some(settings.workspace_name.clone()).filter(|w| !w.is_empty());
+        let resolved = resolve_customer_name(&state, &conv_now).await;
         let new_ev = WsServerEvent::ConversacionNueva {
-            conversation: conv_to_item(conv_now, false, None, ws_name),
+            conversation: conv_to_item(conv_now, false, None, ws_name, resolved),
         };
         broadcast_all(&state.ws_registry, &new_ev).await;
     }
@@ -2050,12 +2080,17 @@ fn conv_to_item(
     include_client_id: bool,
     last_opened_at: Option<DateTime>,
     workspace_name: Option<String>,
+    resolved_name: Option<String>,
 ) -> ConversationItem {
     let (can_send_freeform, expires_iso) = compute_freeform_state(c.last_inbound_at);
+    // Prioridad: DB (Clients.sName) → WhatsApp profile (c.name) → null
+    let customer_name = resolved_name
+        .filter(|s| !s.trim().is_empty())
+        .or(c.name);
     ConversationItem {
         id: c.id.map(|o| o.to_hex()).unwrap_or_default(),
         customer_phone: c.phone,
-        customer_name: c.name,
+        customer_name,
         business_phone: c.business_phone,
         workspace_name,
         status: c.status,
@@ -2070,6 +2105,24 @@ fn conv_to_item(
         can_send_freeform,
         freeform_expires_at: expires_iso,
     }
+}
+
+/// Resuelve el nombre del contacto para una conversación contra `Clients`:
+/// si tiene `client_id` linkeado lo usa; si no, intenta por teléfono. Devuelve
+/// `None` cuando no matchea en DB — el caller cae a `WaConversation.name`.
+async fn resolve_customer_name(state: &Arc<AppState>, conv: &WaConversation) -> Option<String> {
+    use crate::db::ProfileRepository;
+    if let Some(cid) = conv.client_id {
+        let map = state.db.get_client_names_by_ids(&[cid]).await.ok()?;
+        if let Some(n) = map.get(&cid).cloned() {
+            return Some(n);
+        }
+    }
+    let map = state.db
+        .get_client_names_by_phones(&[conv.phone.clone()])
+        .await
+        .ok()?;
+    map.get(&conv.phone).cloned()
 }
 
 /// Ventana de 24h desde `last_inbound_at`. Usado por el gate de envío freeform,
