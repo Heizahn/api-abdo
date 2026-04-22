@@ -10,12 +10,10 @@ pub struct WhatsAppService {
 }
 
 impl WhatsAppService {
-    pub fn from_env(client: reqwest::Client) -> Result<Self> {
-        let access_token = std::env::var("WHATSAPP_ACCESS_TOKEN")
-            .map_err(|_| anyhow::anyhow!("Falta WHATSAPP_ACCESS_TOKEN"))?;
-        let phone_number_id = std::env::var("WHATSAPP_PHONE_NUMBER_ID")
-            .map_err(|_| anyhow::anyhow!("Falta WHATSAPP_PHONE_NUMBER_ID"))?;
-        Ok(Self { access_token, phone_number_id, client })
+    /// Construye el service con credenciales explícitas (provienen de `WaSettings`,
+    /// cifrado descifrado in-memory).
+    pub fn new(client: reqwest::Client, phone_number_id: String, access_token: String) -> Self {
+        Self { access_token, phone_number_id, client }
     }
 
     fn messages_url(&self) -> String {

@@ -357,9 +357,42 @@ impl WhatsAppRepository for MongoDB {
         Ok(ids)
     }
 
-    async fn find_message_by_wa_id(&self, wa_message_id: &str) -> Result<Option<WaMessage>, String> {
+    async fn find_message_by_idempotency(
+        &self,
+        conversation_id: &ObjectId,
+        idempotency_key: &str,
+    ) -> Result<Option<WaMessage>, String> {
         self.wa_messages()
-            .find_one(doc! { "wa_message_id": wa_message_id })
+            .find_one(doc! {
+                "conversation_id": conversation_id,
+                "idempotency_key": idempotency_key,
+            })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn update_message_retry(
+        &self,
+        id: &ObjectId,
+        new_wa_message_id: &str,
+        status: &str,
+    ) -> Result<Option<WaMessage>, String> {
+        use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+        let opts = FindOneAndUpdateOptions::builder()
+            .return_document(ReturnDocument::After)
+            .build();
+        self.wa_messages()
+            .find_one_and_update(
+                doc! { "_id": id },
+                doc! {
+                    "$set": {
+                        "wa_message_id": new_wa_message_id,
+                        "status": status,
+                        "timestamp": DateTime::now(),
+                    },
+                },
+            )
+            .with_options(opts)
             .await
             .map_err(|e| e.to_string())
     }
@@ -413,10 +446,25 @@ impl WhatsAppRepository for MongoDB {
     async fn update_wa_settings(
         &self,
         id: &ObjectId,
+        workspace_name: Option<String>,
+        phone_number_id: Option<String>,
+        access_token_cipher: Option<String>,
         agents: Option<Vec<String>>,
         active: Option<bool>,
     ) -> Result<(), String> {
         let mut set_doc = doc! { "updated_at": DateTime::now() };
+        if let Some(w) = workspace_name {
+            set_doc.insert("workspace_name", w);
+        }
+        if let Some(p) = phone_number_id {
+            set_doc.insert("phone_number_id", p);
+        }
+        // Sólo tocar el token si viene no-vacío — `Some("")` no debe borrarlo.
+        if let Some(t) = access_token_cipher {
+            if !t.is_empty() {
+                set_doc.insert("access_token", t);
+            }
+        }
         if let Some(a) = agents {
             set_doc.insert("agents", mongodb::bson::to_bson(&a).unwrap());
         }

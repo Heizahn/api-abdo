@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use crate::{
     auth::user_jwt::UserProfileClaims,
+    crypto::aes::{decrypt_payload, encrypt_payload},
     db::WhatsAppRepository,
     error::ApiError,
     models::whatsapp::*,
@@ -574,30 +575,73 @@ pub async fn send_message_handler(
 ) -> Result<Json<SendMessageResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
-    // Idempotency: si el front reintenta con la misma clave en menos de 24h,
-    // devolvemos el mensaje ya creado en vez de reenviarlo a Meta.
-    if let Some(key) = payload.idempotency_key.as_deref() {
-        if let Some(wa_id) = state.redis.get_idempotent_message(key).await {
-            if let Some(existing) = state.db.find_message_by_wa_id(&wa_id).await
-                .map_err(|e| ApiError::DatabaseError(e))?
-            {
-                let name = existing.sent_by.as_deref().map(|_| claims.name.clone());
-                return Ok(Json(SendMessageResponse {
-                    ok: true,
-                    message: msg_to_item(existing, name),
-                }));
-            }
-        }
-    }
-
     let conv = state.db
         .find_conversation_by_id(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
-    let wa = WhatsAppService::from_env(state.reqwest_client.clone())
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    // Lookup idempotente (fuente de verdad: DB, por `(conv_id, idempotency_key)`).
+    // - sent/delivered/read → devolver el mismo mensaje (no reenviar a Meta).
+    // - failed               → reintentar envío, actualizar `wa_message_id` + status.
+    // - None (sin status)    → devolver como está (estado intermedio, no reenviamos).
+    if let Some(key) = payload.idempotency_key.as_deref() {
+        if let Some(existing) = state.db
+            .find_message_by_idempotency(&oid, key)
+            .await
+            .map_err(|e| ApiError::DatabaseError(e))?
+        {
+            let existing_id = existing.id;
+            let is_failed = existing.status.as_deref() == Some("failed");
+
+            if !is_failed {
+                let name = existing.sent_by.as_deref().map(|_| claims.name.clone());
+                let item = msg_to_item(existing, name);
+                return Ok(Json(SendMessageResponse {
+                    ok: true,
+                    message_id: item.id.clone(),
+                    message: item,
+                }));
+            }
+
+            // Retry: reenviar a Meta con la configuración del negocio y actualizar el doc.
+            let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
+            let new_wa_id = wa.send_text(&conv.phone, &payload.content)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+            let msg_oid = existing_id
+                .ok_or_else(|| ApiError::Internal("mensaje previo sin _id".into()))?;
+            let updated = state.db
+                .update_message_retry(&msg_oid, &new_wa_id, "sent")
+                .await
+                .map_err(|e| ApiError::DatabaseError(e))?
+                .ok_or_else(|| ApiError::Internal("no se pudo actualizar mensaje tras reintento".into()))?;
+
+            state.db
+                .touch_conversation(&oid, &payload.content, false, None)
+                .await
+                .map_err(|e| ApiError::DatabaseError(e))?;
+
+            let item = msg_to_item(updated, Some(claims.name.clone()));
+
+            // Broadcast del retry — status vuelve a "sent", el front actualiza la burbuja.
+            let ev = WsServerEvent::MensajeNuevo {
+                conversation_id: id.clone(),
+                message: item.clone(),
+            };
+            broadcast_all(&state.ws_registry, &ev).await;
+
+            return Ok(Json(SendMessageResponse {
+                ok: true,
+                message_id: item.id.clone(),
+                message: item,
+            }));
+        }
+    }
+
+    // Envío nuevo.
+    let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
 
     let wa_id = wa.send_text(&conv.phone, &payload.content)
         .await
@@ -606,7 +650,7 @@ pub async fn send_message_handler(
     let msg = WaMessage {
         id: None,
         conversation_id: oid,
-        wa_message_id: wa_id.clone(),
+        wa_message_id: wa_id,
         direction: "out".to_string(),
         msg_type: "text".to_string(),
         body: Some(payload.content.clone()),
@@ -620,10 +664,6 @@ pub async fn send_message_handler(
     let saved = state.db.save_message(msg).await.map_err(|e| ApiError::DatabaseError(e))?;
     state.db.touch_conversation(&oid, &payload.content, false, None).await.map_err(|e| ApiError::DatabaseError(e))?;
 
-    if let Some(key) = payload.idempotency_key.as_deref() {
-        state.redis.set_idempotent_message(key, &wa_id).await;
-    }
-
     let item = msg_to_item(saved, Some(claims.name.clone()));
 
     // Broadcast del mensaje outbound. El front deduplica contra `idempotency_key`
@@ -634,7 +674,11 @@ pub async fn send_message_handler(
     };
     broadcast_all(&state.ws_registry, &ev).await;
 
-    Ok(Json(SendMessageResponse { ok: true, message: item }))
+    Ok(Json(SendMessageResponse {
+        ok: true,
+        message_id: item.id.clone(),
+        message: item,
+    }))
 }
 
 #[utoipa::path(
@@ -655,7 +699,7 @@ pub async fn mark_read_handler(
 ) -> Result<Json<MarkReadResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
-    state.db
+    let conv = state.db
         .find_conversation_by_id(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
@@ -671,14 +715,19 @@ pub async fn mark_read_handler(
     let _ = state.db.reset_unread(&oid).await;
 
     // Notificar a Meta (ticks azules) con el último inbound. Meta marca como
-    // leídos automáticamente todos los anteriores.
+    // leídos automáticamente todos los anteriores. Best-effort: si faltan
+    // credenciales para este business_phone, logueamos y seguimos.
     if let Some(latest) = changed_ids.last().cloned() {
-        let client = state.reqwest_client.clone();
-        tokio::spawn(async move {
-            if let Ok(wa) = WhatsAppService::from_env(client) {
-                let _ = wa.mark_as_read(&latest).await;
+        match resolve_service_for_phone(&state, &conv.business_phone).await {
+            Ok(wa) => {
+                tokio::spawn(async move {
+                    let _ = wa.mark_as_read(&latest).await;
+                });
             }
-        });
+            Err(e) => {
+                tracing::warn!("[mark-read] no se pudo resolver WhatsAppService: {:?}", e);
+            }
+        }
     }
 
     // Broadcast del batch. El front propaga `status: "read"` en la UI local.
@@ -970,9 +1019,21 @@ pub async fn create_settings_handler(
     let phone = normalize_to_e164(&payload.phone);
     let now = mongodb::bson::DateTime::now();
 
+    if payload.access_token.trim().is_empty() {
+        return Err(ApiError::BadRequest("access_token requerido".into()));
+    }
+    if payload.phone_number_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("phone_number_id requerido".into()));
+    }
+
+    let encrypted = encrypt_payload(&settings_secret(), payload.access_token.trim());
+
     let doc = WaSettings {
         id: None,
         phone,
+        workspace_name: payload.workspace_name,
+        phone_number_id: payload.phone_number_id,
+        access_token: encrypted,
         agents: payload.agents,
         active: true,
         created_at: now,
@@ -1002,8 +1063,24 @@ pub async fn update_settings_handler(
     Json(payload): Json<UpdateSettingsRequest>,
 ) -> Result<Json<UpdateResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+
+    // Cifrar access_token si vino con valor. `None` o vacío ⇒ no tocar el guardado.
+    let encrypted_token = payload
+        .access_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|t| encrypt_payload(&settings_secret(), t));
+
     state.db
-        .update_wa_settings(&oid, payload.agents, payload.active)
+        .update_wa_settings(
+            &oid,
+            payload.workspace_name,
+            payload.phone_number_id,
+            encrypted_token,
+            payload.agents,
+            payload.active,
+        )
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
     Ok(Json(UpdateResponse { ok: true }))
@@ -1074,6 +1151,44 @@ fn hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
+/// Secreto AES para cifrar `WaSettings.access_token` en reposo.
+/// Reutilizamos `JWT_SECRET` — alta entropía y estrictamente privado del backend.
+fn settings_secret() -> String {
+    std::env::var("JWT_SECRET").unwrap_or_default()
+}
+
+/// Resuelve el `WhatsAppService` para el `business_phone` de una conversación:
+/// busca `WaSettings`, descifra el `access_token` y construye el cliente.
+async fn resolve_service_for_phone(
+    state: &Arc<AppState>,
+    business_phone: &str,
+) -> Result<WhatsAppService, ApiError> {
+    let settings = state
+        .db
+        .find_wa_settings_by_phone(business_phone)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| ApiError::Internal(format!(
+            "wa_settings inactivo o no encontrado para {}",
+            business_phone
+        )))?;
+
+    if settings.phone_number_id.is_empty() || settings.access_token.is_empty() {
+        return Err(ApiError::Internal(
+            "wa_settings sin phone_number_id o access_token configurados".into(),
+        ));
+    }
+
+    let token = decrypt_payload(&settings_secret(), &settings.access_token)
+        .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
+
+    Ok(WhatsAppService::new(
+        state.reqwest_client.clone(),
+        settings.phone_number_id,
+        token,
+    ))
+}
+
 /// Normaliza cualquier formato de número venezolano a E.164 sin "+" (ej: "584141234567")
 fn normalize_to_e164(phone: &str) -> String {
     let digits: String = phone.chars().filter(|c| c.is_ascii_digit()).collect();
@@ -1119,6 +1234,9 @@ fn settings_to_item(s: WaSettings) -> SettingsItem {
     SettingsItem {
         id: s.id.map(|o| o.to_hex()).unwrap_or_default(),
         phone: s.phone,
+        workspace_name: s.workspace_name,
+        phone_number_id: s.phone_number_id,
+        has_access_token: !s.access_token.is_empty(),
         agents: s.agents,
         active: s.active,
         created_at: iso8601(s.created_at),

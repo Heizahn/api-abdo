@@ -234,8 +234,20 @@ pub trait WhatsAppRepository {
     /// Marca todos los inbound de una conversación con status != "read" como "read".
     /// Retorna la lista de `wa_message_id` que cambiaron (para emitir MENSAJES_VISTOS).
     async fn mark_inbound_as_read(&self, conversation_id: &ObjectId) -> Result<Vec<String>, String>;
-    /// Busca un mensaje por su `wa_message_id` (usado para reconstruir respuestas idempotentes).
-    async fn find_message_by_wa_id(&self, wa_message_id: &str) -> Result<Option<WaMessage>, String>;
+    /// Busca un mensaje por `(conversation_id, idempotency_key)`. Fuente de verdad
+    /// para reintentos idempotentes: permite detectar envíos previos `failed` y reintentarlos.
+    async fn find_message_by_idempotency(
+        &self,
+        conversation_id: &ObjectId,
+        idempotency_key: &str,
+    ) -> Result<Option<WaMessage>, String>;
+    /// Tras reintentar un envío fallido: actualiza `wa_message_id` y `status` del mismo doc.
+    async fn update_message_retry(
+        &self,
+        id: &ObjectId,
+        new_wa_message_id: &str,
+        status: &str,
+    ) -> Result<Option<WaMessage>, String>;
 
     // Per-agent "last opened" tracking
     /// Upsert del último momento en que `user_id` abrió `conversation_id`.
@@ -251,7 +263,18 @@ pub trait WhatsAppRepository {
     async fn find_wa_settings_by_phone(&self, phone: &str) -> Result<Option<WaSettings>, String>;
     async fn get_all_wa_settings(&self) -> Result<Vec<WaSettings>, String>;
     async fn create_wa_settings(&self, settings: WaSettings) -> Result<WaSettings, String>;
-    async fn update_wa_settings(&self, id: &ObjectId, agents: Option<Vec<String>>, active: Option<bool>) -> Result<(), String>;
+    /// Actualiza campos mutables de `WaSettings`. Todos opcionales: `None` significa "no tocar".
+    /// `access_token_cipher`: debe venir ya cifrado (AES-GCM). Si se pasa `Some("")` se ignora
+    /// (para que `PUT` con `access_token: ""` no borre el token).
+    async fn update_wa_settings(
+        &self,
+        id: &ObjectId,
+        workspace_name: Option<String>,
+        phone_number_id: Option<String>,
+        access_token_cipher: Option<String>,
+        agents: Option<Vec<String>>,
+        active: Option<bool>,
+    ) -> Result<(), String>;
     async fn delete_wa_settings(&self, id: &ObjectId) -> Result<(), String>;
 }
 

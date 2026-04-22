@@ -282,6 +282,8 @@ pub struct ConversationMessagesResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SendMessageResponse {
     pub ok: bool,
+    /// Atajo: `_id` del mensaje en la colección (Mongo ObjectId hex). Igual a `message.id`.
+    pub message_id: String,
     pub message: MessageItem,
 }
 
@@ -308,13 +310,26 @@ pub struct UpdateResponse {
 // CONFIGURACIÓN DE NÚMEROS (wa_settings)
 // ============================================
 
-/// Documento en colección `wa_settings`
+/// Documento en colección `WaSettings`.
+///
+/// El `access_token` se guarda **cifrado en reposo** (AES-GCM con
+/// `WHATSAPP_SETTINGS_SECRET`). Nunca se devuelve al front — sólo se
+/// descifra in-memory para hablar con la API de Meta.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WaSettings {
     #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
     pub id: Option<ObjectId>,
     /// Número en E.164 sin "+" (ej: "584222236777")
     pub phone: String,
+    /// Nombre legible del Meta Business / workspace
+    #[serde(default)]
+    pub workspace_name: String,
+    /// Phone Number ID de WhatsApp Cloud API
+    #[serde(default)]
+    pub phone_number_id: String,
+    /// Access token permanente de Meta (AES-GCM ciphertext Base64URL). Nunca se expone al front.
+    #[serde(default)]
+    pub access_token: String,
     /// UUIDs de los agentes asignados a este número
     pub agents: Vec<String>,
     pub active: bool,
@@ -326,12 +341,22 @@ pub struct WaSettings {
 pub struct CreateSettingsRequest {
     /// Número en formato venezolano o E.164 (se normaliza automáticamente)
     pub phone: String,
+    /// Nombre legible del workspace / Meta Business
+    pub workspace_name: String,
+    /// Phone Number ID de WhatsApp Cloud API
+    pub phone_number_id: String,
+    /// Access token permanente de Meta (se cifra antes de guardar)
+    pub access_token: String,
     /// UUIDs de los agentes que atenderán este número
     pub agents: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateSettingsRequest {
+    pub workspace_name: Option<String>,
+    pub phone_number_id: Option<String>,
+    /// Si viene vacío o ausente, **no** se toca el token guardado.
+    pub access_token: Option<String>,
     pub agents: Option<Vec<String>>,
     pub active: Option<bool>,
 }
@@ -340,6 +365,10 @@ pub struct UpdateSettingsRequest {
 pub struct SettingsItem {
     pub id: String,
     pub phone: String,
+    pub workspace_name: String,
+    pub phone_number_id: String,
+    /// `true` si hay un token guardado (cifrado). **Nunca** se devuelve el token en claro.
+    pub has_access_token: bool,
     pub agents: Vec<String>,
     pub active: bool,
     /// ISO-8601 (RFC 3339) UTC
