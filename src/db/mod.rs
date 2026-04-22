@@ -1,6 +1,6 @@
 pub mod mongo;
 use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
-use crate::models::whatsapp::{UrlPreview, WaConversation, WaMessage, WaSettings};
+use crate::models::whatsapp::{UrlPreview, WaConversation, WaMessage, WaQuickReply, WaSettings};
 use std::collections::HashMap;
 
 use crate::models::payment::{Bank, PaymentReport, ReferenceMatchInfo};
@@ -301,6 +301,31 @@ pub trait WhatsAppRepository {
         active: Option<bool>,
     ) -> Result<(), String>;
     async fn delete_wa_settings(&self, id: &ObjectId) -> Result<(), String>;
+
+    // Quick replies (snippets)
+    /// Devuelve los `WaSettings._id` donde `user_id` aparece en `agents`.
+    /// Se usa como scope para filtrar quick-replies y validar permisos de escritura.
+    async fn get_user_workspaces(&self, user_id: &str) -> Result<Vec<ObjectId>, String>;
+    /// Devuelve `true` si **todos** los `ids` existen en `WaSettings`. Usado para validar `workspace_ids`.
+    async fn wa_settings_exist(&self, ids: &[ObjectId]) -> Result<bool, String>;
+    /// Listado de quick-replies cuyo `workspace_ids` intersecta con `user_workspaces`.
+    /// Si `filter_workspace_id` viene, filtra además por ese workspace puntual.
+    async fn list_quick_replies(
+        &self,
+        user_workspaces: &[ObjectId],
+        filter_workspace_id: Option<&ObjectId>,
+    ) -> Result<Vec<WaQuickReply>, String>;
+    async fn find_quick_reply_by_id(&self, id: &ObjectId) -> Result<Option<WaQuickReply>, String>;
+    async fn create_quick_reply(&self, doc: WaQuickReply) -> Result<WaQuickReply, String>;
+    /// `None` en un campo ⇒ no tocar. Devuelve el doc actualizado (o `None` si no existe).
+    async fn update_quick_reply(
+        &self,
+        id: &ObjectId,
+        title: Option<String>,
+        content: Option<String>,
+        workspace_ids: Option<Vec<ObjectId>>,
+    ) -> Result<Option<WaQuickReply>, String>;
+    async fn delete_quick_reply(&self, id: &ObjectId) -> Result<bool, String>;
 }
 
 // ============================================

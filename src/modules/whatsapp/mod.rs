@@ -50,6 +50,12 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route("/v1/auth-user/whatsapp/whatsapp-numbers", post(handler::create_settings_handler))
         .route("/v1/auth-user/whatsapp/whatsapp-numbers/:id", put(handler::update_settings_handler))
         .route("/v1/auth-user/whatsapp/whatsapp-numbers/:id", delete(handler::delete_settings_handler))
+        // Quick replies (snippets de texto)
+        .route("/v1/auth-user/whatsapp/quick-replies", get(handler::list_quick_replies_handler))
+        .route("/v1/auth-user/whatsapp/quick-replies", post(handler::create_quick_reply_handler))
+        .route("/v1/auth-user/whatsapp/quick-replies/:id", put(handler::update_quick_reply_handler))
+        .route("/v1/auth-user/whatsapp/quick-replies/:id", delete(handler::delete_quick_reply_handler))
+        .route("/v1/auth-user/whatsapp/quick-replies/:id/duplicate", post(handler::duplicate_quick_reply_handler))
         // Debug
         .route("/v1/auth-user/whatsapp/debug/last-webhook", get(handler::debug_last_webhook_handler))
 }

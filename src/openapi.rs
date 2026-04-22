@@ -6,11 +6,12 @@ use crate::models::auth::{
 };
 use crate::models::whatsapp::{
     ConversationDetailResponse, ConversationItem, ConversationMessagesResponse,
-    ConversationsListResponse, CreateSettingsRequest, MarkReadResponse, MessageItem,
-    SendMessageRequest, SendMessageResponse, SettingsItem, SettingsListResponse,
-    SettingsResponse, TakeConversationResponse, TransferConversationRequest,
-    ReplyToItem, TransferableAgentItem, TransferableAgentsResponse, UpdateResponse,
-    UpdateSettingsRequest, UrlPreview,
+    ConversationsListResponse, CreateQuickReplyRequest, CreateSettingsRequest,
+    DuplicateQuickReplyRequest, MarkReadResponse, MessageItem, QuickRepliesListResponse,
+    QuickReplyItem, QuickReplyResponse, ReplyToItem, SendMessageRequest, SendMessageResponse,
+    SettingsItem, SettingsListResponse, SettingsResponse, TakeConversationResponse,
+    TransferConversationRequest, TransferableAgentItem, TransferableAgentsResponse,
+    UpdateQuickReplyRequest, UpdateResponse, UpdateSettingsRequest, UrlPreview,
 };
 
 #[derive(OpenApi)]
@@ -42,6 +43,11 @@ use crate::models::whatsapp::{
         crate::modules::whatsapp::handler::update_settings_handler,
         crate::modules::whatsapp::handler::delete_settings_handler,
         crate::modules::whatsapp::handler::get_media_handler,
+        crate::modules::whatsapp::handler::list_quick_replies_handler,
+        crate::modules::whatsapp::handler::create_quick_reply_handler,
+        crate::modules::whatsapp::handler::update_quick_reply_handler,
+        crate::modules::whatsapp::handler::delete_quick_reply_handler,
+        crate::modules::whatsapp::handler::duplicate_quick_reply_handler,
     ),
     components(
         schemas(
@@ -53,6 +59,7 @@ use crate::models::whatsapp::{
             // WhatsApp — Requests
             SendMessageRequest, TransferConversationRequest,
             CreateSettingsRequest, UpdateSettingsRequest,
+            CreateQuickReplyRequest, UpdateQuickReplyRequest, DuplicateQuickReplyRequest,
             // WhatsApp — Responses
             ConversationsListResponse,
             ConversationDetailResponse,
@@ -62,10 +69,11 @@ use crate::models::whatsapp::{
             TakeConversationResponse,
             TransferableAgentsResponse,
             SettingsListResponse, SettingsResponse,
+            QuickRepliesListResponse, QuickReplyResponse,
             UpdateResponse,
             // WhatsApp — Items
             ConversationItem, MessageItem, SettingsItem,
-            TransferableAgentItem, ReplyToItem, UrlPreview,
+            TransferableAgentItem, ReplyToItem, UrlPreview, QuickReplyItem,
         )
     ),
     tags(

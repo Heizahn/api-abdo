@@ -509,3 +509,81 @@ pub struct TransferableAgentsResponse {
     pub ok: bool,
     pub data: Vec<TransferableAgentItem>,
 }
+
+// ============================================
+// MENSAJES RÁPIDOS (WaQuickReplies)
+// ============================================
+
+/// Documento de la colección `WaQuickReplies`. Snippet de texto reutilizable
+/// que un agente puede insertar rápidamente en el composer.
+///
+/// Scope: `workspace_ids` — lista de `WaSettings._id` donde este snippet está
+/// disponible. Al listar, el filtro es "intersección con los workspaces del
+/// agente que pregunta".
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WaQuickReply {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    pub title: String,
+    pub content: String,
+    /// `_id` de los `WaSettings` en los que aplica este snippet.
+    pub workspace_ids: Vec<ObjectId>,
+    /// UUID del creador (`User._id`).
+    pub created_by: String,
+    /// Nombre del creador al momento de crear (snapshot — no se actualiza si el user cambia de nombre).
+    pub created_by_name: String,
+    pub created_at: DateTime,
+    pub updated_at: DateTime,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct QuickReplyItem {
+    pub id: String,
+    pub title: String,
+    pub content: String,
+    /// Hex de `WaSettings._id` donde aplica el snippet.
+    pub workspace_ids: Vec<String>,
+    pub created_by: String,
+    pub created_by_name: String,
+    /// ISO-8601 (RFC 3339) UTC
+    pub created_at: String,
+    /// ISO-8601 (RFC 3339) UTC
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateQuickReplyRequest {
+    /// 1–100 chars.
+    pub title: String,
+    /// 1–1024 chars (límite de WhatsApp para texto libre).
+    pub content: String,
+    /// Hex de `WaSettings._id`. Mínimo 1. El usuario debe ser agente en todos ellos.
+    pub workspace_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateQuickReplyRequest {
+    pub title: Option<String>,
+    pub content: Option<String>,
+    pub workspace_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DuplicateQuickReplyRequest {
+    /// Si viene, sobreescribe el título de la copia. Por defecto `<original> (copia)`.
+    pub title: Option<String>,
+    /// Si viene, usa estos workspaces en vez de los del original. Debe validarse igual que en `create`.
+    pub workspace_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct QuickRepliesListResponse {
+    pub ok: bool,
+    pub data: Vec<QuickReplyItem>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct QuickReplyResponse {
+    pub ok: bool,
+    pub data: QuickReplyItem,
+}

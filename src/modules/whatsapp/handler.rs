@@ -1303,6 +1303,279 @@ pub async fn get_media_handler(
 }
 
 // ============================================
+// QUICK REPLIES (mensajes rápidos)
+// ============================================
+
+#[derive(serde::Deserialize)]
+pub struct QuickRepliesQuery {
+    /// Hex de `WaSettings._id`. Si viene, filtra a ese workspace puntual
+    /// (el agente debe pertenecer a él o devuelve lista vacía).
+    pub workspace_id: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/quick-replies",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(
+        ("workspace_id" = Option<String>, Query, description = "Filtrar por workspace puntual (hex de WaSettings._id)"),
+    ),
+    responses(
+        (status = 200, description = "Lista de snippets visibles para el agente", body = QuickRepliesListResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "El usuario no tiene permiso de chat"),
+    )
+)]
+pub async fn list_quick_replies_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Query(q): Query<QuickRepliesQuery>,
+) -> Result<Json<QuickRepliesListResponse>, ApiError> {
+    require_can_chat(&state, &claims.id).await?;
+
+    let workspaces = state.db.get_user_workspaces(&claims.id)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    let filter_oid = match q.workspace_id.as_deref() {
+        Some(hex) => Some(
+            ObjectId::parse_str(hex)
+                .map_err(|_| ApiError::BadRequest("workspace_id inválido".into()))?,
+        ),
+        None => None,
+    };
+
+    let docs = state.db
+        .list_quick_replies(&workspaces, filter_oid.as_ref())
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    Ok(Json(QuickRepliesListResponse {
+        ok: true,
+        data: docs.into_iter().map(quick_reply_to_item).collect(),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/quick-replies",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    request_body = CreateQuickReplyRequest,
+    responses(
+        (status = 200, description = "Snippet creado", body = QuickReplyResponse),
+        (status = 400, description = "Validación falló"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "El usuario no tiene permiso de chat o no es agente en los workspaces indicados"),
+    )
+)]
+pub async fn create_quick_reply_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Json(payload): Json<CreateQuickReplyRequest>,
+) -> Result<Json<QuickReplyResponse>, ApiError> {
+    require_can_chat(&state, &claims.id).await?;
+
+    let title = validate_qr_title(&payload.title)?;
+    let content = validate_qr_content(&payload.content)?;
+    let workspace_oids = parse_and_validate_workspaces(&state, &claims.id, &payload.workspace_ids).await?;
+
+    let now = DateTime::now();
+    let doc = WaQuickReply {
+        id: None,
+        title,
+        content,
+        workspace_ids: workspace_oids,
+        created_by: claims.id.clone(),
+        created_by_name: claims.name.clone(),
+        created_at: now,
+        updated_at: now,
+    };
+
+    let saved = state.db.create_quick_reply(doc)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    Ok(Json(QuickReplyResponse {
+        ok: true,
+        data: quick_reply_to_item(saved),
+    }))
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/auth-user/whatsapp/quick-replies/{id}",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ID del snippet")),
+    request_body = UpdateQuickReplyRequest,
+    responses(
+        (status = 200, description = "Snippet actualizado", body = QuickReplyResponse),
+        (status = 400, description = "Validación falló"),
+        (status = 404, description = "Snippet no encontrado o no visible para el agente"),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn update_quick_reply_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+    Json(payload): Json<UpdateQuickReplyRequest>,
+) -> Result<Json<QuickReplyResponse>, ApiError> {
+    require_can_chat(&state, &claims.id).await?;
+
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+    let existing = state.db.find_quick_reply_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    let user_workspaces = state.db.get_user_workspaces(&claims.id)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    if !has_workspace_overlap(&existing.workspace_ids, &user_workspaces) {
+        // No revelamos existencia del doc al user que no tiene acceso.
+        return Err(ApiError::NotFound);
+    }
+
+    let title = match payload.title {
+        Some(t) => Some(validate_qr_title(&t)?),
+        None => None,
+    };
+    let content = match payload.content {
+        Some(c) => Some(validate_qr_content(&c)?),
+        None => None,
+    };
+    let workspace_oids = match payload.workspace_ids {
+        Some(list) => Some(parse_and_validate_workspaces(&state, &claims.id, &list).await?),
+        None => None,
+    };
+
+    let updated = state.db
+        .update_quick_reply(&oid, title, content, workspace_oids)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    Ok(Json(QuickReplyResponse {
+        ok: true,
+        data: quick_reply_to_item(updated),
+    }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/auth-user/whatsapp/quick-replies/{id}",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ID del snippet")),
+    responses(
+        (status = 200, description = "Snippet eliminado", body = UpdateResponse),
+        (status = 404, description = "Snippet no encontrado o no visible para el agente"),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn delete_quick_reply_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+) -> Result<Json<UpdateResponse>, ApiError> {
+    require_can_chat(&state, &claims.id).await?;
+
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+    let existing = state.db.find_quick_reply_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    let user_workspaces = state.db.get_user_workspaces(&claims.id)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    if !has_workspace_overlap(&existing.workspace_ids, &user_workspaces) {
+        return Err(ApiError::NotFound);
+    }
+
+    let deleted = state.db.delete_quick_reply(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    if !deleted {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(UpdateResponse { ok: true }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/quick-replies/{id}/duplicate",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ID del snippet original")),
+    request_body = DuplicateQuickReplyRequest,
+    responses(
+        (status = 200, description = "Snippet duplicado", body = QuickReplyResponse),
+        (status = 400, description = "Validación falló"),
+        (status = 404, description = "Snippet original no encontrado o no visible"),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn duplicate_quick_reply_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+    Json(payload): Json<DuplicateQuickReplyRequest>,
+) -> Result<Json<QuickReplyResponse>, ApiError> {
+    require_can_chat(&state, &claims.id).await?;
+
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+    let original = state.db.find_quick_reply_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    let user_workspaces = state.db.get_user_workspaces(&claims.id)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    if !has_workspace_overlap(&original.workspace_ids, &user_workspaces) {
+        return Err(ApiError::NotFound);
+    }
+
+    let title = match payload.title.as_deref() {
+        Some(t) => validate_qr_title(t)?,
+        None => {
+            let proposed = format!("{} (copia)", original.title);
+            // Truncar si supera 100 chars — nunca falla por el suffix.
+            proposed.chars().take(100).collect::<String>()
+        }
+    };
+    let workspace_oids = match payload.workspace_ids {
+        Some(list) => parse_and_validate_workspaces(&state, &claims.id, &list).await?,
+        None => original.workspace_ids.clone(),
+    };
+
+    let now = DateTime::now();
+    let doc = WaQuickReply {
+        id: None,
+        title,
+        content: original.content.clone(),
+        workspace_ids: workspace_oids,
+        created_by: claims.id.clone(),
+        created_by_name: claims.name.clone(),
+        created_at: now,
+        updated_at: now,
+    };
+
+    let saved = state.db.create_quick_reply(doc)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    Ok(Json(QuickReplyResponse {
+        ok: true,
+        data: quick_reply_to_item(saved),
+    }))
+}
+
+// ============================================
 // HELPERS INTERNOS
 // ============================================
 
@@ -1625,4 +1898,105 @@ async fn resolve_sent_by_names(
         }
     }
     out
+}
+
+// ============================================
+// HELPERS — QUICK REPLIES
+// ============================================
+
+const QR_TITLE_MAX: usize = 100;
+const QR_CONTENT_MAX: usize = 1024;
+
+/// Exige `bCanChat == true`. El `user_jwt_auth_middleware` solo valida que el
+/// token sea de staff, pero el permiso de chat es un campo extra en `Users`.
+async fn require_can_chat(state: &Arc<AppState>, user_id: &str) -> Result<(), ApiError> {
+    use crate::db::UserRepository;
+    let user = state.db.find_user_by_id(user_id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::Forbidden)?;
+    if !user.can_chat {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(())
+}
+
+fn validate_qr_title(raw: &str) -> Result<String, ApiError> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Err(ApiError::BadRequest("title requerido".into()));
+    }
+    if t.chars().count() > QR_TITLE_MAX {
+        return Err(ApiError::BadRequest(format!(
+            "title excede {} caracteres",
+            QR_TITLE_MAX
+        )));
+    }
+    Ok(t.to_string())
+}
+
+fn validate_qr_content(raw: &str) -> Result<String, ApiError> {
+    let c = raw.trim();
+    if c.is_empty() {
+        return Err(ApiError::BadRequest("content requerido".into()));
+    }
+    if c.chars().count() > QR_CONTENT_MAX {
+        return Err(ApiError::BadRequest(format!(
+            "content excede {} caracteres",
+            QR_CONTENT_MAX
+        )));
+    }
+    Ok(c.to_string())
+}
+
+/// Parsea `workspace_ids` de hex → ObjectId, valida mínimo 1, existencia en
+/// `WaSettings` y que el usuario sea agente en **todos** ellos.
+async fn parse_and_validate_workspaces(
+    state: &Arc<AppState>,
+    user_id: &str,
+    raw: &[String],
+) -> Result<Vec<ObjectId>, ApiError> {
+    if raw.is_empty() {
+        return Err(ApiError::BadRequest("workspace_ids requiere al menos 1".into()));
+    }
+    let mut oids = Vec::with_capacity(raw.len());
+    for s in raw {
+        let oid = ObjectId::parse_str(s)
+            .map_err(|_| ApiError::BadRequest(format!("workspace_id inválido: {}", s)))?;
+        oids.push(oid);
+    }
+    oids.sort();
+    oids.dedup();
+
+    let user_workspaces = state.db.get_user_workspaces(user_id)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    for w in &oids {
+        if !user_workspaces.contains(w) {
+            return Err(ApiError::Forbidden);
+        }
+    }
+    // Sanity: cada id debe existir en WaSettings. (El check anterior ya lo
+    // implica en la práctica, pero mantenemos la validación explícita.)
+    if !state.db.wa_settings_exist(&oids).await.map_err(ApiError::DatabaseError)? {
+        return Err(ApiError::BadRequest("algún workspace_id no existe".into()));
+    }
+    Ok(oids)
+}
+
+fn has_workspace_overlap(a: &[ObjectId], b: &[ObjectId]) -> bool {
+    a.iter().any(|x| b.contains(x))
+}
+
+fn quick_reply_to_item(q: WaQuickReply) -> QuickReplyItem {
+    QuickReplyItem {
+        id: q.id.map(|o| o.to_hex()).unwrap_or_default(),
+        title: q.title,
+        content: q.content,
+        workspace_ids: q.workspace_ids.into_iter().map(|o| o.to_hex()).collect(),
+        created_by: q.created_by,
+        created_by_name: q.created_by_name,
+        created_at: iso8601(q.created_at),
+        updated_at: iso8601(q.updated_at),
+    }
 }

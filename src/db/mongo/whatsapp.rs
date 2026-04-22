@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::db::WhatsAppRepository;
 use crate::db::mongo::MongoDB;
-use crate::models::whatsapp::{UrlPreview, WaConversation, WaConversationOpen, WaMessage, WaSettings};
+use crate::models::whatsapp::{UrlPreview, WaConversation, WaConversationOpen, WaMessage, WaQuickReply, WaSettings};
 
 impl MongoDB {
     pub(crate) fn wa_conversations(&self) -> mongodb::Collection<WaConversation> {
@@ -24,6 +24,10 @@ impl MongoDB {
 
     pub(crate) fn wa_conversation_opens(&self) -> mongodb::Collection<WaConversationOpen> {
         self.db.collection::<WaConversationOpen>("WaConversationOpens")
+    }
+
+    pub(crate) fn wa_quick_replies(&self) -> mongodb::Collection<WaQuickReply> {
+        self.db.collection::<WaQuickReply>("WaQuickReplies")
     }
 }
 
@@ -619,6 +623,122 @@ impl WhatsAppRepository for MongoDB {
             out.insert(open.conversation_id, open.last_opened_at);
         }
         Ok(out)
+    }
+
+    async fn get_user_workspaces(&self, user_id: &str) -> Result<Vec<ObjectId>, String> {
+        #[derive(serde::Deserialize)]
+        struct IdOnly {
+            #[serde(rename = "_id")]
+            id: ObjectId,
+        }
+        let mut cursor = self.db
+            .collection::<IdOnly>("WaSettings")
+            .find(doc! { "agents": user_id })
+            .with_options(
+                FindOptions::builder()
+                    .projection(doc! { "_id": 1 })
+                    .build(),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        while let Some(s) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            out.push(s.id);
+        }
+        Ok(out)
+    }
+
+    async fn wa_settings_exist(&self, ids: &[ObjectId]) -> Result<bool, String> {
+        if ids.is_empty() {
+            return Ok(false);
+        }
+        let count = self.wa_settings()
+            .count_documents(doc! { "_id": { "$in": ids } })
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(count as usize == ids.len())
+    }
+
+    async fn list_quick_replies(
+        &self,
+        user_workspaces: &[ObjectId],
+        filter_workspace_id: Option<&ObjectId>,
+    ) -> Result<Vec<WaQuickReply>, String> {
+        if user_workspaces.is_empty() {
+            return Ok(Vec::new());
+        }
+        let scope = match filter_workspace_id {
+            // Si piden un workspace puntual, sólo devolver si está en los del user.
+            Some(id) if user_workspaces.contains(id) => vec![*id],
+            Some(_) => return Ok(Vec::new()),
+            None => user_workspaces.to_vec(),
+        };
+        self.wa_quick_replies()
+            .find(doc! { "workspace_ids": { "$in": &scope } })
+            .sort(doc! { "updated_at": -1 })
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn find_quick_reply_by_id(&self, id: &ObjectId) -> Result<Option<WaQuickReply>, String> {
+        self.wa_quick_replies()
+            .find_one(doc! { "_id": id })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn create_quick_reply(&self, doc: WaQuickReply) -> Result<WaQuickReply, String> {
+        let result = self.wa_quick_replies()
+            .insert_one(&doc)
+            .await
+            .map_err(|e| e.to_string())?;
+        let id = result.inserted_id.as_object_id().ok_or_else(|| "insert sin ObjectId".to_string())?;
+        self.wa_quick_replies()
+            .find_one(doc! { "_id": id })
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "quick_reply no encontrado tras insert".to_string())
+    }
+
+    async fn update_quick_reply(
+        &self,
+        id: &ObjectId,
+        title: Option<String>,
+        content: Option<String>,
+        workspace_ids: Option<Vec<ObjectId>>,
+    ) -> Result<Option<WaQuickReply>, String> {
+        use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+
+        let mut set_doc = doc! { "updated_at": DateTime::now() };
+        if let Some(t) = title {
+            set_doc.insert("title", t);
+        }
+        if let Some(c) = content {
+            set_doc.insert("content", c);
+        }
+        if let Some(ws) = workspace_ids {
+            set_doc.insert("workspace_ids", mongodb::bson::to_bson(&ws).map_err(|e| e.to_string())?);
+        }
+
+        let opts = FindOneAndUpdateOptions::builder()
+            .return_document(ReturnDocument::After)
+            .build();
+        self.wa_quick_replies()
+            .find_one_and_update(doc! { "_id": id }, doc! { "$set": set_doc })
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn delete_quick_reply(&self, id: &ObjectId) -> Result<bool, String> {
+        let res = self.wa_quick_replies()
+            .delete_one(doc! { "_id": id })
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(res.deleted_count > 0)
     }
 }
 
