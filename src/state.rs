@@ -38,7 +38,11 @@ impl AppState {
             db,
             redis,
             config: Arc::new(config),
-            reqwest_client: reqwest::Client::new(),
+            reqwest_client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(20))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             ws_registry: Arc::new(RwLock::new(HashMap::new())),
         }))
     }

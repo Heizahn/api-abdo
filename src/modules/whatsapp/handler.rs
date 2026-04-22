@@ -327,6 +327,11 @@ pub async fn receive_webhook(
 
                     // MENSAJE_NUEVO a todos los conectados; el front filtra por conversación abierta.
                     let message_item = msg_to_item(saved, None);
+                    let agent_count = state.ws_registry.read().await.len();
+                    tracing::info!(
+                        "[webhook] broadcast MENSAJE_NUEVO wa_id={} conv={} → {} agente(s) conectados",
+                        message_item.wa_message_id, conv_id.to_hex(), agent_count
+                    );
                     let msg_ev = WsServerEvent::MensajeNuevo {
                         conversation_id: conv_id.to_hex(),
                         message: message_item,
