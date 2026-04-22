@@ -76,13 +76,22 @@ impl WhatsAppService {
     ///
     /// Si `reply_to` trae un `wa_message_id` (wamid…), Meta lo recibe como
     /// `context.message_id` y la burbuja sale citada en el chat del cliente.
-    pub async fn send_text(&self, to: &str, body: &str, reply_to: Option<&str>) -> Result<String> {
+    ///
+    /// `preview_url = true` → Meta fetchea OG tags de la URL incluida en `body`
+    /// (si hay) y renderiza la tarjeta de preview en el teléfono del cliente.
+    pub async fn send_text(
+        &self,
+        to: &str,
+        body: &str,
+        reply_to: Option<&str>,
+        preview_url: bool,
+    ) -> Result<String> {
         let mut payload = json!({
             "messaging_product": "whatsapp",
             "recipient_type": "individual",
             "to": to,
             "type": "text",
-            "text": { "preview_url": false, "body": body }
+            "text": { "preview_url": preview_url, "body": body }
         });
 
         if let Some(wamid) = reply_to {

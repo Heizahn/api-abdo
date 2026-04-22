@@ -278,6 +278,11 @@ pub struct SendMessageRequest {
     pub reply_to: Option<String>,
     /// Plantilla aprobada — obligatoria cuando `type == "template"`.
     pub template: Option<SendTemplatePayload>,
+    /// Si es `true` y el texto contiene una URL, Meta fetchea las OG tags del
+    /// sitio y renderiza la tarjeta de preview en el chat del cliente. Sólo
+    /// aplica a `type == "text"`. Default `false`.
+    #[serde(default)]
+    pub preview_url: Option<bool>,
 }
 
 /// Plantilla lista para enviar. El front obtiene `name`/`language` desde

@@ -713,9 +713,10 @@ pub async fn send_message_handler(
             // Se reusa el `reply_to` original del mensaje para mantener la cita.
             let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
             let retry_reply_to = existing.reply_to_wa_message_id.clone();
+            let preview_url_flag = payload.preview_url.unwrap_or(false);
             let (new_wa_id, preview) = match &mode {
                 SendMode::Text { content } => {
-                    let wa_id = wa.send_text(&conv.phone, content, retry_reply_to.as_deref())
+                    let wa_id = wa.send_text(&conv.phone, content, retry_reply_to.as_deref(), preview_url_flag)
                         .await
                         .map_err(|e| ApiError::Internal(e.to_string()))?;
                     (wa_id, content.clone())
@@ -769,9 +770,10 @@ pub async fn send_message_handler(
     // Envío nuevo.
     let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
 
+    let preview_url_flag = payload.preview_url.unwrap_or(false);
     let (wa_id, msg_type, body, preview, tpl_fields) = match &mode {
         SendMode::Text { content } => {
-            let wa_id = wa.send_text(&conv.phone, content, payload.reply_to.as_deref())
+            let wa_id = wa.send_text(&conv.phone, content, payload.reply_to.as_deref(), preview_url_flag)
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             (wa_id, "text".to_string(), Some(content.clone()), content.clone(), None)
