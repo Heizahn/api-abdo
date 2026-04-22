@@ -284,6 +284,7 @@ pub async fn receive_webhook(
                         status: None,
                         sent_by: None,
                         idempotency_key: None,
+                        reply_to_wa_message_id: msg.context.as_ref().map(|c| c.id.clone()),
                         timestamp: msg_ts,
                     };
 
@@ -678,6 +679,7 @@ pub async fn send_message_handler(
         status: Some("sent".to_string()),
         sent_by: Some(claims.id.clone()),
         idempotency_key: payload.idempotency_key.clone(),
+        reply_to_wa_message_id: payload.reply_to.clone(),
         timestamp: DateTime::now(),
     };
 
@@ -1314,6 +1316,7 @@ fn msg_to_item(m: WaMessage, from_user_name: Option<String>) -> MessageItem {
         from_user_id: m.sent_by,
         from_user_name,
         idempotency_key: m.idempotency_key,
+        reply_to: None,
         created_at: iso8601(m.timestamp),
     }
 }

@@ -71,6 +71,11 @@ pub struct WaMessage {
     /// asociar respuesta HTTP con evento WS y deduplicar en la UI.
     #[serde(default)]
     pub idempotency_key: Option<String>,
+    /// `wa_message_id` del mensaje al que responde (cita). `None` si no es respuesta.
+    /// En outbound: lo setea el agente al enviar. En inbound: viene de Meta en
+    /// `context.id` cuando el cliente cita un mensaje del negocio.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_wa_message_id: Option<String>,
     pub timestamp: DateTime,
 }
 
@@ -140,6 +145,16 @@ pub struct InboundMessage {
     pub interactive: Option<serde_json::Value>,
     pub button: Option<serde_json::Value>,
     pub reaction: Option<serde_json::Value>,
+    /// Cuando el usuario cita un mensaje, Meta incluye `context.id` con el
+    /// `wamid` del mensaje original.
+    pub context: Option<InboundContext>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InboundContext {
+    pub id: String,
+    #[allow(dead_code)]
+    pub from: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -194,6 +209,10 @@ pub struct SendMessageRequest {
     /// en vez de reenviarlo a Meta. Permite al front deduplicar contra el
     /// evento WS `MENSAJE_NUEVO`.
     pub idempotency_key: Option<String>,
+    /// `wa_message_id` (wamid…) del mensaje al que se está respondiendo.
+    /// Si está presente, Meta lo recibe como `context.message_id` y la
+    /// burbuja sale citada en el chat del cliente.
+    pub reply_to: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -259,8 +278,27 @@ pub struct MessageItem {
     /// Clave de idempotencia provista por el front al enviar (eco en la respuesta).
     /// El front la usa para deduplicar contra el evento WS `MENSAJE_NUEVO`.
     pub idempotency_key: Option<String>,
+    /// Mensaje citado (quoted reply). `null` si no es respuesta o si el
+    /// mensaje original ya no existe en la DB.
+    pub reply_to: Option<ReplyToItem>,
     /// ISO-8601 (RFC 3339) UTC
     pub created_at: String,
+}
+
+/// Resumen del mensaje citado al armar `MessageItem.reply_to`.
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct ReplyToItem {
+    pub wa_message_id: String,
+    /// Primeros ~80 chars del contenido original (texto o caption). `null` si
+    /// el original no tiene cuerpo (ej. imagen sin caption).
+    pub preview_content: Option<String>,
+    /// Tipo del mensaje original: "text" | "image" | "audio" | "video" |
+    /// "document" | "sticker" | otros.
+    pub preview_type: String,
+    /// "in" | "out" — para que el front sepa de qué lado citar la burbuja.
+    pub direction: String,
+    /// Nombre del agente que envió el original (solo si era outbound).
+    pub from_user_name: Option<String>,
 }
 
 /// Respuesta paginable con cursor: el front envía `next_cursor` de nuevo para la siguiente página.

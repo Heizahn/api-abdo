@@ -52,16 +52,29 @@ pub struct UserResponse {
     /// Permiso para atender chats de WhatsApp. El front lo usa para mostrar
     /// la sección de soporte sin depender del rol.
     pub can_chat: bool,
+    /// Fecha de creación en ISO-8601 (RFC 3339). `null` si el documento no la tiene.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creation_date: Option<String>,
+}
+
+fn bson_to_iso_string(b: &Bson) -> Option<String> {
+    match b {
+        Bson::DateTime(dt) => dt.try_to_rfc3339_string().ok(),
+        Bson::String(s) => Some(s.clone()),
+        _ => None,
+    }
 }
 
 impl From<User> for UserResponse {
     fn from(user: User) -> Self {
+        let creation_date = user.d_creation.as_ref().and_then(bson_to_iso_string);
         UserResponse {
             id: user.id,
             name: user.name,
             email: user.email,
             role: user.role,
             can_chat: user.can_chat,
+            creation_date,
         }
     }
 }
