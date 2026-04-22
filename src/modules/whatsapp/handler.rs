@@ -266,6 +266,11 @@ pub async fn receive_webhook(
                         _ => (None, None, None, None),
                     };
 
+                    // Voice note: sólo relevante en `audio`. Meta envía `voice: true`
+                    // para push-to-talk y `false` para archivos de audio subidos.
+                    let voice = msg.msg_type == "audio"
+                        && msg.audio.as_ref().and_then(|a| a.voice).unwrap_or(false);
+
                     let preview = body.clone().unwrap_or_else(|| format!("[{}]", msg.msg_type));
 
                     tracing::info!(
@@ -293,6 +298,7 @@ pub async fn receive_webhook(
                         idempotency_key: None,
                         reply_to_wa_message_id: msg.context.as_ref().map(|c| c.id.clone()),
                         url_preview: None,
+                        voice,
                         timestamp: msg_ts,
                     };
 
@@ -712,6 +718,7 @@ pub async fn send_message_handler(
         idempotency_key: payload.idempotency_key.clone(),
         reply_to_wa_message_id: payload.reply_to.clone(),
         url_preview: None,
+        voice: false,
         timestamp: DateTime::now(),
     };
 
@@ -1486,6 +1493,7 @@ fn msg_to_item(
         idempotency_key: m.idempotency_key,
         reply_to,
         url_preview: m.url_preview,
+        voice: m.voice,
         created_at: iso8601(m.timestamp),
     }
 }

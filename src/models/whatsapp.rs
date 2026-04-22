@@ -90,6 +90,10 @@ pub struct WaMessage {
     /// no produjo un preview válido.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url_preview: Option<UrlPreview>,
+    /// `true` si es una nota de voz (push-to-talk). Poblado 100% desde
+    /// `audio.voice` del webhook de Meta. Para `msg_type != "audio"` es `false`.
+    #[serde(default)]
+    pub voice: bool,
     pub timestamp: DateTime,
 }
 
@@ -210,6 +214,9 @@ pub struct InboundMedia {
     pub caption: Option<String>,
     pub mime_type: Option<String>,
     pub filename: Option<String>,
+    /// Sólo relevante en `audio`: `true` = nota de voz (push-to-talk),
+    /// `false` = archivo de audio subido. Meta siempre lo incluye en audio.
+    pub voice: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -327,6 +334,10 @@ pub struct MessageItem {
     /// haya terminado, si el mensaje no tenía URL, o si el fetch falló.
     /// Cuando llega, el front lo recibe también por WS (`URL_PREVIEW_READY`).
     pub url_preview: Option<UrlPreview>,
+    /// `true` si es nota de voz (push-to-talk) reportada por Meta en el
+    /// webhook (`audio.voice`). `false` en archivos de audio subidos y en
+    /// cualquier mensaje que no sea de tipo `audio`.
+    pub voice: bool,
     /// ISO-8601 (RFC 3339) UTC
     pub created_at: String,
 }
