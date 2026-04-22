@@ -302,6 +302,7 @@ pub async fn receive_webhook(
                         template_name: None,
                         template_language: None,
                         template_components: None,
+                        interactive_payload: None,
                         timestamp: msg_ts,
                     };
 
@@ -734,6 +735,12 @@ pub async fn send_message_handler(
                         .map_err(|e| ApiError::Internal(e.to_string()))?;
                     (wa_id, template_preview(tpl))
                 }
+                SendMode::Interactive { payload: inter } => {
+                    let wa_id = wa.send_interactive(&conv.phone, inter, retry_reply_to.as_deref())
+                        .await
+                        .map_err(|e| ApiError::Internal(e.to_string()))?;
+                    (wa_id, interactive_preview(inter))
+                }
             };
 
             let msg_oid = existing_id
@@ -771,12 +778,12 @@ pub async fn send_message_handler(
     let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
 
     let preview_url_flag = payload.preview_url.unwrap_or(false);
-    let (wa_id, msg_type, body, preview, tpl_fields) = match &mode {
+    let (wa_id, msg_type, body, preview, tpl_fields, interactive_payload) = match &mode {
         SendMode::Text { content } => {
             let wa_id = wa.send_text(&conv.phone, content, payload.reply_to.as_deref(), preview_url_flag)
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
-            (wa_id, "text".to_string(), Some(content.clone()), content.clone(), None)
+            (wa_id, "text".to_string(), Some(content.clone()), content.clone(), None, None)
         }
         SendMode::Template { tpl } => {
             let components_value = tpl.components.as_ref()
@@ -796,7 +803,16 @@ pub async fn send_message_handler(
                 language: tpl.language.clone(),
                 components: tpl.components.as_ref().map(|v| serde_json::Value::Array(v.clone())),
             };
-            (wa_id, "template".to_string(), body, prev, Some(fields))
+            (wa_id, "template".to_string(), body, prev, Some(fields), None)
+        }
+        SendMode::Interactive { payload: inter } => {
+            let wa_id = wa.send_interactive(&conv.phone, inter, payload.reply_to.as_deref())
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            let prev = interactive_preview(inter);
+            // `body` guarda el texto humanizado (mismo valor que `preview`) para que
+            // endpoints que listan sin `interactive_payload` sigan teniendo algo.
+            (wa_id, "interactive".to_string(), Some(prev.clone()), prev, None, Some(inter.clone()))
         }
     };
 
@@ -821,11 +837,25 @@ pub async fn send_message_handler(
         template_name: tpl_fields.as_ref().map(|f| f.name.clone()),
         template_language: tpl_fields.as_ref().map(|f| f.language.clone()),
         template_components: tpl_fields.and_then(|f| f.components),
+        interactive_payload,
         timestamp: DateTime::now(),
     };
 
     let saved = state.db.save_message(msg).await.map_err(|e| ApiError::DatabaseError(e))?;
     state.db.touch_conversation(&oid, &preview, false, None).await.map_err(|e| ApiError::DatabaseError(e))?;
+
+    // Si el mensaje nació de un quick-reply guardado, bumpear el contador de uso.
+    // Best-effort: no bloquea la respuesta ni la afecta si falla.
+    if let Some(qr_id) = payload.quick_reply_id.as_deref() {
+        if let Ok(qr_oid) = ObjectId::parse_str(qr_id) {
+            let db = state.db.clone();
+            tokio::spawn(async move {
+                if let Err(e) = db.increment_quick_reply_use(&qr_oid).await {
+                    tracing::warn!("[send_message] increment_quick_reply_use falló id={}: {}", qr_oid, e);
+                }
+            });
+        }
+    }
 
     let rto = resolve_reply_to_for_one(&state, &saved).await;
     let saved_oid = saved.id;
@@ -863,6 +893,7 @@ pub async fn send_message_handler(
 enum SendMode {
     Text { content: String },
     Template { tpl: SendTemplatePayload },
+    Interactive { payload: serde_json::Value },
 }
 
 struct TemplateFields {
@@ -893,6 +924,22 @@ fn resolve_send_mode(
         return Ok(SendMode::Template { tpl: tpl.clone() });
     }
 
+    // Interactive: requiere ventana de 24h abierta (igual que texto freeform).
+    let interactive_mode = payload.msg_type.as_deref().map(|t| t.eq_ignore_ascii_case("interactive"))
+        .unwrap_or(false)
+        || payload.interactive.is_some();
+
+    if interactive_mode {
+        let inter = payload.interactive.as_ref().ok_or_else(|| ApiError::BadRequest(
+            "interactive requerido cuando type=interactive".into(),
+        ))?;
+
+        if !is_within_24h(conv.last_inbound_at) {
+            return Err(ApiError::WindowClosed);
+        }
+        return Ok(SendMode::Interactive { payload: inter.clone() });
+    }
+
     let content = payload.content.as_deref().unwrap_or("").trim();
     if content.is_empty() {
         return Err(ApiError::BadRequest(
@@ -905,6 +952,26 @@ fn resolve_send_mode(
     }
 
     Ok(SendMode::Text { content: content.to_string() })
+}
+
+/// Resumen legible de un payload `interactive` para persistir como preview
+/// y poblar el feed de "último mensaje" de la conversación. No hace
+/// validación — si el payload viene mal armado, devuelve un fallback genérico.
+fn interactive_preview(payload: &serde_json::Value) -> String {
+    // Preferimos el texto del body, luego del header, luego un fallback.
+    if let Some(b) = payload.get("body").and_then(|b| b.get("text")).and_then(|t| t.as_str()) {
+        let t = b.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    if let Some(h) = payload.get("header").and_then(|h| h.get("text")).and_then(|t| t.as_str()) {
+        let t = h.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    "[mensaje interactivo]".to_string()
 }
 
 fn template_preview(tpl: &SendTemplatePayload) -> String {
@@ -1377,6 +1444,7 @@ pub async fn initiate_conversation_handler(
         template_name: Some(tpl_name.to_string()),
         template_language: Some(tpl_lang.to_string()),
         template_components: components_value,
+        interactive_payload: None,
         timestamp: DateTime::now(),
     };
 
@@ -1694,6 +1762,8 @@ pub struct QuickRepliesQuery {
     /// Hex de `WaSettings._id`. Si viene, filtra a ese workspace puntual
     /// (el agente debe pertenecer a él o devuelve lista vacía).
     pub workspace_id: Option<String>,
+    /// Si viene, filtra por `active = bool`. Omitir para traer todos.
+    pub active: Option<bool>,
 }
 
 #[utoipa::path(
@@ -1703,6 +1773,7 @@ pub struct QuickRepliesQuery {
     security(("bearerAuth" = [])),
     params(
         ("workspace_id" = Option<String>, Query, description = "Filtrar por workspace puntual (hex de WaSettings._id)"),
+        ("active" = Option<bool>, Query, description = "Filtrar por estado activo (true/false)"),
     ),
     responses(
         (status = 200, description = "Lista de snippets visibles para el agente", body = QuickRepliesListResponse),
@@ -1730,7 +1801,7 @@ pub async fn list_quick_replies_handler(
     };
 
     let docs = state.db
-        .list_quick_replies(&workspaces, filter_oid.as_ref())
+        .list_quick_replies(&workspaces, filter_oid.as_ref(), q.active)
         .await
         .map_err(ApiError::DatabaseError)?;
 
@@ -1758,11 +1829,25 @@ pub async fn create_quick_reply_handler(
     Extension(claims): Extension<UserProfileClaims>,
     Json(payload): Json<CreateQuickReplyRequest>,
 ) -> Result<Json<QuickReplyResponse>, ApiError> {
+    use super::quick_reply_validation::{validate_quick_reply, ValidatedQuickReply};
+
     require_can_chat(&state, &claims.id).await?;
 
-    let title = validate_qr_title(&payload.title)?;
-    let content = validate_qr_content(&payload.content)?;
+    let title = payload.title.trim().to_string();
+    let content = payload.content.trim().to_string();
     let workspace_oids = parse_and_validate_workspaces(&state, &claims.id, &payload.workspace_ids).await?;
+    let footer = payload.footer.as_ref().map(|s| s.trim().to_string());
+
+    validate_quick_reply(&ValidatedQuickReply {
+        title: &title,
+        content: &content,
+        workspace_ids_len: workspace_oids.len(),
+        header: payload.header.as_ref(),
+        footer: footer.as_deref(),
+        buttons: payload.buttons.as_deref(),
+        list: payload.list.as_ref(),
+        cta_url: payload.cta_url.as_ref(),
+    })?;
 
     let now = DateTime::now();
     let doc = WaQuickReply {
@@ -1774,6 +1859,14 @@ pub async fn create_quick_reply_handler(
         created_by_name: claims.name.clone(),
         created_at: now,
         updated_at: now,
+        active: payload.active.unwrap_or(true),
+        header: payload.header,
+        footer,
+        buttons: payload.buttons,
+        list: payload.list,
+        cta_url: payload.cta_url,
+        use_count: 0,
+        last_used_at: None,
     };
 
     let saved = state.db.create_quick_reply(doc)
@@ -1806,6 +1899,9 @@ pub async fn update_quick_reply_handler(
     Path(id): Path<String>,
     Json(payload): Json<UpdateQuickReplyRequest>,
 ) -> Result<Json<QuickReplyResponse>, ApiError> {
+    use super::quick_reply_validation::{validate_quick_reply, ValidatedQuickReply};
+    use crate::db::UpdateQuickReplyPatch;
+
     require_can_chat(&state, &claims.id).await?;
 
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
@@ -1822,21 +1918,77 @@ pub async fn update_quick_reply_handler(
         return Err(ApiError::NotFound);
     }
 
-    let title = match payload.title {
-        Some(t) => Some(validate_qr_title(&t)?),
+    // Normalización + parse de campos planos
+    let title_new = payload.title.as_ref().map(|t| t.trim().to_string());
+    let content_new = payload.content.as_ref().map(|c| c.trim().to_string());
+    let workspace_oids = match &payload.workspace_ids {
+        Some(list) => Some(parse_and_validate_workspaces(&state, &claims.id, list).await?),
         None => None,
     };
-    let content = match payload.content {
-        Some(c) => Some(validate_qr_content(&c)?),
-        None => None,
+    let footer_patch: Option<Option<String>> = payload.footer.as_ref().map(|opt| {
+        opt.as_ref().map(|s| s.trim().to_string())
+    });
+
+    // Merge patch + existing → estado final, para validar el doc completo.
+    let merged_title = title_new.clone().unwrap_or_else(|| existing.title.clone());
+    let merged_content = content_new.clone().unwrap_or_else(|| existing.content.clone());
+    let merged_ws_len = workspace_oids
+        .as_ref()
+        .map(|v| v.len())
+        .unwrap_or(existing.workspace_ids.len());
+
+    // Campos nullable: Some(Some) → nuevo valor, Some(None) → clear, None → mantener existente.
+    let merged_header: Option<QuickReplyHeader> = match &payload.header {
+        Some(Some(h)) => Some(h.clone()),
+        Some(None) => None,
+        None => existing.header.clone(),
     };
-    let workspace_oids = match payload.workspace_ids {
-        Some(list) => Some(parse_and_validate_workspaces(&state, &claims.id, &list).await?),
-        None => None,
+    let merged_footer: Option<String> = match &footer_patch {
+        Some(Some(f)) => Some(f.clone()),
+        Some(None) => None,
+        None => existing.footer.clone(),
+    };
+    let merged_buttons: Option<Vec<QuickReplyButton>> = match &payload.buttons {
+        Some(Some(b)) => Some(b.clone()),
+        Some(None) => None,
+        None => existing.buttons.clone(),
+    };
+    let merged_list: Option<QuickReplyList> = match &payload.list {
+        Some(Some(l)) => Some(l.clone()),
+        Some(None) => None,
+        None => existing.list.clone(),
+    };
+    let merged_cta: Option<QuickReplyCtaUrl> = match &payload.cta_url {
+        Some(Some(c)) => Some(c.clone()),
+        Some(None) => None,
+        None => existing.cta_url.clone(),
+    };
+
+    validate_quick_reply(&ValidatedQuickReply {
+        title: &merged_title,
+        content: &merged_content,
+        workspace_ids_len: merged_ws_len,
+        header: merged_header.as_ref(),
+        footer: merged_footer.as_deref(),
+        buttons: merged_buttons.as_deref(),
+        list: merged_list.as_ref(),
+        cta_url: merged_cta.as_ref(),
+    })?;
+
+    let patch = UpdateQuickReplyPatch {
+        title: title_new,
+        content: content_new,
+        workspace_ids: workspace_oids,
+        active: payload.active,
+        header: payload.header,
+        footer: footer_patch,
+        buttons: payload.buttons,
+        list: payload.list,
+        cta_url: payload.cta_url,
     };
 
     let updated = state.db
-        .update_quick_reply(&oid, title, content, workspace_oids)
+        .update_quick_reply(&oid, patch)
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::NotFound)?;
@@ -1889,6 +2041,51 @@ pub async fn delete_quick_reply_handler(
 }
 
 #[utoipa::path(
+    patch,
+    path = "/v1/auth-user/whatsapp/quick-replies/{id}/active",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ID del snippet")),
+    request_body = ToggleActiveRequest,
+    responses(
+        (status = 200, description = "Estado actualizado", body = QuickReplyResponse),
+        (status = 404, description = "Snippet no encontrado o no visible para el agente"),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn set_quick_reply_active_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+    Json(payload): Json<ToggleActiveRequest>,
+) -> Result<Json<QuickReplyResponse>, ApiError> {
+    require_can_chat(&state, &claims.id).await?;
+
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+    let existing = state.db.find_quick_reply_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    let user_workspaces = state.db.get_user_workspaces(&claims.id)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    if !has_workspace_overlap(&existing.workspace_ids, &user_workspaces) {
+        return Err(ApiError::NotFound);
+    }
+
+    let updated = state.db.set_quick_reply_active(&oid, payload.active)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    Ok(Json(QuickReplyResponse {
+        ok: true,
+        data: quick_reply_to_item(updated),
+    }))
+}
+
+#[utoipa::path(
     post,
     path = "/v1/auth-user/whatsapp/quick-replies/{id}/duplicate",
     tag = "WhatsApp — Soporte",
@@ -1924,7 +2121,16 @@ pub async fn duplicate_quick_reply_handler(
     }
 
     let title = match payload.title.as_deref() {
-        Some(t) => validate_qr_title(t)?,
+        Some(t) => {
+            let trimmed = t.trim().to_string();
+            if trimmed.is_empty() || trimmed.chars().count() > 100 {
+                return Err(ApiError::ValidationError {
+                    field: "title".into(),
+                    message: "El título debe tener entre 1 y 100 caracteres".into(),
+                });
+            }
+            trimmed
+        }
         None => {
             let proposed = format!("{} (copia)", original.title);
             // Truncar si supera 100 chars — nunca falla por el suffix.
@@ -1946,6 +2152,16 @@ pub async fn duplicate_quick_reply_handler(
         created_by_name: claims.name.clone(),
         created_at: now,
         updated_at: now,
+        // La copia nace activa, con use_count en 0. El resto de campos
+        // interactivos se heredan tal cual del original.
+        active: true,
+        header: original.header.clone(),
+        footer: original.footer.clone(),
+        buttons: original.buttons.clone(),
+        list: original.list.clone(),
+        cta_url: original.cta_url.clone(),
+        use_count: 0,
+        last_used_at: None,
     };
 
     let saved = state.db.create_quick_reply(doc)
@@ -2205,6 +2421,7 @@ fn msg_to_item(
         template_name: m.template_name,
         template_language: m.template_language,
         template_components: m.template_components,
+        interactive_payload: m.interactive_payload,
         created_at: iso8601(m.timestamp),
     }
 }
@@ -2342,9 +2559,6 @@ async fn resolve_sent_by_names(
 // HELPERS — QUICK REPLIES
 // ============================================
 
-const QR_TITLE_MAX: usize = 100;
-const QR_CONTENT_MAX: usize = 1024;
-
 /// Exige `bCanChat == true`. El `user_jwt_auth_middleware` solo valida que el
 /// token sea de staff, pero el permiso de chat es un campo extra en `Users`.
 async fn require_can_chat(state: &Arc<AppState>, user_id: &str) -> Result<(), ApiError> {
@@ -2357,34 +2571,6 @@ async fn require_can_chat(state: &Arc<AppState>, user_id: &str) -> Result<(), Ap
         return Err(ApiError::Forbidden);
     }
     Ok(())
-}
-
-fn validate_qr_title(raw: &str) -> Result<String, ApiError> {
-    let t = raw.trim();
-    if t.is_empty() {
-        return Err(ApiError::BadRequest("title requerido".into()));
-    }
-    if t.chars().count() > QR_TITLE_MAX {
-        return Err(ApiError::BadRequest(format!(
-            "title excede {} caracteres",
-            QR_TITLE_MAX
-        )));
-    }
-    Ok(t.to_string())
-}
-
-fn validate_qr_content(raw: &str) -> Result<String, ApiError> {
-    let c = raw.trim();
-    if c.is_empty() {
-        return Err(ApiError::BadRequest("content requerido".into()));
-    }
-    if c.chars().count() > QR_CONTENT_MAX {
-        return Err(ApiError::BadRequest(format!(
-            "content excede {} caracteres",
-            QR_CONTENT_MAX
-        )));
-    }
-    Ok(c.to_string())
 }
 
 /// Parsea `workspace_ids` de hex → ObjectId, valida mínimo 1, existencia en
@@ -2436,6 +2622,14 @@ fn quick_reply_to_item(q: WaQuickReply) -> QuickReplyItem {
         created_by_name: q.created_by_name,
         created_at: iso8601(q.created_at),
         updated_at: iso8601(q.updated_at),
+        active: q.active,
+        header: q.header,
+        footer: q.footer,
+        buttons: q.buttons,
+        list: q.list,
+        cta_url: q.cta_url,
+        use_count: q.use_count,
+        last_used_at: q.last_used_at.map(iso8601),
     }
 }
 

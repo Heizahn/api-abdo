@@ -109,6 +109,11 @@ pub struct WaMessage {
     /// ya interpolados). Permite rerenderizar la burbuja en el futuro.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_components: Option<serde_json::Value>,
+    /// Snapshot del payload `interactive` enviado a Meta (sólo cuando
+    /// `msg_type == "interactive"`). Incluye action/buttons/list/etc para que
+    /// el front pueda rerenderizar la burbuja.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interactive_payload: Option<serde_json::Value>,
     pub timestamp: DateTime,
 }
 
@@ -260,8 +265,9 @@ pub struct StatusError {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SendMessageRequest {
-    /// Discriminador: `"text"` (default) o `"template"`. Cuando viene
-    /// `"template"` el backend ignora `content` y usa `template`.
+    /// Discriminador: `"text"` (default), `"template"` o `"interactive"`.
+    /// Segun el valor se usa `content`, `template` o `interactive` y los
+    /// demás se ignoran.
     #[serde(default, rename = "type")]
     pub msg_type: Option<String>,
     /// Texto del mensaje a enviar. Requerido cuando `type == "text"`.
@@ -283,6 +289,17 @@ pub struct SendMessageRequest {
     /// aplica a `type == "text"`. Default `false`.
     #[serde(default)]
     pub preview_url: Option<bool>,
+    /// Payload de mensaje interactivo (button / list / cta_url) — pasa-piso
+    /// directo al objeto `interactive` de la Cloud API de Meta. Requerido
+    /// cuando `type == "interactive"`.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    pub interactive: Option<serde_json::Value>,
+    /// Si el mensaje interactivo proviene de un quick-reply guardado, pasar
+    /// el `id` aquí para que el backend incremente `use_count` y setee
+    /// `last_used_at`. Opcional.
+    #[serde(default)]
+    pub quick_reply_id: Option<String>,
 }
 
 /// Plantilla lista para enviar. El front obtiene `name`/`language` desde
@@ -419,6 +436,10 @@ pub struct MessageItem {
     /// El front los usa para renderizar la burbuja cuando quiere customizar.
     #[schema(value_type = Option<Object>)]
     pub template_components: Option<serde_json::Value>,
+    /// Payload `interactive` enviado a Meta (sólo cuando `type == "interactive"`).
+    /// Passthrough del mismo objeto que se le pasó a la Cloud API.
+    #[schema(value_type = Option<Object>)]
+    pub interactive_payload: Option<serde_json::Value>,
     /// ISO-8601 (RFC 3339) UTC
     pub created_at: String,
 }
@@ -604,8 +625,67 @@ pub struct TransferableAgentsResponse {
 // MENSAJES RÁPIDOS (WaQuickReplies)
 // ============================================
 
-/// Documento de la colección `WaQuickReplies`. Snippet de texto reutilizable
-/// que un agente puede insertar rápidamente en el composer.
+/// Header opcional de un quick-reply (variante discriminada por `type`).
+/// Para media (image/video/document) `link` debe ser URL pública https — Meta
+/// hace fetch del recurso al renderizar.
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum QuickReplyHeader {
+    Text { text: String },
+    Image { link: String },
+    Video { link: String },
+    Document { link: String, #[serde(default, skip_serializing_if = "Option::is_none")] filename: Option<String> },
+}
+
+/// Un botón de "reply button" (respuesta rápida). Máx 1..3 por mensaje.
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+pub struct QuickReplyButton {
+    /// ID único dentro del array (≤ 256 chars). Meta lo devuelve cuando el
+    /// usuario aprieta el botón, y el front lo usa para identificar la opción.
+    pub id: String,
+    /// Label visible en el botón (≤ 20 chars).
+    pub title: String,
+}
+
+/// Fila dentro de una sección de una lista interactiva.
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+pub struct QuickReplyListRow {
+    /// ID único en toda la lista (no sólo dentro de la sección).
+    pub id: String,
+    /// Título visible (≤ 24 chars).
+    pub title: String,
+    /// Descripción secundaria opcional (≤ 72 chars).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Sección dentro de una lista interactiva. Cada sección agrupa filas.
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+pub struct QuickReplyListSection {
+    /// Título de la sección (≤ 24 chars).
+    pub title: String,
+    pub rows: Vec<QuickReplyListRow>,
+}
+
+/// Lista interactiva: un botón que abre un bottom-sheet con secciones y filas.
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+pub struct QuickReplyList {
+    /// Texto del botón que abre la lista (≤ 20 chars).
+    pub button: String,
+    pub sections: Vec<QuickReplyListSection>,
+}
+
+/// Botón URL (call-to-action). Excluyente con `buttons` y `list`.
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+pub struct QuickReplyCtaUrl {
+    /// Label visible del botón (≤ 20 chars).
+    pub display_text: String,
+    /// URL destino (http o https; se recomienda https).
+    pub url: String,
+}
+
+/// Documento de la colección `WaQuickReplies`. Snippet de texto (opcionalmente
+/// interactivo) reutilizable que un agente puede insertar en el composer.
 ///
 /// Scope: `workspace_ids` — lista de `WaSettings._id` donde este snippet está
 /// disponible. Al listar, el filtro es "intersección con los workspaces del
@@ -624,7 +704,30 @@ pub struct WaQuickReply {
     pub created_by_name: String,
     pub created_at: DateTime,
     pub updated_at: DateTime,
+    /// Activar/desactivar sin borrar el doc. Default `true`.
+    #[serde(default = "default_true")]
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<QuickReplyHeader>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footer: Option<String>,
+    /// Reply buttons (1..3). Excluyente con `list` y `cta_url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buttons: Option<Vec<QuickReplyButton>>,
+    /// Lista interactiva. Excluyente con `buttons` y `cta_url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list: Option<QuickReplyList>,
+    /// Botón URL. Excluyente con `buttons` y `list`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cta_url: Option<QuickReplyCtaUrl>,
+    /// Contador de envíos — para ordenar por popularidad en el front.
+    #[serde(default)]
+    pub use_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<DateTime>,
 }
+
+fn default_true() -> bool { true }
 
 #[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct QuickReplyItem {
@@ -639,6 +742,20 @@ pub struct QuickReplyItem {
     pub created_at: String,
     /// ISO-8601 (RFC 3339) UTC
     pub updated_at: String,
+    pub active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub header: Option<QuickReplyHeader>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub buttons: Option<Vec<QuickReplyButton>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list: Option<QuickReplyList>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cta_url: Option<QuickReplyCtaUrl>,
+    pub use_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -649,13 +766,60 @@ pub struct CreateQuickReplyRequest {
     pub content: String,
     /// Hex de `WaSettings._id`. Mínimo 1. El usuario debe ser agente en todos ellos.
     pub workspace_ids: Vec<String>,
+    #[serde(default)]
+    pub active: Option<bool>,
+    #[serde(default)]
+    pub header: Option<QuickReplyHeader>,
+    #[serde(default)]
+    pub footer: Option<String>,
+    #[serde(default)]
+    pub buttons: Option<Vec<QuickReplyButton>>,
+    #[serde(default)]
+    pub list: Option<QuickReplyList>,
+    #[serde(default)]
+    pub cta_url: Option<QuickReplyCtaUrl>,
+}
+
+/// PATCH-style body con semántica `null = limpiar`, `undefined = no tocar`.
+/// Los campos `Option<Option<T>>` usan `deserialize_some_opt` para distinguir
+/// el campo ausente (None) de un `null` explícito (Some(None)).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateQuickReplyRequest {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub workspace_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub active: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_some_opt")]
+    pub header: Option<Option<QuickReplyHeader>>,
+    #[serde(default, deserialize_with = "deserialize_some_opt")]
+    pub footer: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_some_opt")]
+    pub buttons: Option<Option<Vec<QuickReplyButton>>>,
+    #[serde(default, deserialize_with = "deserialize_some_opt")]
+    pub list: Option<Option<QuickReplyList>>,
+    #[serde(default, deserialize_with = "deserialize_some_opt")]
+    pub cta_url: Option<Option<QuickReplyCtaUrl>>,
+}
+
+/// Helper de serde: distingue "campo ausente" de "campo presente con null".
+/// Devuelve `Some(None)` cuando el campo viene como `null`, `Some(Some(v))`
+/// cuando trae valor, y se combina con `#[serde(default)]` para quedar en
+/// `None` si el campo no aparece en el JSON.
+fn deserialize_some_opt<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
-pub struct UpdateQuickReplyRequest {
-    pub title: Option<String>,
-    pub content: Option<String>,
-    pub workspace_ids: Option<Vec<String>>,
+pub struct ToggleActiveRequest {
+    pub active: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

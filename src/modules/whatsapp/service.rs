@@ -280,6 +280,51 @@ impl WhatsAppService {
         Ok(waba_id)
     }
 
+    /// Envía un mensaje interactivo (reply buttons, list o cta_url). El objeto
+    /// `interactive` se pasa tal cual a Meta — ya debe estar armado con la
+    /// forma esperada por `type: "interactive"` según la docs de WhatsApp
+    /// Cloud API. Si viene `reply_to` (wamid), se incluye `context.message_id`
+    /// para que la burbuja salga citada.
+    pub async fn send_interactive(
+        &self,
+        to: &str,
+        interactive: &serde_json::Value,
+        reply_to: Option<&str>,
+    ) -> Result<String> {
+        let mut payload = json!({
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "interactive",
+            "interactive": interactive,
+        });
+
+        if let Some(wamid) = reply_to {
+            payload["context"] = json!({ "message_id": wamid });
+        }
+
+        let url = self.messages_url();
+        let resp = send_with_retry("send_interactive", || {
+            self.client.post(&url).bearer_auth(&self.access_token).json(&payload)
+        }).await
+            .map_err(|e| describe_reqwest_error("send_interactive request", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("WhatsApp send_interactive error [{}]: {}", status, body));
+        }
+
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| describe_reqwest_error("send_interactive response decode", e))?;
+        let wa_id = json["messages"][0]["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+
+        Ok(wa_id)
+    }
+
     /// Marca un mensaje entrante como leído (ticks azules en texto, mic azul
     /// en voice notes). Meta requiere una llamada POR mensaje — no propaga el
     /// read a los anteriores.

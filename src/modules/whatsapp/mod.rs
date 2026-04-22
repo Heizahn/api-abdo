@@ -1,12 +1,13 @@
 pub mod assignment;
 pub mod backfill;
 pub mod handler;
+pub mod quick_reply_validation;
 pub mod service;
 pub mod url_preview;
 pub mod ws;
 
 use axum::{
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
     Router,
 };
 use crate::state::AppState;
@@ -58,6 +59,7 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route("/v1/auth-user/whatsapp/quick-replies", post(handler::create_quick_reply_handler))
         .route("/v1/auth-user/whatsapp/quick-replies/:id", put(handler::update_quick_reply_handler))
         .route("/v1/auth-user/whatsapp/quick-replies/:id", delete(handler::delete_quick_reply_handler))
+        .route("/v1/auth-user/whatsapp/quick-replies/:id/active", patch(handler::set_quick_reply_active_handler))
         .route("/v1/auth-user/whatsapp/quick-replies/:id/duplicate", post(handler::duplicate_quick_reply_handler))
         // Templates (Meta Cloud API, cached 5min en Redis)
         .route("/v1/auth-user/whatsapp/templates", get(handler::list_templates_handler))

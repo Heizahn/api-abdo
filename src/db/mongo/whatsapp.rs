@@ -5,7 +5,7 @@ use futures::TryStreamExt;
 
 use std::collections::HashMap;
 
-use crate::db::WhatsAppRepository;
+use crate::db::{UpdateQuickReplyPatch, WhatsAppRepository};
 use crate::db::mongo::MongoDB;
 use crate::models::whatsapp::{UrlPreview, WaConversation, WaConversationOpen, WaMessage, WaQuickReply, WaSettings};
 
@@ -789,6 +789,7 @@ impl WhatsAppRepository for MongoDB {
         &self,
         user_workspaces: &[ObjectId],
         filter_workspace_id: Option<&ObjectId>,
+        active_filter: Option<bool>,
     ) -> Result<Vec<WaQuickReply>, String> {
         if user_workspaces.is_empty() {
             return Ok(Vec::new());
@@ -799,8 +800,12 @@ impl WhatsAppRepository for MongoDB {
             Some(_) => return Ok(Vec::new()),
             None => user_workspaces.to_vec(),
         };
+        let mut filter = doc! { "workspace_ids": { "$in": &scope } };
+        if let Some(a) = active_filter {
+            filter.insert("active", a);
+        }
         self.wa_quick_replies()
-            .find(doc! { "workspace_ids": { "$in": &scope } })
+            .find(filter)
             .sort(doc! { "updated_at": -1 })
             .await
             .map_err(|e| e.to_string())?
@@ -832,31 +837,96 @@ impl WhatsAppRepository for MongoDB {
     async fn update_quick_reply(
         &self,
         id: &ObjectId,
-        title: Option<String>,
-        content: Option<String>,
-        workspace_ids: Option<Vec<ObjectId>>,
+        patch: UpdateQuickReplyPatch,
     ) -> Result<Option<WaQuickReply>, String> {
         use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 
         let mut set_doc = doc! { "updated_at": DateTime::now() };
-        if let Some(t) = title {
+        let mut unset_doc = Document::new();
+
+        if let Some(t) = patch.title {
             set_doc.insert("title", t);
         }
-        if let Some(c) = content {
+        if let Some(c) = patch.content {
             set_doc.insert("content", c);
         }
-        if let Some(ws) = workspace_ids {
+        if let Some(ws) = patch.workspace_ids {
             set_doc.insert("workspace_ids", mongodb::bson::to_bson(&ws).map_err(|e| e.to_string())?);
+        }
+        if let Some(a) = patch.active {
+            set_doc.insert("active", a);
+        }
+
+        // Campos nullable: Some(Some(v)) → $set, Some(None) → $unset, None → ignorar.
+        match patch.header {
+            Some(Some(h)) => { set_doc.insert("header", mongodb::bson::to_bson(&h).map_err(|e| e.to_string())?); }
+            Some(None) => { unset_doc.insert("header", ""); }
+            None => {}
+        }
+        match patch.footer {
+            Some(Some(f)) => { set_doc.insert("footer", f); }
+            Some(None) => { unset_doc.insert("footer", ""); }
+            None => {}
+        }
+        match patch.buttons {
+            Some(Some(b)) => { set_doc.insert("buttons", mongodb::bson::to_bson(&b).map_err(|e| e.to_string())?); }
+            Some(None) => { unset_doc.insert("buttons", ""); }
+            None => {}
+        }
+        match patch.list {
+            Some(Some(l)) => { set_doc.insert("list", mongodb::bson::to_bson(&l).map_err(|e| e.to_string())?); }
+            Some(None) => { unset_doc.insert("list", ""); }
+            None => {}
+        }
+        match patch.cta_url {
+            Some(Some(c)) => { set_doc.insert("cta_url", mongodb::bson::to_bson(&c).map_err(|e| e.to_string())?); }
+            Some(None) => { unset_doc.insert("cta_url", ""); }
+            None => {}
+        }
+
+        let mut update = doc! { "$set": set_doc };
+        if !unset_doc.is_empty() {
+            update.insert("$unset", unset_doc);
         }
 
         let opts = FindOneAndUpdateOptions::builder()
             .return_document(ReturnDocument::After)
             .build();
         self.wa_quick_replies()
-            .find_one_and_update(doc! { "_id": id }, doc! { "$set": set_doc })
+            .find_one_and_update(doc! { "_id": id }, update)
             .with_options(opts)
             .await
             .map_err(|e| e.to_string())
+    }
+
+    async fn set_quick_reply_active(
+        &self,
+        id: &ObjectId,
+        active: bool,
+    ) -> Result<Option<WaQuickReply>, String> {
+        use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+        let opts = FindOneAndUpdateOptions::builder()
+            .return_document(ReturnDocument::After)
+            .build();
+        self.wa_quick_replies()
+            .find_one_and_update(
+                doc! { "_id": id },
+                doc! { "$set": { "active": active, "updated_at": DateTime::now() } },
+            )
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn increment_quick_reply_use(&self, id: &ObjectId) -> Result<(), String> {
+        self.wa_quick_replies()
+            .update_one(
+                doc! { "_id": id },
+                doc! { "$inc": { "use_count": 1 }, "$set": { "last_used_at": DateTime::now() } },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     async fn delete_quick_reply(&self, id: &ObjectId) -> Result<bool, String> {

@@ -1,6 +1,9 @@
 pub mod mongo;
 use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
-use crate::models::whatsapp::{UrlPreview, WaConversation, WaMessage, WaQuickReply, WaSettings};
+use crate::models::whatsapp::{
+    QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyList, UrlPreview,
+    WaConversation, WaMessage, WaQuickReply, WaSettings,
+};
 use std::collections::HashMap;
 
 use crate::models::payment::{Bank, PaymentReport, ReferenceMatchInfo};
@@ -211,6 +214,28 @@ pub trait OnuRepository {
     async fn update_onu_ip(&self, onu: OnuIpUpdate, id_editor: &str) -> Result<(), String>;
 }
 
+/// Patch tri-state para `update_quick_reply`.
+///
+/// Para cada campo:
+/// - `None` en el `Option` externo ⇒ el cliente no tocó ese campo (no hacer nada).
+/// - `Some(None)` en los campos `Option<Option<_>>` ⇒ el cliente envió `null` explícito
+///   (borrar el campo con `$unset`).
+/// - `Some(Some(v))` ⇒ setear el valor (`$set`).
+///
+/// Los campos "planos" (`title`, `content`, `workspace_ids`, `active`) son
+/// non-nullable en el modelo, por eso usan `Option<T>` directo (no admiten `null`).
+pub struct UpdateQuickReplyPatch {
+    pub title: Option<String>,
+    pub content: Option<String>,
+    pub workspace_ids: Option<Vec<ObjectId>>,
+    pub active: Option<bool>,
+    pub header: Option<Option<QuickReplyHeader>>,
+    pub footer: Option<Option<String>>,
+    pub buttons: Option<Option<Vec<QuickReplyButton>>>,
+    pub list: Option<Option<QuickReplyList>>,
+    pub cta_url: Option<Option<QuickReplyCtaUrl>>,
+}
+
 // ============================================
 // 7. WhatsAppRepository: Soporte / Chat
 // ============================================
@@ -346,21 +371,30 @@ pub trait WhatsAppRepository {
     async fn wa_settings_exist(&self, ids: &[ObjectId]) -> Result<bool, String>;
     /// Listado de quick-replies cuyo `workspace_ids` intersecta con `user_workspaces`.
     /// Si `filter_workspace_id` viene, filtra además por ese workspace puntual.
+    /// Si `active_filter` viene, filtra por `active = bool` (None ⇒ sin filtro).
     async fn list_quick_replies(
         &self,
         user_workspaces: &[ObjectId],
         filter_workspace_id: Option<&ObjectId>,
+        active_filter: Option<bool>,
     ) -> Result<Vec<WaQuickReply>, String>;
     async fn find_quick_reply_by_id(&self, id: &ObjectId) -> Result<Option<WaQuickReply>, String>;
     async fn create_quick_reply(&self, doc: WaQuickReply) -> Result<WaQuickReply, String>;
-    /// `None` en un campo ⇒ no tocar. Devuelve el doc actualizado (o `None` si no existe).
+    /// Actualización parcial tri-state (ver `UpdateQuickReplyPatch`). Devuelve el doc
+    /// actualizado (o `None` si no existe).
     async fn update_quick_reply(
         &self,
         id: &ObjectId,
-        title: Option<String>,
-        content: Option<String>,
-        workspace_ids: Option<Vec<ObjectId>>,
+        patch: UpdateQuickReplyPatch,
     ) -> Result<Option<WaQuickReply>, String>;
+    /// Toggle simple de `active`. Devuelve el doc actualizado (o `None` si no existe).
+    async fn set_quick_reply_active(
+        &self,
+        id: &ObjectId,
+        active: bool,
+    ) -> Result<Option<WaQuickReply>, String>;
+    /// `$inc use_count` + `$set last_used_at = now`. Se llama tras un envío exitoso.
+    async fn increment_quick_reply_use(&self, id: &ObjectId) -> Result<(), String>;
     async fn delete_quick_reply(&self, id: &ObjectId) -> Result<bool, String>;
 }
 

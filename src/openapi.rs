@@ -8,12 +8,13 @@ use crate::models::whatsapp::{
     ConversationDetailResponse, ConversationItem, ConversationMessagesResponse,
     ConversationsListResponse, CreateQuickReplyRequest, CreateSettingsRequest,
     DuplicateQuickReplyRequest, InitiateConversationRequest, MarkReadResponse, MessageItem,
-    QuickRepliesListResponse, QuickReplyItem, QuickReplyResponse, ReplyToItem,
+    QuickRepliesListResponse, QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyItem,
+    QuickReplyList, QuickReplyListRow, QuickReplyListSection, QuickReplyResponse, ReplyToItem,
     SendMessageRequest, SendMessageResponse, SendTemplatePayload,
     SettingsItem, SettingsListResponse, SettingsResponse, TakeConversationResponse,
-    TemplatesListResponse, TransferConversationRequest, TransferableAgentItem,
-    TransferableAgentsResponse, UpdateQuickReplyRequest, UpdateResponse, UpdateSettingsRequest,
-    UrlPreview, WhatsAppTemplate,
+    TemplatesListResponse, ToggleActiveRequest, TransferConversationRequest,
+    TransferableAgentItem, TransferableAgentsResponse, UpdateQuickReplyRequest, UpdateResponse,
+    UpdateSettingsRequest, UrlPreview, WhatsAppTemplate,
 };
 
 #[derive(OpenApi)]
@@ -50,6 +51,7 @@ use crate::models::whatsapp::{
         crate::modules::whatsapp::handler::create_quick_reply_handler,
         crate::modules::whatsapp::handler::update_quick_reply_handler,
         crate::modules::whatsapp::handler::delete_quick_reply_handler,
+        crate::modules::whatsapp::handler::set_quick_reply_active_handler,
         crate::modules::whatsapp::handler::duplicate_quick_reply_handler,
         crate::modules::whatsapp::handler::list_templates_handler,
     ),
@@ -65,6 +67,9 @@ use crate::models::whatsapp::{
             TransferConversationRequest,
             CreateSettingsRequest, UpdateSettingsRequest,
             CreateQuickReplyRequest, UpdateQuickReplyRequest, DuplicateQuickReplyRequest,
+            ToggleActiveRequest,
+            QuickReplyHeader, QuickReplyButton, QuickReplyList, QuickReplyListSection,
+            QuickReplyListRow, QuickReplyCtaUrl,
             // WhatsApp — Responses
             ConversationsListResponse,
             ConversationDetailResponse,

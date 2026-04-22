@@ -33,6 +33,17 @@ pub enum ApiError {
     #[error("Missing template params")]
     MissingTemplateParams,
 
+    /// La ventana de 24h del chat ya expiró (alias de sentido para casos donde
+    /// el mensaje sería freeform). Se sirve como 409 `window_closed`.
+    #[error("Window closed: use template")]
+    WindowClosed,
+
+    /// Falló validación de un payload. `field` es el nombre del campo que
+    /// falló; `message` es texto orientativo para el front. Se sirve como
+    /// 422 Unprocessable Entity con `{ ok:false, error:"validation_error", field, message }`.
+    #[error("Validation error on {field}: {message}")]
+    ValidationError { field: String, message: String },
+
     #[error("Database error: {0}")]
     DatabaseError(String),
 
@@ -52,6 +63,18 @@ pub enum ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        // ValidationError lleva payload extra (field + message), lo manejamos aparte.
+        if let ApiError::ValidationError { field, message } = &self {
+            tracing::error!("API Error: {:?}", self);
+            let body = Json(json!({
+                "ok": false,
+                "error": "validation_error",
+                "field": field,
+                "message": message,
+            }));
+            return (StatusCode::UNPROCESSABLE_ENTITY, body).into_response();
+        }
+
         let (status, error_message) = match self {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             ApiError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
@@ -59,7 +82,9 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
             ApiError::WindowExpired => (StatusCode::CONFLICT, "window_expired"),
+            ApiError::WindowClosed => (StatusCode::CONFLICT, "window_closed"),
             ApiError::MissingTemplateParams => (StatusCode::BAD_REQUEST, "missing_template_params"),
+            ApiError::ValidationError { .. } => unreachable!(),
             ApiError::DatabaseError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "database_error"),
             ApiError::CacheError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "cache_error"),
             ApiError::SmsError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "sms_error"),
