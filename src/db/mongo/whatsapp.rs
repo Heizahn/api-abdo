@@ -331,12 +331,21 @@ impl WhatsAppRepository for MongoDB {
             ],
         };
 
+        // Struct de proyección dedicado: la proyección excluye campos requeridos
+        // de `WaMessage` (conversation_id, direction, msg_type, timestamp), así
+        // que deserializar la Collection tipada fallaría.
+        #[derive(serde::Deserialize)]
+        struct MsgIdProj {
+            wa_message_id: String,
+        }
+
         let projection = FindOptions::builder()
-            .projection(doc! { "wa_message_id": 1 })
+            .projection(doc! { "wa_message_id": 1, "_id": 0 })
             .build();
 
         let mut ids = Vec::new();
-        let mut cursor = col
+        let mut cursor = self.db
+            .collection::<MsgIdProj>("WaMessages")
             .find(filter.clone())
             .with_options(projection)
             .await
