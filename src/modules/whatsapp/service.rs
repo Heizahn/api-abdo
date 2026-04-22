@@ -27,6 +27,31 @@ fn describe_reqwest_error(ctx: &str, e: reqwest::Error) -> anyhow::Error {
     anyhow::anyhow!("{}{}: {}", ctx, flag_str, chain)
 }
 
+/// `true` si el error es un fallo transitorio en la capa de transporte que vale
+/// la pena reintentar: connect timeout, reset de conexión, body corrupto, etc.
+/// Deja pasar errores "de aplicación" (4xx/5xx) que no se resuelven con retry.
+fn is_transient_reqwest_error(e: &reqwest::Error) -> bool {
+    e.is_timeout() || e.is_connect() || e.is_request() || e.is_body()
+}
+
+/// Ejecuta un request con un reintento simple ante fallos transitorios (ver
+/// `is_transient_reqwest_error`). Backoff fijo de 500 ms para no martillear al
+/// CDN de Meta. Loggea en `warn` el primer fallo para diagnóstico.
+async fn send_with_retry(
+    ctx: &str,
+    mut build: impl FnMut() -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response, reqwest::Error> {
+    match build().send().await {
+        Ok(r) => Ok(r),
+        Err(e) if is_transient_reqwest_error(&e) => {
+            tracing::warn!("{} fallo transitorio, reintentando en 500ms: {}", ctx, e);
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            build().send().await
+        }
+        Err(e) => Err(e),
+    }
+}
+
 pub struct WhatsAppService {
     access_token: String,
     phone_number_id: String,
@@ -64,12 +89,10 @@ impl WhatsAppService {
             payload["context"] = json!({ "message_id": wamid });
         }
 
-        let resp = self.client
-            .post(self.messages_url())
-            .bearer_auth(&self.access_token)
-            .json(&payload)
-            .send()
-            .await
+        let url = self.messages_url();
+        let resp = send_with_retry("send_text", || {
+            self.client.post(&url).bearer_auth(&self.access_token).json(&payload)
+        }).await
             .map_err(|e| describe_reqwest_error("send_text request", e))?;
 
         if !resp.status().is_success() {
@@ -98,11 +121,9 @@ impl WhatsAppService {
     /// los headers por defecto de reqwest.
     pub async fn download_media(&self, media_id: &str) -> Result<(Vec<u8>, String, Option<String>)> {
         let info_url = format!("https://graph.facebook.com/{}/{}", WA_API_VERSION, media_id);
-        let resp = self.client
-            .get(&info_url)
-            .bearer_auth(&self.access_token)
-            .send()
-            .await
+        let resp = send_with_retry("download_media info", || {
+            self.client.get(&info_url).bearer_auth(&self.access_token)
+        }).await
             .map_err(|e| describe_reqwest_error("download_media info", e))?;
 
         if !resp.status().is_success() {
@@ -121,12 +142,12 @@ impl WhatsAppService {
             .to_string();
         let file_name = info["file_name"].as_str().map(|s| s.to_string());
 
-        let bin = self.client
-            .get(&url)
-            .bearer_auth(&self.access_token)
-            .header(reqwest::header::ACCEPT, "*/*")
-            .send()
-            .await
+        let bin = send_with_retry("download_media bytes", || {
+            self.client
+                .get(&url)
+                .bearer_auth(&self.access_token)
+                .header(reqwest::header::ACCEPT, "*/*")
+        }).await
             .map_err(|e| describe_reqwest_error("download_media bytes", e))?;
 
         if !bin.status().is_success() {
@@ -135,6 +156,9 @@ impl WhatsAppService {
             return Err(anyhow::anyhow!("WhatsApp media download error [{}]: {}", status, body));
         }
 
+        // `bytes()` también puede fallar transitoriamente (reset a mitad de
+        // descarga), pero reintentarlo requeriría re-descargar todo. Preferimos
+        // fallar y dejar que el front reintente.
         let bytes = bin.bytes().await
             .map_err(|e| describe_reqwest_error("download_media body", e))?;
 
