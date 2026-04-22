@@ -214,6 +214,20 @@ pub async fn receive_webhook(
                         None => continue,
                     };
 
+                    // Si la conversación estaba cerrada, reabrirla en pending (sin dueño).
+                    // El auto-assign de abajo la reasignará al agente con menos carga.
+                    let was_reopened = if conv.status == "closed" {
+                        match state.db.reopen_conversation(&conv_id).await {
+                            Ok(changed) => changed,
+                            Err(e) => {
+                                tracing::warn!("reopen_conversation error: {}", e);
+                                false
+                            }
+                        }
+                    } else {
+                        false
+                    };
+
                     // Extraer contenido según tipo
                     let (body, media_id) = match msg.msg_type.as_str() {
                         "text" => (msg.text.as_ref().map(|t| t.body.clone()), None),
@@ -289,6 +303,13 @@ pub async fn receive_webhook(
                             conversation: conv_to_item(conv_now.clone(), false, None),
                         };
                         broadcast_all(&state.ws_registry, &new_ev).await;
+                    } else if was_reopened {
+                        // Cerrada → pending: el front debe re-integrarla en la bandeja activa.
+                        let reopened_ev = WsServerEvent::ChatEstadoCambio {
+                            conversation_id: conv_id.to_hex(),
+                            new_status: "pending".to_string(),
+                        };
+                        broadcast_all(&state.ws_registry, &reopened_ev).await;
                     }
 
                     // MENSAJE_NUEVO a todos los conectados; el front filtra por conversación abierta.
@@ -843,11 +864,14 @@ pub async fn close_conversation_handler(
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
-    state.db.update_conversation_status(&oid, "closed")
+    // Capturar al agente ANTES de cerrar — `close_conversation` desasigna.
+    let prev_agent = conv.assigned_to.clone();
+
+    state.db.close_conversation(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
 
-    if let Some(agent) = conv.assigned_to.as_deref() {
+    if let Some(agent) = prev_agent.as_deref() {
         state.redis.decr_agent_load(agent).await;
     }
 

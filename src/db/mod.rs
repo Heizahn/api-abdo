@@ -220,6 +220,11 @@ pub trait WhatsAppRepository {
     /// Cursor-based: `cursor` de la forma `<millis>_<hex_id>` para paginación descendente por `timestamp`.
     async fn get_messages(&self, conversation_id: &ObjectId, cursor: Option<&str>, limit: i64) -> Result<Vec<WaMessage>, String>;
     async fn update_conversation_status(&self, id: &ObjectId, status: &str) -> Result<(), String>;
+    /// Cierra la conversación: status="closed" y libera al agente (`$unset assigned_to`).
+    async fn close_conversation(&self, id: &ObjectId) -> Result<(), String>;
+    /// Reabre una conversación cerrada → pending. No-op si ya no estaba cerrada.
+    /// Retorna `true` si efectivamente cambió el estado.
+    async fn reopen_conversation(&self, id: &ObjectId) -> Result<bool, String>;
     async fn assign_conversation(&self, id: &ObjectId, assigned_to: Option<&str>) -> Result<(), String>;
     /// Intenta tomar una conversación pendiente. Retorna `None` si ya estaba asignada a otro
     /// (o no estaba en status `pending`), `Some(conv)` si la toma fue exitosa.

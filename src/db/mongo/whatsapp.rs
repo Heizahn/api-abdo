@@ -230,6 +230,34 @@ impl WhatsAppRepository for MongoDB {
         Ok(())
     }
 
+    async fn close_conversation(&self, id: &ObjectId) -> Result<(), String> {
+        self.wa_conversations()
+            .update_one(
+                doc! { "_id": id },
+                doc! {
+                    "$set": { "status": "closed" },
+                    "$unset": { "assigned_to": "" },
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn reopen_conversation(&self, id: &ObjectId) -> Result<bool, String> {
+        let res = self.wa_conversations()
+            .update_one(
+                doc! { "_id": id, "status": "closed" },
+                doc! {
+                    "$set": { "status": "pending" },
+                    "$unset": { "assigned_to": "" },
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(res.modified_count > 0)
+    }
+
     async fn assign_conversation(
         &self,
         id: &ObjectId,
