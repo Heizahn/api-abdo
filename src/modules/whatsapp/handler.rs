@@ -299,6 +299,9 @@ pub async fn receive_webhook(
                         reply_to_wa_message_id: msg.context.as_ref().map(|c| c.id.clone()),
                         url_preview: None,
                         voice,
+                        template_name: None,
+                        template_language: None,
+                        template_components: None,
                         timestamp: msg_ts,
                     };
 
@@ -312,6 +315,11 @@ pub async fn receive_webhook(
 
                     if let Err(e) = state.db.touch_conversation(&conv_id, &preview, true, Some(msg_ts)).await {
                         tracing::warn!("touch_conversation error: {}", e);
+                    }
+
+                    // Actualizar `last_inbound_at` → reabre la ventana de 24h.
+                    if let Err(e) = state.db.update_last_inbound_at(&conv_id, msg_ts).await {
+                        tracing::warn!("update_last_inbound_at error: {}", e);
                     }
 
                     // Releer conversación para emitir estado actualizado (unread_count, last_*).
@@ -355,6 +363,19 @@ pub async fn receive_webhook(
                         message: message_item,
                     };
                     broadcast_all(&state.ws_registry, &msg_ev).await;
+
+                    // Ventana de 24h: el inbound reabre la ventana. Emitimos el
+                    // evento siempre para que los countdowns del front se
+                    // re-sincronicen con el nuevo `freeform_expires_at`.
+                    let (can_send_freeform, freeform_expires_at) =
+                        compute_freeform_state(Some(msg_ts));
+                    let estado_ev = WsServerEvent::ConversacionEstado {
+                        conversation_id: conv_id.to_hex(),
+                        last_inbound_at: Some(iso8601(msg_ts)),
+                        can_send_freeform,
+                        freeform_expires_at,
+                    };
+                    broadcast_all(&state.ws_registry, &estado_ev).await;
 
                     // URL preview: fire-and-forget. Si el cuerpo trae una URL,
                     // el job fetchea OG tags y emite URL_PREVIEW_READY cuando termina.
@@ -633,6 +654,11 @@ pub async fn send_message_handler(
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
+    // Decidir modo: template (siempre permitido) vs texto (sólo dentro de la
+    // ventana de 24h). El discriminador `type: "template"` o la presencia del
+    // campo `template` activan el modo template.
+    let mode = resolve_send_mode(&payload, &conv)?;
+
     // Lookup idempotente (fuente de verdad: DB, por `(conv_id, idempotency_key)`).
     // - sent/delivered/read → devolver el mismo mensaje (no reenviar a Meta).
     // - failed               → reintentar envío, actualizar `wa_message_id` + status.
@@ -661,9 +687,27 @@ pub async fn send_message_handler(
             // Se reusa el `reply_to` original del mensaje para mantener la cita.
             let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
             let retry_reply_to = existing.reply_to_wa_message_id.clone();
-            let new_wa_id = wa.send_text(&conv.phone, &payload.content, retry_reply_to.as_deref())
-                .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            let (new_wa_id, preview) = match &mode {
+                SendMode::Text { content } => {
+                    let wa_id = wa.send_text(&conv.phone, content, retry_reply_to.as_deref())
+                        .await
+                        .map_err(|e| ApiError::Internal(e.to_string()))?;
+                    (wa_id, content.clone())
+                }
+                SendMode::Template { tpl } => {
+                    let components_value = tpl.components.as_ref()
+                        .map(|v| serde_json::Value::Array(v.clone()));
+                    let wa_id = wa.send_template(
+                            &conv.phone,
+                            &tpl.name,
+                            &tpl.language,
+                            components_value.as_ref(),
+                        )
+                        .await
+                        .map_err(|e| ApiError::Internal(e.to_string()))?;
+                    (wa_id, template_preview(tpl))
+                }
+            };
 
             let msg_oid = existing_id
                 .ok_or_else(|| ApiError::Internal("mensaje previo sin _id".into()))?;
@@ -674,7 +718,7 @@ pub async fn send_message_handler(
                 .ok_or_else(|| ApiError::Internal("no se pudo actualizar mensaje tras reintento".into()))?;
 
             state.db
-                .touch_conversation(&oid, &payload.content, false, None)
+                .touch_conversation(&oid, &preview, false, None)
                 .await
                 .map_err(|e| ApiError::DatabaseError(e))?;
 
@@ -699,17 +743,44 @@ pub async fn send_message_handler(
     // Envío nuevo.
     let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
 
-    let wa_id = wa.send_text(&conv.phone, &payload.content, payload.reply_to.as_deref())
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let (wa_id, msg_type, body, preview, tpl_fields) = match &mode {
+        SendMode::Text { content } => {
+            let wa_id = wa.send_text(&conv.phone, content, payload.reply_to.as_deref())
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            (wa_id, "text".to_string(), Some(content.clone()), content.clone(), None)
+        }
+        SendMode::Template { tpl } => {
+            let components_value = tpl.components.as_ref()
+                .map(|v| serde_json::Value::Array(v.clone()));
+            let wa_id = wa.send_template(
+                    &conv.phone,
+                    &tpl.name,
+                    &tpl.language,
+                    components_value.as_ref(),
+                )
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            let prev = template_preview(tpl);
+            let body = tpl.rendered_text.clone().or_else(|| Some(prev.clone()));
+            let fields = TemplateFields {
+                name: tpl.name.clone(),
+                language: tpl.language.clone(),
+                components: tpl.components.as_ref().map(|v| serde_json::Value::Array(v.clone())),
+            };
+            (wa_id, "template".to_string(), body, prev, Some(fields))
+        }
+    };
+
+    let is_text_mode = matches!(mode, SendMode::Text { .. });
 
     let msg = WaMessage {
         id: None,
         conversation_id: oid,
         wa_message_id: wa_id,
         direction: "out".to_string(),
-        msg_type: "text".to_string(),
-        body: Some(payload.content.clone()),
+        msg_type,
+        body,
         media_id: None,
         media_mime_type: None,
         media_filename: None,
@@ -719,11 +790,14 @@ pub async fn send_message_handler(
         reply_to_wa_message_id: payload.reply_to.clone(),
         url_preview: None,
         voice: false,
+        template_name: tpl_fields.as_ref().map(|f| f.name.clone()),
+        template_language: tpl_fields.as_ref().map(|f| f.language.clone()),
+        template_components: tpl_fields.and_then(|f| f.components),
         timestamp: DateTime::now(),
     };
 
     let saved = state.db.save_message(msg).await.map_err(|e| ApiError::DatabaseError(e))?;
-    state.db.touch_conversation(&oid, &payload.content, false, None).await.map_err(|e| ApiError::DatabaseError(e))?;
+    state.db.touch_conversation(&oid, &preview, false, None).await.map_err(|e| ApiError::DatabaseError(e))?;
 
     let rto = resolve_reply_to_for_one(&state, &saved).await;
     let saved_oid = saved.id;
@@ -737,16 +811,17 @@ pub async fn send_message_handler(
     };
     broadcast_all(&state.ws_registry, &ev).await;
 
-    // URL preview async: si el agente mandó una URL, fetcheamos OG tags y
-    // emitimos URL_PREVIEW_READY cuando termina. El preview respeta cache
-    // Redis por URL, así que re-enviar el mismo link no re-fetchea.
-    if let Some(msg_oid) = saved_oid {
-        super::url_preview::spawn_preview_job(
-            state.clone(),
-            msg_oid,
-            oid,
-            payload.content.clone(),
-        );
+    // URL preview sólo para texto: los templates no llevan URLs que el
+    // usuario pueda escribir de forma libre.
+    if is_text_mode {
+        if let Some(msg_oid) = saved_oid {
+            super::url_preview::spawn_preview_job(
+                state.clone(),
+                msg_oid,
+                oid,
+                preview.clone(),
+            );
+        }
     }
 
     Ok(Json(SendMessageResponse {
@@ -754,6 +829,64 @@ pub async fn send_message_handler(
         message_id: item.id.clone(),
         message: item,
     }))
+}
+
+/// Decide el modo de envío según el payload y la ventana de 24h.
+enum SendMode {
+    Text { content: String },
+    Template { tpl: SendTemplatePayload },
+}
+
+struct TemplateFields {
+    name: String,
+    language: String,
+    components: Option<serde_json::Value>,
+}
+
+fn resolve_send_mode(
+    payload: &SendMessageRequest,
+    conv: &WaConversation,
+) -> Result<SendMode, ApiError> {
+    // Activamos modo template si viene `type="template"` o si `template` está
+    // presente. Ambos caminos requieren el objeto `template`.
+    let template_mode = payload.msg_type.as_deref().map(|t| t.eq_ignore_ascii_case("template"))
+        .unwrap_or(false)
+        || payload.template.is_some();
+
+    if template_mode {
+        let tpl = payload.template.as_ref()
+            .ok_or(ApiError::MissingTemplateParams)?;
+
+        let name = tpl.name.trim();
+        let language = tpl.language.trim();
+        if name.is_empty() || language.is_empty() {
+            return Err(ApiError::MissingTemplateParams);
+        }
+        return Ok(SendMode::Template { tpl: tpl.clone() });
+    }
+
+    let content = payload.content.as_deref().unwrap_or("").trim();
+    if content.is_empty() {
+        return Err(ApiError::BadRequest(
+            "content requerido (o template para envíos fuera de 24h)".into(),
+        ));
+    }
+
+    if !is_within_24h(conv.last_inbound_at) {
+        return Err(ApiError::WindowExpired);
+    }
+
+    Ok(SendMode::Text { content: content.to_string() })
+}
+
+fn template_preview(tpl: &SendTemplatePayload) -> String {
+    if let Some(rendered) = tpl.rendered_text.as_deref() {
+        let t = rendered.trim();
+        if !t.is_empty() {
+            return t.to_string();
+        }
+    }
+    format!("[plantilla: {}]", tpl.name)
 }
 
 #[utoipa::path(
@@ -1713,6 +1846,7 @@ fn conv_to_item(
     last_opened_at: Option<DateTime>,
     workspace_name: Option<String>,
 ) -> ConversationItem {
+    let (can_send_freeform, expires_iso) = compute_freeform_state(c.last_inbound_at);
     ConversationItem {
         id: c.id.map(|o| o.to_hex()).unwrap_or_default(),
         customer_phone: c.phone,
@@ -1727,6 +1861,33 @@ fn conv_to_item(
         created_at: iso8601(c.created_at),
         client_id: if include_client_id { c.client_id.map(|o| o.to_hex()) } else { None },
         last_opened_at: last_opened_at.map(iso8601),
+        last_inbound_at: c.last_inbound_at.map(iso8601),
+        can_send_freeform,
+        freeform_expires_at: expires_iso,
+    }
+}
+
+/// Ventana de 24h desde `last_inbound_at`. Usado por el gate de envío freeform,
+/// por `conv_to_item` y por el WS event `CONVERSACION_ESTADO`.
+pub(super) fn is_within_24h(last_inbound_at: Option<DateTime>) -> bool {
+    match last_inbound_at {
+        Some(t) => {
+            let now = DateTime::now().timestamp_millis();
+            let then = t.timestamp_millis();
+            (now - then) <= 24 * 60 * 60 * 1000
+        }
+        None => false,
+    }
+}
+
+/// Devuelve `(can_send_freeform, freeform_expires_at_iso)`.
+fn compute_freeform_state(last_inbound_at: Option<DateTime>) -> (bool, Option<String>) {
+    match last_inbound_at {
+        Some(t) => {
+            let expires = DateTime::from_millis(t.timestamp_millis() + 24 * 60 * 60 * 1000);
+            (is_within_24h(Some(t)), Some(iso8601(expires)))
+        }
+        None => (false, None),
     }
 }
 
@@ -1781,6 +1942,9 @@ fn msg_to_item(
         reply_to,
         url_preview: m.url_preview,
         voice: m.voice,
+        template_name: m.template_name,
+        template_language: m.template_language,
+        template_components: m.template_components,
         created_at: iso8601(m.timestamp),
     }
 }

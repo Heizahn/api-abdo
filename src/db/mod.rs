@@ -214,6 +214,10 @@ pub trait WhatsAppRepository {
     /// Retorna `(conv, created)` — `created = true` cuando se insertó en esta llamada.
     async fn upsert_conversation(&self, contact_phone: &str, business_phone: &str, name: Option<String>) -> Result<(WaConversation, bool), String>;
     async fn touch_conversation(&self, id: &ObjectId, preview: &str, increment_unread: bool, last_message_at: Option<mongodb::bson::DateTime>) -> Result<(), String>;
+    /// Setea `last_inbound_at` en la conversación al timestamp indicado. Se usa
+    /// desde el webhook al recibir un mensaje entrante para llevar la ventana
+    /// de 24h (freeform) alineada con Meta.
+    async fn update_last_inbound_at(&self, id: &ObjectId, when: mongodb::bson::DateTime) -> Result<(), String>;
     async fn save_message(&self, message: WaMessage) -> Result<WaMessage, String>;
     /// Cursor-based: `cursor` de la forma `<millis>_<hex_id>` para paginación descendente por `last_message_at`.
     async fn get_conversations(&self, status: Option<&str>, assigned_to: Option<&str>, business_phone: Option<&str>, cursor: Option<&str>, limit: i64) -> Result<Vec<WaConversation>, String>;

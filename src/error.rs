@@ -25,6 +25,14 @@ pub enum ApiError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    /// Ventana de 24h expirada: no se puede enviar freeform, usar template.
+    #[error("Window expired: use template")]
+    WindowExpired,
+
+    /// Faltan parámetros en el componente BODY del template enviado.
+    #[error("Missing template params")]
+    MissingTemplateParams,
+
     #[error("Database error: {0}")]
     DatabaseError(String),
 
@@ -50,6 +58,8 @@ impl IntoResponse for ApiError {
             ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+            ApiError::WindowExpired => (StatusCode::CONFLICT, "window_expired"),
+            ApiError::MissingTemplateParams => (StatusCode::BAD_REQUEST, "missing_template_params"),
             ApiError::DatabaseError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "database_error"),
             ApiError::CacheError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "cache_error"),
             ApiError::SmsError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "sms_error"),

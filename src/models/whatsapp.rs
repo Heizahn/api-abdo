@@ -31,6 +31,11 @@ pub struct WaConversation {
     pub last_message_preview: Option<String>,
     pub unread_count: i32,
     pub created_at: DateTime,
+    /// Último mensaje entrante (del contacto). Se usa para calcular la ventana
+    /// de 24h en la que Meta permite enviar mensajes freeform. `None` si la
+    /// conversación nunca recibió un inbound (raro — se abre con uno).
+    #[serde(default)]
+    pub last_inbound_at: Option<DateTime>,
 }
 
 /// Registro "conversación abierta por agente X en fecha Y" (colección `WaConversationOpens`).
@@ -94,6 +99,16 @@ pub struct WaMessage {
     /// `audio.voice` del webhook de Meta. Para `msg_type != "audio"` es `false`.
     #[serde(default)]
     pub voice: bool,
+    /// Nombre del template (solo cuando `msg_type == "template"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_name: Option<String>,
+    /// Código de idioma del template (ej: "es", "en_US").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_language: Option<String>,
+    /// Snapshot de los `components` enviados a Meta (con `parameters`
+    /// ya interpolados). Permite rerenderizar la burbuja en el futuro.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_components: Option<serde_json::Value>,
     pub timestamp: DateTime,
 }
 
@@ -245,8 +260,13 @@ pub struct StatusError {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SendMessageRequest {
-    /// Texto del mensaje a enviar
-    pub content: String,
+    /// Discriminador: `"text"` (default) o `"template"`. Cuando viene
+    /// `"template"` el backend ignora `content` y usa `template`.
+    #[serde(default, rename = "type")]
+    pub msg_type: Option<String>,
+    /// Texto del mensaje a enviar. Requerido cuando `type == "text"`.
+    #[serde(default)]
+    pub content: Option<String>,
     /// Clave de idempotencia generada por el front (ej: UUID v4).
     /// Si se repite dentro de 24h, el backend devuelve el mensaje ya creado
     /// en vez de reenviarlo a Meta. Permite al front deduplicar contra el
@@ -256,6 +276,28 @@ pub struct SendMessageRequest {
     /// Si está presente, Meta lo recibe como `context.message_id` y la
     /// burbuja sale citada en el chat del cliente.
     pub reply_to: Option<String>,
+    /// Plantilla aprobada — obligatoria cuando `type == "template"`.
+    pub template: Option<SendTemplatePayload>,
+}
+
+/// Plantilla lista para enviar. El front obtiene `name`/`language` desde
+/// `GET /templates` y pasa los `components` con los parámetros ya
+/// interpolados (según lo que indique Meta para cada template).
+#[derive(Debug, Deserialize, Clone, ToSchema)]
+pub struct SendTemplatePayload {
+    pub name: String,
+    /// Código de idioma tal cual lo expone Meta (ej: "es", "en_US").
+    pub language: String,
+    /// Componentes del template (header / body / buttons) con los
+    /// `parameters` interpolados por el front. Se hace passthrough a Meta.
+    #[schema(value_type = Vec<Object>)]
+    #[serde(default)]
+    pub components: Option<Vec<serde_json::Value>>,
+    /// Texto ya renderizado que debe mostrarse en la burbuja del agente
+    /// (el front calcula esto a partir del BODY del template + parámetros).
+    /// Si no se envía, el backend usa un placeholder legible como fallback.
+    #[serde(default)]
+    pub rendered_text: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -295,6 +337,16 @@ pub struct ConversationItem {
     /// `null` si nunca lo abrió.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_opened_at: Option<String>,
+    /// ISO-8601 del último mensaje entrante. El front lo usa para mostrar la
+    /// ventana de 24h y computar su propio countdown local. `null` si no hay
+    /// inbounds registrados (caso borde — la conversación nace con uno).
+    pub last_inbound_at: Option<String>,
+    /// `true` si `now - last_inbound_at <= 24h`. Cuando es `false` Meta rechaza
+    /// mensajes freeform y el front debe usar un template aprobado.
+    pub can_send_freeform: bool,
+    /// ISO-8601 de cuándo expira la ventana (`last_inbound_at + 24h`). `null`
+    /// si no hay inbound previo. Ideal para countdown de UI.
+    pub freeform_expires_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema)]
@@ -338,6 +390,14 @@ pub struct MessageItem {
     /// webhook (`audio.voice`). `false` en archivos de audio subidos y en
     /// cualquier mensaje que no sea de tipo `audio`.
     pub voice: bool,
+    /// Nombre del template (solo cuando `type == "template"`). `null` si no.
+    pub template_name: Option<String>,
+    /// Código de idioma del template.
+    pub template_language: Option<String>,
+    /// `components` enviados a Meta (passthrough del payload original).
+    /// El front los usa para renderizar la burbuja cuando quiere customizar.
+    #[schema(value_type = Option<Object>)]
+    pub template_components: Option<serde_json::Value>,
     /// ISO-8601 (RFC 3339) UTC
     pub created_at: String,
 }

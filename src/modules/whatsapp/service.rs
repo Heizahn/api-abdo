@@ -111,6 +111,55 @@ impl WhatsAppService {
         Ok(wa_id)
     }
 
+    /// Envía una plantilla aprobada a un número (fuera de la ventana de 24h).
+    /// `components` se pasa tal cual a Meta (el front ya interpola los
+    /// parámetros). Si es `None`, se envía un template sin placeholders.
+    pub async fn send_template(
+        &self,
+        to: &str,
+        template_name: &str,
+        language: &str,
+        components: Option<&serde_json::Value>,
+    ) -> Result<String> {
+        let mut template = json!({
+            "name": template_name,
+            "language": { "code": language }
+        });
+
+        if let Some(c) = components {
+            template["components"] = c.clone();
+        }
+
+        let payload = json!({
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "template",
+            "template": template
+        });
+
+        let url = self.messages_url();
+        let resp = send_with_retry("send_template", || {
+            self.client.post(&url).bearer_auth(&self.access_token).json(&payload)
+        }).await
+            .map_err(|e| describe_reqwest_error("send_template request", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("WhatsApp send_template error [{}]: {}", status, body));
+        }
+
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| describe_reqwest_error("send_template response decode", e))?;
+        let wa_id = json["messages"][0]["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+
+        Ok(wa_id)
+    }
+
     /// Descarga el binario de un media subido por un contacto vía webhook.
     ///
     /// Son dos llamadas contra Meta:

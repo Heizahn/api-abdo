@@ -126,6 +126,21 @@ impl WhatsAppRepository for MongoDB {
         Ok(())
     }
 
+    async fn update_last_inbound_at(
+        &self,
+        id: &ObjectId,
+        when: DateTime,
+    ) -> Result<(), String> {
+        self.wa_conversations()
+            .update_one(
+                doc! { "_id": id },
+                doc! { "$set": { "last_inbound_at": when } },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     async fn save_message(&self, message: WaMessage) -> Result<WaMessage, String> {
         let col = self.wa_messages();
 

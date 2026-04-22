@@ -9,6 +9,7 @@ use crate::models::whatsapp::{
     ConversationsListResponse, CreateQuickReplyRequest, CreateSettingsRequest,
     DuplicateQuickReplyRequest, MarkReadResponse, MessageItem, QuickRepliesListResponse,
     QuickReplyItem, QuickReplyResponse, ReplyToItem, SendMessageRequest, SendMessageResponse,
+    SendTemplatePayload,
     SettingsItem, SettingsListResponse, SettingsResponse, TakeConversationResponse,
     TemplatesListResponse, TransferConversationRequest, TransferableAgentItem,
     TransferableAgentsResponse, UpdateQuickReplyRequest, UpdateResponse, UpdateSettingsRequest,
@@ -59,7 +60,7 @@ use crate::models::whatsapp::{
             RefreshRequest, RefreshResponse,
             TokenPair,
             // WhatsApp — Requests
-            SendMessageRequest, TransferConversationRequest,
+            SendMessageRequest, SendTemplatePayload, TransferConversationRequest,
             CreateSettingsRequest, UpdateSettingsRequest,
             CreateQuickReplyRequest, UpdateQuickReplyRequest, DuplicateQuickReplyRequest,
             // WhatsApp — Responses

@@ -105,6 +105,17 @@ pub enum WsServerEvent {
         new_status: String,
     },
 
+    /// Cambio en el estado de la ventana de 24h (freeform) de una conversación.
+    /// Se emite al recibir un inbound (reinicia la ventana) y al expirar las 24h
+    /// sin inbound. El front mergea los campos en la conversación por `conversation_id`.
+    #[serde(rename = "CONVERSACION_ESTADO")]
+    ConversacionEstado {
+        conversation_id: String,
+        last_inbound_at: Option<String>,
+        can_send_freeform: bool,
+        freeform_expires_at: Option<String>,
+    },
+
     #[serde(rename = "ERROR")]
     Error { error: String },
 
