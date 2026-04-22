@@ -1039,14 +1039,12 @@ pub async fn create_settings_handler(
     let phone = normalize_to_e164(&payload.phone);
     let now = mongodb::bson::DateTime::now();
 
-    if payload.access_token.trim().is_empty() {
-        return Err(ApiError::BadRequest("access_token requerido".into()));
-    }
+    let access_token = validate_access_token(&payload.access_token)?;
     if payload.phone_number_id.trim().is_empty() {
         return Err(ApiError::BadRequest("phone_number_id requerido".into()));
     }
 
-    let encrypted = encrypt_payload(&settings_secret(), payload.access_token.trim());
+    let encrypted = encrypt_payload(&settings_secret(), access_token);
 
     let doc = WaSettings {
         id: None,
@@ -1085,12 +1083,13 @@ pub async fn update_settings_handler(
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
     // Cifrar access_token si vino con valor. `None` o vacío ⇒ no tocar el guardado.
-    let encrypted_token = payload
-        .access_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|t| encrypt_payload(&settings_secret(), t));
+    let encrypted_token = match payload.access_token.as_deref() {
+        Some(raw) if !raw.trim().is_empty() => {
+            let clean = validate_access_token(raw)?;
+            Some(encrypt_payload(&settings_secret(), clean))
+        }
+        _ => None,
+    };
 
     state.db
         .update_wa_settings(
@@ -1175,6 +1174,22 @@ fn hex_nibble(b: u8) -> Option<u8> {
 /// Reutilizamos `JWT_SECRET` — alta entropía y estrictamente privado del backend.
 fn settings_secret() -> String {
     std::env::var("JWT_SECRET").unwrap_or_default()
+}
+
+/// Valida un access_token de Meta. Un token legítimo es un string continuo
+/// base64url-ish sin espacios ni comillas. Cualquier carácter extraño suele
+/// indicar copy-paste con varias variables (ej: pegar una línea de `.env`).
+fn validate_access_token(raw: &str) -> Result<&str, ApiError> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Err(ApiError::BadRequest("access_token requerido".into()));
+    }
+    if t.chars().any(|c| c.is_whitespace() || c == '"' || c == '\'') {
+        return Err(ApiError::BadRequest(
+            "access_token inválido: contiene espacios o comillas".into(),
+        ));
+    }
+    Ok(t)
 }
 
 /// Resuelve el `WhatsAppService` para el `business_phone` de una conversación:
