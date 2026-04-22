@@ -327,7 +327,8 @@ pub async fn receive_webhook(
                     }
 
                     // MENSAJE_NUEVO a todos los conectados; el front filtra por conversación abierta.
-                    let message_item = msg_to_item(saved, None);
+                    let reply_to = resolve_reply_to_for_one(&state, &saved).await;
+                    let message_item = msg_to_item(saved, None, reply_to);
                     let agent_count = state.ws_registry.read().await.len();
                     tracing::info!(
                         "[webhook] broadcast MENSAJE_NUEVO wa_id={} conv={} → {} agente(s) conectados",
@@ -525,6 +526,7 @@ pub async fn get_conversation_messages_handler(
         .map_err(|e| ApiError::DatabaseError(e))?;
 
     let agent_names = resolve_sent_by_names(&state, &messages).await;
+    let reply_items = resolve_reply_to_items(&state, &messages).await;
 
     let next_cursor = if (messages.len() as i64) < limit {
         None
@@ -568,7 +570,9 @@ pub async fn get_conversation_messages_handler(
             .into_iter()
             .map(|m| {
                 let name = m.sent_by.as_deref().and_then(|id| agent_names.get(id).cloned());
-                msg_to_item(m, name)
+                let rto = m.reply_to_wa_message_id.as_deref()
+                    .and_then(|wid| reply_items.get(wid).cloned());
+                msg_to_item(m, name, rto)
             })
             .collect(),
         next_cursor,
@@ -617,7 +621,8 @@ pub async fn send_message_handler(
 
             if !is_failed {
                 let name = existing.sent_by.as_deref().map(|_| claims.name.clone());
-                let item = msg_to_item(existing, name);
+                let rto = resolve_reply_to_for_one(&state, &existing).await;
+                let item = msg_to_item(existing, name, rto);
                 return Ok(Json(SendMessageResponse {
                     ok: true,
                     message_id: item.id.clone(),
@@ -626,8 +631,10 @@ pub async fn send_message_handler(
             }
 
             // Retry: reenviar a Meta con la configuración del negocio y actualizar el doc.
+            // Se reusa el `reply_to` original del mensaje para mantener la cita.
             let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
-            let new_wa_id = wa.send_text(&conv.phone, &payload.content)
+            let retry_reply_to = existing.reply_to_wa_message_id.clone();
+            let new_wa_id = wa.send_text(&conv.phone, &payload.content, retry_reply_to.as_deref())
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -644,7 +651,8 @@ pub async fn send_message_handler(
                 .await
                 .map_err(|e| ApiError::DatabaseError(e))?;
 
-            let item = msg_to_item(updated, Some(claims.name.clone()));
+            let rto = resolve_reply_to_for_one(&state, &updated).await;
+            let item = msg_to_item(updated, Some(claims.name.clone()), rto);
 
             // Broadcast del retry — status vuelve a "sent", el front actualiza la burbuja.
             let ev = WsServerEvent::MensajeNuevo {
@@ -664,7 +672,7 @@ pub async fn send_message_handler(
     // Envío nuevo.
     let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
 
-    let wa_id = wa.send_text(&conv.phone, &payload.content)
+    let wa_id = wa.send_text(&conv.phone, &payload.content, payload.reply_to.as_deref())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -686,7 +694,8 @@ pub async fn send_message_handler(
     let saved = state.db.save_message(msg).await.map_err(|e| ApiError::DatabaseError(e))?;
     state.db.touch_conversation(&oid, &payload.content, false, None).await.map_err(|e| ApiError::DatabaseError(e))?;
 
-    let item = msg_to_item(saved, Some(claims.name.clone()));
+    let rto = resolve_reply_to_for_one(&state, &saved).await;
+    let item = msg_to_item(saved, Some(claims.name.clone()), rto);
 
     // Broadcast del mensaje outbound. El front deduplica contra `idempotency_key`
     // si ya recibió la respuesta HTTP.
@@ -1303,7 +1312,11 @@ fn settings_to_item(s: WaSettings) -> SettingsItem {
     }
 }
 
-fn msg_to_item(m: WaMessage, from_user_name: Option<String>) -> MessageItem {
+fn msg_to_item(
+    m: WaMessage,
+    from_user_name: Option<String>,
+    reply_to: Option<ReplyToItem>,
+) -> MessageItem {
     MessageItem {
         id: m.id.map(|o| o.to_hex()).unwrap_or_default(),
         conversation_id: m.conversation_id.to_hex(),
@@ -1316,9 +1329,95 @@ fn msg_to_item(m: WaMessage, from_user_name: Option<String>) -> MessageItem {
         from_user_id: m.sent_by,
         from_user_name,
         idempotency_key: m.idempotency_key,
-        reply_to: None,
+        reply_to,
         created_at: iso8601(m.timestamp),
     }
+}
+
+/// Trunca el cuerpo del mensaje citado a ~80 chars (seguro en UTF-8).
+/// Se usa sólo para preview en la UI; el mensaje original completo sigue
+/// disponible por su `wa_message_id`.
+fn preview_truncate(s: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i >= max_chars { out.push('…'); break; }
+        out.push(c);
+    }
+    out
+}
+
+/// Atajo para un solo mensaje: reusa el helper batch y devuelve el `ReplyToItem`
+/// correspondiente si existe.
+async fn resolve_reply_to_for_one(
+    state: &Arc<AppState>,
+    m: &WaMessage,
+) -> Option<ReplyToItem> {
+    let wid = m.reply_to_wa_message_id.as_ref()?;
+    let items = resolve_reply_to_items(state, std::slice::from_ref(m)).await;
+    items.get(wid).cloned()
+}
+
+/// Batch-resuelve los `reply_to` de un conjunto de mensajes en un solo query a
+/// `WaMessages` (+ uno a `Users` para los nombres de agentes).
+///
+/// Devuelve un mapa `wa_message_id citado → ReplyToItem` listo para armar el
+/// `MessageItem`. Mensajes cuyo `reply_to_wa_message_id` no existe en DB
+/// (ej. mensajes anteriores al deploy del feature) quedan fuera del mapa y
+/// el front recibirá `reply_to: null`.
+async fn resolve_reply_to_items(
+    state: &Arc<AppState>,
+    messages: &[WaMessage],
+) -> std::collections::HashMap<String, ReplyToItem> {
+    use crate::db::UserRepository;
+
+    // Recolecto los wamid citados, dedup.
+    let mut wa_ids: Vec<String> = messages
+        .iter()
+        .filter_map(|m| m.reply_to_wa_message_id.clone())
+        .collect();
+    wa_ids.sort();
+    wa_ids.dedup();
+    if wa_ids.is_empty() {
+        return std::collections::HashMap::new();
+    }
+
+    // Batch lookup del mensaje original.
+    let originals = match state.db.find_messages_by_wa_ids(&wa_ids).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("resolve_reply_to_items find_messages_by_wa_ids error: {}", e);
+            return std::collections::HashMap::new();
+        }
+    };
+
+    // Nombres de agentes para los originales outbound — un batch sobre Users.
+    let mut sender_ids: Vec<String> = originals.values()
+        .filter_map(|m| m.sent_by.clone())
+        .collect();
+    sender_ids.sort();
+    sender_ids.dedup();
+    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for id in sender_ids {
+        if let Ok(Some(u)) = state.db.find_user_by_id(&id).await {
+            names.insert(id, u.name);
+        }
+    }
+
+    // Ensamblar ReplyToItems.
+    originals.into_iter().map(|(wa_id, m)| {
+        let preview_content = m.body.as_deref()
+            .filter(|s| !s.is_empty())
+            .map(|s| preview_truncate(s, 80));
+        let from_user_name = m.sent_by.as_deref().and_then(|id| names.get(id).cloned());
+        let item = ReplyToItem {
+            wa_message_id: wa_id.clone(),
+            preview_content,
+            preview_type: m.msg_type,
+            direction: m.direction,
+            from_user_name,
+        };
+        (wa_id, item)
+    }).collect()
 }
 
 /// Convierte un timestamp de Meta (Unix seconds en string) a `bson::DateTime`.

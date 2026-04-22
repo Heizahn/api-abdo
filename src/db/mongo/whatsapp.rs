@@ -406,6 +406,21 @@ impl WhatsAppRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
+    async fn find_messages_by_wa_ids(
+        &self,
+        wa_ids: &[String],
+    ) -> Result<HashMap<String, WaMessage>, String> {
+        if wa_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let cursor = self.wa_messages()
+            .find(doc! { "wa_message_id": { "$in": wa_ids } })
+            .await
+            .map_err(|e| e.to_string())?;
+        let msgs: Vec<WaMessage> = cursor.try_collect().await.map_err(|e| e.to_string())?;
+        Ok(msgs.into_iter().map(|m| (m.wa_message_id.clone(), m)).collect())
+    }
+
     async fn update_message_status(&self, wa_message_id: &str, status: &str) -> Result<Option<WaMessage>, String> {
         use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
         let opts = FindOneAndUpdateOptions::builder()

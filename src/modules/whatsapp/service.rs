@@ -48,14 +48,21 @@ impl WhatsAppService {
     }
 
     /// Envía un mensaje de texto libre a un número (formato E.164 sin "+").
-    pub async fn send_text(&self, to: &str, body: &str) -> Result<String> {
-        let payload = json!({
+    ///
+    /// Si `reply_to` trae un `wa_message_id` (wamid…), Meta lo recibe como
+    /// `context.message_id` y la burbuja sale citada en el chat del cliente.
+    pub async fn send_text(&self, to: &str, body: &str, reply_to: Option<&str>) -> Result<String> {
+        let mut payload = json!({
             "messaging_product": "whatsapp",
             "recipient_type": "individual",
             "to": to,
             "type": "text",
             "text": { "preview_url": false, "body": body }
         });
+
+        if let Some(wamid) = reply_to {
+            payload["context"] = json!({ "message_id": wamid });
+        }
 
         let resp = self.client
             .post(self.messages_url())

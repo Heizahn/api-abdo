@@ -248,6 +248,13 @@ pub trait WhatsAppRepository {
         new_wa_message_id: &str,
         status: &str,
     ) -> Result<Option<WaMessage>, String>;
+    /// Batch-lookup por `wa_message_id`: devuelve un mapa `wamid → mensaje` para los
+    /// que existan. Usado para enriquecer `MessageItem.reply_to` con un preview del
+    /// mensaje citado (en una sola query, sin N+1).
+    async fn find_messages_by_wa_ids(
+        &self,
+        wa_ids: &[String],
+    ) -> Result<HashMap<String, WaMessage>, String>;
 
     // Per-agent "last opened" tracking
     /// Upsert del último momento en que `user_id` abrió `conversation_id`.
