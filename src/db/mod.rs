@@ -236,6 +236,31 @@ pub struct UpdateQuickReplyPatch {
     pub cta_url: Option<Option<QuickReplyCtaUrl>>,
 }
 
+/// Payload para `touch_conversation`: agrupa todos los campos denormalizados
+/// que viven en `WaConversation` para renderizar el preview del listado
+/// estilo WhatsApp (icono por tipo, checkmarks, "Tú: …", nombre de archivo).
+///
+/// La mayoría de los callers vienen en 4 flujos:
+/// - webhook inbound → `direction="in"`, `increment_unread=true`
+/// - send text/media outbound → `direction="out"`, `status=Some("sent")`
+/// - send template outbound → idem
+/// - initiate (primer mensaje) → idem
+pub struct ConversationTouch<'a> {
+    pub preview: &'a str,
+    pub msg_type: &'a str,
+    /// "in" | "out"
+    pub direction: &'a str,
+    pub wa_message_id: &'a str,
+    /// Sólo outbound: UUID del agente.
+    pub from_user_id: Option<&'a str>,
+    /// Sólo documentos.
+    pub media_filename: Option<&'a str>,
+    /// Sólo outbound: "sent" inicial; en inbound va `None`.
+    pub status: Option<&'a str>,
+    pub increment_unread: bool,
+    pub last_message_at: Option<mongodb::bson::DateTime>,
+}
+
 // ============================================
 // 7. WhatsAppRepository: Soporte / Chat
 // ============================================
@@ -246,7 +271,21 @@ pub trait WhatsAppRepository {
     /// Crea o recupera una conversación identificada por el par `(contact_phone, business_phone)`.
     /// Retorna `(conv, created)` — `created = true` cuando se insertó en esta llamada.
     async fn upsert_conversation(&self, contact_phone: &str, business_phone: &str, name: Option<String>) -> Result<(WaConversation, bool), String>;
-    async fn touch_conversation(&self, id: &ObjectId, preview: &str, increment_unread: bool, last_message_at: Option<mongodb::bson::DateTime>) -> Result<(), String>;
+    async fn touch_conversation(
+        &self,
+        id: &ObjectId,
+        touch: ConversationTouch<'_>,
+    ) -> Result<(), String>;
+    /// Si el último mensaje de la conversación tiene `wa_message_id == wa_id`,
+    /// propaga el nuevo `status` a `last_message_status`. Devuelve `true`
+    /// cuando efectivamente se actualizó (match en DB), `false` en caso
+    /// contrario — útil para saber si hay que emitir evento WS.
+    async fn update_conversation_status_if_last(
+        &self,
+        id: &ObjectId,
+        wa_message_id: &str,
+        status: &str,
+    ) -> Result<bool, String>;
     /// Setea `last_inbound_at` en la conversación al timestamp indicado. Se usa
     /// desde el webhook al recibir un mensaje entrante para llevar la ventana
     /// de 24h (freeform) alineada con Meta.

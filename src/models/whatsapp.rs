@@ -29,6 +29,33 @@ pub struct WaConversation {
     pub assigned_to: Option<String>,
     pub last_message_at: DateTime,
     pub last_message_preview: Option<String>,
+    /// Tipo del último mensaje (ej: "text", "image", "audio", "video",
+    /// "document", "sticker", "location", "template", "interactive", "button").
+    /// Se desnormaliza aquí para que el listado pueda renderizar previews
+    /// estilo WhatsApp (icono + texto) sin tener que hacer un join contra
+    /// `WaMessages`. `None` en docs viejos.
+    #[serde(default)]
+    pub last_message_type: Option<String>,
+    /// Dirección del último mensaje: `"in"` (del contacto) o `"out"` (del agente).
+    #[serde(default)]
+    pub last_message_direction: Option<String>,
+    /// Estado del último mensaje outbound (`"sent" | "delivered" | "read" | "failed"`).
+    /// Sólo es significativo cuando `last_message_direction == "out"`. El front
+    /// pinta los ✓ / ✓✓ / ✓✓ azul con este campo.
+    #[serde(default)]
+    pub last_message_status: Option<String>,
+    /// Nombre de archivo del último mensaje si era un documento. Null en otros casos.
+    #[serde(default)]
+    pub last_message_media_filename: Option<String>,
+    /// UUID del agente que envió el último mensaje (sólo para outbound).
+    /// El handler resuelve el nombre a demanda.
+    #[serde(default)]
+    pub last_message_from_user_id: Option<String>,
+    /// `wa_message_id` del último mensaje de la conversación. Se usa para saber
+    /// si un status-update del webhook corresponde al último mensaje y, de ser
+    /// así, propagar el nuevo status a `last_message_status`.
+    #[serde(default)]
+    pub last_message_wa_id: Option<String>,
     pub unread_count: i32,
     pub created_at: DateTime,
     /// Último mensaje entrante (del contacto). Se usa para calcular la ventana
@@ -365,6 +392,30 @@ pub struct ConversationItem {
     /// ISO-8601 (RFC 3339) UTC, ej: "2026-04-21T14:32:10.123Z"
     pub last_message_at: String,
     pub last_message_preview: Option<String>,
+    /// Tipo del último mensaje — el front lo usa para renderizar previews
+    /// estilo WhatsApp (📷 Foto, 🎤 Nota de voz, 📄 Documento, ✨ Interactivo…).
+    /// Valores posibles: "text", "image", "audio", "video", "document",
+    /// "sticker", "location", "template", "interactive", "button".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_message_type: Option<String>,
+    /// `"in"` (del contacto) o `"out"` (del agente). Permite al front prefijar
+    /// "Tú: …" cuando es outbound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_message_direction: Option<String>,
+    /// Estado del último mensaje outbound. Solo significativo cuando
+    /// `last_message_direction == "out"`. Valores: `"sent" | "delivered" | "read" | "failed"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_message_status: Option<String>,
+    /// Nombre de archivo (sólo cuando `last_message_type == "document"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_message_media_filename: Option<String>,
+    /// UUID del agente que envió el último mensaje (sólo outbound).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_message_from_user_id: Option<String>,
+    /// Nombre del agente que envió el último mensaje (best-effort, resuelto en
+    /// el handler). Útil cuando hay varios agentes en el mismo workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_message_from_user_name: Option<String>,
     pub unread_count: i32,
     /// ISO-8601 (RFC 3339) UTC
     pub created_at: String,

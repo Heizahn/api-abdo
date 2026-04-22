@@ -5,7 +5,7 @@ use futures::TryStreamExt;
 
 use std::collections::HashMap;
 
-use crate::db::{UpdateQuickReplyPatch, WhatsAppRepository};
+use crate::db::{ConversationTouch, UpdateQuickReplyPatch, WhatsAppRepository};
 use crate::db::mongo::MongoDB;
 use crate::models::whatsapp::{UrlPreview, WaConversation, WaConversationOpen, WaMessage, WaPurposesPatch, WaQuickReply, WaSettings};
 
@@ -102,28 +102,63 @@ impl WhatsAppRepository for MongoDB {
     async fn touch_conversation(
         &self,
         id: &ObjectId,
-        preview: &str,
-        increment_unread: bool,
-        last_message_at: Option<DateTime>,
+        touch: ConversationTouch<'_>,
     ) -> Result<(), String> {
-        let ts = last_message_at.unwrap_or_else(DateTime::now);
-        let unread_update: i32 = if increment_unread { 1 } else { 0 };
+        let ts = touch.last_message_at.unwrap_or_else(DateTime::now);
+        let unread_update: i32 = if touch.increment_unread { 1 } else { 0 };
+
+        let mut set_doc = doc! {
+            "last_message_at": ts,
+            "last_message_preview": touch.preview,
+            "last_message_type": touch.msg_type,
+            "last_message_direction": touch.direction,
+            "last_message_wa_id": touch.wa_message_id,
+        };
+        let mut unset_doc = Document::new();
+
+        match touch.status {
+            Some(s) => { set_doc.insert("last_message_status", s); }
+            None    => { unset_doc.insert("last_message_status", ""); }
+        }
+        match touch.from_user_id {
+            Some(u) => { set_doc.insert("last_message_from_user_id", u); }
+            None    => { unset_doc.insert("last_message_from_user_id", ""); }
+        }
+        match touch.media_filename {
+            Some(f) => { set_doc.insert("last_message_media_filename", f); }
+            None    => { unset_doc.insert("last_message_media_filename", ""); }
+        }
+
+        let mut update_doc = doc! {
+            "$set": set_doc,
+            "$inc": { "unread_count": unread_update },
+        };
+        if !unset_doc.is_empty() {
+            update_doc.insert("$unset", unset_doc);
+        }
 
         self.wa_conversations()
-            .update_one(
-                doc! { "_id": id },
-                doc! {
-                    "$set": {
-                        "last_message_at": ts,
-                        "last_message_preview": preview,
-                    },
-                    "$inc": { "unread_count": unread_update }
-                },
-            )
+            .update_one(doc! { "_id": id }, update_doc)
             .await
             .map_err(|e| e.to_string())?;
 
         Ok(())
+    }
+
+    async fn update_conversation_status_if_last(
+        &self,
+        id: &ObjectId,
+        wa_message_id: &str,
+        status: &str,
+    ) -> Result<bool, String> {
+        let res = self.wa_conversations()
+            .update_one(
+                doc! { "_id": id, "last_message_wa_id": wa_message_id },
+                doc! { "$set": { "last_message_status": status } },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(res.modified_count > 0)
     }
 
     async fn update_last_inbound_at(

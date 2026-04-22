@@ -149,6 +149,26 @@ pub async fn receive_webhook(
                     }
                     match state.db.update_message_status(&s.id, &s.status).await {
                         Ok(Some(updated)) => {
+                            // Si este mensaje era el último de la conversación, propagar el
+                            // nuevo status al preview del listado (checkmarks en vivo).
+                            match state.db
+                                .update_conversation_status_if_last(
+                                    &updated.conversation_id,
+                                    &updated.wa_message_id,
+                                    &s.status,
+                                )
+                                .await
+                            {
+                                Ok(true) => tracing::debug!(
+                                    "[webhook] last_message_status={} propagado a conv {}",
+                                    s.status, updated.conversation_id.to_hex()
+                                ),
+                                Ok(false) => {} // no era el último — sin propagar
+                                Err(e) => tracing::warn!(
+                                    "[webhook] update_conversation_status_if_last error: {}", e
+                                ),
+                            }
+
                             let event = WsServerEvent::MensajeActualizado {
                                 conversation_id: updated.conversation_id.to_hex(),
                                 message_id: updated.wa_message_id.clone(),
@@ -346,7 +366,18 @@ pub async fn receive_webhook(
                         }
                     };
 
-                    if let Err(e) = state.db.touch_conversation(&conv_id, &preview, true, Some(msg_ts)).await {
+                    let touch = crate::db::ConversationTouch {
+                        preview: &preview,
+                        msg_type: &msg.msg_type,
+                        direction: "in",
+                        wa_message_id: &msg.id,
+                        from_user_id: None,
+                        media_filename: saved.media_filename.as_deref(),
+                        status: None,
+                        increment_unread: true,
+                        last_message_at: Some(msg_ts),
+                    };
+                    if let Err(e) = state.db.touch_conversation(&conv_id, touch).await {
                         tracing::warn!("touch_conversation error: {}", e);
                     }
 
@@ -370,7 +401,7 @@ pub async fn receive_webhook(
                             .filter(|w| !w.is_empty());
                         let resolved = resolve_customer_name(&state, &conv_now).await;
                         let new_ev = WsServerEvent::ConversacionNueva {
-                            conversation: conv_to_item(conv_now.clone(), false, None, ws_name, resolved),
+                            conversation: conv_to_item(conv_now.clone(), false, None, ws_name, resolved, None),
                         };
                         broadcast_all(&state.ws_registry, &new_ev).await;
                     } else if was_reopened {
@@ -541,6 +572,9 @@ pub async fn list_conversations_handler(
         )
     };
 
+    // Batch-resolve nombres de agentes (autor del último mensaje outbound).
+    let agent_names = resolve_last_message_agent_names(&state, &convs).await;
+
     let data = convs
         .into_iter()
         .map(|c| {
@@ -549,7 +583,10 @@ pub async fn list_conversations_handler(
             let resolved = c.client_id
                 .and_then(|id| names_by_id.get(&id).cloned())
                 .or_else(|| names_by_phone.get(&c.phone).cloned());
-            conv_to_item(c, false, last_opened, ws, resolved)
+            let agent_name = c.last_message_from_user_id
+                .as_ref()
+                .and_then(|id| agent_names.get(id).cloned());
+            conv_to_item(c, false, last_opened, ws, resolved, agent_name)
         })
         .collect();
 
@@ -587,10 +624,11 @@ pub async fn get_conversation_handler(
     let last_opened = opens.get(&oid).copied();
     let workspace_name = resolve_workspace_name(&state, &conv.business_phone).await;
     let resolved = resolve_customer_name(&state, &conv).await;
+    let agent_name = resolve_last_message_agent_name_one(&state, &conv).await;
 
     Ok(Json(ConversationDetailResponse {
         ok: true,
-        conversation: conv_to_item(conv, true, last_opened, workspace_name, resolved),
+        conversation: conv_to_item(conv, true, last_opened, workspace_name, resolved, agent_name),
     }))
 }
 
@@ -729,6 +767,8 @@ pub async fn send_message_handler(
             .map_err(|e| ApiError::DatabaseError(e))?
         {
             let existing_id = existing.id;
+            let existing_msg_type = existing.msg_type.clone();
+            let existing_media_filename = existing.media_filename.clone();
             let is_failed = existing.status.as_deref() == Some("failed");
 
             if !is_failed {
@@ -783,8 +823,19 @@ pub async fn send_message_handler(
                 .map_err(|e| ApiError::DatabaseError(e))?
                 .ok_or_else(|| ApiError::Internal("no se pudo actualizar mensaje tras reintento".into()))?;
 
+            let touch = crate::db::ConversationTouch {
+                preview: &preview,
+                msg_type: &existing_msg_type,
+                direction: "out",
+                wa_message_id: &new_wa_id,
+                from_user_id: Some(claims.id.as_str()),
+                media_filename: existing_media_filename.as_deref(),
+                status: Some("sent"),
+                increment_unread: false,
+                last_message_at: None,
+            };
             state.db
-                .touch_conversation(&oid, &preview, false, None)
+                .touch_conversation(&oid, touch)
                 .await
                 .map_err(|e| ApiError::DatabaseError(e))?;
 
@@ -874,7 +925,18 @@ pub async fn send_message_handler(
     };
 
     let saved = state.db.save_message(msg).await.map_err(|e| ApiError::DatabaseError(e))?;
-    state.db.touch_conversation(&oid, &preview, false, None).await.map_err(|e| ApiError::DatabaseError(e))?;
+    let touch = crate::db::ConversationTouch {
+        preview: &preview,
+        msg_type: &saved.msg_type,
+        direction: "out",
+        wa_message_id: &saved.wa_message_id,
+        from_user_id: Some(claims.id.as_str()),
+        media_filename: saved.media_filename.as_deref(),
+        status: Some("sent"),
+        increment_unread: false,
+        last_message_at: None,
+    };
+    state.db.touch_conversation(&oid, touch).await.map_err(|e| ApiError::DatabaseError(e))?;
 
     // Si el mensaje nació de un quick-reply guardado, bumpear el contador de uso.
     // Best-effort: no bloquea la respuesta ni la afecta si falla.
@@ -1160,10 +1222,11 @@ pub async fn take_conversation_handler(
     let last_opened = opens.get(&oid).copied();
     let workspace_name = resolve_workspace_name(&state, &conv.business_phone).await;
     let resolved = resolve_customer_name(&state, &conv).await;
+    let agent_name = resolve_last_message_agent_name_one(&state, &conv).await;
 
     Ok(Json(TakeConversationResponse {
         ok: true,
-        conversation: conv_to_item(conv, true, last_opened, workspace_name, resolved),
+        conversation: conv_to_item(conv, true, last_opened, workspace_name, resolved, agent_name),
     }))
 }
 
@@ -1235,7 +1298,8 @@ pub async fn transfer_conversation_handler(
     let last_opened = opens.get(&oid).copied();
     let workspace_name = resolve_workspace_name(&state, &conv_after.business_phone).await;
     let resolved = resolve_customer_name(&state, &conv_after).await;
-    let conv_item = conv_to_item(conv_after, true, last_opened, workspace_name, resolved);
+    let agent_name = resolve_last_message_agent_name_one(&state, &conv_after).await;
+    let conv_item = conv_to_item(conv_after, true, last_opened, workspace_name, resolved, agent_name);
 
     // Emitir tras tener el item listo — incluye el estado actualizado con workspace_name y assigned_to nuevo.
     let ev = WsServerEvent::ChatTransferido {
@@ -1304,10 +1368,11 @@ pub async fn close_conversation_handler(
     let last_opened = opens.get(&oid).copied();
     let workspace_name = resolve_workspace_name(&state, &conv_after.business_phone).await;
     let resolved = resolve_customer_name(&state, &conv_after).await;
+    let agent_name = resolve_last_message_agent_name_one(&state, &conv_after).await;
 
     Ok(Json(ConversationDetailResponse {
         ok: true,
-        conversation: conv_to_item(conv_after, true, last_opened, workspace_name, resolved),
+        conversation: conv_to_item(conv_after, true, last_opened, workspace_name, resolved, agent_name),
     }))
 }
 
@@ -1481,7 +1546,18 @@ pub async fn initiate_conversation_handler(
     };
 
     let saved = state.db.save_message(msg).await.map_err(ApiError::DatabaseError)?;
-    state.db.touch_conversation(&conv_id, &preview, false, None)
+    let touch = crate::db::ConversationTouch {
+        preview: &preview,
+        msg_type: &saved.msg_type,
+        direction: "out",
+        wa_message_id: &saved.wa_message_id,
+        from_user_id: Some(claims.id.as_str()),
+        media_filename: saved.media_filename.as_deref(),
+        status: Some("sent"),
+        increment_unread: false,
+        last_message_at: None,
+    };
+    state.db.touch_conversation(&conv_id, touch)
         .await
         .map_err(ApiError::DatabaseError)?;
 
@@ -1499,8 +1575,11 @@ pub async fn initiate_conversation_handler(
     if conv_created {
         let ws_name = Some(settings.workspace_name.clone()).filter(|w| !w.is_empty());
         let resolved = resolve_customer_name(&state, &conv_now).await;
+        // El último mensaje es el template recién enviado por `claims`, así que
+        // el nombre del agente sale del token — evitamos un round-trip a Users.
+        let agent_name = Some(claims.name.clone());
         let new_ev = WsServerEvent::ConversacionNueva {
-            conversation: conv_to_item(conv_now, false, None, ws_name, resolved),
+            conversation: conv_to_item(conv_now, false, None, ws_name, resolved, agent_name),
         };
         broadcast_all(&state.ws_registry, &new_ev).await;
     }
@@ -2333,6 +2412,7 @@ fn conv_to_item(
     last_opened_at: Option<DateTime>,
     workspace_name: Option<String>,
     resolved_name: Option<String>,
+    last_message_from_user_name: Option<String>,
 ) -> ConversationItem {
     let (can_send_freeform, expires_iso) = compute_freeform_state(c.last_inbound_at);
     // Prioridad: DB (Clients.sName) → WhatsApp profile (c.name) → null
@@ -2349,6 +2429,12 @@ fn conv_to_item(
         assigned_to: c.assigned_to,
         last_message_at: iso8601(c.last_message_at),
         last_message_preview: c.last_message_preview,
+        last_message_type: c.last_message_type,
+        last_message_direction: c.last_message_direction,
+        last_message_status: c.last_message_status,
+        last_message_media_filename: c.last_message_media_filename,
+        last_message_from_user_id: c.last_message_from_user_id,
+        last_message_from_user_name,
         unread_count: c.unread_count,
         created_at: iso8601(c.created_at),
         client_id: if include_client_id { c.client_id.map(|o| o.to_hex()) } else { None },
@@ -2588,6 +2674,41 @@ async fn resolve_sent_by_names(
         }
     }
     out
+}
+
+/// Batch-resolución de nombres de agentes para listados de conversaciones,
+/// a partir de `last_message_from_user_id`. Dedup + 1 lookup por UUID único.
+async fn resolve_last_message_agent_names(
+    state: &Arc<AppState>,
+    convs: &[WaConversation],
+) -> std::collections::HashMap<String, String> {
+    use crate::db::UserRepository;
+
+    let mut ids: Vec<String> = convs
+        .iter()
+        .filter_map(|c| c.last_message_from_user_id.clone())
+        .collect();
+    ids.sort();
+    ids.dedup();
+
+    let mut out = std::collections::HashMap::new();
+    for id in ids {
+        if let Ok(Some(u)) = state.db.find_user_by_id(&id).await {
+            out.insert(id, u.name);
+        }
+    }
+    out
+}
+
+/// Resuelve el nombre del agente del último mensaje de una conversación
+/// puntual (detalle). Devuelve `None` si no hay autor o no se encuentra.
+async fn resolve_last_message_agent_name_one(
+    state: &Arc<AppState>,
+    conv: &WaConversation,
+) -> Option<String> {
+    use crate::db::UserRepository;
+    let id = conv.last_message_from_user_id.as_deref()?;
+    state.db.find_user_by_id(id).await.ok().flatten().map(|u| u.name)
 }
 
 // ============================================
