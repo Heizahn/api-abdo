@@ -41,6 +41,12 @@ impl AppState {
             reqwest_client: reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .timeout(std::time::Duration::from_secs(20))
+                // Matar sockets idle antes de que el NAT/proxy los expire.
+                // Evita el caso típico: reqwest reutiliza un socket stale y
+                // el envío queda colgado hasta timeout mientras curl (socket
+                // nuevo) funciona normal.
+                .pool_idle_timeout(std::time::Duration::from_secs(30))
+                .tcp_keepalive(std::time::Duration::from_secs(15))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             ws_registry: Arc::new(RwLock::new(HashMap::new())),

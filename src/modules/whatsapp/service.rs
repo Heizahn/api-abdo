@@ -1,7 +1,31 @@
 use anyhow::Result;
 use serde_json::json;
+use std::error::Error as StdError;
 
 const WA_API_VERSION: &str = "v25.0";
+
+/// Formatea un `reqwest::Error` con toda la cadena de causas (is_timeout,
+/// is_connect, source()...) para que el log muestre la razón real en vez
+/// del texto genérico "error sending request for url".
+fn describe_reqwest_error(ctx: &str, e: reqwest::Error) -> anyhow::Error {
+    let mut flags = Vec::new();
+    if e.is_timeout() { flags.push("timeout"); }
+    if e.is_connect() { flags.push("connect"); }
+    if e.is_request() { flags.push("request"); }
+    if e.is_body() { flags.push("body"); }
+    if e.is_decode() { flags.push("decode"); }
+
+    let mut chain = format!("{}", e);
+    let mut src: Option<&dyn StdError> = e.source();
+    while let Some(s) = src {
+        chain.push_str(" | caused by: ");
+        chain.push_str(&s.to_string());
+        src = s.source();
+    }
+
+    let flag_str = if flags.is_empty() { String::new() } else { format!(" [{}]", flags.join(",")) };
+    anyhow::anyhow!("{}{}: {}", ctx, flag_str, chain)
+}
 
 pub struct WhatsAppService {
     access_token: String,
@@ -38,7 +62,8 @@ impl WhatsAppService {
             .bearer_auth(&self.access_token)
             .json(&payload)
             .send()
-            .await?;
+            .await
+            .map_err(|e| describe_reqwest_error("send_text request", e))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -46,7 +71,8 @@ impl WhatsAppService {
             return Err(anyhow::anyhow!("WhatsApp send_text error [{}]: {}", status, body));
         }
 
-        let json: serde_json::Value = resp.json().await?;
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| describe_reqwest_error("send_text response decode", e))?;
         let wa_id = json["messages"][0]["id"]
             .as_str()
             .unwrap_or("")
