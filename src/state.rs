@@ -47,6 +47,12 @@ impl AppState {
                 // nuevo) funciona normal.
                 .pool_idle_timeout(std::time::Duration::from_secs(30))
                 .tcp_keepalive(std::time::Duration::from_secs(15))
+                // Forzar IPv4: en Debian el resolver devuelve AAAA primero y
+                // reqwest no tiene Happy Eyeballs, así que se cuelga 10s en
+                // cada intento a IPv6 (graph.facebook.com). Binding a 0.0.0.0
+                // obliga al OS a elegir una dirección IPv4 local, lo que
+                // descarta la ruta IPv6.
+                .local_address(std::net::IpAddr::from([0u8, 0, 0, 0]))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             ws_registry: Arc::new(RwLock::new(HashMap::new())),
