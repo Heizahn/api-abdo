@@ -263,6 +263,28 @@ pub async fn receive_webhook(
                             });
                             (label, None, None, None)
                         }
+                        // Respuesta a botón/lista interactivo: Meta envía
+                        // `interactive.button_reply.{id,title}` o
+                        // `interactive.list_reply.{id,title,description}`.
+                        // Guardamos el `title` elegido como body (para preview) y
+                        // el objeto crudo en `interactive_payload` para que el
+                        // front pueda renderizar el contexto completo.
+                        "interactive" => {
+                            let txt = msg.interactive.as_ref().and_then(|v| {
+                                v.get("button_reply").and_then(|b| b.get("title"))
+                                    .or_else(|| v.get("list_reply").and_then(|l| l.get("title")))
+                                    .and_then(|t| t.as_str())
+                                    .map(|s| s.to_string())
+                            });
+                            (txt, None, None, None)
+                        }
+                        // Legacy: botón de template (quick-reply de template).
+                        // Meta envía `button.text` con el label tapped.
+                        "button" => {
+                            let txt = msg.button.as_ref()
+                                .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()));
+                            (txt, None, None, None)
+                        }
                         _ => (None, None, None, None),
                     };
 
@@ -283,6 +305,16 @@ pub async fn receive_webhook(
                         .and_then(parse_unix_seconds_to_bson)
                         .unwrap_or_else(DateTime::now);
 
+                    // Para inbound de tipo `interactive`/`button`, preservamos el
+                    // objeto crudo de Meta (incluye `button_reply`/`list_reply`)
+                    // para que el front pueda renderizar la burbuja con el
+                    // contexto completo de la selección.
+                    let interactive_payload = match msg.msg_type.as_str() {
+                        "interactive" => msg.interactive.clone(),
+                        "button" => msg.button.clone(),
+                        _ => None,
+                    };
+
                     let wa_msg = WaMessage {
                         id: None,
                         conversation_id: conv_id,
@@ -302,7 +334,7 @@ pub async fn receive_webhook(
                         template_name: None,
                         template_language: None,
                         template_components: None,
-                        interactive_payload: None,
+                        interactive_payload,
                         timestamp: msg_ts,
                     };
 
