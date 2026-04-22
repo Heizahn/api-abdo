@@ -49,6 +49,9 @@ pub struct UserResponse {
     pub name: String,
     pub email: String,
     pub role: f32,
+    /// Permiso para atender chats de WhatsApp. El front lo usa para mostrar
+    /// la sección de soporte sin depender del rol.
+    pub can_chat: bool,
 }
 
 impl From<User> for UserResponse {
@@ -58,6 +61,7 @@ impl From<User> for UserResponse {
             name: user.name,
             email: user.email,
             role: user.role,
+            can_chat: user.can_chat,
         }
     }
 }
