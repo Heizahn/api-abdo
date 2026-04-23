@@ -314,11 +314,11 @@ impl WhatsAppRepository for MongoDB {
         let pipeline = vec![
             doc! { "$match": match_stage },
             doc! { "$facet": {
-                "todos":      [ { "$count": "n" } ],
-                "mis":        [ { "$match": { "assigned_to": current_user_id } }, { "$count": "n" } ],
-                "pendientes": [ { "$match": { "status": "pending" } },            { "$count": "n" } ],
-                "en_proceso": [ { "$match": { "status": "in_progress" } },        { "$count": "n" } ],
-                "cerrados":   [ { "$match": { "status": "closed" } },             { "$count": "n" } ],
+                "total":       [ { "$count": "n" } ],
+                "mine":        [ { "$match": { "assigned_to": current_user_id } }, { "$count": "n" } ],
+                "pending":     [ { "$match": { "status": "pending" } },            { "$count": "n" } ],
+                "in_progress": [ { "$match": { "status": "in_progress" } },        { "$count": "n" } ],
+                "closed":      [ { "$match": { "status": "closed" } },             { "$count": "n" } ],
             } },
         ];
 
@@ -345,11 +345,11 @@ impl WhatsAppRepository for MongoDB {
         };
 
         Ok(ConversationStats {
-            todos: extract("todos"),
-            mis: extract("mis"),
-            pendientes: extract("pendientes"),
-            en_proceso: extract("en_proceso"),
-            cerrados: extract("cerrados"),
+            total: extract("total"),
+            mine: extract("mine"),
+            pending: extract("pending"),
+            in_progress: extract("in_progress"),
+            closed: extract("closed"),
         })
     }
 

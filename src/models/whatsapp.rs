@@ -563,15 +563,15 @@ pub struct UpdateResponse {
 }
 
 /// Contadores por categoría — independientes del filtro activo en la UI.
-/// `todos === pendientes + en_proceso + cerrados` (invariante).
-/// `mis` es ortogonal al estado, no se suma con los otros.
+/// `total === pending + in_progress + closed` (invariante).
+/// `mine` es ortogonal al estado, no se suma con los otros.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ConversationStats {
-    pub todos: u64,
-    pub mis: u64,
-    pub pendientes: u64,
-    pub en_proceso: u64,
-    pub cerrados: u64,
+    pub total: u64,
+    pub mine: u64,
+    pub pending: u64,
+    pub in_progress: u64,
+    pub closed: u64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
