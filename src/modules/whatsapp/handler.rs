@@ -2183,7 +2183,7 @@ pub async fn list_quick_replies_handler(
     Extension(claims): Extension<UserProfileClaims>,
     Query(q): Query<QuickRepliesQuery>,
 ) -> Result<Json<QuickRepliesListResponse>, ApiError> {
-    require_can_chat(&state, &claims.id).await?;
+    let caller = require_can_chat(&state, &claims.id).await?;
 
     let filter_oid = match q.workspace_id.as_deref() {
         Some(hex) => Some(
@@ -2200,7 +2200,7 @@ pub async fn list_quick_replies_handler(
 
     Ok(Json(QuickRepliesListResponse {
         ok: true,
-        data: docs.into_iter().map(quick_reply_to_item).collect(),
+        data: docs.into_iter().map(|q| quick_reply_to_item(q, &caller)).collect(),
     }))
 }
 
@@ -2224,7 +2224,7 @@ pub async fn create_quick_reply_handler(
 ) -> Result<Json<QuickReplyResponse>, ApiError> {
     use super::quick_reply_validation::{validate_quick_reply, ValidatedQuickReply};
 
-    require_can_chat(&state, &claims.id).await?;
+    let caller = require_can_chat(&state, &claims.id).await?;
 
     let title = payload.title.trim().to_string();
     let content = payload.content.trim().to_string();
@@ -2267,7 +2267,7 @@ pub async fn create_quick_reply_handler(
 
     Ok(Json(QuickReplyResponse {
         ok: true,
-        data: quick_reply_to_item(saved),
+        data: quick_reply_to_item(saved, &caller),
     }))
 }
 
@@ -2295,7 +2295,7 @@ pub async fn update_quick_reply_handler(
     use super::quick_reply_validation::{validate_quick_reply, ValidatedQuickReply};
     use crate::db::UpdateQuickReplyPatch;
 
-    require_can_chat(&state, &claims.id).await?;
+    let caller = require_can_chat(&state, &claims.id).await?;
 
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
     let existing = state.db.find_quick_reply_by_id(&oid)
@@ -2375,7 +2375,7 @@ pub async fn update_quick_reply_handler(
 
     Ok(Json(QuickReplyResponse {
         ok: true,
-        data: quick_reply_to_item(updated),
+        data: quick_reply_to_item(updated, &caller),
     }))
 }
 
@@ -2388,7 +2388,7 @@ pub async fn update_quick_reply_handler(
     responses(
         (status = 200, description = "Snippet eliminado", body = UpdateResponse),
         (status = 401, description = "No autorizado"),
-        (status = 403, description = "El usuario no tiene `bCanChat=true`"),
+        (status = 403, description = "El usuario no tiene `bCanChat=true`, o tiene chat pero no cumple la regla de `can_edit` (no es creador del item ni superadmin/operador)"),
         (status = 404, description = "Snippet no encontrado"),
     )
 )]
@@ -2397,9 +2397,19 @@ pub async fn delete_quick_reply_handler(
     Extension(claims): Extension<UserProfileClaims>,
     Path(id): Path<String>,
 ) -> Result<Json<UpdateResponse>, ApiError> {
-    require_can_chat(&state, &claims.id).await?;
+    let caller = require_can_chat(&state, &claims.id).await?;
 
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+
+    // Delete necesita `can_edit` (más restrictivo que can_chat): se debe ser
+    // superadmin/operador o el creador del item.
+    let existing = state.db.find_quick_reply_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+    if !compute_can_edit(caller.role, &caller.id, &existing.created_by) {
+        return Err(ApiError::Forbidden);
+    }
 
     let deleted = state.db.delete_quick_reply(&oid)
         .await
@@ -2430,7 +2440,7 @@ pub async fn set_quick_reply_active_handler(
     Path(id): Path<String>,
     Json(payload): Json<ToggleActiveRequest>,
 ) -> Result<Json<QuickReplyResponse>, ApiError> {
-    require_can_chat(&state, &claims.id).await?;
+    let caller = require_can_chat(&state, &claims.id).await?;
 
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
@@ -2441,7 +2451,7 @@ pub async fn set_quick_reply_active_handler(
 
     Ok(Json(QuickReplyResponse {
         ok: true,
-        data: quick_reply_to_item(updated),
+        data: quick_reply_to_item(updated, &caller),
     }))
 }
 
@@ -2466,7 +2476,7 @@ pub async fn duplicate_quick_reply_handler(
     Path(id): Path<String>,
     Json(payload): Json<DuplicateQuickReplyRequest>,
 ) -> Result<Json<QuickReplyResponse>, ApiError> {
-    require_can_chat(&state, &claims.id).await?;
+    let caller = require_can_chat(&state, &claims.id).await?;
 
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
     let original = state.db.find_quick_reply_by_id(&oid)
@@ -2524,7 +2534,7 @@ pub async fn duplicate_quick_reply_handler(
 
     Ok(Json(QuickReplyResponse {
         ok: true,
-        data: quick_reply_to_item(saved),
+        data: quick_reply_to_item(saved, &caller),
     }))
 }
 
@@ -3080,9 +3090,15 @@ async fn resolve_last_message_agent_name_one(
 // HELPERS — QUICK REPLIES
 // ============================================
 
-/// Exige `bCanChat == true`. El `user_jwt_auth_middleware` solo valida que el
-/// token sea de staff, pero el permiso de chat es un campo extra en `Users`.
-async fn require_can_chat(state: &Arc<AppState>, user_id: &str) -> Result<(), ApiError> {
+/// Exige `bCanChat == true` y devuelve el `User` completo (para que el
+/// caller tenga el rol sin re-consultar DB). El `user_jwt_auth_middleware`
+/// solo valida que el token sea de staff; el permiso de chat vive en `Users`.
+///
+/// Los call sites que sólo necesitan el gate escriben
+/// `require_can_chat(&state, &claims.id).await?;` y el valor se descarta. Los
+/// que además necesitan el rol (`can_edit`, auditoría, etc.) lo capturan con
+/// `let caller = require_can_chat(...).await?;`.
+async fn require_can_chat(state: &Arc<AppState>, user_id: &str) -> Result<crate::models::users::User, ApiError> {
     use crate::db::UserRepository;
     let user = state.db.find_user_by_id(user_id)
         .await
@@ -3091,7 +3107,22 @@ async fn require_can_chat(state: &Arc<AppState>, user_id: &str) -> Result<(), Ap
     if !user.can_chat {
         return Err(ApiError::Forbidden);
     }
-    Ok(())
+    Ok(user)
+}
+
+/// Regla actual para `can_edit` (controla el botón de **eliminar** una quick
+/// reply desde el front):
+///
+/// - `true` si el caller es superadmin (`nRole == 0`) u operador (`nRole == 0.5`).
+/// - `true` si el caller es el creador del item (`created_by == caller.id`).
+/// - `false` en cualquier otro caso.
+///
+/// Cualquier `can_chat=true` puede editar/crear/toggle/duplicar — sólo el
+/// delete exige `can_edit=true`. El front usa esta bandera para deshabilitar
+/// el botón de borrar en cards donde no aplica.
+fn compute_can_edit(caller_role: f32, caller_id: &str, qr_created_by: &str) -> bool {
+    let is_admin_or_operator = caller_role == 0.0 || caller_role == 0.5;
+    is_admin_or_operator || qr_created_by == caller_id
 }
 
 /// Parsea `workspace_ids` de hex → ObjectId y valida que existan en `WaSettings`.
@@ -3122,10 +3153,8 @@ async fn parse_and_validate_workspaces(
     Ok(oids)
 }
 
-fn quick_reply_to_item(q: WaQuickReply) -> QuickReplyItem {
-    // `can_edit` siempre true: bajo la policy actual, si el caller llegó a
-    // este mapeo es porque pasó `require_can_chat` — y `can_chat=true`
-    // habilita todas las operaciones sobre todas las quick replies.
+fn quick_reply_to_item(q: WaQuickReply, caller: &crate::models::users::User) -> QuickReplyItem {
+    let can_edit = compute_can_edit(caller.role, &caller.id, &q.created_by);
     QuickReplyItem {
         id: q.id.map(|o| o.to_hex()).unwrap_or_default(),
         title: q.title,
@@ -3136,7 +3165,7 @@ fn quick_reply_to_item(q: WaQuickReply) -> QuickReplyItem {
         created_at: iso8601(q.created_at),
         updated_at: iso8601(q.updated_at),
         active: q.active,
-        can_edit: true,
+        can_edit,
         header: q.header,
         footer: q.footer,
         buttons: q.buttons,

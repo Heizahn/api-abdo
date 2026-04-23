@@ -899,10 +899,13 @@ pub struct QuickReplyItem {
     /// ISO-8601 (RFC 3339) UTC
     pub updated_at: String,
     pub active: bool,
-    /// `true` si el caller puede editar/borrar/duplicar este item. Bajo la
-    /// policy actual (`bCanChat` es gateway único) es siempre `true` si el
-    /// caller ve el item — el front lo usa para alinear la UI sin re-aplicar
-    /// la lógica de scope del backend.
+    /// `true` si el caller puede **eliminar** este item. Cualquier usuario
+    /// con `bCanChat=true` puede editar/crear/duplicar/toggle sobre cualquier
+    /// quick reply — el delete es la única operación con gate adicional:
+    /// sólo pueden borrar superadmin (`nRole=0`), operador (`nRole=0.5`), o
+    /// el creador del item (`created_by == caller.id`). El front usa esta
+    /// bandera para deshabilitar el botón de eliminar en las cards donde no
+    /// aplica.
     pub can_edit: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub header: Option<QuickReplyHeader>,
