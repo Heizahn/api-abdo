@@ -1,5 +1,6 @@
 use mongodb::bson::Bson;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct User {
@@ -118,6 +119,54 @@ pub struct RefreshTokenRequest {
 #[derive(Debug, Serialize)]
 pub struct RefreshTokenResponse {
     pub token: String,
+}
+
+/// Shape devuelto por el CRUD de usuarios (`/v1/auth-user/users*`).
+/// Nombres en inglés snake_case, como el resto del módulo nuevo.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UserItem {
+    pub id: String,
+    pub name: String,
+    pub email: String,
+    pub role: f32,
+    pub visible: bool,
+    pub can_chat: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creator_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creation_date: Option<String>,
+}
+
+impl From<User> for UserItem {
+    fn from(u: User) -> Self {
+        let creation_date = u.d_creation.as_ref().and_then(bson_to_iso_string);
+        UserItem {
+            id: u.id,
+            name: u.name,
+            email: u.email,
+            role: u.role,
+            visible: u.visible,
+            can_chat: u.can_chat,
+            tag: u.tag,
+            creator_id: u.id_creator,
+            creation_date,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UserListResponse {
+    pub ok: bool,
+    pub data: Vec<UserItem>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UserResponseEnvelope {
+    pub ok: bool,
+    pub data: UserItem,
 }
 
 #[allow(dead_code)]

@@ -35,6 +35,23 @@ pub trait AuthRepository {
 // ============================================
 // 6. UserRepository: Auth Users (Admin/Staff)
 // ============================================
+
+/// Filtros para `list_users` — todos opcionales excepto `limit`.
+pub struct UserListFilter<'a> {
+    /// Substring case-insensitive en `sName` O `email`.
+    pub search: Option<&'a str>,
+    /// Filtro exacto por `nRole`.
+    pub role: Option<f32>,
+    /// Filtro por `visible`. `None` trae ambos.
+    pub visible: Option<bool>,
+    /// Filtro por `bCanChat`. `None` trae ambos.
+    pub can_chat: Option<bool>,
+    /// Resultados por página.
+    pub limit: i64,
+    /// Cursor opaco (copiar de `next_cursor` de la página anterior).
+    pub cursor: Option<&'a str>,
+}
+
 #[async_trait::async_trait]
 #[allow(dead_code)]
 pub trait UserRepository {
@@ -51,6 +68,9 @@ pub trait UserRepository {
     /// Usuarios con permiso para atender chats (campo `bCanChat == true` y `visible == true`).
     /// Usado para poblar el dropdown de transferencia de conversaciones.
     async fn find_chat_agents(&self) -> Result<Vec<User>, String>;
+    /// Listado paginado con filtros para el CRUD de usuarios.
+    /// Ordenado por `sName` ascendente con `_id` como tiebreaker estable.
+    async fn list_users(&self, filter: UserListFilter<'_>) -> Result<Vec<User>, String>;
 }
 
 // ============================================

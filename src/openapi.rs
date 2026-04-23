@@ -4,6 +4,7 @@ use crate::models::auth::{
     LoginRequest, LoginResponse, RefreshRequest, RefreshResponse,
     TokenPair, VerifyNumberRequest, VerifyNumberResponse,
 };
+use crate::models::users::{UserItem, UserListResponse, UserResponseEnvelope};
 use crate::models::whatsapp::{
     ConversationDetailResponse, ConversationItem, ConversationMessagesResponse, ConversationStats,
     ConversationStatsResponse, ConversationsListResponse, CreateQuickReplyRequest,
@@ -56,6 +57,8 @@ use crate::models::whatsapp::{
         crate::modules::whatsapp::handler::set_quick_reply_active_handler,
         crate::modules::whatsapp::handler::duplicate_quick_reply_handler,
         crate::modules::whatsapp::handler::list_templates_handler,
+        // Users — CRUD
+        crate::modules::users::handler::list_users_handler,
     ),
     components(
         schemas(
@@ -86,6 +89,8 @@ use crate::models::whatsapp::{
             QuickRepliesListResponse, QuickReplyResponse,
             TemplatesListResponse,
             UpdateResponse,
+            // Users — CRUD
+            UserItem, UserListResponse, UserResponseEnvelope,
             // WhatsApp — Items
             ConversationItem, MessageItem, SettingsItem,
             TransferableAgentItem, ReplyToItem, UrlPreview, LocationPayload, QuickReplyItem,
@@ -95,6 +100,7 @@ use crate::models::whatsapp::{
     tags(
         (name = "Auth — Clientes", description = "Autenticación de clientes vía teléfono + OTP"),
         (name = "WhatsApp — Soporte", description = "Chat de soporte vía WhatsApp Business API"),
+        (name = "Users — CRUD", description = "Gestión de usuarios (staff/admin). Requiere rol SUPERADMIN (nRole == 0.0)."),
     )
 )]
 pub struct ApiDoc;

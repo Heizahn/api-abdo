@@ -1,11 +1,43 @@
 use async_trait::async_trait;
 use futures::stream::TryStreamExt;
-use mongodb::bson::doc;
+use mongodb::bson::{doc, Bson, Document};
+use mongodb::options::FindOptions;
 use mongodb::Collection;
 
 use super::MongoDB;
-use crate::db::UserRepository;
+use crate::db::{UserListFilter, UserRepository};
 use crate::models::users::{User, UserCredentials};
+
+/// Escapa caracteres especiales de regex para usar un string como literal.
+fn regex_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if ".*+?^${}()|[]\\/".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Codifica `(sName, _id)` como cursor opaco para paginación estable.
+/// Formato: `"{sName}\x1f{id}"` → base64 (pipe-char sin colisión).
+fn encode_user_cursor(name: &str, id: &str) -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    URL_SAFE_NO_PAD.encode(format!("{}\x1f{}", name, id))
+}
+
+fn decode_user_cursor(c: &str) -> Option<(String, String)> {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let bytes = URL_SAFE_NO_PAD.decode(c).ok()?;
+    let s = String::from_utf8(bytes).ok()?;
+    let (name, id) = s.split_once('\x1f')?;
+    Some((name.to_string(), id.to_string()))
+}
+
+pub(crate) fn last_user_cursor(users: &[User]) -> Option<String> {
+    users.last().map(|u| encode_user_cursor(&u.name, &u.id))
+}
 
 #[async_trait]
 impl UserRepository for MongoDB {
@@ -115,5 +147,78 @@ impl UserRepository for MongoDB {
             users.push(user);
         }
         Ok(users)
+    }
+
+    async fn list_users(&self, filter: UserListFilter<'_>) -> Result<Vec<User>, String> {
+        let collection: Collection<User> = self.db.collection("Users");
+
+        let mut q = Document::new();
+
+        // Search: substring case-insensitive contra sName | email.
+        // Se guarda el $or del search en una lista para combinarlo con el $or
+        // del cursor al final usando $and (Mongo no permite 2 $or sueltos).
+        let mut or_groups: Vec<Vec<Document>> = Vec::new();
+
+        if let Some(s) = filter.search {
+            let re = regex_escape(s.trim());
+            if !re.is_empty() {
+                or_groups.push(vec![
+                    doc! { "sName": { "$regex": &re, "$options": "i" } },
+                    doc! { "email": { "$regex": &re, "$options": "i" } },
+                ]);
+            }
+        }
+
+        if let Some(r) = filter.role {
+            q.insert("nRole", r as f64);
+        }
+        if let Some(v) = filter.visible {
+            q.insert("visible", v);
+        }
+        if let Some(cc) = filter.can_chat {
+            q.insert("bCanChat", cc);
+        }
+
+        if let Some(c) = filter.cursor {
+            if let Some((name, id)) = decode_user_cursor(c) {
+                or_groups.push(vec![
+                    doc! { "sName": { "$gt": &name } },
+                    doc! { "sName": &name, "_id": { "$gt": &id } },
+                ]);
+            }
+        }
+
+        // Combinar múltiples $or: si hay 1, va directo; si hay más, se envuelven en $and.
+        match or_groups.len() {
+            0 => {}
+            1 => {
+                q.insert("$or", or_groups.pop().unwrap()
+                    .into_iter().map(Bson::Document).collect::<Vec<_>>());
+            }
+            _ => {
+                let and_arr: Vec<Bson> = or_groups.into_iter()
+                    .map(|g| {
+                        let mut d = Document::new();
+                        d.insert("$or", g.into_iter().map(Bson::Document).collect::<Vec<_>>());
+                        Bson::Document(d)
+                    })
+                    .collect();
+                q.insert("$and", and_arr);
+            }
+        }
+
+        let opts = FindOptions::builder()
+            .sort(doc! { "sName": 1, "_id": 1 })
+            .limit(filter.limit)
+            .build();
+
+        collection
+            .find(q)
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())
     }
 }

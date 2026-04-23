@@ -1,0 +1,13 @@
+pub mod handler;
+
+use axum::{routing::get, Router};
+use std::sync::Arc;
+
+use crate::state::AppState;
+
+/// Rutas CRUD de usuarios. Todas requieren JWT staff válido + rol SUPERADMIN
+/// (`nRole == 0.0` leído de DB en cada request, no del JWT snapshot).
+pub fn user_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/v1/auth-user/users", get(handler::list_users_handler))
+}
