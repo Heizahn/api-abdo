@@ -61,17 +61,32 @@ async fn send_with_retry(
     }
 }
 
+/// Config opcional del relay de Cloudflare Worker para descarga de media.
+/// Se activa cuando la VM no puede conectar directo a `lookaside.fbsbx.com`.
+#[derive(Clone)]
+pub struct MediaRelay {
+    pub url: String,
+    pub secret: String,
+}
+
 pub struct WhatsAppService {
     access_token: String,
     phone_number_id: String,
     client: reqwest::Client,
+    media_relay: Option<MediaRelay>,
 }
 
 impl WhatsAppService {
     /// Construye el service con credenciales explícitas (provienen de `WaSettings`,
     /// cifrado descifrado in-memory).
     pub fn new(client: reqwest::Client, phone_number_id: String, access_token: String) -> Self {
-        Self { access_token, phone_number_id, client }
+        Self { access_token, phone_number_id, client, media_relay: None }
+    }
+
+    /// Builder: activa el relay de Cloudflare para descargas de media.
+    pub fn with_media_relay(mut self, relay: MediaRelay) -> Self {
+        self.media_relay = Some(relay);
+        self
     }
 
     fn messages_url(&self) -> String {
@@ -209,12 +224,25 @@ impl WhatsAppService {
     /// Descarga el binario desde la URL firmada que devolvió `download_media_info`.
     /// Se fuerza `Accept: */*` porque la CDN de Meta a veces responde 406 con
     /// los headers por defecto de reqwest.
+    ///
+    /// Si hay `media_relay` configurado, el request va al Worker de Cloudflare
+    /// con la URL de Meta como query param. El Worker valida el secret y el
+    /// host, y reenvía transparentemente. Existe como workaround al bloqueo
+    /// de red desde la VM hacia `lookaside.fbsbx.com`.
     pub async fn download_media_body(&self, url: &str) -> Result<Vec<u8>> {
         let bin = send_with_retry("download_media bytes", || {
-            self.client
-                .get(url)
-                .bearer_auth(&self.access_token)
-                .header(reqwest::header::ACCEPT, "*/*")
+            match &self.media_relay {
+                Some(relay) => self.client
+                    .get(&relay.url)
+                    .query(&[("url", url)])
+                    .header("x-relay-secret", &relay.secret)
+                    .bearer_auth(&self.access_token)
+                    .header(reqwest::header::ACCEPT, "*/*"),
+                None => self.client
+                    .get(url)
+                    .bearer_auth(&self.access_token)
+                    .header(reqwest::header::ACCEPT, "*/*"),
+            }
         }).await
             .map_err(|e| describe_reqwest_error("download_media bytes", e))?;
 

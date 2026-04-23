@@ -42,6 +42,13 @@ pub struct Config {
     //Zabbix
     pub zabbix_url: String,
     pub zabbix_token: String,
+
+    // WhatsApp Media Relay (Cloudflare Worker)
+    // Si ambas están seteadas, las descargas de media van vía el worker
+    // en lugar de conectar directo a `lookaside.fbsbx.com`. Existe porque
+    // desde la VM la ruta a esa CDN está bloqueada por el ISP.
+    pub wa_media_relay_url: Option<String>,
+    pub wa_media_relay_secret: Option<String>,
 }
 
 impl Config {
@@ -109,6 +116,11 @@ impl Config {
             //Zabbix
             zabbix_url: env::var("ZABBIX_URL").expect("Falta ZABBIX_URL en .env"),
             zabbix_token: env::var("ZABBIX_TOKEN").expect("Falta ZABBIX_TOKEN en .env"),
+
+            // WhatsApp Media Relay — opcional. Si no están seteadas, se cae
+            // al flow directo a Meta (útil en dev o si la red mejora).
+            wa_media_relay_url: env::var("WA_MEDIA_RELAY_URL").ok().filter(|s| !s.is_empty()),
+            wa_media_relay_secret: env::var("WA_MEDIA_RELAY_SECRET").ok().filter(|s| !s.is_empty()),
         }
     }
 

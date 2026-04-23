@@ -1903,7 +1903,10 @@ pub async fn get_media_handler(
     }
     let token = decrypt_payload(&settings_secret(), &settings.access_token)
         .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
-    let wa = WhatsAppService::new(state.reqwest_client.clone(), settings.phone_number_id, token);
+    let wa = apply_media_relay(
+        &state,
+        WhatsAppService::new(state.reqwest_client.clone(), settings.phone_number_id, token),
+    );
 
     let t_meta = std::time::Instant::now();
     let (bytes, mime, remote_filename) = wa.download_media(&media_id)
@@ -2485,11 +2488,27 @@ async fn resolve_service_for_phone(
     let token = decrypt_payload(&settings_secret(), &settings.access_token)
         .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
 
-    Ok(WhatsAppService::new(
+    let svc = WhatsAppService::new(
         state.reqwest_client.clone(),
         settings.phone_number_id,
         token,
-    ))
+    );
+    Ok(apply_media_relay(&state, svc))
+}
+
+/// Aplica el relay de Cloudflare al service si ambas env vars están seteadas
+/// en el Config. No-op cuando no hay relay configurado (dev, o red arreglada).
+fn apply_media_relay(state: &Arc<AppState>, svc: WhatsAppService) -> WhatsAppService {
+    match (
+        state.config.wa_media_relay_url.as_ref(),
+        state.config.wa_media_relay_secret.as_ref(),
+    ) {
+        (Some(url), Some(secret)) => svc.with_media_relay(super::service::MediaRelay {
+            url: url.clone(),
+            secret: secret.clone(),
+        }),
+        _ => svc,
+    }
 }
 
 /// Tamaño máximo para el prefetch automático del webhook. Encima de esto el
