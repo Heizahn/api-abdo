@@ -10,8 +10,9 @@ use crate::{
     db::mongo::users::last_user_cursor,
     error::ApiError,
     models::users::{
-        CreateUserBody, SetUserVisibleRequest, UpdateUserRequest, User, UserCredentials,
-        UserItem, UserListResponse, UserResponseEnvelope,
+        CreateUserBody, OkResponse, SetUserPasswordRequest, SetUserVisibleRequest,
+        UpdateUserRequest, User, UserCredentials, UserItem, UserListResponse,
+        UserResponseEnvelope,
     },
     state::AppState,
 };
@@ -318,4 +319,49 @@ pub async fn update_user_handler(
         ok: true,
         data: UserItem::from(user),
     }))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/v1/auth-user/users/{id}/password",
+    tag = "Users — CRUD",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "UUID del usuario")),
+    request_body = SetUserPasswordRequest,
+    responses(
+        (status = 200, description = "Password actualizado", body = OkResponse),
+        (status = 400, description = "Password inválido (mínimo 8 caracteres)"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Requiere rol SUPERADMIN"),
+        (status = 404, description = "Usuario no encontrado"),
+    )
+)]
+pub async fn set_user_password_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+    Json(payload): Json<SetUserPasswordRequest>,
+) -> Result<Json<OkResponse>, ApiError> {
+    let _caller = require_superadmin(&state, &claims).await?;
+
+    if payload.password.len() < PASSWORD_MIN_LEN {
+        return Err(ApiError::BadRequest(format!(
+            "password debe tener al menos {} caracteres",
+            PASSWORD_MIN_LEN
+        )));
+    }
+
+    let hash = bcrypt::hash(&payload.password, BCRYPT_COST)
+        .map_err(|_| ApiError::Internal("no se pudo hashear password".into()))?;
+
+    let existed = state
+        .db
+        .update_user_password(&id, &hash)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    if !existed {
+        return Err(ApiError::NotFound);
+    }
+
+    Ok(Json(OkResponse { ok: true }))
 }

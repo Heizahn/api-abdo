@@ -77,6 +77,11 @@ pub trait UserRepository {
     /// Update parcial del user. Sólo se tocan los campos `Some` del patch.
     /// Retorna `true` si el doc existía.
     async fn update_user(&self, id: &str, patch: UpdateUserPatch) -> Result<bool, String>;
+    /// Actualiza el hash bcrypt en `UserCredentials` para el `user_id`. Si no
+    /// existe una credencial previa, se inserta — soporta el caso borde donde
+    /// el user fue creado sin credencial (no debería pasar por `create_user_handler`
+    /// pero es defensivo). Retorna `true` si el user existe.
+    async fn update_user_password(&self, user_id: &str, password_hash: &str) -> Result<bool, String>;
 }
 
 /// Patch parcial para `update_user` — sólo se setean los `Some`.

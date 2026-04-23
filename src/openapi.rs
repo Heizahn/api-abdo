@@ -5,8 +5,8 @@ use crate::models::auth::{
     TokenPair, VerifyNumberRequest, VerifyNumberResponse,
 };
 use crate::models::users::{
-    CreateUserBody, SetUserVisibleRequest, UpdateUserRequest, UserItem, UserListResponse,
-    UserResponseEnvelope,
+    CreateUserBody, OkResponse, SetUserPasswordRequest, SetUserVisibleRequest, UpdateUserRequest,
+    UserItem, UserListResponse, UserResponseEnvelope,
 };
 use crate::models::whatsapp::{
     ConversationDetailResponse, ConversationItem, ConversationMessagesResponse, ConversationStats,
@@ -65,6 +65,7 @@ use crate::models::whatsapp::{
         crate::modules::users::handler::create_user_handler,
         crate::modules::users::handler::set_user_visible_handler,
         crate::modules::users::handler::update_user_handler,
+        crate::modules::users::handler::set_user_password_handler,
     ),
     components(
         schemas(
@@ -96,8 +97,8 @@ use crate::models::whatsapp::{
             TemplatesListResponse,
             UpdateResponse,
             // Users — CRUD
-            UserItem, UserListResponse, UserResponseEnvelope,
-            SetUserVisibleRequest, UpdateUserRequest, CreateUserBody,
+            UserItem, UserListResponse, UserResponseEnvelope, OkResponse,
+            SetUserVisibleRequest, UpdateUserRequest, CreateUserBody, SetUserPasswordRequest,
             // WhatsApp — Items
             ConversationItem, MessageItem, SettingsItem,
             TransferableAgentItem, ReplyToItem, UrlPreview, LocationPayload, QuickReplyItem,

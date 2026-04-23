@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use futures::stream::TryStreamExt;
 use mongodb::bson::{doc, Bson, Document};
-use mongodb::options::FindOptions;
+use mongodb::options::{FindOptions, UpdateOptions};
 use mongodb::Collection;
 
 use super::MongoDB;
@@ -156,6 +156,30 @@ impl UserRepository for MongoDB {
             .await
             .map_err(|e| e.to_string())?;
         Ok(res.matched_count > 0)
+    }
+
+    async fn update_user_password(&self, user_id: &str, password_hash: &str) -> Result<bool, String> {
+        let users: Collection<User> = self.db.collection("Users");
+        let exists = users
+            .find_one(doc! { "_id": user_id })
+            .projection(doc! { "_id": 1 })
+            .await
+            .map_err(|e| e.to_string())?
+            .is_some();
+        if !exists {
+            return Ok(false);
+        }
+
+        let creds: Collection<UserCredentials> = self.db.collection("UserCredentials");
+        creds
+            .update_one(
+                doc! { "userId": user_id },
+                doc! { "$set": { "password": password_hash, "userId": user_id } },
+            )
+            .with_options(UpdateOptions::builder().upsert(true).build())
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(true)
     }
 
     async fn update_user(&self, id: &str, patch: UpdateUserPatch) -> Result<bool, String> {

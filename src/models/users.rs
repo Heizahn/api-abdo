@@ -189,6 +189,16 @@ pub struct UpdateUserRequest {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+pub struct SetUserPasswordRequest {
+    pub password: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct OkResponse {
+    pub ok: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateUserBody {
     pub name: String,
     pub email: String,
