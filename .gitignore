@@ -1,6 +1,7 @@
 /target
 .env
-.claude/
+.claude/*
+!.claude/skills/
 .idea
 /uploads
 /olt_reports
