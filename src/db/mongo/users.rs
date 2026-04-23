@@ -5,7 +5,7 @@ use mongodb::options::FindOptions;
 use mongodb::Collection;
 
 use super::MongoDB;
-use crate::db::{UserListFilter, UserRepository};
+use crate::db::{UpdateUserPatch, UserListFilter, UserRepository};
 use crate::models::users::{User, UserCredentials};
 
 /// Escapa caracteres especiales de regex para usar un string como literal.
@@ -153,6 +153,34 @@ impl UserRepository for MongoDB {
         let collection: Collection<User> = self.db.collection("Users");
         let res = collection
             .update_one(doc! { "_id": id }, doc! { "$set": { "visible": visible } })
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(res.matched_count > 0)
+    }
+
+    async fn update_user(&self, id: &str, patch: UpdateUserPatch) -> Result<bool, String> {
+        let collection: Collection<User> = self.db.collection("Users");
+        let mut set = Document::new();
+        if let Some(n) = patch.name { set.insert("sName", n); }
+        if let Some(e) = patch.email { set.insert("email", e); }
+        if let Some(r) = patch.role { set.insert("nRole", r as f64); }
+        if let Some(c) = patch.can_chat { set.insert("bCanChat", c); }
+        if let Some(t) = patch.tag { set.insert("nTag", t as i64); }
+
+        // Si el patch vino vacío, evitamos round-trip a Mongo y asumimos "existía"
+        // (no falla; el caller sigue devolviendo 200 con el doc actual).
+        if set.is_empty() {
+            let exists = collection
+                .find_one(doc! { "_id": id })
+                .projection(doc! { "_id": 1 })
+                .await
+                .map_err(|e| e.to_string())?
+                .is_some();
+            return Ok(exists);
+        }
+
+        let res = collection
+            .update_one(doc! { "_id": id }, doc! { "$set": set })
             .await
             .map_err(|e| e.to_string())?;
         Ok(res.matched_count > 0)

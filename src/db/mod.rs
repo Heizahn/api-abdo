@@ -74,6 +74,18 @@ pub trait UserRepository {
     /// Setea `visible` en el doc (soft delete / reactivación). Retorna `true`
     /// si el user existía, `false` si no — para devolver 404 al caller.
     async fn set_user_visible(&self, id: &str, visible: bool) -> Result<bool, String>;
+    /// Update parcial del user. Sólo se tocan los campos `Some` del patch.
+    /// Retorna `true` si el doc existía.
+    async fn update_user(&self, id: &str, patch: UpdateUserPatch) -> Result<bool, String>;
+}
+
+/// Patch parcial para `update_user` — sólo se setean los `Some`.
+pub struct UpdateUserPatch {
+    pub name: Option<String>,
+    pub email: Option<String>,
+    pub role: Option<f32>,
+    pub can_chat: Option<bool>,
+    pub tag: Option<u32>,
 }
 
 // ============================================

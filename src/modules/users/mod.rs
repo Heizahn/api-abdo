@@ -17,4 +17,8 @@ pub fn user_routes() -> Router<Arc<AppState>> {
             "/v1/auth-user/users/:id/visible",
             patch(handler::set_user_visible_handler),
         )
+        .route(
+            "/v1/auth-user/users/:id",
+            patch(handler::update_user_handler),
+        )
 }
