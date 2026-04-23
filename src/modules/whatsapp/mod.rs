@@ -39,6 +39,7 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route("/v1/auth-user/whatsapp/conversations/:id/take", post(handler::take_conversation_handler))
         .route("/v1/auth-user/whatsapp/conversations/:id/transfer", post(handler::transfer_conversation_handler))
         .route("/v1/auth-user/whatsapp/conversations/:id/close", post(handler::close_conversation_handler))
+        .route("/v1/auth-user/whatsapp/conversations/:id/reopen", post(handler::reopen_conversation_handler))
         // Iniciar una conversación (agente outbound first) — siempre template
         .route("/v1/auth-user/whatsapp/conversations/initiate", post(handler::initiate_conversation_handler))
         // Agentes con permiso de chat (para dropdown de transferencia)

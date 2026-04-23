@@ -1495,6 +1495,77 @@ pub async fn close_conversation_handler(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/conversations/{id}/reopen",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ID de la conversación cerrada")),
+    responses(
+        (status = 200, description = "Conversación reabierta (status: pending, assigned_to: null) o detalle actual si ya estaba abierta (idempotente).", body = ConversationDetailResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "El usuario no tiene `bCanChat=true`"),
+        (status = 404, description = "Conversación no encontrada"),
+    )
+)]
+pub async fn reopen_conversation_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+) -> Result<Json<ConversationDetailResponse>, ApiError> {
+    require_can_chat(&state, &claims.id).await?;
+
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+
+    // Pre-check de existencia: `reopen_conversation` sólo actúa si status==closed.
+    // Distinguir "no existe" (404) de "ya abierta" (idempotente) requiere este paso.
+    if state.db.find_conversation_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .is_none()
+    {
+        return Err(ApiError::NotFound);
+    }
+
+    let reopened = state.db.reopen_conversation(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    let conv_after = state.db
+        .find_conversation_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    let opens = state.db
+        .get_conversation_opens(&claims.id, &[oid])
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    let last_opened = opens.get(&oid).copied();
+    let workspace_name = resolve_workspace_name(&state, &conv_after.business_phone).await;
+    let resolved = resolve_customer_name(&state, &conv_after).await;
+    let agent_name = resolve_last_message_agent_name_one(&state, &conv_after).await;
+    let conversation_item = conv_to_item(
+        conv_after, true, last_opened, workspace_name, resolved, agent_name,
+    );
+
+    // Sólo emitimos el evento si realmente se reabrió (transición real).
+    // Si era una llamada idempotente sobre una conv ya abierta, no disparamos
+    // nada para no confundir a los otros clientes conectados.
+    if reopened {
+        let ev = WsServerEvent::ChatReabierto {
+            conversation_id: id.clone(),
+            conversation: conversation_item.clone(),
+        };
+        broadcast_all(&state.ws_registry, &ev).await;
+    }
+
+    Ok(Json(ConversationDetailResponse {
+        ok: true,
+        conversation: conversation_item,
+    }))
+}
+
 // ============================================
 // INICIAR CONVERSACIÓN (agent outbound first)
 // ============================================

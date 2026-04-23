@@ -112,6 +112,7 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
         crate::modules::whatsapp::handler::take_conversation_handler,
         crate::modules::whatsapp::handler::transfer_conversation_handler,
         crate::modules::whatsapp::handler::close_conversation_handler,
+        crate::modules::whatsapp::handler::reopen_conversation_handler,
         crate::modules::whatsapp::handler::initiate_conversation_handler,
         crate::modules::whatsapp::handler::list_transferable_agents_handler,
         crate::modules::whatsapp::handler::list_settings_handler,

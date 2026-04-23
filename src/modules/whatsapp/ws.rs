@@ -70,6 +70,15 @@ pub enum WsServerEvent {
     #[serde(rename = "CHAT_CERRADO")]
     ChatCerrado { conversation_id: String },
 
+    /// Conversación reabierta (closed → pending). Incluye el item completo
+    /// para que el front mergee sin refetch — `assigned_to` queda `null`
+    /// porque al cerrar se libera al agente.
+    #[serde(rename = "CHAT_REABIERTO")]
+    ChatReabierto {
+        conversation_id: String,
+        conversation: ConversationItem,
+    },
+
     /// Cambio de status de un mensaje (sent/delivered/read/failed).
     #[serde(rename = "MENSAJE_ACTUALIZADO")]
     MensajeActualizado {
