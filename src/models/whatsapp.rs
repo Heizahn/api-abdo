@@ -141,6 +141,12 @@ pub struct WaMessage {
     /// el front pueda rerenderizar la burbuja.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interactive_payload: Option<serde_json::Value>,
+    /// Payload de contactos compartidos cuando `msg_type == "contacts"`.
+    /// Passthrough del array que envía Meta: cada item tiene `name`,
+    /// `phones`, `emails`, `addresses`, `org`, `birthday`, `urls`.
+    /// El front lo renderiza como tarjeta tipo vCard.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contacts_payload: Option<serde_json::Value>,
     pub timestamp: DateTime,
 }
 
@@ -491,6 +497,12 @@ pub struct MessageItem {
     /// Passthrough del mismo objeto que se le pasó a la Cloud API.
     #[schema(value_type = Option<Object>)]
     pub interactive_payload: Option<serde_json::Value>,
+    /// Array de contactos compartidos (sólo cuando `type == "contacts"`).
+    /// Passthrough del payload de Meta: cada contacto tiene `name`, `phones`,
+    /// `emails`, `addresses`, `org`, `birthday`, `urls`. El front lo renderiza
+    /// como tarjeta tipo vCard.
+    #[schema(value_type = Option<Object>)]
+    pub contacts_payload: Option<serde_json::Value>,
     /// ISO-8601 (RFC 3339) UTC
     pub created_at: String,
 }

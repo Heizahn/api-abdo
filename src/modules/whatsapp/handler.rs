@@ -305,6 +305,21 @@ pub async fn receive_webhook(
                                 .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()));
                             (txt, None, None, None)
                         }
+                        // Tarjeta de contacto: Meta manda un array; usamos el
+                        // nombre del primero para el preview del listado.
+                        "contacts" => {
+                            let name = msg.contacts.as_ref()
+                                .and_then(|v| v.as_array())
+                                .and_then(|arr| arr.first())
+                                .and_then(|c| c.get("name"))
+                                .and_then(|n| {
+                                    n.get("formatted_name")
+                                        .or_else(|| n.get("first_name"))
+                                        .and_then(|x| x.as_str())
+                                        .map(|s| s.to_string())
+                                });
+                            (name, None, None, None)
+                        }
                         _ => (None, None, None, None),
                     };
 
@@ -335,6 +350,13 @@ pub async fn receive_webhook(
                         _ => None,
                     };
 
+                    // Payload completo de contactos compartidos (vCard).
+                    let contacts_payload = if msg.msg_type == "contacts" {
+                        msg.contacts.clone()
+                    } else {
+                        None
+                    };
+
                     let wa_msg = WaMessage {
                         id: None,
                         conversation_id: conv_id,
@@ -355,6 +377,7 @@ pub async fn receive_webhook(
                         template_language: None,
                         template_components: None,
                         interactive_payload,
+                        contacts_payload,
                         timestamp: msg_ts,
                     };
 
@@ -968,6 +991,7 @@ pub async fn send_message_handler(
         template_language: tpl_fields.as_ref().map(|f| f.language.clone()),
         template_components: tpl_fields.and_then(|f| f.components),
         interactive_payload,
+        contacts_payload: None,
         timestamp: DateTime::now(),
     };
 
@@ -1589,6 +1613,7 @@ pub async fn initiate_conversation_handler(
         template_language: Some(tpl_lang.to_string()),
         template_components: components_value,
         interactive_payload: None,
+        contacts_payload: None,
         timestamp: DateTime::now(),
     };
 
@@ -2804,6 +2829,7 @@ fn msg_to_item(
         template_language: m.template_language,
         template_components: m.template_components,
         interactive_payload: m.interactive_payload,
+        contacts_payload: m.contacts_payload,
         created_at: iso8601(m.timestamp),
     }
 }

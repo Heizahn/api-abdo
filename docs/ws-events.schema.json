@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://api.abdo77.com/v1/ws/schema.json",
   "title": "WhatsApp WebSocket Events",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Contrato de eventos del WebSocket de soporte WhatsApp. El socket se abre en GET /v1/ws/chat?token=<user_jwt>. Todos los eventos (cliente→servidor y servidor→cliente) usan el envelope { tipo, datos }, discriminante por `tipo`. Las fechas son ISO-8601 RFC-3339 UTC.",
   "oneOf": [
     { "$ref": "#/$defs/ClientEvent" },
@@ -330,7 +330,70 @@
     "MessageType": {
       "type": "string",
       "description": "Tipos conocidos hoy. El front debería aceptar strings desconocidos sin crashear (fallback a render genérico).",
-      "examples": ["text", "image", "audio", "video", "document", "sticker", "location", "template", "interactive", "button"]
+      "examples": ["text", "image", "audio", "video", "document", "sticker", "location", "template", "interactive", "button", "contacts"]
+    },
+
+    "ContactCard": {
+      "type": "object",
+      "description": "Tarjeta de contacto compartida por el cliente (tipo vCard). Passthrough del objeto que Meta manda en `messages[].contacts[]`. Todos los campos excepto `name` son opcionales según lo que el cliente haya compartido.",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "object",
+          "properties": {
+            "formatted_name": { "type": ["string", "null"] },
+            "first_name":     { "type": ["string", "null"] },
+            "last_name":      { "type": ["string", "null"] },
+            "middle_name":    { "type": ["string", "null"] },
+            "suffix":         { "type": ["string", "null"] },
+            "prefix":         { "type": ["string", "null"] }
+          }
+        },
+        "phones": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "phone":      { "type": ["string", "null"] },
+              "type":       { "type": ["string", "null"], "description": "CELL | HOME | WORK | ..." },
+              "wa_id":      { "type": ["string", "null"], "description": "E.164 sin '+' si el contacto tiene WhatsApp." }
+            }
+          }
+        },
+        "emails": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "email": { "type": ["string", "null"] },
+              "type":  { "type": ["string", "null"] }
+            }
+          }
+        },
+        "addresses": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "org": {
+          "type": "object",
+          "properties": {
+            "company":    { "type": ["string", "null"] },
+            "department": { "type": ["string", "null"] },
+            "title":      { "type": ["string", "null"] }
+          }
+        },
+        "birthday": { "type": ["string", "null"], "description": "YYYY-MM-DD" },
+        "urls": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "url":  { "type": ["string", "null"] },
+              "type": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
     },
 
     "UrlPreview": {
@@ -387,6 +450,11 @@
         "template_language": { "type": ["string", "null"] },
         "template_components": { "description": "Passthrough del payload original de Meta.", "type": ["object", "array", "null"] },
         "interactive_payload": { "description": "Passthrough de interactive.* (button_reply/list_reply).", "type": ["object", "null"] },
+        "contacts_payload": {
+          "description": "Sólo cuando `type == \"contacts\"`. Array de tarjetas de contacto compartidas (vCard) con passthrough del payload de Meta.",
+          "type": ["array", "null"],
+          "items": { "$ref": "#/$defs/ContactCard" }
+        },
         "created_at":      { "type": "string", "format": "date-time" }
       },
       "additionalProperties": false
