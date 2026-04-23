@@ -17,7 +17,13 @@ use crate::{
 };
 
 const SUPERADMIN_ROLE: f32 = 0.0;
-const BCRYPT_COST: u32 = bcrypt::DEFAULT_COST;
+/// Cost de bcrypt para hashear passwords. `10` mantiene compatibilidad con los
+/// users creados originalmente en LoopBack 4 (sus hashes son `$2a$10$...`),
+/// así todos los logins tienen la misma latencia. Cost 10 ≈ 60-100ms por
+/// verify — suficientemente lento para anti-brute-force, suficientemente
+/// rápido para UX. NO usar `bcrypt::DEFAULT_COST` (que es 12) — cada
+/// incremento duplica el tiempo.
+const BCRYPT_COST: u32 = 10;
 const PASSWORD_MIN_LEN: usize = 8;
 
 /// Chequea que el caller tenga rol SUPERADMIN. El middleware
