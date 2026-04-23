@@ -8,13 +8,14 @@ use crate::models::whatsapp::{
     ConversationDetailResponse, ConversationItem, ConversationMessagesResponse, ConversationStats,
     ConversationStatsResponse, ConversationsListResponse, CreateQuickReplyRequest,
     CreateSettingsRequest, DuplicateQuickReplyRequest, InitiateConversationRequest,
-    MarkReadResponse, MessageItem, QuickRepliesListResponse, QuickReplyButton, QuickReplyCtaUrl,
-    QuickReplyHeader, QuickReplyItem, QuickReplyList, QuickReplyListRow, QuickReplyListSection,
-    QuickReplyResponse, ReplyToItem, SendMessageRequest, SendMessageResponse, SendTemplatePayload,
-    SettingsItem, SettingsListResponse, SettingsResponse, TakeConversationResponse,
-    TemplatesListResponse, ToggleActiveRequest, TransferConversationRequest, TransferableAgentItem,
-    TransferableAgentsResponse, UpdateQuickReplyRequest, UpdateResponse, UpdateSettingsRequest,
-    UrlPreview, WaPurposeConfig, WaPurposes, WaPurposesPatch, WhatsAppTemplate,
+    LocationPayload, MarkReadResponse, MessageItem, QuickRepliesListResponse, QuickReplyButton,
+    QuickReplyCtaUrl, QuickReplyHeader, QuickReplyItem, QuickReplyList, QuickReplyListRow,
+    QuickReplyListSection, QuickReplyResponse, ReplyToItem, SendMessageRequest, SendMessageResponse,
+    SendTemplatePayload, SettingsItem, SettingsListResponse, SettingsResponse,
+    TakeConversationResponse, TemplatesListResponse, ToggleActiveRequest,
+    TransferConversationRequest, TransferableAgentItem, TransferableAgentsResponse,
+    UpdateQuickReplyRequest, UpdateResponse, UpdateSettingsRequest, UrlPreview, WaPurposeConfig,
+    WaPurposes, WaPurposesPatch, WhatsAppTemplate,
 };
 
 #[derive(OpenApi)]
@@ -87,7 +88,7 @@ use crate::models::whatsapp::{
             UpdateResponse,
             // WhatsApp — Items
             ConversationItem, MessageItem, SettingsItem,
-            TransferableAgentItem, ReplyToItem, UrlPreview, QuickReplyItem,
+            TransferableAgentItem, ReplyToItem, UrlPreview, LocationPayload, QuickReplyItem,
             WhatsAppTemplate,
         )
     ),

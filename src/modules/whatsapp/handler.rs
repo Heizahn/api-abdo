@@ -273,15 +273,13 @@ pub async fn receive_webhook(
                             .map(|m| (None, m.id.clone(), m.mime_type.clone(), None))
                             .unwrap_or((None, None, None, None)),
                         "location" => {
+                            // Preview: nombre del lugar → dirección → "Ubicación" genérico.
+                            // Las coordenadas ya van en el campo `location`
+                            // estructurado; no las ponemos en el preview.
                             let label = msg.location.as_ref().and_then(|l| {
-                                l.name.clone().or_else(|| l.address.clone()).or_else(|| {
-                                    match (l.latitude, l.longitude) {
-                                        (Some(lat), Some(lng)) => Some(format!("{},{}", lat, lng)),
-                                        _ => None,
-                                    }
-                                })
-                            });
-                            (label, None, None, None)
+                                l.name.clone().or_else(|| l.address.clone())
+                            }).unwrap_or_else(|| "Ubicación".to_string());
+                            (Some(label), None, None, None)
                         }
                         // Respuesta a botón/lista interactivo: Meta envía
                         // `interactive.button_reply.{id,title}` o
@@ -357,6 +355,25 @@ pub async fn receive_webhook(
                         None
                     };
 
+                    // Datos estructurados de ubicación para que el front
+                    // renderice el mapa (iframe de OSM/Google, img estática,
+                    // o link a maps — lo decide el front).
+                    let location_payload = if msg.msg_type == "location" {
+                        msg.location.as_ref().and_then(|l| {
+                            match (l.latitude, l.longitude) {
+                                (Some(lat), Some(lng)) => Some(crate::models::whatsapp::LocationPayload {
+                                    latitude: lat,
+                                    longitude: lng,
+                                    name: l.name.clone(),
+                                    address: l.address.clone(),
+                                }),
+                                _ => None,
+                            }
+                        })
+                    } else {
+                        None
+                    };
+
                     let wa_msg = WaMessage {
                         id: None,
                         conversation_id: conv_id,
@@ -378,6 +395,7 @@ pub async fn receive_webhook(
                         template_components: None,
                         interactive_payload,
                         contacts_payload,
+                        location: location_payload,
                         timestamp: msg_ts,
                     };
 
@@ -992,6 +1010,7 @@ pub async fn send_message_handler(
         template_components: tpl_fields.and_then(|f| f.components),
         interactive_payload,
         contacts_payload: None,
+        location: None,
         timestamp: DateTime::now(),
     };
 
@@ -1614,6 +1633,7 @@ pub async fn initiate_conversation_handler(
         template_components: components_value,
         interactive_payload: None,
         contacts_payload: None,
+        location: None,
         timestamp: DateTime::now(),
     };
 
@@ -2830,6 +2850,7 @@ fn msg_to_item(
         template_components: m.template_components,
         interactive_payload: m.interactive_payload,
         contacts_payload: m.contacts_payload,
+        location: m.location,
         created_at: iso8601(m.timestamp),
     }
 }

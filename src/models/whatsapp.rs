@@ -147,7 +147,26 @@ pub struct WaMessage {
     /// El front lo renderiza como tarjeta tipo vCard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contacts_payload: Option<serde_json::Value>,
+    /// Coordenadas y metadata cuando `msg_type == "location"`. El front usa
+    /// `latitude`/`longitude` para renderizar el mapa (iframe de OSM, Google
+    /// Embed, imagen estática, link a maps, etc) y muestra `name`/`address`
+    /// como caption si vienen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<LocationPayload>,
     pub timestamp: DateTime,
+}
+
+/// Ubicación compartida vía WhatsApp. `latitude`/`longitude` son siempre no
+/// nulos en inbounds válidos; `name`/`address` sólo vienen si el cliente
+/// usó "Lugares cercanos" o compartió una dirección con nombre.
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+pub struct LocationPayload {
+    pub latitude: f64,
+    pub longitude: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
 }
 
 /// Preview de URL extraído server-side del cuerpo de un mensaje.
@@ -503,6 +522,9 @@ pub struct MessageItem {
     /// como tarjeta tipo vCard.
     #[schema(value_type = Option<Object>)]
     pub contacts_payload: Option<serde_json::Value>,
+    /// Datos estructurados de ubicación (sólo cuando `type == "location"`).
+    /// El front renderiza el mapa con `latitude`/`longitude`.
+    pub location: Option<LocationPayload>,
     /// ISO-8601 (RFC 3339) UTC
     pub created_at: String,
 }
