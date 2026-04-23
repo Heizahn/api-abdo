@@ -31,6 +31,12 @@ pub async fn login_handler(
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::Unauthorized("Usuario no encontrado".to_string()))?;
 
+    // Usuarios "sin acceso" (nRole == -1) no pueden loggear ni refrescar.
+    // Diferente de `visible == false` (ese sólo los oculta de listados).
+    if user.role == -1.0 {
+        return Err(ApiError::Unauthorized("Usuario sin acceso".to_string()));
+    }
+
     let creds = state
         .db
         .find_user_credentials_by_user_id(&user.id)
@@ -79,6 +85,11 @@ pub async fn refresh_token_handler(
     let user = get_user_by_id(&state, &claims.id)
         .await?
         .ok_or(ApiError::Unauthorized("Usuario no encontrado".to_string()))?;
+
+    // Misma regla que el login: usuarios sin acceso no pueden refrescar el token.
+    if user.role == -1.0 {
+        return Err(ApiError::Unauthorized("Usuario sin acceso".to_string()));
+    }
 
     let new_token = jwt_service
         .generate_token(&user.id, &user.name, user.role)

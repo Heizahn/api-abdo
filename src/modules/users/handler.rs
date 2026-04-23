@@ -5,7 +5,6 @@ use axum::{
 use std::sync::Arc;
 
 use crate::{
-    auth::user_jwt::UserProfileClaims,
     db::{UpdateUserPatch, UserListFilter, UserRepository},
     db::mongo::users::last_user_cursor,
     error::ApiError,
@@ -21,26 +20,15 @@ const SUPERADMIN_ROLE: f32 = 0.0;
 const BCRYPT_COST: u32 = bcrypt::DEFAULT_COST;
 const PASSWORD_MIN_LEN: usize = 8;
 
-/// Valida que el `claims.id` (UUID del JWT) corresponda a un user existente y
-/// con `nRole == 0.0` LEÍDO DE DB (no del snapshot del JWT). Si el rol fue
-/// revocado, `claims.role` puede estar desactualizado hasta 6h. Este gate
-/// evita que un ex-admin siga gestionando usuarios tras la revocación.
-async fn require_superadmin(
-    state: &Arc<AppState>,
-    claims: &UserProfileClaims,
-) -> Result<User, ApiError> {
-    let user = state
-        .db
-        .find_user_by_id(&claims.id)
-        .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or(ApiError::Unauthorized("usuario no encontrado".into()))?;
-
-    if user.role != SUPERADMIN_ROLE {
+/// Chequea que el caller tenga rol SUPERADMIN. El middleware
+/// `user_jwt_auth_middleware` ya inyectó el `User` fresco leído de DB en la
+/// request, así que acá sólo validamos el rol — sin query extra. Un user
+/// "sin acceso" (role == -1) ya fue rechazado por el middleware con 401.
+fn require_superadmin(current_user: &User) -> Result<(), ApiError> {
+    if current_user.role != SUPERADMIN_ROLE {
         return Err(ApiError::Forbidden);
     }
-
-    Ok(user)
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]
@@ -74,10 +62,10 @@ pub struct ListUsersQuery {
 )]
 pub async fn list_users_handler(
     State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<UserProfileClaims>,
+    Extension(current_user): Extension<User>,
     Query(q): Query<ListUsersQuery>,
 ) -> Result<Json<UserListResponse>, ApiError> {
-    let _caller = require_superadmin(&state, &claims).await?;
+    require_superadmin(&current_user)?;
 
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let search_ref = q.search.as_deref().map(str::trim).filter(|s| !s.is_empty());
@@ -124,11 +112,11 @@ pub async fn list_users_handler(
 )]
 pub async fn set_user_visible_handler(
     State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<UserProfileClaims>,
+    Extension(current_user): Extension<User>,
     Path(id): Path<String>,
     Json(payload): Json<SetUserVisibleRequest>,
 ) -> Result<Json<UserResponseEnvelope>, ApiError> {
-    let _caller = require_superadmin(&state, &claims).await?;
+    require_superadmin(&current_user)?;
 
     let existed = state
         .db
@@ -170,10 +158,11 @@ pub async fn set_user_visible_handler(
 )]
 pub async fn create_user_handler(
     State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<UserProfileClaims>,
+    Extension(current_user): Extension<User>,
     Json(payload): Json<CreateUserBody>,
 ) -> Result<Json<UserResponseEnvelope>, ApiError> {
-    let caller = require_superadmin(&state, &claims).await?;
+    require_superadmin(&current_user)?;
+    let caller = &current_user;
 
     // Normalización + validación.
     let name = payload.name.trim().to_string();
@@ -260,11 +249,11 @@ pub async fn create_user_handler(
 )]
 pub async fn update_user_handler(
     State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<UserProfileClaims>,
+    Extension(current_user): Extension<User>,
     Path(id): Path<String>,
     Json(payload): Json<UpdateUserRequest>,
 ) -> Result<Json<UserResponseEnvelope>, ApiError> {
-    let _caller = require_superadmin(&state, &claims).await?;
+    require_superadmin(&current_user)?;
 
     // Normalización mínima + validación de email si viene.
     let name = payload.name.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
@@ -285,7 +274,10 @@ pub async fn update_user_handler(
     }
 
     if let Some(r) = payload.role {
-        if !r.is_finite() || r < 0.0 {
+        // Se acepta cualquier valor finito. `-1.0` es el sentinel de "sin
+        // acceso" que el middleware usa para rechazar JWTs; otros negativos
+        // son desconocidos pero no fallamos acá (el front es responsable).
+        if !r.is_finite() {
             return Err(ApiError::BadRequest("role inválido".into()));
         }
     }
@@ -338,11 +330,11 @@ pub async fn update_user_handler(
 )]
 pub async fn set_user_password_handler(
     State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<UserProfileClaims>,
+    Extension(current_user): Extension<User>,
     Path(id): Path<String>,
     Json(payload): Json<SetUserPasswordRequest>,
 ) -> Result<Json<OkResponse>, ApiError> {
-    let _caller = require_superadmin(&state, &claims).await?;
+    require_superadmin(&current_user)?;
 
     if payload.password.len() < PASSWORD_MIN_LEN {
         return Err(ApiError::BadRequest(format!(
