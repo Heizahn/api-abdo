@@ -183,6 +183,37 @@ impl RedisClient {
         ))
     }
 
+    /// Intenta adquirir un lock de prefetch para `media_id`. Devuelve `true`
+    /// si el caller debe hacer la descarga; `false` si ya hay otra tarea bajándolo.
+    /// TTL 60s como red de seguridad (si el prefetch muere, el lock se libera solo).
+    pub async fn try_lock_media_prefetch(&self, media_id: &str) -> bool {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return true, // Si Redis falla, permitimos la descarga.
+        };
+        let key = format!("wa:media:lock:{}", media_id);
+        let result: Option<String> = redis::cmd("SET")
+            .arg(&key)
+            .arg("1")
+            .arg("NX")
+            .arg("EX")
+            .arg(60u64)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(None);
+        result.is_some()
+    }
+
+    /// Libera el lock de prefetch — idempotente, ignora errores.
+    pub async fn release_media_prefetch_lock(&self, media_id: &str) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let key = format!("wa:media:lock:{}", media_id);
+        let _: Result<(), _> = conn.del(key).await;
+    }
+
     /// Guarda un media en Redis con TTL de 30 días (los `media_id` de Meta son inmutables).
     /// No-op silencioso si Redis falla — es best-effort.
     pub async fn set_media_cache(

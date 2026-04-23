@@ -1890,10 +1890,40 @@ pub async fn get_media_handler(
             .unwrap_or_else(|| media_id.clone());
         return Ok(build_media_response(bytes, &mime, &filename));
     }
-    tracing::warn!(
-        "[media] MISS {} — cayendo a Meta (prefetch no completó a tiempo o falló)",
-        media_id
-    );
+
+    // 4.5. Miss + prefetch posiblemente en vuelo: si el lock ya está tomado,
+    // hay otra tarea bajándolo. Esperamos ~2s en polls de 100ms a ver si
+    // aparece en cache antes de disparar una segunda descarga al Worker.
+    if !state.redis.try_lock_media_prefetch(&media_id).await {
+        tracing::info!("[media] MISS→WAIT {} — prefetch en vuelo, esperando", media_id);
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if let Some((bytes, mime, remote_filename)) = state.redis.get_media_cache(&media_id).await {
+                tracing::info!(
+                    "[media] WAIT→HIT {} ({} bytes, {}) wait={}ms",
+                    media_id, bytes.len(), mime, t0.elapsed().as_millis()
+                );
+                let filename = msg.media_filename
+                    .clone()
+                    .or(remote_filename)
+                    .unwrap_or_else(|| media_id.clone());
+                return Ok(build_media_response(bytes, &mime, &filename));
+            }
+        }
+        // El otro task tardó demasiado o falló — seguimos con descarga propia.
+        tracing::warn!("[media] MISS→WAIT timeout para {} — bajando por nuestra cuenta", media_id);
+    } else {
+        tracing::warn!(
+            "[media] MISS {} — cayendo a Meta (prefetch no completó a tiempo o falló)",
+            media_id
+        );
+    }
+    // Guard: al salir del handler liberamos el lock. Si la descarga falla,
+    // otro request puede reintentar inmediatamente en vez de esperar el TTL.
+    let _lock_guard = MediaPrefetchGuard {
+        redis: state.redis.clone(),
+        media_id: media_id.clone(),
+    };
 
     // 5. Cache miss → descargar de Meta.
     if settings.phone_number_id.is_empty() || settings.access_token.is_empty() {
@@ -2517,9 +2547,29 @@ fn apply_media_relay(state: &Arc<AppState>, svc: WhatsAppService) -> WhatsAppSer
 const MEDIA_PREFETCH_MAX_BYTES: u64 = 5 * 1024 * 1024; // 5 MB
 
 /// Tipos de mensaje que se prefetchean al llegar por webhook.
-/// Documentos quedan fuera: pueden ser muy pesados y no se reproducen inline.
+/// Todos los tipos con media están incluidos — documentos también, pero el
+/// límite de 5 MB (`MEDIA_PREFETCH_MAX_BYTES`) deja fuera los PDFs pesados.
 fn should_prefetch_media(msg_type: &str) -> bool {
-    matches!(msg_type, "audio" | "image" | "sticker" | "video")
+    matches!(msg_type, "audio" | "image" | "sticker" | "video" | "document")
+}
+
+/// Guard que libera el lock de prefetch al salir de `prefetch_media`,
+/// haya terminado bien o mal. Evita que un panic o un early-return deje
+/// un lock huérfano en Redis (el TTL de 60s lo limpiaría igual, pero
+/// así lo liberamos apenas se puede).
+struct MediaPrefetchGuard {
+    redis: crate::cache::RedisClient,
+    media_id: String,
+}
+
+impl Drop for MediaPrefetchGuard {
+    fn drop(&mut self) {
+        let redis = self.redis.clone();
+        let media_id = self.media_id.clone();
+        tokio::spawn(async move {
+            redis.release_media_prefetch_lock(&media_id).await;
+        });
+    }
 }
 
 /// Descarga un media de Meta y lo guarda en Redis si pesa poco.
@@ -2535,6 +2585,18 @@ pub(crate) async fn prefetch_media(
     if state.redis.get_media_cache(&media_id).await.is_some() {
         return;
     }
+
+    // Lock para evitar descarga duplicada: si el endpoint ya está bajando
+    // este media (race con el agente que abre el chat al instante), lo dejamos.
+    if !state.redis.try_lock_media_prefetch(&media_id).await {
+        tracing::debug!("prefetch_media({}): ya hay otra tarea descargándolo", media_id);
+        return;
+    }
+    // RAII manual: liberamos el lock al final.
+    let _guard = MediaPrefetchGuard {
+        redis: state.redis.clone(),
+        media_id: media_id.clone(),
+    };
 
     let wa = match resolve_service_for_phone(&state, &business_phone).await {
         Ok(w) => w,

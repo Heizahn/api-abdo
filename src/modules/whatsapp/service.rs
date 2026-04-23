@@ -194,10 +194,23 @@ impl WhatsAppService {
     }
 
     /// Info de un media: URL firmada por Meta (TTL ~5 min), mime, tamaño y filename.
+    ///
+    /// Si hay `media_relay` configurado, también el info call (a
+    /// `graph.facebook.com`) pasa por el Worker. La VM del ISP venezolano
+    /// a veces filtra también este host, no sólo `lookaside.fbsbx.com`.
     pub async fn download_media_info(&self, media_id: &str) -> Result<MediaInfo> {
         let info_url = format!("https://graph.facebook.com/{}/{}", WA_API_VERSION, media_id);
         let resp = send_with_retry("download_media info", || {
-            self.client.get(&info_url).bearer_auth(&self.access_token)
+            match &self.media_relay {
+                Some(relay) => self.client
+                    .get(&relay.url)
+                    .query(&[("url", info_url.as_str())])
+                    .header("x-relay-secret", &relay.secret)
+                    .bearer_auth(&self.access_token),
+                None => self.client
+                    .get(&info_url)
+                    .bearer_auth(&self.access_token),
+            }
         }).await
             .map_err(|e| describe_reqwest_error("download_media info", e))?;
 
