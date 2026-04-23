@@ -15,6 +15,7 @@ use mongodb::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 // Importamos modelos para los helpers de colecciones
 use crate::auth::claims::VerificationCode;
@@ -24,17 +25,19 @@ use crate::models::payment::PaymentMethod;
 // Structs Auxiliares (Públicos para el Trait)
 // ============================================
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct PaymentDetails {
     #[serde(rename = "_id")]
+    #[schema(value_type = String, example = "65a7f8d9c3e2a1b4d6f8e0c5")]
     pub id: ObjectId,
     pub reason: String,
     pub balance_bs: f64,
     pub status: String,
+    #[schema(value_type = String, format = "date-time")]
     pub full_date: DateTime,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct ResultGroupedByDate {
     #[serde(rename = "_id")]
     pub date: String,

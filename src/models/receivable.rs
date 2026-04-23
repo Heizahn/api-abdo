@@ -1,22 +1,23 @@
 use serde::Serialize;
+use utoipa::ToSchema;
 
 // ============================================
 // RECEIVABLES (GET /v1/receivable/me)
 // ============================================
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ReceivablesResponse {
     pub ok: bool,
     pub receivables: Vec<ReceivableData>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ReceivableByIdResponse {
     pub ok: bool,
     pub receivable: ReceivableData,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ReceivableData {
     pub debt_id: String,
     pub id_owner: String, // El cliente dueño de la deuda
@@ -30,7 +31,7 @@ pub struct ReceivableData {
     pub payments: Option<Vec<PaymentData>>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct PaymentData {
     pub payment_id: String,
     pub amount_usd: f64,
@@ -40,7 +41,7 @@ pub struct PaymentData {
     pub is_report: bool, // true si viene de PaymentReport, false si es un Payment procesado
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RejectedPayment {
     pub payment_id: String,
     pub amount_usd: f64,
@@ -50,7 +51,7 @@ pub struct RejectedPayment {
     pub rejection_reason: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct RejectedPaymentsResponse {
     pub ok: bool,
     pub payments: Vec<RejectedPayment>,

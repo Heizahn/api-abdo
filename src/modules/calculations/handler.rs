@@ -2,6 +2,7 @@ use axum::{extract::State, Json};
 use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 use crate::{
     db::{ProfileRepository, SalesRepository},
@@ -9,20 +10,20 @@ use crate::{
     state::AppState,
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CalculationRequest {
     pub amount_usd: f64,
     pub id_tax: Option<String>,
     pub id_debt: Option<String>,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy, Serialize, Deserialize, ToSchema)]
 pub enum Currency {
     USD,
     BS,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct CalculationRequestV2 {
     pub amount: f64,
     pub currency: Currency,
@@ -30,20 +31,30 @@ pub struct CalculationRequestV2 {
     pub id_debt: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct CalculationResponseV2 {
     pub ok: bool,
     pub amount: f64,
     pub currency: Currency,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct CalculationResponse {
     pub ok: bool,
     pub amount_bs: f64,
 }
 
-/// POST /v1/calculation/bs
+#[utoipa::path(
+    post,
+    path = "/v1/utils/calculate/bs",
+    tag = "Calculations",
+    request_body = CalculationRequest,
+    responses(
+        (status = 200, description = "Conversión USD → Bs aplicando tasa BCV e IVA", body = CalculationResponse),
+        (status = 400, description = "Falta id_tax o id_debt"),
+        (status = 404, description = "Tax o deuda no encontrada"),
+    )
+)]
 pub async fn calculate_bs_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CalculationRequest>,
@@ -102,6 +113,17 @@ pub async fn calculate_bs_handler(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v2/utils/calculate",
+    tag = "Calculations",
+    request_body = CalculationRequestV2,
+    responses(
+        (status = 200, description = "Conversión bidireccional USD↔Bs aplicando tasa BCV e IVA", body = CalculationResponseV2),
+        (status = 400, description = "Falta id_tax o id_debt, o id inválido"),
+        (status = 404, description = "Tax o deuda no encontrada"),
+    )
+)]
 pub async fn calculate_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CalculationRequestV2>,

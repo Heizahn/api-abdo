@@ -10,7 +10,18 @@ use crate::{
     state::AppState,
 };
 
-/// GET /v1/profile/me/group
+#[utoipa::path(
+    get,
+    path = "/v1/profile/me/group",
+    tag = "Profile — Clientes",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Resumen de todas las cuentas del cliente autenticado (balances, últimos pagos, rechazos)", body = MeGroupResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Scope insuficiente"),
+        (status = 404, description = "No hay cuentas asociadas al teléfono"),
+    )
+)]
 pub async fn me_group_handler(
     Extension(claims): Extension<AccessClaims>,
     State(state): State<Arc<AppState>>,
@@ -130,6 +141,16 @@ pub async fn me_group_handler(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/profile/me/phone",
+    tag = "Profile — Clientes",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Teléfono del cliente autenticado", body = MePhoneResponse),
+        (status = 401, description = "No autorizado"),
+    )
+)]
 pub async fn me_phone_handler(
     Extension(claims): Extension<AccessClaims>,
     State(state): State<Arc<AppState>>,

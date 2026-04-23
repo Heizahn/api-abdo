@@ -19,7 +19,16 @@ use crate::{
     state::AppState,
 };
 
-/// POST /v1/auth-user/login
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/login",
+    tag = "Auth — Staff",
+    request_body = UserLoginRequest,
+    responses(
+        (status = 200, description = "Login exitoso", body = UserLoginResponse),
+        (status = 401, description = "Credenciales incorrectas o usuario sin acceso"),
+    )
+)]
 pub async fn login_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<UserLoginRequest>,
@@ -71,7 +80,16 @@ async fn get_user_by_id(state: &Arc<AppState>, id: &str) -> Result<Option<User>,
         .map_err(|e| ApiError::DatabaseError(e))
 }
 
-/// POST /v1/auth-user/refresh-token
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/refresh-token",
+    tag = "Auth — Staff",
+    request_body = RefreshTokenRequest,
+    responses(
+        (status = 200, description = "Token renovado", body = RefreshTokenResponse),
+        (status = 401, description = "Token inválido o usuario sin acceso"),
+    )
+)]
 pub async fn refresh_token_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<RefreshTokenRequest>,
@@ -98,7 +116,18 @@ pub async fn refresh_token_handler(
     Ok(Json(RefreshTokenResponse { token: new_token }))
 }
 
-/// POST /v1/auth-user/payments/check-reference
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/payments/check-reference",
+    tag = "Payments",
+    security(("bearerAuth" = [])),
+    request_body = CheckReferenceRequest,
+    responses(
+        (status = 200, description = "Resultado de la búsqueda de referencia (available | duplicate_own_client | duplicate_other_client)", body = CheckReferenceResponse),
+        (status = 400, description = "idClient inválido"),
+        (status = 401, description = "No autorizado"),
+    )
+)]
 pub async fn check_reference_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<CheckReferenceRequest>,
@@ -157,7 +186,16 @@ pub async fn check_reference_handler(
     Ok(Json(response))
 }
 
-/// GET /v1/auth-user/me
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/me",
+    tag = "Auth — Staff",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Perfil del usuario autenticado", body = UserResponse),
+        (status = 401, description = "No autorizado"),
+    )
+)]
 pub async fn me_handler(
     Extension(claims): Extension<UserProfileClaims>,
     State(state): State<Arc<AppState>>,

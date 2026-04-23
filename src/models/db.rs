@@ -1,5 +1,6 @@
 use mongodb::bson::{oid::ObjectId, DateTime};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 // ============================================
 // Database Models
@@ -27,7 +28,7 @@ pub struct ActiveClientBalance {
     pub n_balance: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LatestPayment {
     pub id: String,
     pub created_at: String,
@@ -39,7 +40,7 @@ pub struct LatestPayment {
     pub creator_name: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct SolvencyCounts {
     pub solventes: u32,
     pub morosos: u32,
@@ -94,7 +95,7 @@ pub struct ActiveDebtResponse {
     pub active_debt_amount: f64,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct PingResponse {
     pub ok: bool,
     pub message: String,
@@ -110,13 +111,13 @@ pub struct Tax {
     pub iva: f64,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct LatestVersionResponse {
     pub ok: bool,
     pub data: LatestVersion,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
 pub struct LatestVersion {
     pub latest_version_code: i32,
     pub update_url: String,
@@ -160,12 +161,12 @@ pub struct OnuIpUpdate {
     pub new_ip: String,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct BcvResponse {
     pub bcv: f64,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct ClientOnu {
     pub id: String,
     pub sn: Option<String>,
@@ -177,7 +178,7 @@ pub struct ClientOnu {
     pub olt_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct ClientDetail {
     pub id: String,
     pub name: String,
@@ -217,7 +218,7 @@ pub struct ClientDetail {
     pub onu: Option<ClientOnu>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct ClientListItem {
     pub id: String,
     pub name: String,
@@ -229,7 +230,7 @@ pub struct ClientListItem {
     pub plan_price: Option<f64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ClientStatusHistoryItem {
     pub id: String,
     pub client_id: String,
@@ -239,7 +240,7 @@ pub struct ClientStatusHistoryItem {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct CustomerInfoItem {
     pub id: String,
     pub razon_social: String,

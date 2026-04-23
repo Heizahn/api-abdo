@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ZabbixTrafficResponse {
     pub client_zabbix_code: String,
     pub olt_name: String,
@@ -9,7 +10,7 @@ pub struct ZabbixTrafficResponse {
     pub history: Vec<MonthlyTraffic>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct MonthlyTraffic {
     pub year: i32,
     pub month: u32,

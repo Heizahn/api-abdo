@@ -13,8 +13,17 @@ use crate::{
     state::AppState,
 };
 
-/// GET /v1/receivable/me
-/// Obtiene todas las deudas activas (receivables) del usuario autenticado
+#[utoipa::path(
+    get,
+    path = "/v1/receivable/me",
+    tag = "Receivables — Clientes",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Deudas activas del cliente autenticado (con saldo pendiente o pagos en proceso)", body = ReceivablesResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 404, description = "Usuario no encontrado"),
+    )
+)]
 pub async fn me_receivables_handler(
     Extension(claims): Extension<AccessClaims>,
     State(state): State<Arc<AppState>>,
@@ -185,8 +194,17 @@ pub async fn me_receivables_handler(
 }
 
 
-/// GET /v1/receivable/me/paid
-/// Obtiene todas las deudas PAGADAS (saldo 0) del usuario autenticado
+#[utoipa::path(
+    get,
+    path = "/v1/receivable/me/paid",
+    tag = "Receivables — Clientes",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Deudas ya pagadas (saldo 0) del cliente autenticado", body = ReceivablesResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 404, description = "Usuario no encontrado"),
+    )
+)]
 pub async fn me_paid_receivables_handler(
     Extension(claims): Extension<AccessClaims>,
     State(state): State<Arc<AppState>>,
@@ -334,8 +352,19 @@ pub async fn me_paid_receivables_handler(
     }))
 }
 
-/// GET /v1/receivable/:id
-/// Obtiene una deuda específica por ID, validando que pertenezca al usuario
+#[utoipa::path(
+    get,
+    path = "/v1/receivable/{id}",
+    tag = "Receivables — Clientes",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ObjectId de la deuda")),
+    responses(
+        (status = 200, description = "Detalle de la deuda (incluye pagos y reportes)", body = ReceivableByIdResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "La deuda no pertenece al cliente autenticado"),
+        (status = 404, description = "Deuda no encontrada"),
+    )
+)]
 pub async fn get_receivable_by_id_handler(
     Extension(claims): Extension<AccessClaims>,
     State(state): State<Arc<AppState>>,
@@ -486,8 +515,20 @@ pub async fn get_receivable_by_id_handler(
     }))
 }
 
-/// GET /v1/receivable/:id/payments/rejected
-/// Obtiene los pagos rechazados de una factura específica
+#[utoipa::path(
+    get,
+    path = "/v1/receivable/{id}/payments/rejected",
+    tag = "Receivables — Clientes",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ObjectId de la deuda")),
+    responses(
+        (status = 200, description = "Pagos rechazados para esta deuda", body = RejectedPaymentsResponse),
+        (status = 400, description = "ID inválido"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "La deuda no pertenece al cliente autenticado"),
+        (status = 404, description = "Deuda no encontrada"),
+    )
+)]
 pub async fn get_rejected_payments_by_receivable_handler(
     Extension(claims): Extension<AccessClaims>,
     State(state): State<Arc<AppState>>,

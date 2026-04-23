@@ -8,8 +8,16 @@ use crate::{
     state::AppState,
 };
 
-/// GET /v1/users/agents
-/// Retorna usuarios con nRole >= 0 y < 3 (admin, staff, etc. — excluye providers)
+#[utoipa::path(
+    get,
+    path = "/v1/users/agents",
+    tag = "Providers",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Usuarios con nRole ∈ [0, 3) — admin/staff/etc., excluye providers", body = Vec<UserResponse>),
+        (status = 401, description = "No autorizado"),
+    )
+)]
 pub async fn get_agents_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<UserResponse>>, ApiError> {
@@ -22,7 +30,16 @@ pub async fn get_agents_handler(
     Ok(Json(users.into_iter().map(UserResponse::from).collect()))
 }
 
-/// GET /v1/users/providers
+#[utoipa::path(
+    get,
+    path = "/v1/users/providers",
+    tag = "Providers",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Usuarios con nRole == 3 (providers)", body = Vec<ProviderResponse>),
+        (status = 401, description = "No autorizado"),
+    )
+)]
 pub async fn get_providers_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<ProviderResponse>>, ApiError> {

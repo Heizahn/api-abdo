@@ -20,6 +20,16 @@ use crate::modules::network::mikrotik::ip_pppoe::get_ip_pppoe_mk;
 use crate::models::zabbix::ZabbixTrafficResponse;
 use crate::modules::zabbix::service as zabbix_service;
 
+#[utoipa::path(
+    get,
+    path = "/v1/utils/list/banks",
+    tag = "Utils",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Listado de bancos del sistema", body = BankListResponse),
+        (status = 401, description = "No autorizado"),
+    )
+)]
 pub async fn get_bank_list(
     Extension(_claims): Extension<AccessClaims>,
     State(state): State<Arc<AppState>>,
@@ -43,6 +53,16 @@ pub async fn get_bank_list(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/utils/list/banks",
+    tag = "Utils",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Listado de bancos del sistema (endpoint staff)", body = BankListResponse),
+        (status = 401, description = "No autorizado"),
+    )
+)]
 pub async fn get_bank_list_user(
     Extension(_claims): Extension<UserProfileClaims>,
     State(state): State<Arc<AppState>>,
@@ -66,6 +86,12 @@ pub async fn get_bank_list_user(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/utils/ping",
+    tag = "Utils",
+    responses((status = 200, description = "Health check", body = PingResponse))
+)]
 pub async fn get_ping_response() -> Result<Json<PingResponse>, ApiError> {
     Ok(Json(PingResponse {
         ok: true,
@@ -73,6 +99,15 @@ pub async fn get_ping_response() -> Result<Json<PingResponse>, ApiError> {
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/utils/latest-version",
+    tag = "Utils",
+    responses(
+        (status = 200, description = "Última versión disponible de la app", body = LatestVersionResponse),
+        (status = 404, description = "No hay control de versiones configurado"),
+    )
+)]
 pub async fn get_latest_version_response(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<LatestVersionResponse>, ApiError> {
@@ -91,12 +126,30 @@ pub async fn get_latest_version_response(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/privacy-policy",
+    tag = "Utils",
+    responses((status = 200, description = "Política de privacidad (HTML)", content_type = "text/html"))
+)]
 pub async fn get_privacy_policy() -> Result<Html<String>, ApiError> {
     tracing::info!("Handling get_privacy_policy request");
     let privacy_policy = include_str!("../../../public/privacy_policy.html");
     Ok(Html(privacy_policy.to_string()))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/utils/image/{filename}",
+    tag = "Utils",
+    security(("bearerAuth" = [])),
+    params(("filename" = String, Path, description = "Nombre de archivo en uploads/")),
+    responses(
+        (status = 200, description = "Binario de la imagen", content_type = "image/*"),
+        (status = 401, description = "No autorizado"),
+        (status = 404, description = "Archivo no encontrado"),
+    )
+)]
 pub async fn get_image(
     Path(filename): Path<String>,
     State(_state): State<Arc<AppState>>,
@@ -131,6 +184,16 @@ pub async fn get_image(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/utils/bcv",
+    tag = "Utils",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Tasa BCV del día", body = BcvResponse),
+        (status = 401, description = "No autorizado"),
+    )
+)]
 pub async fn get_bcv(State(state): State<Arc<AppState>>) -> Result<Json<BcvResponse>, ApiError> {
     let bcv = state.db.get_latest_exchange_rate().await;
 
@@ -140,6 +203,18 @@ pub async fn get_bcv(State(state): State<Arc<AppState>>) -> Result<Json<BcvRespo
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/utils/ip-pppoe/{sn}",
+    tag = "Utils",
+    security(("bearerAuth" = [])),
+    params(("sn" = String, Path, description = "Serial number del ONU")),
+    responses(
+        (status = 200, description = "IP PPPoE asignada por el MikroTik", body = String),
+        (status = 401, description = "No autorizado"),
+        (status = 404, description = "No hay sesión PPPoE activa"),
+    )
+)]
 pub async fn get_ip_pppoe(
     Path(sn): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -179,6 +254,18 @@ pub async fn get_ip_pppoe(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/utils/zabbix/{id_client}",
+    tag = "Utils",
+    security(("bearerAuth" = [])),
+    params(("id_client" = String, Path, description = "ObjectId del cliente")),
+    responses(
+        (status = 200, description = "Tráfico histórico mensual desde Zabbix", body = ZabbixTrafficResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 404, description = "Cliente/ONU no encontrados"),
+    )
+)]
 pub async fn get_zabbix(
     Path(id_client): Path<String>,
     State(state): State<Arc<AppState>>

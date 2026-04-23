@@ -21,7 +21,18 @@ use crate::{
     state::AppState,
 };
 
-/// GET /v1/payments/methods/pago-movil/:debt_id
+#[utoipa::path(
+    get,
+    path = "/v1/payments/methods/payment/{debt_id}",
+    tag = "Payments",
+    security(("bearerAuth" = [])),
+    params(("debt_id" = String, Path, description = "ObjectId de la deuda")),
+    responses(
+        (status = 200, description = "Datos de pago móvil del proveedor dueño del cliente. `data` puede ser null si el proveedor no configuró método.", body = PaymentMethodResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 404, description = "Deuda/cliente/proveedor no encontrados"),
+    )
+)]
 pub async fn get_pago_movil_data_handler(
     Extension(_claims): Extension<AccessClaims>,
     State(state): State<Arc<AppState>>,
@@ -92,6 +103,18 @@ pub async fn get_pago_movil_data_handler(
     Ok(Json(PaymentMethodResponse { ok: true, data }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/payments/methods/payment/by-client/{client_id}",
+    tag = "Payments",
+    security(("bearerAuth" = [])),
+    params(("client_id" = String, Path, description = "ObjectId del cliente")),
+    responses(
+        (status = 200, description = "Datos de pago móvil del proveedor dueño del cliente", body = PaymentMethodResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 404, description = "Cliente/proveedor no encontrados"),
+    )
+)]
 pub async fn get_pago_movil_data_by_client_handler(
     Extension(_claims): Extension<AccessClaims>,
     State(state): State<Arc<AppState>>,
@@ -160,6 +183,18 @@ pub async fn get_pago_movil_data_by_client_handler(
     Ok(Json(PaymentMethodResponse { ok: true, data }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/payments/methods/by-client/{client_id}",
+    tag = "Payments",
+    security(("bearerAuth" = [])),
+    params(("client_id" = String, Path, description = "ObjectId del cliente")),
+    responses(
+        (status = 200, description = "Datos de pago móvil del proveedor dueño del cliente (endpoint staff)", body = PaymentMethodResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 404, description = "Cliente/proveedor no encontrados"),
+    )
+)]
 pub async fn get_pago_movil_data_by_client_user_handler(
     Extension(_claims): Extension<UserProfileClaims>,
     State(state): State<Arc<AppState>>,
@@ -228,7 +263,22 @@ pub async fn get_pago_movil_data_by_client_user_handler(
     Ok(Json(PaymentMethodResponse { ok: true, data }))
 }
 
-/// POST /v1/payments/report
+#[utoipa::path(
+    post,
+    path = "/v1/payments/payment/report",
+    tag = "Payments",
+    security(("bearerAuth" = [])),
+    request_body(
+        content = String,
+        content_type = "multipart/form-data",
+        description = "multipart/form-data con: `reference` (str), `amount_bs` (f64 como str), `date` (RFC3339 opcional), `bank` (str), `phone` (str), `image` (file), `id_payment_method` (ObjectId), y exactamente uno de `id_debt` o `id_client`."
+    ),
+    responses(
+        (status = 200, description = "Reporte de pago registrado en estado Pendiente"),
+        (status = 400, description = "Faltan datos básicos o IDs inválidos"),
+        (status = 401, description = "No autorizado"),
+    )
+)]
 pub async fn report_payment_handler(
     Extension(_claims): Extension<AccessClaims>,
     State(state): State<Arc<AppState>>,
@@ -408,7 +458,22 @@ pub async fn report_payment_handler(
     })))
 }
 
-/// POST /v1/auth-user/payments/report
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/payments/report",
+    tag = "Payments",
+    security(("bearerAuth" = [])),
+    request_body(
+        content = String,
+        content_type = "multipart/form-data",
+        description = "Mismos campos que `/v1/payments/payment/report` pero desde el dashboard staff."
+    ),
+    responses(
+        (status = 200, description = "Reporte de pago registrado en estado Pendiente"),
+        (status = 400, description = "Faltan datos básicos o IDs inválidos"),
+        (status = 401, description = "No autorizado"),
+    )
+)]
 pub async fn report_payment_user_handler(
     Extension(_claims): Extension<UserProfileClaims>,
     State(state): State<Arc<AppState>>,

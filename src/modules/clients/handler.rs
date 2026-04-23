@@ -19,11 +19,18 @@ pub struct ClientsQuery {
     pub owner: Option<String>,
 }
 
-/// GET /v1/auth-user/clients/:id
-///
-/// Devuelve el detalle completo de un cliente.
-/// - Rol 3 (provider): solo puede ver sus propios clientes.
-/// - Otros roles: acceso libre, pueden filtrar por ?owner.
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/clients/{id}",
+    tag = "Clients — Staff",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ObjectId del cliente")),
+    responses(
+        (status = 200, description = "Detalle completo del cliente. Incluye datos de ONU, sector, plan, proveedor, e IP PPPoE si tiene SN.", body = ClientDetail),
+        (status = 401, description = "No autorizado"),
+        (status = 404, description = "Cliente no encontrado o no pertenece al provider"),
+    )
+)]
 pub async fn get_client_by_id_handler(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<UserProfileClaims>,
@@ -73,7 +80,17 @@ pub async fn get_client_by_id_handler(
     Ok(Json(detail))
 }
 
-/// GET /v1/clients/:id/status-history
+#[utoipa::path(
+    get,
+    path = "/v1/clients/{id}/status-history",
+    tag = "Clients — Staff",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ObjectId del cliente")),
+    responses(
+        (status = 200, description = "Historial de cambios de estado del cliente", body = Vec<ClientStatusHistoryItem>),
+        (status = 401, description = "No autorizado"),
+    )
+)]
 pub async fn get_status_history_handler(
     State(state): State<Arc<AppState>>,
     Extension(_claims): Extension<UserProfileClaims>,
@@ -87,11 +104,16 @@ pub async fn get_status_history_handler(
         .map_err(ApiError::DatabaseError)
 }
 
-/// GET /v1/auth-user/clients/contact-info
-///
-/// Returns contact info (razon_social, dni, direccion, email, telefono) for all clients.
-/// - Rol 3 (provider): only returns clients belonging to their owner ID.
-/// - Otros roles: returns all clients.
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/clients/contact-info",
+    tag = "Clients — Staff",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Info de contacto (razón social, DNI, dirección, email, teléfono). Si el caller es provider, sólo sus clientes.", body = Vec<CustomerInfoItem>),
+        (status = 401, description = "No autorizado"),
+    )
+)]
 pub async fn get_customers_info_handler(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<UserProfileClaims>,
@@ -112,10 +134,17 @@ pub async fn get_customers_info_handler(
         .map_err(ApiError::DatabaseError)
 }
 
-/// GET /v1/auth-user/clients/all?owner=<id>
-///
-/// - Rol 3 (provider): siempre filtra por su propio ID, ignora ?owner.
-/// - Otros roles: usa ?owner si se provee, o devuelve todos.
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/clients/all",
+    tag = "Clients — Staff",
+    security(("bearerAuth" = [])),
+    params(("owner" = Option<String>, Query, description = "Filtrar por owner (ignorado si el caller es provider)")),
+    responses(
+        (status = 200, description = "Listado de clientes (vista ligera para tablas)", body = Vec<ClientListItem>),
+        (status = 401, description = "No autorizado"),
+    )
+)]
 pub async fn get_all_clients_handler(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<UserProfileClaims>,

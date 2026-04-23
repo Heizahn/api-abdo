@@ -3,6 +3,7 @@ use chrono::{Datelike, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use utoipa::ToSchema;
 
 use crate::{
     auth::user_jwt::UserProfileClaims,
@@ -43,21 +44,31 @@ async fn resolve_owner_id(
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct MonthlyClosingResponse {
     pub months: Vec<String>,
     pub selected_month: String,
     pub data: MonthlyClosingData,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct MonthlyClosingData {
     pub collected: f64,
     pub pending: f64,
     pub efficiency: Option<f64>,
 }
 
-/// GET /v1/auth-user/dashboard/latest-payments?owner=<id>
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/dashboard/latest-payments",
+    tag = "Dashboard",
+    security(("bearerAuth" = [])),
+    params(("owner" = Option<String>, Query, description = "Filtrar por owner (ignorado si el caller es provider)")),
+    responses(
+        (status = 200, description = "Últimos 10 pagos activos", body = Vec<LatestPayment>),
+        (status = 401, description = "No autorizado"),
+    )
+)]
 pub async fn latest_payments_handler(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<UserProfileClaims>,
@@ -72,7 +83,17 @@ pub async fn latest_payments_handler(
         .map_err(ApiError::DatabaseError)
 }
 
-/// GET /v1/auth-user/dashboard/solvency?owner=<id>
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/dashboard/solvency",
+    tag = "Dashboard",
+    security(("bearerAuth" = [])),
+    params(("owner" = Option<String>, Query, description = "Filtrar por owner (ignorado si el caller es provider)")),
+    responses(
+        (status = 200, description = "Conteos de clientes por estado (solventes, morosos, suspendidos)", body = SolvencyCounts),
+        (status = 401, description = "No autorizado"),
+    )
+)]
 pub async fn solvency_handler(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<UserProfileClaims>,
@@ -87,7 +108,22 @@ pub async fn solvency_handler(
         .map_err(ApiError::DatabaseError)
 }
 
-/// GET /v1/auth-user/dashboard/monthly-closing?month=YYYY-MM&owner=<id>
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/dashboard/monthly-closing",
+    tag = "Dashboard",
+    security(("bearerAuth" = [])),
+    params(
+        ("month" = Option<String>, Query, description = "Mes en formato YYYY-MM (default: mes actual)"),
+        ("owner" = Option<String>, Query, description = "Filtrar por owner (ignorado si el caller es provider)"),
+    ),
+    responses(
+        (status = 200, description = "Cierre mensual (cobrado, pendiente, eficiencia) + selector de meses", body = MonthlyClosingResponse),
+        (status = 400, description = "Formato de mes inválido o mes futuro"),
+        (status = 401, description = "No autorizado"),
+        (status = 404, description = "Mes pasado sin datos"),
+    )
+)]
 pub async fn monthly_closing_handler(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<UserProfileClaims>,
