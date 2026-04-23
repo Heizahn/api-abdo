@@ -1,8 +1,8 @@
 pub mod mongo;
 use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
 use crate::models::whatsapp::{
-    QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyList, UrlPreview,
-    WaConversation, WaMessage, WaQuickReply, WaSettings,
+    ConversationStats, QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyList,
+    UrlPreview, WaConversation, WaMessage, WaQuickReply, WaSettings,
 };
 use std::collections::HashMap;
 
@@ -303,6 +303,15 @@ pub trait WhatsAppRepository {
     async fn save_message(&self, message: WaMessage) -> Result<WaMessage, String>;
     /// Cursor-based: `cursor` de la forma `<millis>_<hex_id>` para paginación descendente por `last_message_at`.
     async fn get_conversations(&self, status: Option<&str>, assigned_to: Option<&str>, business_phone: Option<&str>, cursor: Option<&str>, limit: i64) -> Result<Vec<WaConversation>, String>;
+    /// Contadores agregados por categoría sobre el scope visible (opcionalmente
+    /// acotado por `business_phone`). Resuelve los 5 contadores en una sola
+    /// query usando `$facet` — es deliberadamente independiente de los filtros
+    /// de la UI para que los números no cambien al filtrar la lista.
+    async fn get_conversation_stats(
+        &self,
+        business_phone: Option<&str>,
+        current_user_id: &str,
+    ) -> Result<ConversationStats, String>;
     /// Cursor-based: `cursor` de la forma `<millis>_<hex_id>` para paginación descendente por `timestamp`.
     async fn get_messages(&self, conversation_id: &ObjectId, cursor: Option<&str>, limit: i64) -> Result<Vec<WaMessage>, String>;
     async fn update_conversation_status(&self, id: &ObjectId, status: &str) -> Result<(), String>;

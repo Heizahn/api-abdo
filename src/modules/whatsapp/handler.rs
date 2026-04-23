@@ -487,6 +487,39 @@ pub struct MessagesQuery {
     pub limit: Option<i64>,
 }
 
+#[derive(serde::Deserialize)]
+pub struct ConversationStatsQuery {
+    pub business_phone: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/conversations/stats",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(
+        ("business_phone" = Option<String>, Query, description = "Filtrar el scope a un solo número de negocio (E.164 sin '+'). Si se omite, cuenta sobre todos los números."),
+    ),
+    responses(
+        (status = 200, description = "Contadores de conversaciones por categoría", body = ConversationStatsResponse),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn conversations_stats_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Query(q): Query<ConversationStatsQuery>,
+) -> Result<Json<ConversationStatsResponse>, ApiError> {
+    let business_phone_norm = q.business_phone.as_deref().map(normalize_to_e164);
+    let stats = state
+        .db
+        .get_conversation_stats(business_phone_norm.as_deref(), &claims.id)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    Ok(Json(ConversationStatsResponse { ok: true, data: stats }))
+}
+
 #[utoipa::path(
     get,
     path = "/v1/auth-user/whatsapp/conversations",

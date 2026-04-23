@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use crate::db::{ConversationTouch, UpdateQuickReplyPatch, WhatsAppRepository};
 use crate::db::mongo::MongoDB;
-use crate::models::whatsapp::{UrlPreview, WaConversation, WaConversationOpen, WaMessage, WaPurposesPatch, WaQuickReply, WaSettings};
+use crate::models::whatsapp::{ConversationStats, UrlPreview, WaConversation, WaConversationOpen, WaMessage, WaPurposesPatch, WaQuickReply, WaSettings};
 
 impl MongoDB {
     pub(crate) fn wa_conversations(&self) -> mongodb::Collection<WaConversation> {
@@ -299,6 +299,58 @@ impl WhatsAppRepository for MongoDB {
             .try_collect::<Vec<_>>()
             .await
             .map_err(|e| e.to_string())
+    }
+
+    async fn get_conversation_stats(
+        &self,
+        business_phone: Option<&str>,
+        current_user_id: &str,
+    ) -> Result<ConversationStats, String> {
+        let mut match_stage = Document::new();
+        if let Some(bp) = business_phone {
+            match_stage.insert("business_phone", bp);
+        }
+
+        let pipeline = vec![
+            doc! { "$match": match_stage },
+            doc! { "$facet": {
+                "todos":      [ { "$count": "n" } ],
+                "mis":        [ { "$match": { "assigned_to": current_user_id } }, { "$count": "n" } ],
+                "pendientes": [ { "$match": { "status": "pending" } },            { "$count": "n" } ],
+                "en_proceso": [ { "$match": { "status": "in_progress" } },        { "$count": "n" } ],
+                "cerrados":   [ { "$match": { "status": "closed" } },             { "$count": "n" } ],
+            } },
+        ];
+
+        let mut cursor = self
+            .wa_conversations()
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let doc = cursor
+            .try_next()
+            .await
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+
+        let extract = |key: &str| -> u64 {
+            doc.get_array(key)
+                .ok()
+                .and_then(|arr| arr.first())
+                .and_then(|v| v.as_document())
+                .and_then(|d| d.get("n"))
+                .and_then(|v| v.as_i32().map(|n| n as u64).or_else(|| v.as_i64().map(|n| n as u64)))
+                .unwrap_or(0)
+        };
+
+        Ok(ConversationStats {
+            todos: extract("todos"),
+            mis: extract("mis"),
+            pendientes: extract("pendientes"),
+            en_proceso: extract("en_proceso"),
+            cerrados: extract("cerrados"),
+        })
     }
 
     async fn get_messages(

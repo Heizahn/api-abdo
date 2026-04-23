@@ -5,17 +5,16 @@ use crate::models::auth::{
     TokenPair, VerifyNumberRequest, VerifyNumberResponse,
 };
 use crate::models::whatsapp::{
-    ConversationDetailResponse, ConversationItem, ConversationMessagesResponse,
-    ConversationsListResponse, CreateQuickReplyRequest, CreateSettingsRequest,
-    DuplicateQuickReplyRequest, InitiateConversationRequest, MarkReadResponse, MessageItem,
-    QuickRepliesListResponse, QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyItem,
-    QuickReplyList, QuickReplyListRow, QuickReplyListSection, QuickReplyResponse, ReplyToItem,
-    SendMessageRequest, SendMessageResponse, SendTemplatePayload,
+    ConversationDetailResponse, ConversationItem, ConversationMessagesResponse, ConversationStats,
+    ConversationStatsResponse, ConversationsListResponse, CreateQuickReplyRequest,
+    CreateSettingsRequest, DuplicateQuickReplyRequest, InitiateConversationRequest,
+    MarkReadResponse, MessageItem, QuickRepliesListResponse, QuickReplyButton, QuickReplyCtaUrl,
+    QuickReplyHeader, QuickReplyItem, QuickReplyList, QuickReplyListRow, QuickReplyListSection,
+    QuickReplyResponse, ReplyToItem, SendMessageRequest, SendMessageResponse, SendTemplatePayload,
     SettingsItem, SettingsListResponse, SettingsResponse, TakeConversationResponse,
-    TemplatesListResponse, ToggleActiveRequest, TransferConversationRequest,
-    TransferableAgentItem, TransferableAgentsResponse, UpdateQuickReplyRequest, UpdateResponse,
-    UpdateSettingsRequest, UrlPreview, WaPurposeConfig, WaPurposes, WaPurposesPatch,
-    WhatsAppTemplate,
+    TemplatesListResponse, ToggleActiveRequest, TransferConversationRequest, TransferableAgentItem,
+    TransferableAgentsResponse, UpdateQuickReplyRequest, UpdateResponse, UpdateSettingsRequest,
+    UrlPreview, WaPurposeConfig, WaPurposes, WaPurposesPatch, WhatsAppTemplate,
 };
 
 #[derive(OpenApi)]
@@ -34,6 +33,7 @@ use crate::models::whatsapp::{
         crate::modules::auth_client::handler::refresh_handler,
         // WhatsApp — Soporte
         crate::modules::whatsapp::handler::list_conversations_handler,
+        crate::modules::whatsapp::handler::conversations_stats_handler,
         crate::modules::whatsapp::handler::get_conversation_handler,
         crate::modules::whatsapp::handler::get_conversation_messages_handler,
         crate::modules::whatsapp::handler::send_message_handler,
@@ -76,6 +76,7 @@ use crate::models::whatsapp::{
             ConversationsListResponse,
             ConversationDetailResponse,
             ConversationMessagesResponse,
+            ConversationStats, ConversationStatsResponse,
             SendMessageResponse,
             MarkReadResponse,
             TakeConversationResponse,

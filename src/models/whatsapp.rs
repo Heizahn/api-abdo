@@ -562,6 +562,24 @@ pub struct UpdateResponse {
     pub ok: bool,
 }
 
+/// Contadores por categoría — independientes del filtro activo en la UI.
+/// `todos === pendientes + en_proceso + cerrados` (invariante).
+/// `mis` es ortogonal al estado, no se suma con los otros.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ConversationStats {
+    pub todos: u64,
+    pub mis: u64,
+    pub pendientes: u64,
+    pub en_proceso: u64,
+    pub cerrados: u64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ConversationStatsResponse {
+    pub ok: bool,
+    pub data: ConversationStats,
+}
+
 // ============================================
 // CONFIGURACIÓN DE NÚMEROS (wa_settings)
 // ============================================
