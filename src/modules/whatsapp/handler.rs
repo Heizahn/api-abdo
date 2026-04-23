@@ -1878,13 +1878,22 @@ pub async fn get_media_handler(
 
     // 4. Hot path: cache de Redis. Los media_id son inmutables, así que el
     // primero que haya abierto el media (o el prefetch del webhook) ya lo dejó.
+    let t0 = std::time::Instant::now();
     if let Some((bytes, mime, remote_filename)) = state.redis.get_media_cache(&media_id).await {
+        tracing::info!(
+            "[media] HIT {} ({} bytes, {}) redis={}ms",
+            media_id, bytes.len(), mime, t0.elapsed().as_millis()
+        );
         let filename = msg.media_filename
             .clone()
             .or(remote_filename)
             .unwrap_or_else(|| media_id.clone());
         return Ok(build_media_response(bytes, &mime, &filename));
     }
+    tracing::warn!(
+        "[media] MISS {} — cayendo a Meta (prefetch no completó a tiempo o falló)",
+        media_id
+    );
 
     // 5. Cache miss → descargar de Meta.
     if settings.phone_number_id.is_empty() || settings.access_token.is_empty() {
@@ -1896,9 +1905,20 @@ pub async fn get_media_handler(
         .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
     let wa = WhatsAppService::new(state.reqwest_client.clone(), settings.phone_number_id, token);
 
+    let t_meta = std::time::Instant::now();
     let (bytes, mime, remote_filename) = wa.download_media(&media_id)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(
+                "[media] download_media falló para {} tras {}ms: {}",
+                media_id, t_meta.elapsed().as_millis(), e
+            );
+            ApiError::Internal(e.to_string())
+        })?;
+    tracing::info!(
+        "[media] MISS→FETCH {} ({} bytes, {}) meta={}ms",
+        media_id, bytes.len(), mime, t_meta.elapsed().as_millis()
+    );
 
     // Guardar en cache fire-and-forget para la próxima request (y para los
     // demás agentes que abran el mismo chat).
