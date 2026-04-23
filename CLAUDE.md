@@ -218,6 +218,10 @@ components(schemas(MiRequest, MiResponse, ...))
 | `OLT_ZTE_PASS` | Password SSH ZTE OLT |
 | `ZABBIX_URL` / `ZABBIX_TOKEN` | API Zabbix |
 | `ID_SIMCOT` | ID del editor para operaciones automáticas (crons) |
-| `WHATSAPP_VERIFY_TOKEN` | Token de verificación del webhook de Meta |
-| `WHATSAPP_ACCESS_TOKEN` | Bearer token de Meta Cloud API |
-| `WHATSAPP_PHONE_NUMBER_ID` | ID del número de teléfono en Meta |
+| `WHATSAPP_VERIFY_TOKEN` | Token de verificación del webhook de Meta (handshake GET) |
+| `WHATSAPP_APP_SECRET` | Secret de la Meta App — valida la firma HMAC-SHA256 del webhook |
+
+> El `access_token` y `phone_number_id` de Meta Cloud API **no** son env vars: se
+> configuran por cuenta en la colección `WaSettings` (el token se guarda cifrado
+> con AES-GCM usando `JWT_SECRET` como clave). La UI de "WhatsApp Numbers" los
+> administra vía `POST/PUT /v1/auth-user/whatsapp/settings`.
