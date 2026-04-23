@@ -18,11 +18,27 @@ cargo build
 # Correr en desarrollo
 cargo run
 
-# Tests
+# Build de producción
+cargo build --release
+
+# Tests (todos)
 cargo test
+
+# Un solo test por nombre (o subcadena del path)
+cargo test <nombre_test>
 ```
 
 > En Windows: `cd "C:/Users/Humberto/Develop/api-abdo" && cargo check`
+
+### Setup inicial de MongoDB (OBLIGATORIO)
+
+El rendimiento depende de índices creados manualmente. Tras clonar el repo y antes del primer `cargo run`:
+
+```bash
+mongosh <MONGO_URI> < scripts/create_indexes.js
+```
+
+Sin los índices, queries sobre `Clients` / `Payments` / `Debts` degradan fuerte.
 
 ---
 
@@ -82,6 +98,7 @@ src/
     dashboard/         # GET /v1/auth-user/dashboard/monthly-closing, /solvency, /latest-payments
     calculations/      # POST /v1/utils/calculate/bs, /v2/utils/calculate
     providers/         # GET /v1/users/providers
+    users/             # PATCH /v1/auth-user/users/:id/password, /visible, /role
     api_utils/         # ping, latest-version, bcv, ip-pppoe, image, zabbix, banks
     whatsapp/
       mod.rs           # 3 grupos de rutas: webhook_routes, ws_routes, user_routes
@@ -89,6 +106,9 @@ src/
       ws.rs            # WebSocket /v1/ws/chat?token=<jwt> — WsRegistry, eventos JSON
       assignment.rs    # Auto-asignación: min-load sobre agentes de wa_settings
       service.rs       # WhatsAppService: send_text, mark_as_read via Meta Cloud API
+      backfill.rs      # Sync histórico de conversaciones desde Meta
+      url_preview.rs   # Generación de previews para URLs en mensajes
+      quick_reply_validation.rs  # Validación de respuestas rápidas
     network/
       mikrotik/        # SSH: leases DHCP, IP PPPoE, cron (cada 20 min)
       zte/             # SSH: reporte ONUs ZTE OLT
@@ -133,8 +153,10 @@ Cada feature en `modules/<nombre>/` es auto-contenida:
 - **Staff/Admin**: `user_jwt_auth_middleware` — emitido en `/v1/auth-user/login`
 
 ### Roles de usuario
+- `nRole == -1` → sentinel "sin acceso" (bloqueo de login en `user_jwt_auth_middleware`)
 - `nRole == 3.0` → provider (solo ve sus clientes via `idOwner == claims.id`)
 - Otros roles → acceso completo, pueden filtrar con `?owner=<id>`
+- El rol **no viene en el JWT**: se resuelve consultando `find_user_by_id` en cada request que lo necesite
 
 ### DB Layer
 Traits en `db/mod.rs`, implementaciones en `db/mongo/`. Los módulos acceden via el trait `Db` (master trait que combina todos los repositorios). Nunca hay `$lookup` sobre colecciones grandes — se prefieren queries paralelas + join en Rust.
