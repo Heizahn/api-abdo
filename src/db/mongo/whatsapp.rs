@@ -453,20 +453,14 @@ impl WhatsAppRepository for MongoDB {
             .return_document(ReturnDocument::After)
             .build();
 
-        // Atómico: toma si sigue pending Y (no tiene dueño O el dueño soy yo).
-        // Idempotente: un agente puede "re-tomar" su propia conversación pending.
-        // Mantiene `status = pending` — la transición a `in_progress` ocurre en
-        // el primer GET /messages del asignado.
+        // Atómico: toma si sigue `pending`, sin importar si ya tiene otro dueño.
+        // Permite reasignación manual en chats `pending` asignados a otro agente.
+        // Idempotente: tomar mi propia conversación devuelve el doc sin cambios.
+        // No toca `status` — la transición a `in_progress` ocurre en el primer
+        // GET /messages del asignado.
         let res = self.wa_conversations()
             .find_one_and_update(
-                doc! {
-                    "_id": id,
-                    "status": "pending",
-                    "$or": [
-                        { "assigned_to": mongodb::bson::Bson::Null },
-                        { "assigned_to": agent_id },
-                    ],
-                },
+                doc! { "_id": id, "status": "pending" },
                 doc! { "$set": { "assigned_to": agent_id } },
             )
             .with_options(opts)

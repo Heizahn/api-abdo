@@ -1259,8 +1259,8 @@ pub async fn mark_read_handler(
     security(("bearerAuth" = [])),
     params(("id" = String, Path, description = "ID de la conversación")),
     responses(
-        (status = 200, description = "Conversación tomada (idempotente si ya era del agente)", body = TakeConversationResponse),
-        (status = 409, description = "Ya fue tomada por otro agente o no está pending"),
+        (status = 200, description = "Conversación tomada o reasignada. Idempotente si ya era del agente. Acepta reasignación: si el chat es `pending` asignado a otro agente, lo transfiere al agente actual.", body = TakeConversationResponse),
+        (status = 409, description = "La conversación no está en `pending` (está en `in_progress` o `closed`)"),
         (status = 404, description = "Conversación no encontrada"),
         (status = 401, description = "No autorizado"),
     )
@@ -1278,9 +1278,10 @@ pub async fn take_conversation_handler(
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
-    let was_already_mine = existing.assigned_to.as_deref() == Some(claims.id.as_str());
+    let prev_owner = existing.assigned_to.clone();
+    let was_already_mine = prev_owner.as_deref() == Some(claims.id.as_str());
 
-    // `take_conversation` solo avanza si status=pending Y (sin dueño O dueño=self).
+    // `take_conversation` ahora permite reasignación: sólo exige `status=pending`.
     let taken = state.db
         .take_conversation(&oid, &claims.id)
         .await
@@ -1288,23 +1289,22 @@ pub async fn take_conversation_handler(
 
     let conv = match taken {
         Some(c) => c,
-        None => return Err(ApiError::Conflict("conversacion_ya_tomada".into())),
+        None => return Err(ApiError::Conflict("conversacion_no_pending".into())),
     };
 
-    // Sólo incrementamos la carga si es la primera vez (no idempotente).
+    // Ajuste de carga: si había un dueño distinto a mí, le bajamos la carga.
+    // Si yo no era dueño, me sube la carga.
     if !was_already_mine {
         state.redis.incr_agent_load(&claims.id).await;
-
-        // CHAT_TOMADO al resto: el agente que tomó ya tiene la respuesta HTTP.
-        let ev = WsServerEvent::ChatTomado {
-            conversation_id: id.clone(),
-            taken_by: claims.id.clone(),
-            status: conv.status.clone(),
-        };
-        broadcast_except(&state.ws_registry, &claims.id, &ev).await;
+        if let Some(prev) = prev_owner.as_deref() {
+            if prev != claims.id {
+                state.redis.decr_agent_load(prev).await;
+            }
+        }
     }
 
-    // `last_opened_at` del agente (si ya había abierto antes).
+    // Resolver datos adicionales que van tanto en la respuesta HTTP como en el
+    // evento WS (para que el resto de agentes vea la conversación actualizada).
     let opens = state.db
         .get_conversation_opens(&claims.id, &[oid])
         .await
@@ -1313,6 +1313,35 @@ pub async fn take_conversation_handler(
     let workspace_name = resolve_workspace_name(&state, &conv.business_phone).await;
     let resolved = resolve_customer_name(&state, &conv).await;
     let agent_name = resolve_last_message_agent_name_one(&state, &conv).await;
+
+    // Broadcast a los demás agentes:
+    // - Si había otro dueño previo (reasignación): CHAT_TRANSFERIDO con
+    //   conversación completa para que el front reemplace su estado local.
+    // - Si no había dueño, o ya era mía y sólo es idempotente: CHAT_TOMADO.
+    if !was_already_mine {
+        let conv_item = conv_to_item(
+            conv.clone(),
+            true,
+            last_opened,
+            workspace_name.clone(),
+            resolved.clone(),
+            agent_name.clone(),
+        );
+        let ev = match prev_owner.as_deref() {
+            Some(prev) if prev != claims.id => WsServerEvent::ChatTransferido {
+                conversation_id: id.clone(),
+                from_user_id: Some(prev.to_string()),
+                to_user_id: claims.id.clone(),
+                conversation: conv_item,
+            },
+            _ => WsServerEvent::ChatTomado {
+                conversation_id: id.clone(),
+                taken_by: claims.id.clone(),
+                status: conv.status.clone(),
+            },
+        };
+        broadcast_except(&state.ws_registry, &claims.id, &ev).await;
+    }
 
     Ok(Json(TakeConversationResponse {
         ok: true,
