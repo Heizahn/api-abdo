@@ -1,7 +1,7 @@
 pub mod handler;
 
 use axum::{
-    routing::{get, patch},
+    routing::{get, patch, post},
     Router,
 };
 use std::sync::Arc;
@@ -13,6 +13,7 @@ use crate::state::AppState;
 pub fn user_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/auth-user/users", get(handler::list_users_handler))
+        .route("/v1/auth-user/users", post(handler::create_user_handler))
         .route(
             "/v1/auth-user/users/:id/visible",
             patch(handler::set_user_visible_handler),

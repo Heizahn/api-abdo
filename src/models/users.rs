@@ -188,6 +188,20 @@ pub struct UpdateUserRequest {
     pub tag: Option<u32>,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateUserBody {
+    pub name: String,
+    pub email: String,
+    pub role: f32,
+    pub password: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_chat: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<u32>,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct CreateUserRequest {

@@ -10,13 +10,15 @@ use crate::{
     db::mongo::users::last_user_cursor,
     error::ApiError,
     models::users::{
-        SetUserVisibleRequest, UpdateUserRequest, User, UserItem, UserListResponse,
-        UserResponseEnvelope,
+        CreateUserBody, SetUserVisibleRequest, UpdateUserRequest, User, UserCredentials,
+        UserItem, UserListResponse, UserResponseEnvelope,
     },
     state::AppState,
 };
 
 const SUPERADMIN_ROLE: f32 = 0.0;
+const BCRYPT_COST: u32 = bcrypt::DEFAULT_COST;
+const PASSWORD_MIN_LEN: usize = 8;
 
 /// Valida que el `claims.id` (UUID del JWT) corresponda a un user existente y
 /// con `nRole == 0.0` LEÍDO DE DB (no del snapshot del JWT). Si el rol fue
@@ -144,6 +146,94 @@ pub async fn set_user_visible_handler(
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::NotFound)?;
+
+    Ok(Json(UserResponseEnvelope {
+        ok: true,
+        data: UserItem::from(user),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/users",
+    tag = "Users — CRUD",
+    security(("bearerAuth" = [])),
+    request_body = CreateUserBody,
+    responses(
+        (status = 200, description = "Usuario creado", body = UserResponseEnvelope),
+        (status = 400, description = "Payload inválido (email/password/role)"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Requiere rol SUPERADMIN"),
+        (status = 409, description = "Email ya registrado"),
+    )
+)]
+pub async fn create_user_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Json(payload): Json<CreateUserBody>,
+) -> Result<Json<UserResponseEnvelope>, ApiError> {
+    let caller = require_superadmin(&state, &claims).await?;
+
+    // Normalización + validación.
+    let name = payload.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("name requerido".into()));
+    }
+    let email = payload.email.trim().to_lowercase();
+    if email.is_empty() || !email.contains('@') {
+        return Err(ApiError::BadRequest("email inválido".into()));
+    }
+    if payload.password.len() < PASSWORD_MIN_LEN {
+        return Err(ApiError::BadRequest(format!(
+            "password debe tener al menos {} caracteres",
+            PASSWORD_MIN_LEN
+        )));
+    }
+    if !payload.role.is_finite() || payload.role < 0.0 {
+        return Err(ApiError::BadRequest("role inválido".into()));
+    }
+
+    // Email único.
+    if state
+        .db
+        .find_user_by_email(&email)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .is_some()
+    {
+        return Err(ApiError::Conflict("email_ya_registrado".into()));
+    }
+
+    // Hash de password (costoso: ~100ms) antes de tocar DB.
+    let hash = bcrypt::hash(&payload.password, BCRYPT_COST)
+        .map_err(|_| ApiError::Internal("no se pudo hashear password".into()))?;
+
+    let user_id = uuid::Uuid::new_v4().to_string();
+    let now = mongodb::bson::DateTime::now();
+
+    let user = User {
+        id: user_id.clone(),
+        name,
+        role: payload.role,
+        email: email.clone(),
+        visible: payload.visible.unwrap_or(true),
+        can_chat: payload.can_chat.unwrap_or(false),
+        tag: payload.tag,
+        id_creator: Some(caller.id.clone()),
+        d_creation: Some(mongodb::bson::Bson::DateTime(now)),
+    };
+
+    state.db.create_user(user.clone()).await.map_err(ApiError::DatabaseError)?;
+
+    // Credenciales en colección separada (UserCredentials).
+    state
+        .db
+        .create_user_credentials(UserCredentials {
+            user_id: user_id.clone(),
+            password: hash,
+        })
+        .await
+        .map_err(ApiError::DatabaseError)?;
 
     Ok(Json(UserResponseEnvelope {
         ok: true,
