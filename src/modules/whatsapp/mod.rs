@@ -21,11 +21,9 @@ pub fn webhook_routes() -> Router<Arc<AppState>> {
 }
 
 /// Ruta WebSocket: autenticación via query param ?token=<user_jwt>
-/// También sirve el schema público de eventos WS (contrato para el front).
 pub fn ws_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/ws/chat", get(ws::ws_handler))
-        .route("/v1/ws/schema.json", get(handler::ws_schema_handler))
 }
 
 /// Rutas REST protegidas con JWT de staff/admin

@@ -3235,37 +3235,3 @@ fn count_placeholders(text: &str) -> u32 {
     }
     max_idx
 }
-
-/// JSON Schema de los eventos WebSocket (cliente↔servidor).
-/// Incluido en el binario con `include_str!` para no depender del filesystem.
-///
-/// El front puede consumirlo para generar tipos TS automáticos
-/// (quicktype / json-schema-to-typescript) y evitar drift manual.
-///
-/// Versionado: el archivo tiene `$id` + `version` (semver). Al cambiar un
-/// evento, bump de `version` en el JSON.
-const WS_EVENTS_SCHEMA: &str = include_str!("../../../docs/ws-events.schema.json");
-
-/// GET /v1/ws/schema.json — público, sin JWT. Cacheable 1 hora.
-#[utoipa::path(
-    get,
-    path = "/v1/ws/schema.json",
-    tag = "WhatsApp — Soporte",
-    responses(
-        (status = 200, description = "JSON Schema de eventos WebSocket", content_type = "application/schema+json"),
-    )
-)]
-pub async fn ws_schema_handler() -> axum::response::Response {
-    let mut resp = axum::response::Response::new(axum::body::Body::from(WS_EVENTS_SCHEMA));
-    let h = resp.headers_mut();
-    h.insert(
-        axum::http::header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static("application/schema+json; charset=utf-8"),
-    );
-    // Cache 1h en browser/CDN; el schema cambia con deploys, no en caliente.
-    h.insert(
-        axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("public, max-age=3600"),
-    );
-    resp
-}

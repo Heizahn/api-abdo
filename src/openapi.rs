@@ -55,7 +55,6 @@ use crate::models::whatsapp::{
         crate::modules::whatsapp::handler::set_quick_reply_active_handler,
         crate::modules::whatsapp::handler::duplicate_quick_reply_handler,
         crate::modules::whatsapp::handler::list_templates_handler,
-        crate::modules::whatsapp::handler::ws_schema_handler,
     ),
     components(
         schemas(
