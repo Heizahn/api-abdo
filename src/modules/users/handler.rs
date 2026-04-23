@@ -9,9 +9,9 @@ use crate::{
     db::mongo::users::last_user_cursor,
     error::ApiError,
     models::users::{
-        CreateUserBody, OkResponse, SetUserPasswordRequest, SetUserVisibleRequest,
-        UpdateUserRequest, User, UserCredentials, UserItem, UserListResponse,
-        UserResponseEnvelope,
+        ChangeMyPasswordRequest, CreateUserBody, OkResponse, SetUserPasswordRequest,
+        SetUserVisibleRequest, UpdateUserRequest, User, UserCredentials, UserItem,
+        UserListResponse, UserResponseEnvelope,
     },
     state::AppState,
 };
@@ -366,6 +366,57 @@ pub async fn set_user_password_handler(
     if !existed {
         return Err(ApiError::NotFound);
     }
+
+    Ok(Json(OkResponse { ok: true }))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/v1/auth-user/me/password",
+    tag = "Users — CRUD",
+    security(("bearerAuth" = [])),
+    request_body = ChangeMyPasswordRequest,
+    responses(
+        (status = 200, description = "Password actualizado", body = OkResponse),
+        (status = 400, description = "Nueva password inválida (mínimo 8 caracteres)"),
+        (status = 401, description = "No autorizado o password actual incorrecta"),
+    )
+)]
+pub async fn change_my_password_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user): Extension<User>,
+    Json(payload): Json<ChangeMyPasswordRequest>,
+) -> Result<Json<OkResponse>, ApiError> {
+    if payload.new_password.len() < PASSWORD_MIN_LEN {
+        return Err(ApiError::BadRequest(format!(
+            "new_password debe tener al menos {} caracteres",
+            PASSWORD_MIN_LEN
+        )));
+    }
+
+    let creds: UserCredentials = state
+        .db
+        .find_user_credentials_by_user_id(&current_user.id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::Unauthorized(
+            "Usuario no tiene credenciales".into(),
+        ))?;
+
+    let valid = bcrypt::verify(&payload.old_password, &creds.password)
+        .map_err(|_| ApiError::InternalServerError)?;
+    if !valid {
+        return Err(ApiError::Unauthorized("Password actual incorrecta".into()));
+    }
+
+    let hash = bcrypt::hash(&payload.new_password, BCRYPT_COST)
+        .map_err(|_| ApiError::Internal("no se pudo hashear password".into()))?;
+
+    state
+        .db
+        .update_user_password(&current_user.id, &hash)
+        .await
+        .map_err(ApiError::DatabaseError)?;
 
     Ok(Json(OkResponse { ok: true }))
 }

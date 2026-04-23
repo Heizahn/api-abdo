@@ -26,4 +26,8 @@ pub fn user_routes() -> Router<Arc<AppState>> {
             "/v1/auth-user/users/:id/password",
             patch(handler::set_user_password_handler),
         )
+        .route(
+            "/v1/auth-user/me/password",
+            patch(handler::change_my_password_handler),
+        )
 }

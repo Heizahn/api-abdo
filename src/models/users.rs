@@ -199,6 +199,15 @@ pub struct SetUserPasswordRequest {
     pub password: String,
 }
 
+/// Payload para que el usuario autenticado cambie su propia contraseña.
+/// Requiere la contraseña actual (`old_password`) como prueba de posesión,
+/// independiente del JWT.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ChangeMyPasswordRequest {
+    pub old_password: String,
+    pub new_password: String,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct OkResponse {
     pub ok: bool,
