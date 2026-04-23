@@ -89,6 +89,21 @@ impl WhatsAppService {
         self
     }
 
+    /// Construye un `RequestBuilder` para una URL de Meta
+    /// (`graph.facebook.com` o `lookaside.fbsbx.com`). Si hay relay
+    /// configurado, redirige al Worker con la URL destino como query
+    /// param y el secret en header — transparente para el caller.
+    /// Aplica a GET/POST/cualquier método.
+    fn meta_request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+        match &self.media_relay {
+            Some(relay) => self.client
+                .request(method, &relay.url)
+                .query(&[("url", url)])
+                .header("x-relay-secret", &relay.secret),
+            None => self.client.request(method, url),
+        }
+    }
+
     fn messages_url(&self) -> String {
         format!(
             "https://graph.facebook.com/{}/{}/messages",
@@ -124,7 +139,9 @@ impl WhatsAppService {
 
         let url = self.messages_url();
         let resp = send_with_retry("send_text", || {
-            self.client.post(&url).bearer_auth(&self.access_token).json(&payload)
+            self.meta_request(reqwest::Method::POST, &url)
+                .bearer_auth(&self.access_token)
+                .json(&payload)
         }).await
             .map_err(|e| describe_reqwest_error("send_text request", e))?;
 
@@ -173,7 +190,9 @@ impl WhatsAppService {
 
         let url = self.messages_url();
         let resp = send_with_retry("send_template", || {
-            self.client.post(&url).bearer_auth(&self.access_token).json(&payload)
+            self.meta_request(reqwest::Method::POST, &url)
+                .bearer_auth(&self.access_token)
+                .json(&payload)
         }).await
             .map_err(|e| describe_reqwest_error("send_template request", e))?;
 
@@ -194,23 +213,11 @@ impl WhatsAppService {
     }
 
     /// Info de un media: URL firmada por Meta (TTL ~5 min), mime, tamaño y filename.
-    ///
-    /// Si hay `media_relay` configurado, también el info call (a
-    /// `graph.facebook.com`) pasa por el Worker. La VM del ISP venezolano
-    /// a veces filtra también este host, no sólo `lookaside.fbsbx.com`.
     pub async fn download_media_info(&self, media_id: &str) -> Result<MediaInfo> {
         let info_url = format!("https://graph.facebook.com/{}/{}", WA_API_VERSION, media_id);
         let resp = send_with_retry("download_media info", || {
-            match &self.media_relay {
-                Some(relay) => self.client
-                    .get(&relay.url)
-                    .query(&[("url", info_url.as_str())])
-                    .header("x-relay-secret", &relay.secret)
-                    .bearer_auth(&self.access_token),
-                None => self.client
-                    .get(&info_url)
-                    .bearer_auth(&self.access_token),
-            }
+            self.meta_request(reqwest::Method::GET, &info_url)
+                .bearer_auth(&self.access_token)
         }).await
             .map_err(|e| describe_reqwest_error("download_media info", e))?;
 
@@ -244,18 +251,9 @@ impl WhatsAppService {
     /// de red desde la VM hacia `lookaside.fbsbx.com`.
     pub async fn download_media_body(&self, url: &str) -> Result<Vec<u8>> {
         let bin = send_with_retry("download_media bytes", || {
-            match &self.media_relay {
-                Some(relay) => self.client
-                    .get(&relay.url)
-                    .query(&[("url", url)])
-                    .header("x-relay-secret", &relay.secret)
-                    .bearer_auth(&self.access_token)
-                    .header(reqwest::header::ACCEPT, "*/*"),
-                None => self.client
-                    .get(url)
-                    .bearer_auth(&self.access_token)
-                    .header(reqwest::header::ACCEPT, "*/*"),
-            }
+            self.meta_request(reqwest::Method::GET, url)
+                .bearer_auth(&self.access_token)
+                .header(reqwest::header::ACCEPT, "*/*")
         }).await
             .map_err(|e| describe_reqwest_error("download_media bytes", e))?;
 
@@ -289,7 +287,8 @@ impl WhatsAppService {
         );
 
         let resp = send_with_retry("list_templates", || {
-            self.client.get(&url).bearer_auth(&self.access_token)
+            self.meta_request(reqwest::Method::GET, &url)
+                .bearer_auth(&self.access_token)
         }).await
             .map_err(|e| describe_reqwest_error("list_templates request", e))?;
 
@@ -315,7 +314,8 @@ impl WhatsAppService {
         );
 
         let resp = send_with_retry("get_waba_id", || {
-            self.client.get(&url).bearer_auth(&self.access_token)
+            self.meta_request(reqwest::Method::GET, &url)
+                .bearer_auth(&self.access_token)
         }).await
             .map_err(|e| describe_reqwest_error("get_waba_id request", e))?;
 
@@ -361,7 +361,9 @@ impl WhatsAppService {
 
         let url = self.messages_url();
         let resp = send_with_retry("send_interactive", || {
-            self.client.post(&url).bearer_auth(&self.access_token).json(&payload)
+            self.meta_request(reqwest::Method::POST, &url)
+                .bearer_auth(&self.access_token)
+                .json(&payload)
         }).await
             .map_err(|e| describe_reqwest_error("send_interactive request", e))?;
 
@@ -393,7 +395,9 @@ impl WhatsAppService {
 
         let url = self.messages_url();
         let resp = send_with_retry("mark_as_read", || {
-            self.client.post(&url).bearer_auth(&self.access_token).json(&payload)
+            self.meta_request(reqwest::Method::POST, &url)
+                .bearer_auth(&self.access_token)
+                .json(&payload)
         }).await
             .map_err(|e| describe_reqwest_error("mark_as_read request", e))?;
 

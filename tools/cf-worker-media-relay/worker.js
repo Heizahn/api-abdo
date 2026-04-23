@@ -1,31 +1,35 @@
-// Cloudflare Worker — WhatsApp Media Relay
+// Cloudflare Worker — WhatsApp Meta Relay
 //
-// Relayea descargas de media de Meta (lookaside.fbsbx.com) para el backend
-// api-abdo. Existe porque la VM de Debian no logra conectar a esa CDN desde
-// Venezuela y Cloudflare Workers sí tienen ruta limpia.
+// Relayea TODAS las llamadas a Meta (graph.facebook.com + lookaside.fbsbx.com)
+// para el backend api-abdo. Existe porque la VM de Debian no logra conectar
+// con fiabilidad a esos hosts desde Venezuela (bloqueo/filtrado del ISP) y
+// Cloudflare Workers sí tienen ruta limpia.
 //
 // Contrato:
-//   GET https://<worker>/?url=<signed_meta_url_url_encoded>
+//   <METHOD> https://<worker>/?url=<meta_url_url_encoded>
+//   Métodos soportados: GET, POST (los que usa WhatsApp Cloud API hoy).
 //   Headers obligatorios:
-//     - x-relay-secret: <RELAY_SECRET>   (compartido con el backend)
-//     - authorization:  Bearer <meta_access_token>  (tal cual se lo
-//       mandaríamos a Meta; lo pasamos transparente)
+//     - x-relay-secret: <RELAY_SECRET>  (compartido con el backend)
+//     - authorization:  Bearer <meta_access_token>  (passthrough a Meta)
+//   Para POST:
+//     - content-type: application/json (o lo que corresponda)
+//     - body: el JSON que iría directo a Meta
 //
 // Seguridad:
-//   - RELAY_SECRET previene que cualquier tercero use esto de proxy abierto
-//     para salir a internet por Cloudflare.
-//   - Se valida que el host destino sea *.fbsbx.com o *.facebook.com.
-//     Sin esto, quien sepa el secret podría usar el worker para cualquier
-//     cosa.
+//   - RELAY_SECRET previene que cualquier tercero use esto como proxy abierto.
+//   - Whitelist de host destino (*.fbsbx.com, *.facebook.com, *.cdninstagram.com).
 //
 // Deploy:
-//   wrangler deploy  (ver wrangler.toml al lado)
-//   wrangler secret put RELAY_SECRET
-//   # el mismo valor va en el .env del backend como WA_MEDIA_RELAY_SECRET
+//   wrangler deploy
+//   wrangler secret put RELAY_SECRET  (mismo valor que el WA_MEDIA_RELAY_SECRET
+//                                       del backend).
+
+const ALLOWED_METHODS = ['GET', 'POST'];
+const ALLOWED_HOST_SUFFIXES = ['.fbsbx.com', '.facebook.com', '.cdninstagram.com'];
 
 export default {
   async fetch(request, env) {
-    if (request.method !== 'GET') {
+    if (!ALLOWED_METHODS.includes(request.method)) {
       return new Response('method not allowed', { status: 405 });
     }
 
@@ -50,43 +54,48 @@ export default {
       return new Response('invalid url', { status: 400 });
     }
 
-    // 3. Solo permitimos hosts de Meta — evita usar esto como open proxy
+    // 3. Validar host contra whitelist
     const host = targetUrl.hostname.toLowerCase();
-    const allowedSuffixes = ['.fbsbx.com', '.facebook.com', '.cdninstagram.com'];
-    const hostAllowed = allowedSuffixes.some((s) => host.endsWith(s));
+    const hostAllowed = ALLOWED_HOST_SUFFIXES.some((s) => host.endsWith(s));
     if (!hostAllowed) {
       return new Response('host not allowed', { status: 403 });
     }
 
-    // 4. Fetch transparente — pasamos Authorization + Accept tal cual
+    // 4. Reenviar headers relevantes a Meta
     const upstreamHeaders = new Headers();
     const auth = request.headers.get('authorization');
     if (auth) upstreamHeaders.set('authorization', auth);
+    const ct = request.headers.get('content-type');
+    if (ct) upstreamHeaders.set('content-type', ct);
     upstreamHeaders.set('accept', '*/*');
+
+    // 5. Fetch upstream. GET puede aprovechar la caché de Cloudflare
+    // (URLs firmadas de media caducan a ~5 min). POST nunca se cachea
+    // (Meta devuelve wa_message_id único por request).
+    const init = {
+      method: request.method,
+      headers: upstreamHeaders,
+      redirect: 'follow',
+    };
+    if (request.method === 'GET') {
+      init.cf = { cacheEverything: true, cacheTtl: 300 };
+    } else {
+      init.body = request.body;
+    }
 
     let upstream;
     try {
-      upstream = await fetch(target, {
-        method: 'GET',
-        headers: upstreamHeaders,
-        redirect: 'follow',
-        // Cloudflare cachea por URL; estos binarios son inmutables por 5 min
-        // (TTL de la URL firmada de Meta), así que habilitamos cache a 300s.
-        cf: { cacheEverything: true, cacheTtl: 300 },
-      });
+      upstream = await fetch(target, init);
     } catch (err) {
       return new Response(`upstream fetch failed: ${err.message}`, { status: 502 });
     }
 
-    // 5. Pass-through de headers útiles + body streaming
+    // 6. Pass-through de response: status + headers útiles + body streaming.
     const outHeaders = new Headers();
-    const ct = upstream.headers.get('content-type');
-    if (ct) outHeaders.set('content-type', ct);
-    const cl = upstream.headers.get('content-length');
-    if (cl) outHeaders.set('content-length', cl);
-    const etag = upstream.headers.get('etag');
-    if (etag) outHeaders.set('etag', etag);
-
+    for (const h of ['content-type', 'content-length', 'etag']) {
+      const v = upstream.headers.get(h);
+      if (v) outHeaders.set(h, v);
+    }
     return new Response(upstream.body, {
       status: upstream.status,
       statusText: upstream.statusText,
