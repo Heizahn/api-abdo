@@ -460,17 +460,19 @@ pub trait WhatsAppRepository {
     ) -> Result<Vec<WaSettings>, String>;
 
     // Quick replies (snippets)
-    /// Devuelve los `WaSettings._id` donde `user_id` aparece en `agents`.
-    /// Se usa como scope para filtrar quick-replies y validar permisos de escritura.
-    async fn get_user_workspaces(&self, user_id: &str) -> Result<Vec<ObjectId>, String>;
     /// Devuelve `true` si **todos** los `ids` existen en `WaSettings`. Usado para validar `workspace_ids`.
     async fn wa_settings_exist(&self, ids: &[ObjectId]) -> Result<bool, String>;
-    /// Listado de quick-replies cuyo `workspace_ids` intersecta con `user_workspaces`.
-    /// Si `filter_workspace_id` viene, filtra además por ese workspace puntual.
+    /// Listado de quick-replies. La autorización del caller se resuelve en el
+    /// handler vía `bCanChat`; acá no se filtra por membresía de workspace.
+    ///
+    /// - `filter_workspace_id = None` → devuelve todas las quick replies.
+    /// - `filter_workspace_id = Some(id)` → devuelve las que tienen `id` en
+    ///   `workspace_ids` **o** las globales (`workspace_ids: []`, aplican a
+    ///   cualquier workspace).
+    ///
     /// Si `active_filter` viene, filtra por `active = bool` (None ⇒ sin filtro).
     async fn list_quick_replies(
         &self,
-        user_workspaces: &[ObjectId],
         filter_workspace_id: Option<&ObjectId>,
         active_filter: Option<bool>,
     ) -> Result<Vec<WaQuickReply>, String>;

@@ -2102,9 +2102,9 @@ pub struct QuickRepliesQuery {
         ("active" = Option<bool>, Query, description = "Filtrar por estado activo (true/false)"),
     ),
     responses(
-        (status = 200, description = "Lista de snippets visibles para el agente", body = QuickRepliesListResponse),
+        (status = 200, description = "Lista completa de quick replies. Con `?workspace_id` filtra al workspace más las globales (`workspace_ids: []`).", body = QuickRepliesListResponse),
         (status = 401, description = "No autorizado"),
-        (status = 403, description = "El usuario no tiene permiso de chat"),
+        (status = 403, description = "El usuario no tiene `bCanChat=true`"),
     )
 )]
 pub async fn list_quick_replies_handler(
@@ -2113,10 +2113,6 @@ pub async fn list_quick_replies_handler(
     Query(q): Query<QuickRepliesQuery>,
 ) -> Result<Json<QuickRepliesListResponse>, ApiError> {
     require_can_chat(&state, &claims.id).await?;
-
-    let workspaces = state.db.get_user_workspaces(&claims.id)
-        .await
-        .map_err(ApiError::DatabaseError)?;
 
     let filter_oid = match q.workspace_id.as_deref() {
         Some(hex) => Some(
@@ -2127,7 +2123,7 @@ pub async fn list_quick_replies_handler(
     };
 
     let docs = state.db
-        .list_quick_replies(&workspaces, filter_oid.as_ref(), q.active)
+        .list_quick_replies(filter_oid.as_ref(), q.active)
         .await
         .map_err(ApiError::DatabaseError)?;
 
@@ -2144,10 +2140,10 @@ pub async fn list_quick_replies_handler(
     security(("bearerAuth" = [])),
     request_body = CreateQuickReplyRequest,
     responses(
-        (status = 200, description = "Snippet creado", body = QuickReplyResponse),
-        (status = 400, description = "Validación falló"),
+        (status = 200, description = "Snippet creado. `workspace_ids: []` crea una quick reply global (aplica a todos los workspaces).", body = QuickReplyResponse),
+        (status = 400, description = "Validación falló o algún `workspace_id` no existe"),
         (status = 401, description = "No autorizado"),
-        (status = 403, description = "El usuario no tiene permiso de chat o no es agente en los workspaces indicados"),
+        (status = 403, description = "El usuario no tiene `bCanChat=true`"),
     )
 )]
 pub async fn create_quick_reply_handler(
@@ -2167,7 +2163,6 @@ pub async fn create_quick_reply_handler(
     validate_quick_reply(&ValidatedQuickReply {
         title: &title,
         content: &content,
-        workspace_ids_len: workspace_oids.len(),
         header: payload.header.as_ref(),
         footer: footer.as_deref(),
         buttons: payload.buttons.as_deref(),
@@ -2215,8 +2210,9 @@ pub async fn create_quick_reply_handler(
     responses(
         (status = 200, description = "Snippet actualizado", body = QuickReplyResponse),
         (status = 400, description = "Validación falló"),
-        (status = 404, description = "Snippet no encontrado o no visible para el agente"),
         (status = 401, description = "No autorizado"),
+        (status = 403, description = "El usuario no tiene `bCanChat=true`"),
+        (status = 404, description = "Snippet no encontrado"),
     )
 )]
 pub async fn update_quick_reply_handler(
@@ -2236,14 +2232,6 @@ pub async fn update_quick_reply_handler(
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::NotFound)?;
 
-    let user_workspaces = state.db.get_user_workspaces(&claims.id)
-        .await
-        .map_err(ApiError::DatabaseError)?;
-    if !has_workspace_overlap(&existing.workspace_ids, &user_workspaces) {
-        // No revelamos existencia del doc al user que no tiene acceso.
-        return Err(ApiError::NotFound);
-    }
-
     // Normalización + parse de campos planos
     let title_new = payload.title.as_ref().map(|t| t.trim().to_string());
     let content_new = payload.content.as_ref().map(|c| c.trim().to_string());
@@ -2258,10 +2246,6 @@ pub async fn update_quick_reply_handler(
     // Merge patch + existing → estado final, para validar el doc completo.
     let merged_title = title_new.clone().unwrap_or_else(|| existing.title.clone());
     let merged_content = content_new.clone().unwrap_or_else(|| existing.content.clone());
-    let merged_ws_len = workspace_oids
-        .as_ref()
-        .map(|v| v.len())
-        .unwrap_or(existing.workspace_ids.len());
 
     // Campos nullable: Some(Some) → nuevo valor, Some(None) → clear, None → mantener existente.
     let merged_header: Option<QuickReplyHeader> = match &payload.header {
@@ -2293,7 +2277,6 @@ pub async fn update_quick_reply_handler(
     validate_quick_reply(&ValidatedQuickReply {
         title: &merged_title,
         content: &merged_content,
-        workspace_ids_len: merged_ws_len,
         header: merged_header.as_ref(),
         footer: merged_footer.as_deref(),
         buttons: merged_buttons.as_deref(),
@@ -2333,8 +2316,9 @@ pub async fn update_quick_reply_handler(
     params(("id" = String, Path, description = "ID del snippet")),
     responses(
         (status = 200, description = "Snippet eliminado", body = UpdateResponse),
-        (status = 404, description = "Snippet no encontrado o no visible para el agente"),
         (status = 401, description = "No autorizado"),
+        (status = 403, description = "El usuario no tiene `bCanChat=true`"),
+        (status = 404, description = "Snippet no encontrado"),
     )
 )]
 pub async fn delete_quick_reply_handler(
@@ -2345,17 +2329,6 @@ pub async fn delete_quick_reply_handler(
     require_can_chat(&state, &claims.id).await?;
 
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
-    let existing = state.db.find_quick_reply_by_id(&oid)
-        .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or(ApiError::NotFound)?;
-
-    let user_workspaces = state.db.get_user_workspaces(&claims.id)
-        .await
-        .map_err(ApiError::DatabaseError)?;
-    if !has_workspace_overlap(&existing.workspace_ids, &user_workspaces) {
-        return Err(ApiError::NotFound);
-    }
 
     let deleted = state.db.delete_quick_reply(&oid)
         .await
@@ -2375,8 +2348,9 @@ pub async fn delete_quick_reply_handler(
     request_body = ToggleActiveRequest,
     responses(
         (status = 200, description = "Estado actualizado", body = QuickReplyResponse),
-        (status = 404, description = "Snippet no encontrado o no visible para el agente"),
         (status = 401, description = "No autorizado"),
+        (status = 403, description = "El usuario no tiene `bCanChat=true`"),
+        (status = 404, description = "Snippet no encontrado"),
     )
 )]
 pub async fn set_quick_reply_active_handler(
@@ -2388,17 +2362,6 @@ pub async fn set_quick_reply_active_handler(
     require_can_chat(&state, &claims.id).await?;
 
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
-    let existing = state.db.find_quick_reply_by_id(&oid)
-        .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or(ApiError::NotFound)?;
-
-    let user_workspaces = state.db.get_user_workspaces(&claims.id)
-        .await
-        .map_err(ApiError::DatabaseError)?;
-    if !has_workspace_overlap(&existing.workspace_ids, &user_workspaces) {
-        return Err(ApiError::NotFound);
-    }
 
     let updated = state.db.set_quick_reply_active(&oid, payload.active)
         .await
@@ -2421,8 +2384,9 @@ pub async fn set_quick_reply_active_handler(
     responses(
         (status = 200, description = "Snippet duplicado", body = QuickReplyResponse),
         (status = 400, description = "Validación falló"),
-        (status = 404, description = "Snippet original no encontrado o no visible"),
         (status = 401, description = "No autorizado"),
+        (status = 403, description = "El usuario no tiene `bCanChat=true`"),
+        (status = 404, description = "Snippet original no encontrado"),
     )
 )]
 pub async fn duplicate_quick_reply_handler(
@@ -2438,13 +2402,6 @@ pub async fn duplicate_quick_reply_handler(
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::NotFound)?;
-
-    let user_workspaces = state.db.get_user_workspaces(&claims.id)
-        .await
-        .map_err(ApiError::DatabaseError)?;
-    if !has_workspace_overlap(&original.workspace_ids, &user_workspaces) {
-        return Err(ApiError::NotFound);
-    }
 
     let title = match payload.title.as_deref() {
         Some(t) => {
@@ -3066,15 +3023,18 @@ async fn require_can_chat(state: &Arc<AppState>, user_id: &str) -> Result<(), Ap
     Ok(())
 }
 
-/// Parsea `workspace_ids` de hex → ObjectId, valida mínimo 1, existencia en
-/// `WaSettings` y que el usuario sea agente en **todos** ellos.
+/// Parsea `workspace_ids` de hex → ObjectId y valida que existan en `WaSettings`.
+///
+/// Acepta array vacío: representa una quick reply global (aplica a todos los
+/// workspaces). No se valida membresía del user en los workspaces indicados —
+/// la autorización del módulo de chat es por `bCanChat`, no por workspace.
 async fn parse_and_validate_workspaces(
     state: &Arc<AppState>,
-    user_id: &str,
+    _user_id: &str,
     raw: &[String],
 ) -> Result<Vec<ObjectId>, ApiError> {
     if raw.is_empty() {
-        return Err(ApiError::BadRequest("workspace_ids requiere al menos 1".into()));
+        return Ok(Vec::new());
     }
     let mut oids = Vec::with_capacity(raw.len());
     for s in raw {
@@ -3085,27 +3045,16 @@ async fn parse_and_validate_workspaces(
     oids.sort();
     oids.dedup();
 
-    let user_workspaces = state.db.get_user_workspaces(user_id)
-        .await
-        .map_err(ApiError::DatabaseError)?;
-    for w in &oids {
-        if !user_workspaces.contains(w) {
-            return Err(ApiError::Forbidden);
-        }
-    }
-    // Sanity: cada id debe existir en WaSettings. (El check anterior ya lo
-    // implica en la práctica, pero mantenemos la validación explícita.)
     if !state.db.wa_settings_exist(&oids).await.map_err(ApiError::DatabaseError)? {
         return Err(ApiError::BadRequest("algún workspace_id no existe".into()));
     }
     Ok(oids)
 }
 
-fn has_workspace_overlap(a: &[ObjectId], b: &[ObjectId]) -> bool {
-    a.iter().any(|x| b.contains(x))
-}
-
 fn quick_reply_to_item(q: WaQuickReply) -> QuickReplyItem {
+    // `can_edit` siempre true: bajo la policy actual, si el caller llegó a
+    // este mapeo es porque pasó `require_can_chat` — y `can_chat=true`
+    // habilita todas las operaciones sobre todas las quick replies.
     QuickReplyItem {
         id: q.id.map(|o| o.to_hex()).unwrap_or_default(),
         title: q.title,
@@ -3116,6 +3065,7 @@ fn quick_reply_to_item(q: WaQuickReply) -> QuickReplyItem {
         created_at: iso8601(q.created_at),
         updated_at: iso8601(q.updated_at),
         active: q.active,
+        can_edit: true,
         header: q.header,
         footer: q.footer,
         buttons: q.buttons,

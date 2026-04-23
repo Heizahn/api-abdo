@@ -889,7 +889,8 @@ pub struct QuickReplyItem {
     pub id: String,
     pub title: String,
     pub content: String,
-    /// Hex de `WaSettings._id` donde aplica el snippet.
+    /// Hex de `WaSettings._id` donde aplica el snippet. Array vacío = global
+    /// (aplica a todos los workspaces).
     pub workspace_ids: Vec<String>,
     pub created_by: String,
     pub created_by_name: String,
@@ -898,6 +899,11 @@ pub struct QuickReplyItem {
     /// ISO-8601 (RFC 3339) UTC
     pub updated_at: String,
     pub active: bool,
+    /// `true` si el caller puede editar/borrar/duplicar este item. Bajo la
+    /// policy actual (`bCanChat` es gateway único) es siempre `true` si el
+    /// caller ve el item — el front lo usa para alinear la UI sin re-aplicar
+    /// la lógica de scope del backend.
+    pub can_edit: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub header: Option<QuickReplyHeader>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -919,7 +925,9 @@ pub struct CreateQuickReplyRequest {
     pub title: String,
     /// 1–1024 chars (límite de WhatsApp para texto libre).
     pub content: String,
-    /// Hex de `WaSettings._id`. Mínimo 1. El usuario debe ser agente en todos ellos.
+    /// Hex de `WaSettings._id`. Array vacío = quick reply global (aplica a
+    /// todos los workspaces). No se valida membresía del caller — la
+    /// autorización del módulo chat se resuelve por `bCanChat`.
     pub workspace_ids: Vec<String>,
     #[serde(default)]
     pub active: Option<bool>,
