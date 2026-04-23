@@ -1,0 +1,428 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://api.abdo77.com/v1/ws/schema.json",
+  "title": "WhatsApp WebSocket Events",
+  "version": "1.0.0",
+  "description": "Contrato de eventos del WebSocket de soporte WhatsApp. El socket se abre en GET /v1/ws/chat?token=<user_jwt>. Todos los eventos (cliente→servidor y servidor→cliente) usan el envelope { tipo, datos }, discriminante por `tipo`. Las fechas son ISO-8601 RFC-3339 UTC.",
+  "oneOf": [
+    { "$ref": "#/$defs/ClientEvent" },
+    { "$ref": "#/$defs/ServerEvent" }
+  ],
+  "$defs": {
+    "ClientEvent": {
+      "title": "Eventos cliente → servidor",
+      "description": "Mensajes que el front emite hacia el backend por el WebSocket.",
+      "oneOf": [
+        { "$ref": "#/$defs/Conectar" },
+        { "$ref": "#/$defs/SuscribirConversacion" }
+      ]
+    },
+    "ServerEvent": {
+      "title": "Eventos servidor → cliente",
+      "description": "Mensajes que el backend emite hacia el front por el WebSocket.",
+      "oneOf": [
+        { "$ref": "#/$defs/Conectado" },
+        { "$ref": "#/$defs/MensajeNuevo" },
+        { "$ref": "#/$defs/ConversacionNueva" },
+        { "$ref": "#/$defs/ChatTomado" },
+        { "$ref": "#/$defs/ChatTransferido" },
+        { "$ref": "#/$defs/ChatCerrado" },
+        { "$ref": "#/$defs/MensajeActualizado" },
+        { "$ref": "#/$defs/UrlPreviewReady" },
+        { "$ref": "#/$defs/MensajesVistos" },
+        { "$ref": "#/$defs/ChatEstadoCambio" },
+        { "$ref": "#/$defs/ConversacionEstado" },
+        { "$ref": "#/$defs/Error" }
+      ]
+    },
+
+    "Conectar": {
+      "type": "object",
+      "description": "Handshake opcional que el front envía tras abrir el socket.",
+      "required": ["tipo", "datos"],
+      "properties": {
+        "tipo": { "const": "CONECTAR" },
+        "datos": {
+          "type": "object",
+          "required": ["usuario_id", "nombre"],
+          "properties": {
+            "usuario_id": { "type": "string", "description": "UUID del agente (debe coincidir con el del JWT)." },
+            "nombre":     { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "SuscribirConversacion": {
+      "type": "object",
+      "description": "No-op actual: el backend hace broadcast y el front filtra. Se acepta por compatibilidad futura.",
+      "required": ["tipo", "datos"],
+      "properties": {
+        "tipo": { "const": "SUSCRIBIR_CONVERSACION" },
+        "datos": {
+          "type": "object",
+          "required": ["conversation_id"],
+          "properties": {
+            "conversation_id": { "type": "string", "description": "Hex de ObjectId" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "Conectado": {
+      "type": "object",
+      "description": "Confirmación del backend tras el upgrade WebSocket.",
+      "required": ["tipo", "datos"],
+      "properties": {
+        "tipo": { "const": "CONECTADO" },
+        "datos": {
+          "type": "object",
+          "required": ["usuario_id"],
+          "properties": {
+            "usuario_id": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "MensajeNuevo": {
+      "type": "object",
+      "description": "Mensaje nuevo (inbound o outbound) en una conversación existente. Broadcast a todos los agentes; el front filtra por `conversation_id`.",
+      "required": ["tipo", "datos"],
+      "properties": {
+        "tipo": { "const": "MENSAJE_NUEVO" },
+        "datos": {
+          "type": "object",
+          "required": ["conversation_id", "message"],
+          "properties": {
+            "conversation_id": { "type": "string" },
+            "message":         { "$ref": "#/$defs/MessageItem" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ConversacionNueva": {
+      "type": "object",
+      "description": "Primer mensaje inbound de un `(customer_phone, business_phone)` nunca visto antes.",
+      "required": ["tipo", "datos"],
+      "properties": {
+        "tipo": { "const": "CONVERSACION_NUEVA" },
+        "datos": {
+          "type": "object",
+          "required": ["conversation"],
+          "properties": {
+            "conversation": { "$ref": "#/$defs/ConversationItem" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ChatTomado": {
+      "type": "object",
+      "description": "Un agente tomó una conversación pendiente (vía POST /:id/take o auto-asignación).",
+      "required": ["tipo", "datos"],
+      "properties": {
+        "tipo": { "const": "CHAT_TOMADO" },
+        "datos": {
+          "type": "object",
+          "required": ["conversation_id", "taken_by", "status"],
+          "properties": {
+            "conversation_id": { "type": "string" },
+            "taken_by":        { "type": "string", "description": "UUID del agente que tomó el chat" },
+            "status":          { "type": "string", "const": "in_progress" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ChatTransferido": {
+      "type": "object",
+      "description": "Transferencia de conversación entre agentes. El status siempre pasa a `pending`: el nuevo dueño todavía no abrió el chat.",
+      "required": ["tipo", "datos"],
+      "properties": {
+        "tipo": { "const": "CHAT_TRANSFERIDO" },
+        "datos": {
+          "type": "object",
+          "required": ["conversation_id", "to_user_id", "conversation"],
+          "properties": {
+            "conversation_id": { "type": "string" },
+            "from_user_id":    { "type": ["string", "null"], "description": "Null si la conversación no tenía dueño antes" },
+            "to_user_id":      { "type": "string" },
+            "conversation":    { "$ref": "#/$defs/ConversationItem" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ChatCerrado": {
+      "type": "object",
+      "description": "Conversación cerrada vía POST /:id/close. El `assigned_to` queda liberado.",
+      "required": ["tipo", "datos"],
+      "properties": {
+        "tipo": { "const": "CHAT_CERRADO" },
+        "datos": {
+          "type": "object",
+          "required": ["conversation_id"],
+          "properties": {
+            "conversation_id": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "MensajeActualizado": {
+      "type": "object",
+      "description": "Cambio de status en un mensaje outbound puntual (sent → delivered → read, o failed).",
+      "required": ["tipo", "datos"],
+      "properties": {
+        "tipo": { "const": "MENSAJE_ACTUALIZADO" },
+        "datos": {
+          "type": "object",
+          "required": ["conversation_id", "message_id", "status"],
+          "properties": {
+            "conversation_id": { "type": "string" },
+            "message_id":      { "type": "string", "description": "wa_message_id (wamid...)" },
+            "status":          { "$ref": "#/$defs/MessageStatus" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "UrlPreviewReady": {
+      "type": "object",
+      "description": "El job asíncrono de fetch de OG-tags terminó para un mensaje. El front debe mergear `message.url_preview` en la burbuja existente (mismo `message.id`). No crea burbuja nueva.",
+      "required": ["tipo", "datos"],
+      "properties": {
+        "tipo": { "const": "URL_PREVIEW_READY" },
+        "datos": {
+          "type": "object",
+          "required": ["conversation_id", "message"],
+          "properties": {
+            "conversation_id": { "type": "string" },
+            "message":         { "$ref": "#/$defs/MessageItem" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "MensajesVistos": {
+      "type": "object",
+      "description": "Batch de inbounds que pasaron a `read` porque un agente los marcó vistos (POST /:id/mark-read).",
+      "required": ["tipo", "datos"],
+      "properties": {
+        "tipo": { "const": "MENSAJES_VISTOS" },
+        "datos": {
+          "type": "object",
+          "required": ["conversation_id", "message_ids", "status"],
+          "properties": {
+            "conversation_id": { "type": "string" },
+            "message_ids":     {
+              "type": "array",
+              "items": { "type": "string", "description": "wa_message_id" }
+            },
+            "status": { "type": "string", "const": "read" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ChatEstadoCambio": {
+      "type": "object",
+      "description": "Transición de estado de una conversación. Emitido cuando: (a) el primer GET /:id/messages del agente asignado pasa de `pending` a `in_progress`; (b) un inbound reabre una conversación cerrada, volviendo a `pending`. El campo se llama `new_status`, NO `status` — representa la transición, no el estado actual completo.",
+      "required": ["tipo", "datos"],
+      "properties": {
+        "tipo": { "const": "CHAT_ESTADO_CAMBIO" },
+        "datos": {
+          "type": "object",
+          "required": ["conversation_id", "new_status"],
+          "properties": {
+            "conversation_id": { "type": "string" },
+            "new_status":      {
+              "type": "string",
+              "enum": ["pending", "in_progress"],
+              "description": "Nunca se emite con `closed` por este evento — el cierre va por CHAT_CERRADO."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ConversacionEstado": {
+      "type": "object",
+      "description": "Cambio en la ventana de 24h (freeform) de una conversación. Se emite al recibir un inbound (reinicia la ventana) y puede usarse por el front para re-sincronizar countdowns locales.",
+      "required": ["tipo", "datos"],
+      "properties": {
+        "tipo": { "const": "CONVERSACION_ESTADO" },
+        "datos": {
+          "type": "object",
+          "required": ["conversation_id", "can_send_freeform"],
+          "properties": {
+            "conversation_id":     { "type": "string" },
+            "last_inbound_at":     { "type": ["string", "null"], "format": "date-time" },
+            "can_send_freeform":   { "type": "boolean" },
+            "freeform_expires_at": { "type": ["string", "null"], "format": "date-time" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "Error": {
+      "type": "object",
+      "description": "Error no fatal del socket (el socket sigue abierto).",
+      "required": ["tipo", "datos"],
+      "properties": {
+        "tipo": { "const": "ERROR" },
+        "datos": {
+          "type": "object",
+          "required": ["error"],
+          "properties": {
+            "error": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "MessageStatus": {
+      "type": "string",
+      "enum": ["pending", "sent", "delivered", "read", "failed"],
+      "description": "`pending` solo aparece en optimistic UI del front antes del ACK del backend."
+    },
+
+    "ConversationStatus": {
+      "type": "string",
+      "enum": ["pending", "in_progress", "closed"]
+    },
+
+    "Direction": {
+      "type": "string",
+      "enum": ["in", "out"]
+    },
+
+    "MessageType": {
+      "type": "string",
+      "description": "Tipos conocidos hoy. El front debería aceptar strings desconocidos sin crashear (fallback a render genérico).",
+      "examples": ["text", "image", "audio", "video", "document", "sticker", "location", "template", "interactive", "button"]
+    },
+
+    "UrlPreview": {
+      "type": "object",
+      "required": ["url"],
+      "properties": {
+        "url":         { "type": "string", "format": "uri", "description": "URL canónica tras seguir redirects (hasta 3 hops)." },
+        "title":       { "type": ["string", "null"] },
+        "description": { "type": ["string", "null"] },
+        "image_url":   { "type": ["string", "null"], "format": "uri", "description": "og:image / twitter:image. El front la consume directo." },
+        "site_name":   { "type": ["string", "null"], "description": "og:site_name o hostname final si falta." },
+        "favicon_url": { "type": ["string", "null"], "format": "uri" }
+      },
+      "additionalProperties": false
+    },
+
+    "ReplyToItem": {
+      "type": "object",
+      "description": "Preview del mensaje citado (quoted reply).",
+      "required": ["wa_message_id", "preview_type", "direction"],
+      "properties": {
+        "wa_message_id":   { "type": "string" },
+        "preview_content": { "type": ["string", "null"], "description": "Primeros ~80 chars del contenido original; null si el original no tiene cuerpo (ej. imagen sin caption)." },
+        "preview_type":    { "$ref": "#/$defs/MessageType" },
+        "direction":       { "$ref": "#/$defs/Direction" },
+        "from_user_name":  { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+
+    "MessageItem": {
+      "type": "object",
+      "required": [
+        "id", "conversation_id", "wa_message_id", "direction", "type", "voice", "created_at"
+      ],
+      "properties": {
+        "id":              { "type": "string", "description": "Hex de ObjectId en la colección WaMessages." },
+        "conversation_id": { "type": "string" },
+        "wa_message_id":   { "type": "string", "description": "wamid... (id que reporta Meta)." },
+        "direction":       { "$ref": "#/$defs/Direction" },
+        "type":            { "$ref": "#/$defs/MessageType" },
+        "content":         { "type": ["string", "null"], "description": "Texto, caption, label de location, etc. según el tipo." },
+        "media_id":        { "type": ["string", "null"] },
+        "media_mime_type": { "type": ["string", "null"] },
+        "media_filename":  { "type": ["string", "null"] },
+        "status":          { "oneOf": [{ "$ref": "#/$defs/MessageStatus" }, { "type": "null" }] },
+        "from_user_id":    { "type": ["string", "null"], "description": "UUID del agente (solo outbound)." },
+        "from_user_name":  { "type": ["string", "null"] },
+        "idempotency_key": { "type": ["string", "null"] },
+        "reply_to":        { "oneOf": [{ "$ref": "#/$defs/ReplyToItem" }, { "type": "null" }] },
+        "url_preview":     { "oneOf": [{ "$ref": "#/$defs/UrlPreview" }, { "type": "null" }] },
+        "voice":           { "type": "boolean", "description": "true si es nota de voz (push-to-talk) según audio.voice del webhook." },
+        "template_name":     { "type": ["string", "null"] },
+        "template_language": { "type": ["string", "null"] },
+        "template_components": { "description": "Passthrough del payload original de Meta.", "type": ["object", "array", "null"] },
+        "interactive_payload": { "description": "Passthrough de interactive.* (button_reply/list_reply).", "type": ["object", "null"] },
+        "created_at":      { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+
+    "ConversationItem": {
+      "type": "object",
+      "required": [
+        "id", "customer_phone", "business_phone", "status", "last_message_at",
+        "unread_count", "created_at", "can_send_freeform"
+      ],
+      "properties": {
+        "id":                    { "type": "string" },
+        "customer_phone":        { "type": "string", "description": "E.164 sin '+' (ej: 584141234567)." },
+        "customer_name":         { "type": ["string", "null"] },
+        "business_phone":        { "type": "string", "description": "E.164 sin '+' del número del negocio." },
+        "workspace_name":        { "type": ["string", "null"] },
+        "status":                { "$ref": "#/$defs/ConversationStatus" },
+        "assigned_to":           { "type": ["string", "null"], "description": "UUID del agente asignado." },
+        "last_message_at":       { "type": "string", "format": "date-time" },
+        "last_message_preview":  { "type": ["string", "null"] },
+        "last_message_type":     { "oneOf": [{ "$ref": "#/$defs/MessageType" }, { "type": "null" }] },
+        "last_message_direction":{ "oneOf": [{ "$ref": "#/$defs/Direction" },   { "type": "null" }] },
+        "last_message_status":   { "oneOf": [{ "$ref": "#/$defs/MessageStatus" },{ "type": "null" }] },
+        "last_message_media_filename":   { "type": ["string", "null"] },
+        "last_message_from_user_id":     { "type": ["string", "null"] },
+        "last_message_from_user_name":   { "type": ["string", "null"] },
+        "unread_count":          { "type": "integer", "minimum": 0 },
+        "created_at":            { "type": "string", "format": "date-time" },
+        "client_id":             { "type": ["string", "null"], "description": "Hex de ObjectId del Cliente ISP linkeado (Clients._id). Solo en detalle." },
+        "last_opened_at":        { "type": ["string", "null"], "format": "date-time" },
+        "last_inbound_at":       { "type": ["string", "null"], "format": "date-time" },
+        "can_send_freeform":     { "type": "boolean", "description": "true si now - last_inbound_at <= 24h (ventana freeform de Meta)." },
+        "freeform_expires_at":   { "type": ["string", "null"], "format": "date-time" }
+      },
+      "additionalProperties": false
+    }
+  }
+}
