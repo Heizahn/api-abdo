@@ -25,6 +25,23 @@ pub enum ApiError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    /// La password actual provista (`old_password`) no coincide con el hash
+    /// almacenado. Se sirve como 401 `wrong_password` — diferenciable del 401
+    /// genérico (`unauthorized`) para que el front pueda mostrar un mensaje
+    /// específico en el flujo de cambio de contraseña.
+    #[error("Wrong password")]
+    WrongPassword,
+
+    /// La nueva password es idéntica a la actual. Se sirve como 400
+    /// `same_password`. Evita "cambios" sin cambio real.
+    #[error("Same password")]
+    SamePassword,
+
+    /// La nueva password no cumple la policy mínima (longitud, etc.). Se
+    /// sirve como 400 `weak_password`.
+    #[error("Weak password")]
+    WeakPassword,
+
     /// Ventana de 24h expirada: no se puede enviar freeform, usar template.
     #[error("Window expired: use template")]
     WindowExpired,
@@ -81,6 +98,9 @@ impl IntoResponse for ApiError {
             ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+            ApiError::WrongPassword => (StatusCode::UNAUTHORIZED, "wrong_password"),
+            ApiError::SamePassword => (StatusCode::BAD_REQUEST, "same_password"),
+            ApiError::WeakPassword => (StatusCode::BAD_REQUEST, "weak_password"),
             ApiError::WindowExpired => (StatusCode::CONFLICT, "window_expired"),
             ApiError::WindowClosed => (StatusCode::CONFLICT, "window_closed"),
             ApiError::MissingTemplateParams => (StatusCode::BAD_REQUEST, "missing_template_params"),

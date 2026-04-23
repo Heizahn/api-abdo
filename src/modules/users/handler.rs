@@ -377,9 +377,9 @@ pub async fn set_user_password_handler(
     security(("bearerAuth" = [])),
     request_body = ChangeMyPasswordRequest,
     responses(
-        (status = 200, description = "Password actualizado", body = OkResponse),
-        (status = 400, description = "Nueva password inválida (mínimo 8 caracteres)"),
-        (status = 401, description = "No autorizado o password actual incorrecta"),
+        (status = 200, description = "Password actualizado. El JWT actual sigue siendo válido — no se requiere relogin.", body = OkResponse),
+        (status = 400, description = "`weak_password` (menor al mínimo de 8) | `same_password` (new == old) | `bad_request` (body mal formado)"),
+        (status = 401, description = "`wrong_password` (old_password no coincide) | `unauthorized` (JWT inválido/expirado)"),
     )
 )]
 pub async fn change_my_password_handler(
@@ -388,10 +388,10 @@ pub async fn change_my_password_handler(
     Json(payload): Json<ChangeMyPasswordRequest>,
 ) -> Result<Json<OkResponse>, ApiError> {
     if payload.new_password.len() < PASSWORD_MIN_LEN {
-        return Err(ApiError::BadRequest(format!(
-            "new_password debe tener al menos {} caracteres",
-            PASSWORD_MIN_LEN
-        )));
+        return Err(ApiError::WeakPassword);
+    }
+    if payload.new_password == payload.old_password {
+        return Err(ApiError::SamePassword);
     }
 
     let creds: UserCredentials = state
@@ -406,7 +406,7 @@ pub async fn change_my_password_handler(
     let valid = bcrypt::verify(&payload.old_password, &creds.password)
         .map_err(|_| ApiError::InternalServerError)?;
     if !valid {
-        return Err(ApiError::Unauthorized("Password actual incorrecta".into()));
+        return Err(ApiError::WrongPassword);
     }
 
     let hash = bcrypt::hash(&payload.new_password, BCRYPT_COST)
