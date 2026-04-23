@@ -14,6 +14,36 @@ use mongodb::error::Error as MongoError;
 use mongodb::Collection;
 use std::collections::HashMap;
 
+/// Genera todas las variantes canónicas de un teléfono venezolano para matchear
+/// contra `Clients.sPhone`. El WhatsApp webhook manda E.164 sin "+" (ej
+/// `584144271554`), pero el CRM suele tener `04144271554` o `4144271554`.
+/// Con este fanout + `$in` sobre `sPhone`, el match pega sin perder el índice.
+///
+/// Ejemplo: `584144271554` → `["584144271554", "+584144271554", "04144271554", "4144271554"]`.
+/// Si el número no tiene al menos 10 dígitos, devuelve sólo el input limpio.
+fn phone_variants(phone: &str) -> Vec<String> {
+    let digits: String = phone.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return vec![phone.to_string()];
+    }
+    // El "core" local venezolano son los últimos 10 dígitos (ej "4144271554").
+    let core: String = if digits.len() >= 10 {
+        digits.chars().rev().take(10).collect::<Vec<_>>()
+            .into_iter().rev().collect()
+    } else {
+        return vec![digits];
+    };
+    let mut out = Vec::with_capacity(5);
+    out.push(format!("58{}", core));
+    out.push(format!("+58{}", core));
+    out.push(format!("0{}", core));
+    out.push(core);
+    if !out.contains(&digits) {
+        out.push(digits);
+    }
+    out
+}
+
 /// Format a raw DNI/RIF value into a prefixed string like `V-12345678` or `J-50001234`.
 /// If the value already has a letter prefix followed by `-`, it is returned as-is.
 /// `field` should be `"sDni"` or `"sRif"` to determine the default prefix.
@@ -100,7 +130,22 @@ impl ProfileRepository for MongoDB {
         if phones.is_empty() {
             return Ok(HashMap::new());
         }
-        let filter = doc! { "sPhone": { "$in": phones } };
+
+        // Expandir cada teléfono de entrada a todas sus variantes de formato
+        // (584... / 04... / 4... / +584...) y mantener un mapa inverso
+        // variante → input original para poder devolver bien el match.
+        let mut variants: Vec<String> = Vec::with_capacity(phones.len() * 4);
+        let mut variant_to_input: HashMap<String, String> = HashMap::new();
+        for p in phones {
+            for v in phone_variants(p) {
+                if !variant_to_input.contains_key(&v) {
+                    variants.push(v.clone());
+                    variant_to_input.insert(v, p.clone());
+                }
+            }
+        }
+
+        let filter = doc! { "sPhone": { "$in": &variants } };
         let projection = doc! { "sPhone": 1, "sName": 1 };
         let mut cursor = self
             .customers()
@@ -110,17 +155,22 @@ impl ProfileRepository for MongoDB {
             .map_err(|e| e.to_string())?;
         let mut out: HashMap<String, String> = HashMap::with_capacity(phones.len());
         while let Some(doc) = cursor.try_next().await.map_err(|e| e.to_string())? {
-            let phone = doc.get_str("sPhone").unwrap_or_default().to_string();
-            if phone.is_empty() {
+            let db_phone = doc.get_str("sPhone").unwrap_or_default().to_string();
+            if db_phone.is_empty() {
                 continue;
             }
             let name = doc.get_str("sName").unwrap_or_default().trim().to_string();
             if name.is_empty() {
                 continue;
             }
-            // Primer match por teléfono gana; si hay más de un cliente con el
+            // Resolver cuál fue el input original que expandió a esta variante.
+            let input_key = match variant_to_input.get(&db_phone) {
+                Some(k) => k.clone(),
+                None => continue,
+            };
+            // Primer match por input gana; si hay más de un cliente con el
             // mismo teléfono, el resto se descarta.
-            out.entry(phone).or_insert(name);
+            out.entry(input_key).or_insert(name);
         }
         Ok(out)
     }
