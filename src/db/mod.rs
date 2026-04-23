@@ -460,6 +460,10 @@ pub trait WhatsAppRepository {
     ) -> Result<Vec<WaSettings>, String>;
 
     // Quick replies (snippets)
+    /// Devuelve los `WaSettings._id` donde `user_id` aparece en `agents`.
+    /// Se usa para chequear membresía al autorizar create/delete/duplicate
+    /// de quick replies.
+    async fn get_user_workspaces(&self, user_id: &str) -> Result<Vec<ObjectId>, String>;
     /// Devuelve `true` si **todos** los `ids` existen en `WaSettings`. Usado para validar `workspace_ids`.
     async fn wa_settings_exist(&self, ids: &[ObjectId]) -> Result<bool, String>;
     /// Listado de quick-replies. La autorización del caller se resuelve en el

@@ -899,13 +899,13 @@ pub struct QuickReplyItem {
     /// ISO-8601 (RFC 3339) UTC
     pub updated_at: String,
     pub active: bool,
-    /// `true` si el caller puede **eliminar** este item. Cualquier usuario
-    /// con `bCanChat=true` puede editar/crear/duplicar/toggle sobre cualquier
-    /// quick reply — el delete es la única operación con gate adicional:
-    /// sólo pueden borrar superadmin (`nRole=0`), operador (`nRole=0.5`), o
-    /// el creador del item (`created_by == caller.id`). El front usa esta
-    /// bandera para deshabilitar el botón de eliminar en las cards donde no
-    /// aplica.
+    /// `true` si el caller puede **eliminar** este item. Cualquier `can_chat`
+    /// puede ver/usar/editar/toggle cualquier quick reply — el delete exige
+    /// un gate extra: caller es superadmin (`nRole=0`) o es agente de al
+    /// menos uno de los workspaces del item (overlap con `agents[]` del
+    /// `WaSettings`). El front usa esta bandera para deshabilitar el botón
+    /// de eliminar en las cards donde no aplica; el server valida igual al
+    /// intentar el delete (403 si no cumple).
     pub can_edit: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub header: Option<QuickReplyHeader>,
@@ -928,9 +928,9 @@ pub struct CreateQuickReplyRequest {
     pub title: String,
     /// 1–1024 chars (límite de WhatsApp para texto libre).
     pub content: String,
-    /// Hex de `WaSettings._id`. Array vacío = quick reply global (aplica a
-    /// todos los workspaces). No se valida membresía del caller — la
-    /// autorización del módulo chat se resuelve por `bCanChat`.
+    /// Hex de `WaSettings._id`. Mínimo 1 — no existen quick replies globales.
+    /// Crear exige que el caller sea agente en **todos** estos workspaces
+    /// (o superadmin).
     pub workspace_ids: Vec<String>,
     #[serde(default)]
     pub active: Option<bool>,

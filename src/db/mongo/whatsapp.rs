@@ -900,6 +900,29 @@ impl WhatsAppRepository for MongoDB {
         Ok(out)
     }
 
+    async fn get_user_workspaces(&self, user_id: &str) -> Result<Vec<ObjectId>, String> {
+        #[derive(serde::Deserialize)]
+        struct IdOnly {
+            #[serde(rename = "_id")]
+            id: ObjectId,
+        }
+        let mut cursor = self.db
+            .collection::<IdOnly>("WaSettings")
+            .find(doc! { "agents": user_id })
+            .with_options(
+                FindOptions::builder()
+                    .projection(doc! { "_id": 1 })
+                    .build(),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        while let Some(s) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            out.push(s.id);
+        }
+        Ok(out)
+    }
+
     async fn wa_settings_exist(&self, ids: &[ObjectId]) -> Result<bool, String> {
         if ids.is_empty() {
             return Ok(false);
@@ -917,15 +940,9 @@ impl WhatsAppRepository for MongoDB {
         active_filter: Option<bool>,
     ) -> Result<Vec<WaQuickReply>, String> {
         // Autorización del caller se resuelve en el handler (bCanChat). Acá
-        // sólo aplicamos el filtro opcional de workspace: si viene, matchea
-        // items con ese workspace O globales (workspace_ids vacío).
+        // sólo aplicamos el filtro opcional de workspace.
         let mut filter = match filter_workspace_id {
-            Some(id) => doc! {
-                "$or": [
-                    { "workspace_ids": id },
-                    { "workspace_ids": { "$size": 0 } },
-                ]
-            },
+            Some(id) => doc! { "workspace_ids": id },
             None => doc! {},
         };
         if let Some(a) = active_filter {

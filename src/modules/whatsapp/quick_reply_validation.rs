@@ -20,6 +20,7 @@ use crate::models::whatsapp::{
 pub struct ValidatedQuickReply<'a> {
     pub title: &'a str,
     pub content: &'a str,
+    pub workspace_ids_len: usize,
     pub header: Option<&'a QuickReplyHeader>,
     pub footer: Option<&'a str>,
     pub buttons: Option<&'a [QuickReplyButton]>,
@@ -51,11 +52,14 @@ pub fn validate_quick_reply(qr: &ValidatedQuickReply<'_>) -> Result<(), ApiError
         return Err(err("content", "El contenido debe tener entre 1 y 1024 caracteres"));
     }
 
-    // --- workspace_ids: sin validación de cantidad ---
-    // Se permite array vacío (quick reply global, aplica a cualquier workspace).
-    // La autorización del caller se resuelve en el handler vía `bCanChat`, no
-    // por membresía de workspace. La existencia de los IDs contra `WaSettings`
-    // la valida `parse_and_validate_workspaces` antes de llegar acá.
+    // --- workspace_ids ---
+    // Debe tener al menos 1. No existen quick replies "globales": si alguien
+    // quiere que aplique a todos los números, los agrega explícitamente.
+    // La existencia de los IDs contra `WaSettings` y la membresía del caller
+    // se validan en el handler antes de llegar acá.
+    if qr.workspace_ids_len == 0 {
+        return Err(err("workspace_ids", "Debe seleccionar al menos un workspace"));
+    }
 
     // --- footer ---
     if let Some(f) = qr.footer {
