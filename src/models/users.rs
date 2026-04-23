@@ -169,6 +169,11 @@ pub struct UserResponseEnvelope {
     pub data: UserItem,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetUserVisibleRequest {
+    pub visible: bool,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct CreateUserRequest {

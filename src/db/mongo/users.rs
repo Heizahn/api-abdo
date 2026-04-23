@@ -149,6 +149,15 @@ impl UserRepository for MongoDB {
         Ok(users)
     }
 
+    async fn set_user_visible(&self, id: &str, visible: bool) -> Result<bool, String> {
+        let collection: Collection<User> = self.db.collection("Users");
+        let res = collection
+            .update_one(doc! { "_id": id }, doc! { "$set": { "visible": visible } })
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(res.matched_count > 0)
+    }
+
     async fn list_users(&self, filter: UserListFilter<'_>) -> Result<Vec<User>, String> {
         let collection: Collection<User> = self.db.collection("Users");
 

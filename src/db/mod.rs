@@ -71,6 +71,9 @@ pub trait UserRepository {
     /// Listado paginado con filtros para el CRUD de usuarios.
     /// Ordenado por `sName` ascendente con `_id` como tiebreaker estable.
     async fn list_users(&self, filter: UserListFilter<'_>) -> Result<Vec<User>, String>;
+    /// Setea `visible` en el doc (soft delete / reactivación). Retorna `true`
+    /// si el user existía, `false` si no — para devolver 404 al caller.
+    async fn set_user_visible(&self, id: &str, visible: bool) -> Result<bool, String>;
 }
 
 // ============================================

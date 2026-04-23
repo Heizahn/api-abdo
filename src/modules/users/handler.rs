@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     Extension, Json,
 };
 use std::sync::Arc;
@@ -9,7 +9,9 @@ use crate::{
     db::{UserListFilter, UserRepository},
     db::mongo::users::last_user_cursor,
     error::ApiError,
-    models::users::{User, UserItem, UserListResponse},
+    models::users::{
+        SetUserVisibleRequest, User, UserItem, UserListResponse, UserResponseEnvelope,
+    },
     state::AppState,
 };
 
@@ -99,5 +101,51 @@ pub async fn list_users_handler(
         ok: true,
         data: users.into_iter().map(UserItem::from).collect(),
         next_cursor,
+    }))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/v1/auth-user/users/{id}/visible",
+    tag = "Users — CRUD",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "UUID del usuario")),
+    request_body = SetUserVisibleRequest,
+    responses(
+        (status = 200, description = "Estado actualizado", body = UserResponseEnvelope),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Requiere rol SUPERADMIN"),
+        (status = 404, description = "Usuario no encontrado"),
+    )
+)]
+pub async fn set_user_visible_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+    Json(payload): Json<SetUserVisibleRequest>,
+) -> Result<Json<UserResponseEnvelope>, ApiError> {
+    let _caller = require_superadmin(&state, &claims).await?;
+
+    let existed = state
+        .db
+        .set_user_visible(&id, payload.visible)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    if !existed {
+        return Err(ApiError::NotFound);
+    }
+
+    // Releer para devolver el user actualizado (shape coherente con los demás
+    // endpoints del CRUD que también devuelven el doc post-update).
+    let user = state
+        .db
+        .find_user_by_id(&id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    Ok(Json(UserResponseEnvelope {
+        ok: true,
+        data: UserItem::from(user),
     }))
 }
