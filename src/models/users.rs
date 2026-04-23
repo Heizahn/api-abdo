@@ -30,6 +30,12 @@ pub struct User {
     #[serde(rename = "idCreator", skip_serializing_if = "Option::is_none")]
     pub id_creator: Option<String>,
 
+    /// Rol previo al desactivar. Se llena cuando `visible` pasa de `true` a
+    /// `false` (guardamos el `nRole` vigente antes de setearlo a `-1`).
+    /// Se borra al reactivar. Interno — no se expone en `UserItem`.
+    #[serde(rename = "nRolePrev", default, skip_serializing_if = "Option::is_none")]
+    pub role_prev: Option<f32>,
+
     // Las fechas en Mongo suelen guardarse como mapas (ISODate), así que también usamos Bson aquí por si acaso
     #[serde(rename = "dCreation", skip_serializing_if = "Option::is_none")]
     pub d_creation: Option<Bson>,

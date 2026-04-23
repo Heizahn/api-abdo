@@ -210,6 +210,7 @@ pub async fn create_user_handler(
         can_chat: payload.can_chat.unwrap_or(false),
         tag: payload.tag,
         id_creator: Some(caller.id.clone()),
+        role_prev: None,
         d_creation: Some(mongodb::bson::Bson::DateTime(now)),
     };
 
@@ -274,11 +275,16 @@ pub async fn update_user_handler(
     }
 
     if let Some(r) = payload.role {
-        // Se acepta cualquier valor finito. `-1.0` es el sentinel de "sin
-        // acceso" que el middleware usa para rechazar JWTs; otros negativos
-        // son desconocidos pero no fallamos acá (el front es responsable).
         if !r.is_finite() {
             return Err(ApiError::BadRequest("role inválido".into()));
+        }
+        // `-1` es el sentinel de "sin acceso" y se gestiona sólo vía el toggle
+        // `/visible` (atómicamente con `nRolePrev`). Bloqueamos el canal
+        // directo para evitar estados inconsistentes (role=-1 con visible=true).
+        if r == -1.0 {
+            return Err(ApiError::BadRequest(
+                "para desactivar usar PATCH /:id/visible { visible: false }".into(),
+            ));
         }
     }
 

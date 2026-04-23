@@ -151,8 +151,56 @@ impl UserRepository for MongoDB {
 
     async fn set_user_visible(&self, id: &str, visible: bool) -> Result<bool, String> {
         let collection: Collection<User> = self.db.collection("Users");
+
+        // Aggregation pipeline update (Mongo 4.2+): permite lógica condicional
+        // atómica en una sola llamada. Evita race entre "leer role actual +
+        // escribir nRolePrev/nRole" que tendría dos operaciones separadas.
+        let pipeline: Vec<mongodb::bson::Document> = if visible {
+            // REACTIVAR:
+            // - Si el role actual es -1 (desactivado), restauramos desde
+            //   `nRolePrev` (o 1.0 si no existe) y borramos `nRolePrev`.
+            // - Si ya estaba activo (role != -1), no tocamos role ni nRolePrev.
+            vec![
+                doc! { "$set": {
+                    "visible": true,
+                    "nRole": {
+                        "$cond": {
+                            "if": { "$eq": ["$nRole", -1.0] },
+                            "then": { "$ifNull": ["$nRolePrev", 1.0] },
+                            "else": "$nRole",
+                        }
+                    },
+                    "nRolePrev": {
+                        "$cond": {
+                            "if": { "$eq": ["$nRole", -1.0] },
+                            "then": "$$REMOVE",
+                            "else": "$nRolePrev",
+                        }
+                    },
+                } },
+            ]
+        } else {
+            // DESACTIVAR:
+            // - Si el role actual NO es -1, guardamos el role en `nRolePrev`
+            //   y seteamos role a -1 (sin acceso).
+            // - Si ya era -1 (idempotente), conservamos el `nRolePrev` previo.
+            vec![
+                doc! { "$set": {
+                    "visible": false,
+                    "nRolePrev": {
+                        "$cond": {
+                            "if": { "$ne": ["$nRole", -1.0] },
+                            "then": "$nRole",
+                            "else": "$nRolePrev",
+                        }
+                    },
+                    "nRole": -1.0,
+                } },
+            ]
+        };
+
         let res = collection
-            .update_one(doc! { "_id": id }, doc! { "$set": { "visible": visible } })
+            .update_one(doc! { "_id": id }, pipeline)
             .await
             .map_err(|e| e.to_string())?;
         Ok(res.matched_count > 0)
