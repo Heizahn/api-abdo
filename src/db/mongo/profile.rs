@@ -14,34 +14,18 @@ use mongodb::error::Error as MongoError;
 use mongodb::Collection;
 use std::collections::HashMap;
 
-/// Genera todas las variantes canónicas de un teléfono venezolano para matchear
-/// contra `Clients.sPhone`. El WhatsApp webhook manda E.164 sin "+" (ej
-/// `584144271554`), pero el CRM suele tener `04144271554` o `4144271554`.
-/// Con este fanout + `$in` sobre `sPhone`, el match pega sin perder el índice.
-///
-/// Ejemplo: `584144271554` → `["584144271554", "+584144271554", "04144271554", "4144271554"]`.
-/// Si el número no tiene al menos 10 dígitos, devuelve sólo el input limpio.
-fn phone_variants(phone: &str) -> Vec<String> {
+/// Extrae los últimos 10 dígitos de un teléfono venezolano — el "core" local
+/// que es invariante entre formatos (`584144271554` / `04144271554` /
+/// `+58 414-427-1554` / `(0414) 427-1554` / etc. todos tienen core `4144271554`).
+/// Devuelve `None` si el input no tiene al menos 10 dígitos.
+fn phone_core(phone: &str) -> Option<String> {
     let digits: String = phone.chars().filter(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
-        return vec![phone.to_string()];
+    if digits.len() < 10 {
+        return None;
     }
-    // El "core" local venezolano son los últimos 10 dígitos (ej "4144271554").
-    let core: String = if digits.len() >= 10 {
-        digits.chars().rev().take(10).collect::<Vec<_>>()
-            .into_iter().rev().collect()
-    } else {
-        return vec![digits];
-    };
-    let mut out = Vec::with_capacity(5);
-    out.push(format!("58{}", core));
-    out.push(format!("+58{}", core));
-    out.push(format!("0{}", core));
-    out.push(core);
-    if !out.contains(&digits) {
-        out.push(digits);
-    }
-    out
+    // Últimos 10 dígitos.
+    Some(digits.chars().rev().take(10).collect::<Vec<_>>()
+        .into_iter().rev().collect())
 }
 
 /// Format a raw DNI/RIF value into a prefixed string like `V-12345678` or `J-50001234`.
@@ -131,21 +115,47 @@ impl ProfileRepository for MongoDB {
             return Ok(HashMap::new());
         }
 
-        // Expandir cada teléfono de entrada a todas sus variantes de formato
-        // (584... / 04... / 4... / +584...) y mantener un mapa inverso
-        // variante → input original para poder devolver bien el match.
-        let mut variants: Vec<String> = Vec::with_capacity(phones.len() * 4);
-        let mut variant_to_input: HashMap<String, String> = HashMap::new();
+        // Para cada teléfono de entrada: extraer el core (últimos 10 dígitos)
+        // y armar un regex que matchee cualquier formato donde esos 10 dígitos
+        // aparezcan "al final lógico" del sPhone, tolerando prefijos venezolanos
+        // (58 / +58 / 0) y caracteres no numéricos intercalados (espacios,
+        // guiones, paréntesis).
+        //
+        // Ejemplo: core="4144271554" matchea:
+        //   "4144271554", "04144271554", "584144271554", "+584144271554",
+        //   "0414-427-1554", "+58 (414) 427 1554", etc.
+        //
+        // Costo: Mongo no usa el índice de `sPhone` con este regex. Es full
+        // scan de la colección pero con evaluación rápida por doc. Aceptable
+        // para los batches típicos del módulo de WhatsApp (listados de
+        // 20-100 conversaciones).
+        let mut regex_bsons: Vec<bson::Bson> = Vec::with_capacity(phones.len());
+        let mut core_to_input: HashMap<String, String> = HashMap::new();
         for p in phones {
-            for v in phone_variants(p) {
-                if !variant_to_input.contains_key(&v) {
-                    variants.push(v.clone());
-                    variant_to_input.insert(v, p.clone());
-                }
-            }
+            let core = match phone_core(p) {
+                Some(c) => c,
+                None => continue,
+            };
+            // Interponer `\D*` entre cada dígito del core para tolerar
+            // separadores (espacios, guiones, paréntesis, puntos).
+            let spaced_core: String = core
+                .chars()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join("\\D*");
+            // Anchors: opcionalmente el prefijo internacional `+58`, `58` o el
+            // local `0`, luego el core. `$` al final exige que sea el final
+            // del string → evita falsos positivos con strings más largos.
+            let pattern = format!(r"^\D*(\+?58|0)?\D*{}$", spaced_core);
+            let re = bson::Regex { pattern, options: String::new() };
+            regex_bsons.push(bson::Bson::RegularExpression(re));
+            core_to_input.entry(core).or_insert_with(|| p.clone());
+        }
+        if regex_bsons.is_empty() {
+            return Ok(HashMap::new());
         }
 
-        let filter = doc! { "sPhone": { "$in": &variants } };
+        let filter = doc! { "sPhone": { "$in": regex_bsons } };
         let projection = doc! { "sPhone": 1, "sName": 1 };
         let mut cursor = self
             .customers()
@@ -156,20 +166,20 @@ impl ProfileRepository for MongoDB {
         let mut out: HashMap<String, String> = HashMap::with_capacity(phones.len());
         while let Some(doc) = cursor.try_next().await.map_err(|e| e.to_string())? {
             let db_phone = doc.get_str("sPhone").unwrap_or_default().to_string();
-            if db_phone.is_empty() {
-                continue;
-            }
             let name = doc.get_str("sName").unwrap_or_default().trim().to_string();
             if name.is_empty() {
                 continue;
             }
-            // Resolver cuál fue el input original que expandió a esta variante.
-            let input_key = match variant_to_input.get(&db_phone) {
+            // Recuperar el input original correspondiente: extraemos core del
+            // sPhone devuelto por la DB y lo usamos como key del mapa inverso.
+            let core = match phone_core(&db_phone) {
+                Some(c) => c,
+                None => continue,
+            };
+            let input_key = match core_to_input.get(&core) {
                 Some(k) => k.clone(),
                 None => continue,
             };
-            // Primer match por input gana; si hay más de un cliente con el
-            // mismo teléfono, el resto se descarta.
             out.entry(input_key).or_insert(name);
         }
         Ok(out)
