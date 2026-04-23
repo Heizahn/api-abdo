@@ -208,12 +208,14 @@ impl UserRepository for MongoDB {
 
     async fn update_user_password(&self, user_id: &str, password_hash: &str) -> Result<bool, String> {
         let users: Collection<User> = self.db.collection("Users");
+        // `count_documents` evita deserializar el User (una projection `_id: 1`
+        // sobre una Collection tipada falla pidiendo los campos obligatorios).
         let exists = users
-            .find_one(doc! { "_id": user_id })
-            .projection(doc! { "_id": 1 })
+            .count_documents(doc! { "_id": user_id })
+            .limit(1)
             .await
             .map_err(|e| e.to_string())?
-            .is_some();
+            > 0;
         if !exists {
             return Ok(false);
         }
@@ -239,15 +241,16 @@ impl UserRepository for MongoDB {
         if let Some(c) = patch.can_chat { set.insert("bCanChat", c); }
         if let Some(t) = patch.tag { set.insert("nTag", t as i64); }
 
-        // Si el patch vino vacío, evitamos round-trip a Mongo y asumimos "existía"
-        // (no falla; el caller sigue devolviendo 200 con el doc actual).
+        // Si el patch vino vacío, evitamos round-trip de update y sólo
+        // chequeamos existencia (sin deserializar el User con una projection
+        // parcial — `count_documents` es la forma segura).
         if set.is_empty() {
             let exists = collection
-                .find_one(doc! { "_id": id })
-                .projection(doc! { "_id": 1 })
+                .count_documents(doc! { "_id": id })
+                .limit(1)
                 .await
                 .map_err(|e| e.to_string())?
-                .is_some();
+                > 0;
             return Ok(exists);
         }
 
