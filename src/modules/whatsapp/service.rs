@@ -4,6 +4,15 @@ use std::error::Error as StdError;
 
 const WA_API_VERSION: &str = "v25.0";
 
+/// Metadata de un media antes de bajar el binario.
+/// `url` es firmada por Meta (TTL ~5 min) — no cachearla.
+pub struct MediaInfo {
+    pub url: String,
+    pub mime: String,
+    pub file_size: Option<u64>,
+    pub file_name: Option<String>,
+}
+
 /// Formatea un `reqwest::Error` con toda la cadena de causas (is_timeout,
 /// is_connect, source()...) para que el log muestre la razón real en vez
 /// del texto genérico "error sending request for url".
@@ -169,15 +178,8 @@ impl WhatsAppService {
         Ok(wa_id)
     }
 
-    /// Descarga el binario de un media subido por un contacto vía webhook.
-    ///
-    /// Son dos llamadas contra Meta:
-    /// 1. `GET /v25.0/{media_id}` → devuelve `{ url, mime_type, file_size, ... }`.
-    /// 2. `GET <url>` (con el mismo bearer) → binario.
-    ///
-    /// Se fuerza `Accept: */*` porque la CDN de Meta a veces responde 406 con
-    /// los headers por defecto de reqwest.
-    pub async fn download_media(&self, media_id: &str) -> Result<(Vec<u8>, String, Option<String>)> {
+    /// Info de un media: URL firmada por Meta (TTL ~5 min), mime, tamaño y filename.
+    pub async fn download_media_info(&self, media_id: &str) -> Result<MediaInfo> {
         let info_url = format!("https://graph.facebook.com/{}/{}", WA_API_VERSION, media_id);
         let resp = send_with_retry("download_media info", || {
             self.client.get(&info_url).bearer_auth(&self.access_token)
@@ -199,10 +201,18 @@ impl WhatsAppService {
             .unwrap_or("application/octet-stream")
             .to_string();
         let file_name = info["file_name"].as_str().map(|s| s.to_string());
+        let file_size = info["file_size"].as_u64();
 
+        Ok(MediaInfo { url, mime, file_size, file_name })
+    }
+
+    /// Descarga el binario desde la URL firmada que devolvió `download_media_info`.
+    /// Se fuerza `Accept: */*` porque la CDN de Meta a veces responde 406 con
+    /// los headers por defecto de reqwest.
+    pub async fn download_media_body(&self, url: &str) -> Result<Vec<u8>> {
         let bin = send_with_retry("download_media bytes", || {
             self.client
-                .get(&url)
+                .get(url)
                 .bearer_auth(&self.access_token)
                 .header(reqwest::header::ACCEPT, "*/*")
         }).await
@@ -214,13 +224,18 @@ impl WhatsAppService {
             return Err(anyhow::anyhow!("WhatsApp media download error [{}]: {}", status, body));
         }
 
-        // `bytes()` también puede fallar transitoriamente (reset a mitad de
-        // descarga), pero reintentarlo requeriría re-descargar todo. Preferimos
-        // fallar y dejar que el front reintente.
         let bytes = bin.bytes().await
             .map_err(|e| describe_reqwest_error("download_media body", e))?;
 
-        Ok((bytes.to_vec(), mime, file_name))
+        Ok(bytes.to_vec())
+    }
+
+    /// Descarga completa: info + body. Se mantiene para compatibilidad con
+    /// callers que no necesitan chequear tamaño antes de bajar.
+    pub async fn download_media(&self, media_id: &str) -> Result<(Vec<u8>, String, Option<String>)> {
+        let info = self.download_media_info(media_id).await?;
+        let bytes = self.download_media_body(&info.url).await?;
+        Ok((bytes, info.mime, info.file_name))
     }
 
     /// Lista las plantillas (`message_templates`) de una cuenta WABA. La llamada

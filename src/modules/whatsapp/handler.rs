@@ -366,6 +366,20 @@ pub async fn receive_webhook(
                         }
                     };
 
+                    // Prefetch del binario: el agente casi siempre abre el
+                    // media a los pocos segundos. Si ya está en Redis cuando
+                    // hace el GET, responde en ms en vez de 2 viajes a Meta.
+                    if let Some(ref mid) = saved.media_id {
+                        if should_prefetch_media(&saved.msg_type) {
+                            let state_cl = state.clone();
+                            let phone_cl = conv.business_phone.clone();
+                            let mid_cl = mid.clone();
+                            tokio::spawn(async move {
+                                prefetch_media(state_cl, phone_cl, mid_cl).await;
+                            });
+                        }
+                    }
+
                     let touch = crate::db::ConversationTouch {
                         preview: &preview,
                         msg_type: &msg.msg_type,
@@ -1848,7 +1862,7 @@ pub async fn get_media_handler(
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::NotFound)?;
 
-    // 3. Settings del negocio (auth + credenciales en un solo lookup).
+    // 3. Settings del negocio (auth del agente).
     let settings = state.db
         .find_wa_settings_by_phone(&conv.business_phone)
         .await
@@ -1861,13 +1875,23 @@ pub async fn get_media_handler(
     if !settings.agents.iter().any(|id| id == &claims.id) {
         return Err(ApiError::Forbidden);
     }
+
+    // 4. Hot path: cache de Redis. Los media_id son inmutables, así que el
+    // primero que haya abierto el media (o el prefetch del webhook) ya lo dejó.
+    if let Some((bytes, mime, remote_filename)) = state.redis.get_media_cache(&media_id).await {
+        let filename = msg.media_filename
+            .clone()
+            .or(remote_filename)
+            .unwrap_or_else(|| media_id.clone());
+        return Ok(build_media_response(bytes, &mime, &filename));
+    }
+
+    // 5. Cache miss → descargar de Meta.
     if settings.phone_number_id.is_empty() || settings.access_token.is_empty() {
         return Err(ApiError::Internal(
             "wa_settings sin phone_number_id o access_token configurados".into(),
         ));
     }
-
-    // 4. Service con el token descifrado → descarga.
     let token = decrypt_payload(&settings_secret(), &settings.access_token)
         .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
     let wa = WhatsAppService::new(state.reqwest_client.clone(), settings.phone_number_id, token);
@@ -1876,27 +1900,56 @@ pub async fn get_media_handler(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    // 5. Respuesta binaria. `inline` para que el browser lo renderice (imagen/pdf)
-    // en lugar de forzar la descarga. Front puede hacer `<img src="...">`.
+    // Guardar en cache fire-and-forget para la próxima request (y para los
+    // demás agentes que abran el mismo chat).
+    {
+        let state_cl = state.clone();
+        let mid_cl = media_id.clone();
+        let bytes_cl = bytes.clone();
+        let mime_cl = mime.clone();
+        let filename_cl = remote_filename.clone();
+        tokio::spawn(async move {
+            state_cl.redis.set_media_cache(
+                &mid_cl,
+                &bytes_cl,
+                &mime_cl,
+                filename_cl.as_deref(),
+            ).await;
+        });
+    }
+
     let filename = msg.media_filename
         .clone()
         .or(remote_filename)
         .unwrap_or_else(|| media_id.clone());
+    Ok(build_media_response(bytes, &mime, &filename))
+}
 
+/// Arma la respuesta HTTP con el binario y headers compartidos entre hit y miss.
+/// `Cache-Control: immutable` + 30 días porque los `media_id` de Meta no cambian:
+/// el browser no vuelve a pedirlo hasta un mes después.
+fn build_media_response(bytes: Vec<u8>, mime: &str, filename: &str) -> axum::response::Response {
+    let content_length = bytes.len();
     let mut resp = axum::response::Response::new(axum::body::Body::from(bytes));
     let headers = resp.headers_mut();
-    if let Ok(v) = axum::http::HeaderValue::from_str(&mime) {
+    if let Ok(v) = axum::http::HeaderValue::from_str(mime) {
         headers.insert(axum::http::header::CONTENT_TYPE, v);
     }
-    if let Ok(v) = axum::http::HeaderValue::from_str(&format!("inline; filename=\"{}\"", filename.replace('"', "'"))) {
+    if let Ok(v) = axum::http::HeaderValue::from_str(&format!(
+        "inline; filename=\"{}\"",
+        filename.replace('"', "'")
+    )) {
         headers.insert(axum::http::header::CONTENT_DISPOSITION, v);
     }
-    // Cache agresivo: el `media_id` es estable e inmutable en Meta.
+    headers.insert(
+        axum::http::header::CONTENT_LENGTH,
+        axum::http::HeaderValue::from(content_length),
+    );
     headers.insert(
         axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("private, max-age=86400"),
+        axum::http::HeaderValue::from_static("private, max-age=2592000, immutable"),
     );
-    Ok(resp)
+    resp
 }
 
 // ============================================
@@ -2417,6 +2470,80 @@ async fn resolve_service_for_phone(
         settings.phone_number_id,
         token,
     ))
+}
+
+/// Tamaño máximo para el prefetch automático del webhook. Encima de esto el
+/// binario se descarga on-demand en `get_media_handler` — evita inflar Redis
+/// con PDFs/videos pesados que el agente podría ni abrir.
+const MEDIA_PREFETCH_MAX_BYTES: u64 = 5 * 1024 * 1024; // 5 MB
+
+/// Tipos de mensaje que se prefetchean al llegar por webhook.
+/// Documentos quedan fuera: pueden ser muy pesados y no se reproducen inline.
+fn should_prefetch_media(msg_type: &str) -> bool {
+    matches!(msg_type, "audio" | "image" | "sticker" | "video")
+}
+
+/// Descarga un media de Meta y lo guarda en Redis si pesa poco.
+/// Fire-and-forget: se spawnea desde el webhook apenas llega el mensaje,
+/// para que cuando el agente abra el chat el `GET /media/:id` encuentre
+/// hit en Redis y responda en milisegundos.
+pub(crate) async fn prefetch_media(
+    state: Arc<AppState>,
+    business_phone: String,
+    media_id: String,
+) {
+    // Skip si ya está cacheado (puede pasar si el mismo media llega dos veces).
+    if state.redis.get_media_cache(&media_id).await.is_some() {
+        return;
+    }
+
+    let wa = match resolve_service_for_phone(&state, &business_phone).await {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!("prefetch_media({}): no pude resolver service: {:?}", media_id, e);
+            return;
+        }
+    };
+
+    let info = match wa.download_media_info(&media_id).await {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!("prefetch_media({}): info falló: {:?}", media_id, e);
+            return;
+        }
+    };
+
+    // Si Meta reporta tamaño y supera el límite, no cacheamos — lo bajará el
+    // endpoint si el agente abre el media.
+    if let Some(size) = info.file_size {
+        if size > MEDIA_PREFETCH_MAX_BYTES {
+            tracing::debug!(
+                "prefetch_media({}): skip ({} bytes > {} max)",
+                media_id, size, MEDIA_PREFETCH_MAX_BYTES
+            );
+            return;
+        }
+    }
+
+    let bytes = match wa.download_media_body(&info.url).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("prefetch_media({}): body falló: {:?}", media_id, e);
+            return;
+        }
+    };
+
+    // Guard tardío: si Meta no reportó `file_size` y el binario terminó siendo
+    // grande, igual respetamos el límite.
+    if (bytes.len() as u64) > MEDIA_PREFETCH_MAX_BYTES {
+        return;
+    }
+
+    state.redis.set_media_cache(&media_id, &bytes, &info.mime, info.file_name.as_deref()).await;
+    tracing::info!(
+        "prefetch_media({}): cacheado {} bytes ({})",
+        media_id, bytes.len(), info.mime
+    );
 }
 
 /// Normaliza cualquier formato de número venezolano a E.164 sin "+" (ej: "584141234567")

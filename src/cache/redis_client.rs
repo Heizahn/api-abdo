@@ -143,6 +143,71 @@ impl RedisClient {
         let _: Result<(), _> = conn.set_ex(templates_key(waba_id), raw, 300).await;
     }
 
+    // ============================================
+    // WhatsApp — cache de media (binarios inmutables)
+    // ============================================
+
+    /// Lee un media cacheado. Retorna `(bytes, mime, filename)` si hay hit.
+    /// Lee 3 campos con HGETALL en una sola round-trip.
+    pub async fn get_media_cache(
+        &self,
+        media_id: &str,
+    ) -> Option<(Vec<u8>, String, Option<String>)> {
+        let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;
+        let key = media_cache_key(media_id);
+        let bin: Vec<u8> = redis::cmd("HGET")
+            .arg(&key)
+            .arg("bin")
+            .query_async(&mut conn)
+            .await
+            .ok()?;
+        if bin.is_empty() {
+            return None;
+        }
+        let mime: Option<String> = redis::cmd("HGET")
+            .arg(&key)
+            .arg("mime")
+            .query_async(&mut conn)
+            .await
+            .ok();
+        let filename: Option<String> = redis::cmd("HGET")
+            .arg(&key)
+            .arg("filename")
+            .query_async(&mut conn)
+            .await
+            .ok();
+        Some((
+            bin,
+            mime.unwrap_or_else(|| "application/octet-stream".to_string()),
+            filename,
+        ))
+    }
+
+    /// Guarda un media en Redis con TTL de 30 días (los `media_id` de Meta son inmutables).
+    /// No-op silencioso si Redis falla — es best-effort.
+    pub async fn set_media_cache(
+        &self,
+        media_id: &str,
+        bytes: &[u8],
+        mime: &str,
+        filename: Option<&str>,
+    ) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let key = media_cache_key(media_id);
+        let mut pipe = redis::pipe();
+        pipe.atomic()
+            .cmd("HSET").arg(&key).arg("bin").arg(bytes).ignore()
+            .cmd("HSET").arg(&key).arg("mime").arg(mime).ignore();
+        if let Some(f) = filename {
+            pipe.cmd("HSET").arg(&key).arg("filename").arg(f).ignore();
+        }
+        pipe.cmd("EXPIRE").arg(&key).arg(2_592_000u64).ignore();
+        let _: Result<(), _> = pipe.query_async(&mut conn).await;
+    }
+
     /// Intenta adquirir un lock de asignación para una conversación.
     /// Retorna true si el lock fue adquirido (esta instancia debe proceder).
     /// TTL de 15 segundos para evitar locks eternos.
@@ -186,6 +251,10 @@ fn url_preview_key(url: &str) -> String {
 
 fn templates_key(waba_id: &str) -> String {
     format!("wa:templates:{}", waba_id)
+}
+
+fn media_cache_key(media_id: &str) -> String {
+    format!("wa:media:{}", media_id)
 }
 
 fn exchange_rate_key() -> String {
