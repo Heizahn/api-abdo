@@ -1149,8 +1149,9 @@ fn resolve_send_mode(
             || loc.latitude.abs() > 90.0 || loc.longitude.abs() > 180.0
         {
             return Err(ApiError::ValidationError {
+                code: "location_out_of_range".into(),
                 field: "location".into(),
-                message: "latitude/longitude fuera de rango".into(),
+                message: "La latitud debe estar entre -90 y 90, y la longitud entre -180 y 180.".into(),
             });
         }
         if !is_within_24h(conv.last_inbound_at) { return Err(ApiError::WindowExpired); }
@@ -1160,16 +1161,18 @@ fn resolve_send_mode(
         let list = payload.contacts.as_ref().ok_or_else(|| ApiError::BadRequest("contacts requerido cuando type=contacts".into()))?;
         if list.is_empty() {
             return Err(ApiError::ValidationError {
+                code: "contacts_empty".into(),
                 field: "contacts".into(),
-                message: "array vacío".into(),
+                message: "Debes agregar al menos un contacto.".into(),
             });
         }
         for (i, c) in list.iter().enumerate() {
             let fname = c.get("name").and_then(|n| n.get("formatted_name")).and_then(|s| s.as_str()).unwrap_or("").trim();
             if fname.is_empty() {
                 return Err(ApiError::ValidationError {
+                    code: "contact_name_required".into(),
                     field: format!("contacts[{}].name.formatted_name", i),
-                    message: "requerido y no-vacío".into(),
+                    message: "Cada contacto necesita un nombre completo.".into(),
                 });
             }
         }
@@ -1199,8 +1202,9 @@ fn validate_media_id(id: &str) -> Result<(), ApiError> {
     let t = id.trim();
     if t.is_empty() {
         return Err(ApiError::ValidationError {
+            code: "media_id_required".into(),
             field: "media_id".into(),
-            message: "requerido".into(),
+            message: "Falta `media_id`. Subí el archivo primero con POST /whatsapp/media.".into(),
         });
     }
     Ok(())
@@ -2393,11 +2397,45 @@ const MIME_STICKER:  &[&str] = &["image/webp"];
 // Tamaños máximos por tipo — son los límites oficiales de Meta Cloud API
 // (protocolo, iguales para todas las cuentas). Hardcoded aquí porque no hay
 // caso de uso real para tunearlos por deploy/workspace.
+// Sticker a 500 KB cubre tanto estáticos (Meta: 100 KB) como animados (500 KB);
+// Meta rechaza server-side si el static supera su sub-límite interno.
 const MAX_IMAGE_BYTES:    u64 = 5  * 1024 * 1024;
 const MAX_VIDEO_BYTES:    u64 = 16 * 1024 * 1024;
 const MAX_AUDIO_BYTES:    u64 = 16 * 1024 * 1024;
 const MAX_DOCUMENT_BYTES: u64 = 100 * 1024 * 1024;
-const MAX_STICKER_BYTES:  u64 = 100 * 1024;
+const MAX_STICKER_BYTES:  u64 = 500 * 1024;
+
+/// Convierte bytes a texto human-readable ("16 MB", "100 KB", "800 B").
+/// Usa 1 decimal solo si aporta (no muestra "16.0 MB").
+fn human_bytes(n: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    if n >= MB {
+        let mb = n as f64 / MB as f64;
+        if (mb.fract() * 10.0).round() == 0.0 {
+            format!("{:.0} MB", mb)
+        } else {
+            format!("{:.1} MB", mb)
+        }
+    } else if n >= KB {
+        format!("{} KB", (n as f64 / KB as f64).round() as u64)
+    } else {
+        format!("{} B", n)
+    }
+}
+
+/// Label en español + lista de extensiones aceptadas para un tipo de media.
+/// Usado al formatear mensajes de error user-facing.
+fn media_type_label(type_str: &str) -> (&'static str, &'static str) {
+    match type_str {
+        "image"    => ("imagen",    "jpeg, png"),
+        "video"    => ("video",     "mp4, 3gp"),
+        "audio"    => ("audio",     "aac, amr, mp3, m4a, ogg"),
+        "document" => ("documento", "pdf, doc(x), ppt(x), xls(x), txt"),
+        "sticker"  => ("sticker",   "webp"),
+        _          => ("archivo",   ""),
+    }
+}
 
 /// Resuelve `(max_bytes, mime_allowlist)` para un string de tipo.
 fn media_type_limits(type_str: &str) -> Option<(u64, &'static [&'static str])> {
@@ -2492,13 +2530,21 @@ pub async fn upload_media_handler(
     }
 
     let bytes = file_bytes.ok_or_else(|| ApiError::ValidationError {
-        field: "file".into(), message: "requerido".into(),
+        code: "missing_field".into(),
+        field: "file".into(),
+        message: "Adjuntá el archivo para subir.".into(),
     })?;
     if bytes.is_empty() {
-        return Err(ApiError::ValidationError { field: "file".into(), message: "vacío".into() });
+        return Err(ApiError::ValidationError {
+            code: "file_empty".into(),
+            field: "file".into(),
+            message: "El archivo está vacío.".into(),
+        });
     }
     let conv_id_str = conv_id_str.ok_or_else(|| ApiError::ValidationError {
-        field: "conversation_id".into(), message: "requerido".into(),
+        code: "missing_field".into(),
+        field: "conversation_id".into(),
+        message: "Falta identificar la conversación.".into(),
     })?;
 
     // Si el front no mandó `type`, lo inferimos del Content-Type del file part.
@@ -2507,31 +2553,40 @@ pub async fn upload_media_handler(
     let type_str = match type_str {
         Some(t) => t,
         None => infer_type_from_mime(&mime_lower).ok_or_else(|| ApiError::ValidationError {
+            code: "unrecognized_mime".into(),
             field: "type".into(),
-            message: format!("no se pudo inferir del MIME `{}` — pasar explícito (image|video|document|audio|sticker)", mime_lower),
+            message: format!("No reconocemos el tipo de archivo (`{}`). Revisá la extensión o adjuntalo con otro formato.", mime_lower),
         })?.to_string(),
     };
 
     let (max_bytes, allowed_mimes) = media_type_limits(&type_str)
         .ok_or_else(|| ApiError::ValidationError {
+            code: "invalid_media_type".into(),
             field: "type".into(),
-            message: "debe ser image|video|document|audio|sticker".into(),
+            message: "El tipo debe ser image, video, document, audio o sticker.".into(),
         })?;
 
     if (bytes.len() as u64) > max_bytes {
+        let (label, _) = media_type_label(&type_str);
         return Err(ApiError::ValidationError {
+            code: "media_too_large".into(),
             field: "file".into(),
             message: format!(
-                "{} bytes excede el límite {} bytes para type={}",
-                bytes.len(), max_bytes, type_str
+                "El {} supera el límite de {} (recibido {}). Comprimilo o usá uno más liviano.",
+                label, human_bytes(max_bytes), human_bytes(bytes.len() as u64)
             ),
         });
     }
 
     if !allowed_mimes.iter().any(|m| *m == mime_lower) {
+        let (label, formats) = media_type_label(&type_str);
         return Err(ApiError::ValidationError {
-            field: "file.content_type".into(),
-            message: format!("MIME `{}` no soportado para type={}", mime_lower, type_str),
+            code: "mime_not_allowed".into(),
+            field: "file".into(),
+            message: format!(
+                "Ese formato no se puede enviar como {}. Formatos aceptados: {}.",
+                label, formats
+            ),
         });
     }
 
@@ -3001,8 +3056,9 @@ pub async fn duplicate_quick_reply_handler(
             let trimmed = t.trim().to_string();
             if trimmed.is_empty() || trimmed.chars().count() > 100 {
                 return Err(ApiError::ValidationError {
+                    code: "quick_reply_title_length".into(),
                     field: "title".into(),
-                    message: "El título debe tener entre 1 y 100 caracteres".into(),
+                    message: "El título debe tener entre 1 y 100 caracteres.".into(),
                 });
             }
             trimmed

@@ -68,11 +68,16 @@ pub enum ApiError {
     #[error("Closed conversation requires template")]
     ClosedRequiresTemplate,
 
-    /// Falló validación de un payload. `field` es el nombre del campo que
-    /// falló; `message` es texto orientativo para el front. Se sirve como
-    /// 422 Unprocessable Entity con `{ ok:false, error:"validation_error", field, message }`.
-    #[error("Validation error on {field}: {message}")]
-    ValidationError { field: String, message: String },
+    /// Falló validación de un payload.
+    /// - `code`: identificador estable para que el front mapee a UI/i18n
+    ///   sin parsear el mensaje (ej: `media_too_large`, `missing_field`).
+    /// - `field`: nombre del campo culpable (o `"file"`, `"interactive"`, etc.).
+    /// - `message`: texto human-readable en español listo para mostrar al usuario.
+    ///
+    /// Se sirve como 422 con
+    /// `{ ok:false, error:"validation_error", code, field, message }`.
+    #[error("Validation error [{code}] on {field}: {message}")]
+    ValidationError { code: String, field: String, message: String },
 
     #[error("Database error: {0}")]
     DatabaseError(String),
@@ -94,11 +99,12 @@ pub enum ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         // ValidationError lleva payload extra (field + message), lo manejamos aparte.
-        if let ApiError::ValidationError { field, message } = &self {
+        if let ApiError::ValidationError { code, field, message } = &self {
             tracing::error!("API Error: {:?}", self);
             let body = Json(json!({
                 "ok": false,
                 "error": "validation_error",
+                "code": code,
                 "field": field,
                 "message": message,
             }));
