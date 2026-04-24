@@ -2416,6 +2416,20 @@ fn media_type_limits(type_str: &str) -> Option<(u64, &'static [&'static str])> {
     }
 }
 
+/// Deriva el `type` de Meta a partir del `Content-Type` del file part.
+/// Usado cuando el front sube sin mandar el campo `type` explícito.
+/// `image/webp` → `sticker` (Meta sólo acepta webp en stickers, no en image).
+/// `application/octet-stream` o mimes raros → `document` (catch-all).
+fn infer_type_from_mime(mime: &str) -> Option<&'static str> {
+    if mime == "image/webp" { return Some("sticker"); }
+    if mime.starts_with("image/") { return Some("image"); }
+    if mime.starts_with("video/") { return Some("video"); }
+    if mime.starts_with("audio/") { return Some("audio"); }
+    // PDFs, Word/Excel/PowerPoint, text/plain — todo cae en document.
+    if MIME_DOCUMENT.iter().any(|m| *m == mime) { return Some("document"); }
+    None
+}
+
 /// POST /v1/auth-user/whatsapp/media (multipart/form-data)
 ///
 /// Sube un binario a Meta Cloud API y devuelve el `media_id` para usarlo en un
@@ -2488,12 +2502,20 @@ pub async fn upload_media_handler(
     if bytes.is_empty() {
         return Err(ApiError::ValidationError { field: "file".into(), message: "vacío".into() });
     }
-    let type_str = type_str.ok_or_else(|| ApiError::ValidationError {
-        field: "type".into(), message: "requerido".into(),
-    })?;
     let conv_id_str = conv_id_str.ok_or_else(|| ApiError::ValidationError {
         field: "conversation_id".into(), message: "requerido".into(),
     })?;
+
+    // Si el front no mandó `type`, lo inferimos del Content-Type del file part.
+    // Útil para clientes simples que no quieren replicar la taxonomía de Meta.
+    let mime_lower = file_mime.as_deref().unwrap_or("application/octet-stream").to_lowercase();
+    let type_str = match type_str {
+        Some(t) => t,
+        None => infer_type_from_mime(&mime_lower).ok_or_else(|| ApiError::ValidationError {
+            field: "type".into(),
+            message: format!("no se pudo inferir del MIME `{}` — pasar explícito (image|video|document|audio|sticker)", mime_lower),
+        })?.to_string(),
+    };
 
     let (max_bytes, allowed_mimes) = media_type_limits(&type_str)
         .ok_or_else(|| ApiError::ValidationError {
@@ -2511,11 +2533,10 @@ pub async fn upload_media_handler(
         });
     }
 
-    let mime = file_mime.as_deref().unwrap_or("application/octet-stream").to_lowercase();
-    if !allowed_mimes.iter().any(|m| *m == mime) {
+    if !allowed_mimes.iter().any(|m| *m == mime_lower) {
         return Err(ApiError::ValidationError {
             field: "file.content_type".into(),
-            message: format!("MIME `{}` no soportado para type={}", mime, type_str),
+            message: format!("MIME `{}` no soportado para type={}", mime_lower, type_str),
         });
     }
 
@@ -2548,18 +2569,18 @@ pub async fn upload_media_handler(
 
     // Subir a Meta (sin relay — el relay sólo aplica a downloads desde lookaside).
     let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
-    let media_id = wa.upload_media(bytes, &mime, file_name.as_deref()).await
+    let media_id = wa.upload_media(bytes, &mime_lower, file_name.as_deref()).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     tracing::info!(
         "[upload_media] OK media_id={} size={}B type={} mime={} conv={}",
-        media_id, size, type_str, mime, conv_id_str
+        media_id, size, type_str, mime_lower, conv_id_str
     );
 
     Ok(Json(MediaUploadResponse {
         ok: true,
         media_id,
-        mime_type: mime,
+        mime_type: mime_lower,
         size,
         sha256: sha256_hex,
     }))
