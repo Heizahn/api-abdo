@@ -402,11 +402,9 @@ pub struct MediaSendPayload {
     pub filename: Option<String>,
 }
 
-/// Response de `POST /v1/auth-user/whatsapp/media`. El `media_id` se usa en
-/// el `POST /conversations/:id/messages` subsiguiente.
+/// Datos del media recién subido a Meta.
 #[derive(Debug, Serialize, ToSchema)]
-pub struct MediaUploadResponse {
-    pub ok: bool,
+pub struct MediaUploadData {
     /// ID de Meta para el media recién subido. TTL ~30 días del lado de Meta.
     pub media_id: String,
     /// MIME type canónico detectado (del header `Content-Type` multipart).
@@ -416,6 +414,14 @@ pub struct MediaUploadResponse {
     /// SHA-256 hex del binario. Calculado en backend; sirve al front para
     /// deduplicar reenvíos idénticos en la UI.
     pub sha256: String,
+}
+
+/// Response de `POST /v1/auth-user/whatsapp/media`. El `media_id` se usa en
+/// el `POST /conversations/:id/messages` subsiguiente.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MediaUploadResponse {
+    pub ok: bool,
+    pub data: MediaUploadData,
 }
 
 /// Límite por tipo de media — devuelto en `GET /whatsapp/media/limits`.

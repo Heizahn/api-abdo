@@ -2579,10 +2579,12 @@ pub async fn upload_media_handler(
 
     Ok(Json(MediaUploadResponse {
         ok: true,
-        media_id,
-        mime_type: mime_lower,
-        size,
-        sha256: sha256_hex,
+        data: crate::models::whatsapp::MediaUploadData {
+            media_id,
+            mime_type: mime_lower,
+            size,
+            sha256: sha256_hex,
+        },
     }))
 }
 
