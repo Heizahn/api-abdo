@@ -648,7 +648,7 @@ pub struct ConversationsListResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ConversationDetailResponse {
     pub ok: bool,
-    pub conversation: ConversationItem,
+    pub data: ConversationItem,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -660,26 +660,39 @@ pub struct ConversationMessagesResponse {
     pub next_cursor: Option<String>,
 }
 
+/// Payload interno de `SendMessageResponse.data`. Se extrae a struct propio
+/// para mantener `{ ok, data }` uniforme con el resto de endpoints.
 #[derive(Debug, Serialize, ToSchema)]
-pub struct SendMessageResponse {
-    pub ok: bool,
+pub struct SendMessageData {
     /// Atajo: `_id` del mensaje en la colección (Mongo ObjectId hex). Igual a `message.id`.
     pub message_id: String,
     pub message: MessageItem,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct MarkReadResponse {
+pub struct SendMessageResponse {
     pub ok: bool,
+    pub data: SendMessageData,
+}
+
+/// Payload interno de `MarkReadResponse.data`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MarkReadData {
     /// Lista de `wa_message_id` que pasaron a `read` en esta llamada.
     /// Vacía si no había inbound sin leer.
     pub message_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+pub struct MarkReadResponse {
+    pub ok: bool,
+    pub data: MarkReadData,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct TakeConversationResponse {
     pub ok: bool,
-    pub conversation: ConversationItem,
+    pub data: ConversationItem,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

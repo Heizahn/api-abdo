@@ -716,7 +716,7 @@ pub async fn get_conversation_handler(
 
     Ok(Json(ConversationDetailResponse {
         ok: true,
-        conversation: conv_to_item(conv, true, last_opened, workspace_name, resolved, agent_name),
+        data: conv_to_item(conv, true, last_opened, workspace_name, resolved, agent_name),
     }))
 }
 
@@ -900,8 +900,7 @@ pub async fn send_message_handler(
                 let item = msg_to_item(existing, name, rto);
                 return Ok(Json(SendMessageResponse {
                     ok: true,
-                    message_id: item.id.clone(),
-                    message: item,
+                    data: SendMessageData { message_id: item.id.clone(), message: item },
                 }));
             }
 
@@ -950,8 +949,7 @@ pub async fn send_message_handler(
 
             return Ok(Json(SendMessageResponse {
                 ok: true,
-                message_id: item.id.clone(),
-                message: item,
+                data: SendMessageData { message_id: item.id.clone(), message: item },
             }));
         }
     }
@@ -1044,8 +1042,7 @@ pub async fn send_message_handler(
 
     Ok(Json(SendMessageResponse {
         ok: true,
-        message_id: item.id.clone(),
-        message: item,
+        data: SendMessageData { message_id: item.id.clone(), message: item },
     }))
 }
 
@@ -1486,7 +1483,7 @@ pub async fn mark_read_handler(
         broadcast_all(&state.ws_registry, &ev).await;
     }
 
-    Ok(Json(MarkReadResponse { ok: true, message_ids: changed_ids }))
+    Ok(Json(MarkReadResponse { ok: true, data: MarkReadData { message_ids: changed_ids } }))
 }
 
 #[utoipa::path(
@@ -1600,7 +1597,7 @@ pub async fn take_conversation_handler(
 
     Ok(Json(TakeConversationResponse {
         ok: true,
-        conversation: conv_to_item(conv, true, last_opened, workspace_name, resolved, agent_name),
+        data: conv_to_item(conv, true, last_opened, workspace_name, resolved, agent_name),
     }))
 }
 
@@ -1686,7 +1683,7 @@ pub async fn transfer_conversation_handler(
 
     Ok(Json(ConversationDetailResponse {
         ok: true,
-        conversation: conv_item,
+        data: conv_item,
     }))
 }
 
@@ -1746,7 +1743,7 @@ pub async fn close_conversation_handler(
 
     Ok(Json(ConversationDetailResponse {
         ok: true,
-        conversation: conv_to_item(conv_after, true, last_opened, workspace_name, resolved, agent_name),
+        data: conv_to_item(conv_after, true, last_opened, workspace_name, resolved, agent_name),
     }))
 }
 
@@ -1817,7 +1814,7 @@ pub async fn reopen_conversation_handler(
 
     Ok(Json(ConversationDetailResponse {
         ok: true,
-        conversation: conversation_item,
+        data: conversation_item,
     }))
 }
 
@@ -1940,8 +1937,7 @@ pub async fn initiate_conversation_handler(
             let item = msg_to_item(existing, Some(claims.name.clone()), rto);
             return Ok(Json(SendMessageResponse {
                 ok: true,
-                message_id: item.id.clone(),
-                message: item,
+                data: SendMessageData { message_id: item.id.clone(), message: item },
             }));
         }
     }
@@ -2039,8 +2035,7 @@ pub async fn initiate_conversation_handler(
 
     Ok(Json(SendMessageResponse {
         ok: true,
-        message_id: item.id.clone(),
-        message: item,
+        data: SendMessageData { message_id: item.id.clone(), message: item },
     }))
 }
 
