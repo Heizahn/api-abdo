@@ -23,7 +23,7 @@ pub struct WaConversation {
     pub name: Option<String>,
     /// Cliente ISP vinculado si el número coincide
     pub client_id: Option<ObjectId>,
-    /// "open" | "closed" | "waiting"
+    /// "pending" | "in_progress" | "closed"
     pub status: String,
     /// UUID del agente asignado
     pub assigned_to: Option<String>,

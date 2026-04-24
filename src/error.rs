@@ -55,6 +55,19 @@ pub enum ApiError {
     #[error("Window closed: use template")]
     WindowClosed,
 
+    /// La conversación no se puede tomar porque su `status` actual no es
+    /// `pending` ni `closed` (típicamente ya está `in_progress` de otro agente).
+    /// Se sirve como 409 `conversacion_no_tomable`.
+    #[error("Conversation not takeable")]
+    ConversationNotTakeable,
+
+    /// La conversación está `closed` y el envío no es de tipo template. Los
+    /// mensajes freeform/interactive requieren una plantilla para reabrir el
+    /// chat (escape hatch de la ventana 24h de Meta). Se sirve como 409
+    /// `conversacion_cerrada_requiere_plantilla`.
+    #[error("Closed conversation requires template")]
+    ClosedRequiresTemplate,
+
     /// Falló validación de un payload. `field` es el nombre del campo que
     /// falló; `message` es texto orientativo para el front. Se sirve como
     /// 422 Unprocessable Entity con `{ ok:false, error:"validation_error", field, message }`.
@@ -103,6 +116,8 @@ impl IntoResponse for ApiError {
             ApiError::WeakPassword => (StatusCode::BAD_REQUEST, "weak_password"),
             ApiError::WindowExpired => (StatusCode::CONFLICT, "window_expired"),
             ApiError::WindowClosed => (StatusCode::CONFLICT, "window_closed"),
+            ApiError::ConversationNotTakeable => (StatusCode::CONFLICT, "conversacion_no_tomable"),
+            ApiError::ClosedRequiresTemplate => (StatusCode::CONFLICT, "conversacion_cerrada_requiere_plantilla"),
             ApiError::MissingTemplateParams => (StatusCode::BAD_REQUEST, "missing_template_params"),
             ApiError::ValidationError { .. } => unreachable!(),
             ApiError::DatabaseError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "database_error"),

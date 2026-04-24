@@ -71,6 +71,7 @@ pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents
         conversation_id: conv_id_str,
         taken_by: chosen_agent,
         status: "in_progress".to_string(),
+        previous_status: "pending".to_string(),
     };
     broadcast_all(&state.ws_registry, &event).await;
 }

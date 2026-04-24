@@ -833,7 +833,7 @@ pub async fn send_message_handler(
 ) -> Result<Json<SendMessageResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
-    let conv = state.db
+    let mut conv = state.db
         .find_conversation_by_id(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
@@ -843,6 +843,41 @@ pub async fn send_message_handler(
     // ventana de 24h). El discriminador `type: "template"` o la presencia del
     // campo `template` activan el modo template.
     let mode = resolve_send_mode(&payload, &conv)?;
+
+    // Conversación cerrada:
+    // - Template → reopen + take atómico (asignar al caller), luego enviar.
+    // - Cualquier otro tipo → rechazar con 409.
+    if conv.status == "closed" {
+        match &mode {
+            SendMode::Template { .. } => {
+                // Reabrir + asignar atómicamente al caller.
+                let taken = state.db
+                    .take_conversation(&oid, &claims.id)
+                    .await
+                    .map_err(|e| ApiError::DatabaseError(e))?;
+                let reopened_conv = match taken {
+                    Some(c) => c,
+                    None => return Err(ApiError::ConversationNotTakeable),
+                };
+
+                // CHAT_TOMADO antes de enviar el template a Meta.
+                let ev = WsServerEvent::ChatTomado {
+                    conversation_id: id.clone(),
+                    taken_by: claims.id.clone(),
+                    status: reopened_conv.status.clone(),
+                    previous_status: "closed".to_string(),
+                };
+                broadcast_all(&state.ws_registry, &ev).await;
+
+                // Actualizar la copia local de `conv` para que el resto del handler
+                // opere sobre el estado post-reopen (status = "in_progress").
+                conv = reopened_conv;
+            }
+            _ => {
+                return Err(ApiError::ClosedRequiresTemplate);
+            }
+        }
+    }
 
     // Lookup idempotente (fuente de verdad: DB, por `(conv_id, idempotency_key)`).
     // - sent/delivered/read → devolver el mismo mensaje (no reenviar a Meta).
@@ -1259,8 +1294,8 @@ pub async fn mark_read_handler(
     security(("bearerAuth" = [])),
     params(("id" = String, Path, description = "ID de la conversación")),
     responses(
-        (status = 200, description = "Conversación tomada o reasignada. Idempotente si ya era del agente. Acepta reasignación: si el chat es `pending` asignado a otro agente, lo transfiere al agente actual.", body = TakeConversationResponse),
-        (status = 409, description = "La conversación no está en `pending` (está en `in_progress` o `closed`)"),
+        (status = 200, description = "Conversación tomada, reasignada o reabierta. Idempotente si ya era del agente. Acepta: `pending` (toma/reasignación) y `closed` (reopen+take, transiciona a `in_progress`).", body = TakeConversationResponse),
+        (status = 409, description = "La conversación no es tomable (está en `in_progress`)"),
         (status = 404, description = "Conversación no encontrada"),
         (status = 401, description = "No autorizado"),
     )
@@ -1270,6 +1305,8 @@ pub async fn take_conversation_handler(
     Extension(claims): Extension<UserProfileClaims>,
     Path(id): Path<String>,
 ) -> Result<Json<TakeConversationResponse>, ApiError> {
+    require_can_chat(&state, &claims.id).await?;
+
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
     let existing = state.db
@@ -1278,10 +1315,16 @@ pub async fn take_conversation_handler(
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
+    let previous_status = existing.status.clone();
     let prev_owner = existing.assigned_to.clone();
     let was_already_mine = prev_owner.as_deref() == Some(claims.id.as_str());
 
-    // `take_conversation` ahora permite reasignación: sólo exige `status=pending`.
+    // Sólo `pending` y `closed` son tomables. `in_progress` ya tiene dueño activo → 409.
+    if previous_status != "pending" && previous_status != "closed" {
+        return Err(ApiError::ConversationNotTakeable);
+    }
+
+    // `take_conversation` acepta `pending` (toma/reasignación) y `closed` (reopen+take).
     let taken = state.db
         .take_conversation(&oid, &claims.id)
         .await
@@ -1289,7 +1332,7 @@ pub async fn take_conversation_handler(
 
     let conv = match taken {
         Some(c) => c,
-        None => return Err(ApiError::Conflict("conversacion_no_pending".into())),
+        None => return Err(ApiError::ConversationNotTakeable),
     };
 
     // Ajuste de carga: si había un dueño distinto a mí, le bajamos la carga.
@@ -1314,11 +1357,20 @@ pub async fn take_conversation_handler(
     let resolved = resolve_customer_name(&state, &conv).await;
     let agent_name = resolve_last_message_agent_name_one(&state, &conv).await;
 
-    // Broadcast a los demás agentes:
-    // - Si había otro dueño previo (reasignación): CHAT_TRANSFERIDO con
-    //   conversación completa para que el front reemplace su estado local.
-    // - Si no había dueño, o ya era mía y sólo es idempotente: CHAT_TOMADO.
-    if !was_already_mine {
+    // Broadcast a los demás agentes según el estado previo y el dueño previo:
+    // - `closed` → siempre CHAT_TOMADO con broadcast_all (el chat vuelve al mundo).
+    // - `pending` sin dueño previo → CHAT_TOMADO con broadcast_except (toma nueva).
+    // - `pending` con dueño distinto → CHAT_TRANSFERIDO (reasignación manual).
+    // - `pending` ya era mío → idempotente, no emitir.
+    if previous_status == "closed" {
+        let ev = WsServerEvent::ChatTomado {
+            conversation_id: id.clone(),
+            taken_by: claims.id.clone(),
+            status: conv.status.clone(),
+            previous_status: "closed".to_string(),
+        };
+        broadcast_all(&state.ws_registry, &ev).await;
+    } else if !was_already_mine {
         let conv_item = conv_to_item(
             conv.clone(),
             true,
@@ -1338,6 +1390,7 @@ pub async fn take_conversation_handler(
                 conversation_id: id.clone(),
                 taken_by: claims.id.clone(),
                 status: conv.status.clone(),
+                previous_status: "pending".to_string(),
             },
         };
         broadcast_except(&state.ws_registry, &claims.id, &ev).await;

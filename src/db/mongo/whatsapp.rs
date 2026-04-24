@@ -449,20 +449,32 @@ impl WhatsAppRepository for MongoDB {
         agent_id: &str,
     ) -> Result<Option<WaConversation>, String> {
         use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+        use mongodb::options::UpdateModifications;
         let opts = FindOneAndUpdateOptions::builder()
             .return_document(ReturnDocument::After)
             .build();
 
-        // Atómico: toma si sigue `pending`, sin importar si ya tiene otro dueño.
-        // Permite reasignación manual en chats `pending` asignados a otro agente.
-        // Idempotente: tomar mi propia conversación devuelve el doc sin cambios.
-        // No toca `status` — la transición a `in_progress` ocurre en el primer
-        // GET /messages del asignado.
+        // Atómico: acepta `pending` (toma/reasignación) y `closed` (reopen+take).
+        // - Si era `pending`:  asigna el agente, deja `status` intacto.
+        // - Si era `closed`:   asigna el agente y fuerza `status = "in_progress"`.
+        // Idempotente: tomar mi propia conv `pending` devuelve el doc sin cambios.
+        let filter = doc! { "_id": id, "status": { "$in": ["pending", "closed"] } };
+        let pipeline = vec![
+            doc! {
+                "$set": {
+                    "assigned_to": agent_id,
+                    "status": {
+                        "$cond": [
+                            { "$eq": ["$status", "closed"] },
+                            "in_progress",
+                            "$status"
+                        ]
+                    }
+                }
+            }
+        ];
         let res = self.wa_conversations()
-            .find_one_and_update(
-                doc! { "_id": id, "status": "pending" },
-                doc! { "$set": { "assigned_to": agent_id } },
-            )
+            .find_one_and_update(filter, UpdateModifications::Pipeline(pipeline))
             .with_options(opts)
             .await
             .map_err(|e| e.to_string())?;

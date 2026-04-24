@@ -48,12 +48,14 @@ pub enum WsServerEvent {
     #[serde(rename = "CONVERSACION_NUEVA")]
     ConversacionNueva { conversation: ConversationItem },
 
-    /// Un agente tomó una conversación pendiente.
+    /// Un agente tomó una conversación pendiente o cerrada.
     #[serde(rename = "CHAT_TOMADO")]
     ChatTomado {
         conversation_id: String,
         taken_by: String,
         status: String,
+        /// Estado previo al take: `"pending"` (toma normal) o `"closed"` (reopen+take vía template).
+        previous_status: String,
     },
 
     /// Transferencia entre agentes. `from_user_id` puede ser null si la conversación no tenía dueño.
