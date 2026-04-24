@@ -317,9 +317,10 @@ pub struct StatusError {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SendMessageRequest {
-    /// Discriminador: `"text"` (default), `"template"` o `"interactive"`.
-    /// Segun el valor se usa `content`, `template` o `interactive` y los
-    /// demás se ignoran.
+    /// Discriminador: `"text"` (default), `"template"`, `"interactive"`,
+    /// `"image"`, `"video"`, `"document"`, `"audio"`, `"sticker"`,
+    /// `"location"`, `"contacts"`. Según el valor se usa el sub-objeto
+    /// correspondiente y los demás se ignoran.
     #[serde(default, rename = "type")]
     pub msg_type: Option<String>,
     /// Texto del mensaje a enviar. Requerido cuando `type == "text"`.
@@ -352,6 +353,90 @@ pub struct SendMessageRequest {
     /// `last_used_at`. Opcional.
     #[serde(default)]
     pub quick_reply_id: Option<String>,
+    /// Imagen a enviar (requerido cuando `type == "image"`). El `media_id` se
+    /// obtiene primero vía `POST /whatsapp/media`. `caption` es opcional.
+    #[serde(default)]
+    pub image: Option<MediaSendPayload>,
+    /// Video a enviar (requerido cuando `type == "video"`). Mismo flujo que `image`.
+    #[serde(default)]
+    pub video: Option<MediaSendPayload>,
+    /// Documento a enviar (requerido cuando `type == "document"`). `filename`
+    /// define cómo se muestra en el chat del cliente; si se omite, Meta usa
+    /// el nombre original subido.
+    #[serde(default)]
+    pub document: Option<MediaSendPayload>,
+    /// Audio a enviar (requerido cuando `type == "audio"`). Meta **no** acepta
+    /// `caption` en audio — si viene, se ignora.
+    #[serde(default)]
+    pub audio: Option<MediaSendPayload>,
+    /// Sticker a enviar (requerido cuando `type == "sticker"`). Meta sólo
+    /// acepta `image/webp` animado o estático.
+    #[serde(default)]
+    pub sticker: Option<MediaSendPayload>,
+    /// Ubicación a enviar (requerido cuando `type == "location"`).
+    #[serde(default)]
+    pub location: Option<LocationPayload>,
+    /// Tarjetas de contacto a enviar (requerido cuando `type == "contacts"`).
+    /// Passthrough directo al array que espera Meta — el backend sólo valida
+    /// que sea no-vacío y que cada contacto tenga `name.formatted_name`.
+    #[serde(default)]
+    #[schema(value_type = Option<Vec<Object>>)]
+    pub contacts: Option<Vec<serde_json::Value>>,
+}
+
+/// Payload compartido por image/video/document/audio/sticker en
+/// `SendMessageRequest`. El handler interpreta los campos según el tipo:
+///
+/// - `image`/`video`: usa `media_id` + `caption?`
+/// - `document`:      usa `media_id` + `caption?` + `filename?`
+/// - `audio`/`sticker`: usa sólo `media_id` (los demás se ignoran)
+#[derive(Debug, Deserialize, Clone, ToSchema)]
+pub struct MediaSendPayload {
+    /// ID devuelto por `POST /v1/auth-user/whatsapp/media` (ID de Meta).
+    pub media_id: String,
+    /// Caption opcional (sólo aplica a image/video/document).
+    #[serde(default)]
+    pub caption: Option<String>,
+    /// Nombre de archivo que verá el cliente (sólo aplica a document).
+    #[serde(default)]
+    pub filename: Option<String>,
+}
+
+/// Response de `POST /v1/auth-user/whatsapp/media`. El `media_id` se usa en
+/// el `POST /conversations/:id/messages` subsiguiente.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MediaUploadResponse {
+    pub ok: bool,
+    /// ID de Meta para el media recién subido. TTL ~30 días del lado de Meta.
+    pub media_id: String,
+    /// MIME type canónico detectado (del header `Content-Type` multipart).
+    pub mime_type: String,
+    /// Tamaño en bytes del archivo subido.
+    pub size: u64,
+    /// SHA-256 hex del binario. Calculado en backend; sirve al front para
+    /// deduplicar reenvíos idénticos en la UI.
+    pub sha256: String,
+}
+
+/// Límite por tipo de media — devuelto en `GET /whatsapp/media/limits`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MediaTypeLimit {
+    /// Tamaño máximo aceptado por el backend (bytes).
+    pub max_bytes: u64,
+    /// MIME types permitidos por Meta para ese tipo.
+    pub mime_types: Vec<String>,
+}
+
+/// Response de `GET /v1/auth-user/whatsapp/media/limits`. El front lo cachea
+/// y lo usa para validar client-side antes de llamar al upload.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MediaLimitsResponse {
+    pub ok: bool,
+    pub image: MediaTypeLimit,
+    pub video: MediaTypeLimit,
+    pub audio: MediaTypeLimit,
+    pub document: MediaTypeLimit,
+    pub sticker: MediaTypeLimit,
 }
 
 /// Plantilla lista para enviar. El front obtiene `name`/`language` desde

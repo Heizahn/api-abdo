@@ -383,6 +383,241 @@ impl WhatsAppService {
         Ok(wa_id)
     }
 
+    /// Sube un binario a Meta (`POST /{phone_number_id}/media`) y devuelve el
+    /// `media_id` que luego se pasa a `send_image`/`send_video`/`send_document`
+    /// /`send_audio`/`send_sticker`. Meta mantiene el archivo ~30 días antes
+    /// de borrarlo.
+    ///
+    /// **No** usa el relay: el upload va directo a `graph.facebook.com`, que
+    /// sí es accesible desde la VM (el bloqueo del ISP afecta sólo a
+    /// `lookaside.fbsbx.com`, el CDN de descarga).
+    pub async fn upload_media(
+        &self,
+        bytes: Vec<u8>,
+        mime_type: &str,
+        filename: Option<&str>,
+    ) -> Result<String> {
+        let url = format!(
+            "https://graph.facebook.com/{}/{}/media",
+            WA_API_VERSION, self.phone_number_id
+        );
+
+        // Construir el multipart en un closure porque `send_with_retry`
+        // necesita poder rearmar el request; `multipart::Form` consume `bytes`,
+        // así que clonamos en cada intento. El tamaño máximo ya fue validado
+        // en el handler, los clones son puntuales.
+        let mime_owned = mime_type.to_string();
+        let filename_owned = filename.map(|s| s.to_string()).unwrap_or_else(|| "upload.bin".to_string());
+        let build = || {
+            let part = reqwest::multipart::Part::bytes(bytes.clone())
+                .file_name(filename_owned.clone())
+                .mime_str(&mime_owned)
+                .unwrap_or_else(|_| reqwest::multipart::Part::bytes(bytes.clone()));
+            let form = reqwest::multipart::Form::new()
+                .text("messaging_product", "whatsapp")
+                .text("type", mime_owned.clone())
+                .part("file", part);
+            self.client
+                .post(&url)
+                .bearer_auth(&self.access_token)
+                .multipart(form)
+        };
+
+        let resp = send_with_retry("upload_media", build).await
+            .map_err(|e| describe_reqwest_error("upload_media request", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("WhatsApp upload_media error [{}]: {}", status, body));
+        }
+
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| describe_reqwest_error("upload_media response decode", e))?;
+        let media_id = json["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Meta upload_media response sin `id`"))?
+            .to_string();
+
+        Ok(media_id)
+    }
+
+    /// Builder interno: agrega `context.message_id` al payload si `reply_to`
+    /// viene con un wamid. Usado por todos los `send_*` que soportan citado.
+    fn with_reply_to(mut payload: serde_json::Value, reply_to: Option<&str>) -> serde_json::Value {
+        if let Some(wamid) = reply_to {
+            payload["context"] = json!({ "message_id": wamid });
+        }
+        payload
+    }
+
+    /// Envío genérico: POSTea un `payload` ya armado a `/messages` y extrae
+    /// el `wa_message_id`. Todos los `send_*` (excepto los que tienen lógica
+    /// extra) delegan acá para compartir retry, error handling y decode.
+    async fn post_message(&self, ctx: &'static str, payload: serde_json::Value) -> Result<String> {
+        let url = self.messages_url();
+        let resp = send_with_retry(ctx, || {
+            self.meta_request(reqwest::Method::POST, &url)
+                .bearer_auth(&self.access_token)
+                .json(&payload)
+        }).await
+            .map_err(|e| describe_reqwest_error(ctx, e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("WhatsApp {} error [{}]: {}", ctx, status, body));
+        }
+
+        let json: serde_json::Value = resp.json().await
+            .map_err(|e| describe_reqwest_error(ctx, e))?;
+        let wa_id = json["messages"][0]["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        Ok(wa_id)
+    }
+
+    /// Envía una imagen (media previamente subido con `upload_media`).
+    pub async fn send_image(
+        &self,
+        to: &str,
+        media_id: &str,
+        caption: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> Result<String> {
+        let mut image = json!({ "id": media_id });
+        if let Some(c) = caption { image["caption"] = json!(c); }
+        let payload = Self::with_reply_to(json!({
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "image",
+            "image": image,
+        }), reply_to);
+        self.post_message("send_image", payload).await
+    }
+
+    /// Envía un video.
+    pub async fn send_video(
+        &self,
+        to: &str,
+        media_id: &str,
+        caption: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> Result<String> {
+        let mut video = json!({ "id": media_id });
+        if let Some(c) = caption { video["caption"] = json!(c); }
+        let payload = Self::with_reply_to(json!({
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "video",
+            "video": video,
+        }), reply_to);
+        self.post_message("send_video", payload).await
+    }
+
+    /// Envía un documento. `filename` controla el nombre visible del archivo
+    /// en el chat del cliente.
+    pub async fn send_document(
+        &self,
+        to: &str,
+        media_id: &str,
+        caption: Option<&str>,
+        filename: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> Result<String> {
+        let mut document = json!({ "id": media_id });
+        if let Some(c) = caption { document["caption"] = json!(c); }
+        if let Some(f) = filename { document["filename"] = json!(f); }
+        let payload = Self::with_reply_to(json!({
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "document",
+            "document": document,
+        }), reply_to);
+        self.post_message("send_document", payload).await
+    }
+
+    /// Envía un audio (push-to-talk o archivo). Meta ignora cualquier caption.
+    pub async fn send_audio(
+        &self,
+        to: &str,
+        media_id: &str,
+        reply_to: Option<&str>,
+    ) -> Result<String> {
+        let payload = Self::with_reply_to(json!({
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "audio",
+            "audio": { "id": media_id },
+        }), reply_to);
+        self.post_message("send_audio", payload).await
+    }
+
+    /// Envía un sticker. Meta sólo acepta `image/webp`.
+    pub async fn send_sticker(
+        &self,
+        to: &str,
+        media_id: &str,
+        reply_to: Option<&str>,
+    ) -> Result<String> {
+        let payload = Self::with_reply_to(json!({
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "sticker",
+            "sticker": { "id": media_id },
+        }), reply_to);
+        self.post_message("send_sticker", payload).await
+    }
+
+    /// Envía una ubicación geográfica. `name`/`address` son opcionales; Meta
+    /// los muestra debajo del mapa en el chat del cliente.
+    pub async fn send_location(
+        &self,
+        to: &str,
+        latitude: f64,
+        longitude: f64,
+        name: Option<&str>,
+        address: Option<&str>,
+        reply_to: Option<&str>,
+    ) -> Result<String> {
+        let mut location = json!({ "latitude": latitude, "longitude": longitude });
+        if let Some(n) = name { location["name"] = json!(n); }
+        if let Some(a) = address { location["address"] = json!(a); }
+        let payload = Self::with_reply_to(json!({
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "location",
+            "location": location,
+        }), reply_to);
+        self.post_message("send_location", payload).await
+    }
+
+    /// Envía uno o más contactos (tarjetas tipo vCard). El array `contacts`
+    /// es passthrough al formato de Meta — ver docs para el shape completo
+    /// (`name`, `phones`, `emails`, `addresses`, `org`, `birthday`, `urls`).
+    pub async fn send_contacts(
+        &self,
+        to: &str,
+        contacts: &[serde_json::Value],
+        reply_to: Option<&str>,
+    ) -> Result<String> {
+        let payload = Self::with_reply_to(json!({
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "contacts",
+            "contacts": contacts,
+        }), reply_to);
+        self.post_message("send_contacts", payload).await
+    }
+
     /// Marca un mensaje entrante como leído (ticks azules en texto, mic azul
     /// en voice notes). Meta requiere una llamada POR mensaje — no propaga el
     /// read a los anteriores.

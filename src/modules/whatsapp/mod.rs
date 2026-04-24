@@ -7,6 +7,7 @@ pub mod url_preview;
 pub mod ws;
 
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{delete, get, patch, post, put},
     Router,
 };
@@ -46,6 +47,16 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route("/v1/auth-user/whatsapp/transferable-agents", get(handler::list_transferable_agents_handler))
         // Media: proxy de descarga (el binario vive en la CDN de Meta)
         .route("/v1/auth-user/whatsapp/media/:media_id", get(handler::get_media_handler))
+        // Media: límites por tipo — el front los lee para validar client-side.
+        .route("/v1/auth-user/whatsapp/media/limits", get(handler::get_media_limits_handler))
+        // Media: upload multipart hacia Meta (paso 1 del envío outbound).
+        // El body limit por defecto de axum es 2 MiB — lo desactivamos por
+        // ruta porque el tope real lo aplica el handler según `type` y la
+        // config (`wa_media_max_*_bytes`, hasta 100 MiB para documentos).
+        .route(
+            "/v1/auth-user/whatsapp/media",
+            post(handler::upload_media_handler).layer(DefaultBodyLimit::disable()),
+        )
         // Configuración de números y agentes
         .route("/v1/auth-user/whatsapp/settings", get(handler::list_settings_handler))
         .route("/v1/auth-user/whatsapp/settings", post(handler::create_settings_handler))

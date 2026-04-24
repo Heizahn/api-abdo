@@ -1,12 +1,12 @@
 use axum::{
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Extension, Json,
 };
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 use tokio::sync::Mutex;
 
@@ -910,33 +910,9 @@ pub async fn send_message_handler(
             let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
             let retry_reply_to = existing.reply_to_wa_message_id.clone();
             let preview_url_flag = payload.preview_url.unwrap_or(false);
-            let (new_wa_id, preview) = match &mode {
-                SendMode::Text { content } => {
-                    let wa_id = wa.send_text(&conv.phone, content, retry_reply_to.as_deref(), preview_url_flag)
-                        .await
-                        .map_err(|e| ApiError::Internal(e.to_string()))?;
-                    (wa_id, content.clone())
-                }
-                SendMode::Template { tpl } => {
-                    let components_value = tpl.components.as_ref()
-                        .map(|v| serde_json::Value::Array(v.clone()));
-                    let wa_id = wa.send_template(
-                            &conv.phone,
-                            &tpl.name,
-                            &tpl.language,
-                            components_value.as_ref(),
-                        )
-                        .await
-                        .map_err(|e| ApiError::Internal(e.to_string()))?;
-                    (wa_id, template_preview(tpl))
-                }
-                SendMode::Interactive { payload: inter } => {
-                    let wa_id = wa.send_interactive(&conv.phone, inter, retry_reply_to.as_deref())
-                        .await
-                        .map_err(|e| ApiError::Internal(e.to_string()))?;
-                    (wa_id, interactive_preview(inter))
-                }
-            };
+            let sent = dispatch_send(&mode, &wa, &conv.phone, retry_reply_to.as_deref(), preview_url_flag).await?;
+            let new_wa_id = sent.wa_id.clone();
+            let preview = sent.preview.clone();
 
             let msg_oid = existing_id
                 .ok_or_else(|| ApiError::Internal("mensaje previo sin _id".into()))?;
@@ -984,68 +960,33 @@ pub async fn send_message_handler(
     let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
 
     let preview_url_flag = payload.preview_url.unwrap_or(false);
-    let (wa_id, msg_type, body, preview, tpl_fields, interactive_payload) = match &mode {
-        SendMode::Text { content } => {
-            let wa_id = wa.send_text(&conv.phone, content, payload.reply_to.as_deref(), preview_url_flag)
-                .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-            (wa_id, "text".to_string(), Some(content.clone()), content.clone(), None, None)
-        }
-        SendMode::Template { tpl } => {
-            let components_value = tpl.components.as_ref()
-                .map(|v| serde_json::Value::Array(v.clone()));
-            let wa_id = wa.send_template(
-                    &conv.phone,
-                    &tpl.name,
-                    &tpl.language,
-                    components_value.as_ref(),
-                )
-                .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-            let prev = template_preview(tpl);
-            let body = tpl.rendered_text.clone().or_else(|| Some(prev.clone()));
-            let fields = TemplateFields {
-                name: tpl.name.clone(),
-                language: tpl.language.clone(),
-                components: tpl.components.as_ref().map(|v| serde_json::Value::Array(v.clone())),
-            };
-            (wa_id, "template".to_string(), body, prev, Some(fields), None)
-        }
-        SendMode::Interactive { payload: inter } => {
-            let wa_id = wa.send_interactive(&conv.phone, inter, payload.reply_to.as_deref())
-                .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-            let prev = interactive_preview(inter);
-            // `body` guarda el texto humanizado (mismo valor que `preview`) para que
-            // endpoints que listan sin `interactive_payload` sigan teniendo algo.
-            (wa_id, "interactive".to_string(), Some(prev.clone()), prev, None, Some(inter.clone()))
-        }
-    };
+    let sent = dispatch_send(&mode, &wa, &conv.phone, payload.reply_to.as_deref(), preview_url_flag).await?;
 
     let is_text_mode = matches!(mode, SendMode::Text { .. });
+    let preview = sent.preview.clone();
 
     let msg = WaMessage {
         id: None,
         conversation_id: oid,
-        wa_message_id: wa_id,
+        wa_message_id: sent.wa_id,
         direction: "out".to_string(),
-        msg_type,
-        body,
-        media_id: None,
-        media_mime_type: None,
-        media_filename: None,
+        msg_type: sent.msg_type.to_string(),
+        body: sent.body,
+        media_id: sent.media_id,
+        media_mime_type: sent.media_mime_type,
+        media_filename: sent.media_filename,
         status: Some("sent".to_string()),
         sent_by: Some(claims.id.clone()),
         idempotency_key: payload.idempotency_key.clone(),
         reply_to_wa_message_id: payload.reply_to.clone(),
         url_preview: None,
         voice: false,
-        template_name: tpl_fields.as_ref().map(|f| f.name.clone()),
-        template_language: tpl_fields.as_ref().map(|f| f.language.clone()),
-        template_components: tpl_fields.and_then(|f| f.components),
-        interactive_payload,
-        contacts_payload: None,
-        location: None,
+        template_name: sent.template_fields.as_ref().map(|f| f.name.clone()),
+        template_language: sent.template_fields.as_ref().map(|f| f.language.clone()),
+        template_components: sent.template_fields.and_then(|f| f.components),
+        interactive_payload: sent.interactive_payload,
+        contacts_payload: sent.contacts_payload,
+        location: sent.location,
         timestamp: DateTime::now(),
     };
 
@@ -1113,6 +1054,13 @@ enum SendMode {
     Text { content: String },
     Template { tpl: SendTemplatePayload },
     Interactive { payload: serde_json::Value },
+    Image { media_id: String, caption: Option<String> },
+    Video { media_id: String, caption: Option<String> },
+    Document { media_id: String, caption: Option<String>, filename: Option<String> },
+    Audio { media_id: String },
+    Sticker { media_id: String },
+    Location { loc: LocationPayload },
+    Contacts { list: Vec<serde_json::Value> },
 }
 
 struct TemplateFields {
@@ -1159,6 +1107,79 @@ fn resolve_send_mode(
         return Ok(SendMode::Interactive { payload: inter.clone() });
     }
 
+    // Tipos ricos (media + location + contacts). Todos son freeform de cara a
+    // Meta, así que exigen ventana de 24h abierta — mismo gate que texto.
+    let type_hint = payload.msg_type.as_deref().map(|t| t.to_ascii_lowercase());
+    let explicit = |t: &str| type_hint.as_deref() == Some(t);
+
+    if explicit("image") || (type_hint.is_none() && payload.image.is_some()) {
+        let m = payload.image.as_ref().ok_or_else(|| ApiError::BadRequest("image requerido cuando type=image".into()))?;
+        validate_media_id(&m.media_id)?;
+        if !is_within_24h(conv.last_inbound_at) { return Err(ApiError::WindowExpired); }
+        return Ok(SendMode::Image { media_id: m.media_id.clone(), caption: nonempty(&m.caption) });
+    }
+    if explicit("video") || (type_hint.is_none() && payload.video.is_some()) {
+        let m = payload.video.as_ref().ok_or_else(|| ApiError::BadRequest("video requerido cuando type=video".into()))?;
+        validate_media_id(&m.media_id)?;
+        if !is_within_24h(conv.last_inbound_at) { return Err(ApiError::WindowExpired); }
+        return Ok(SendMode::Video { media_id: m.media_id.clone(), caption: nonempty(&m.caption) });
+    }
+    if explicit("document") || (type_hint.is_none() && payload.document.is_some()) {
+        let m = payload.document.as_ref().ok_or_else(|| ApiError::BadRequest("document requerido cuando type=document".into()))?;
+        validate_media_id(&m.media_id)?;
+        if !is_within_24h(conv.last_inbound_at) { return Err(ApiError::WindowExpired); }
+        return Ok(SendMode::Document {
+            media_id: m.media_id.clone(),
+            caption: nonempty(&m.caption),
+            filename: nonempty(&m.filename),
+        });
+    }
+    if explicit("audio") || (type_hint.is_none() && payload.audio.is_some()) {
+        let m = payload.audio.as_ref().ok_or_else(|| ApiError::BadRequest("audio requerido cuando type=audio".into()))?;
+        validate_media_id(&m.media_id)?;
+        if !is_within_24h(conv.last_inbound_at) { return Err(ApiError::WindowExpired); }
+        return Ok(SendMode::Audio { media_id: m.media_id.clone() });
+    }
+    if explicit("sticker") || (type_hint.is_none() && payload.sticker.is_some()) {
+        let m = payload.sticker.as_ref().ok_or_else(|| ApiError::BadRequest("sticker requerido cuando type=sticker".into()))?;
+        validate_media_id(&m.media_id)?;
+        if !is_within_24h(conv.last_inbound_at) { return Err(ApiError::WindowExpired); }
+        return Ok(SendMode::Sticker { media_id: m.media_id.clone() });
+    }
+    if explicit("location") || (type_hint.is_none() && payload.location.is_some()) {
+        let loc = payload.location.as_ref().ok_or_else(|| ApiError::BadRequest("location requerido cuando type=location".into()))?;
+        if !loc.latitude.is_finite() || !loc.longitude.is_finite()
+            || loc.latitude.abs() > 90.0 || loc.longitude.abs() > 180.0
+        {
+            return Err(ApiError::ValidationError {
+                field: "location".into(),
+                message: "latitude/longitude fuera de rango".into(),
+            });
+        }
+        if !is_within_24h(conv.last_inbound_at) { return Err(ApiError::WindowExpired); }
+        return Ok(SendMode::Location { loc: loc.clone() });
+    }
+    if explicit("contacts") || (type_hint.is_none() && payload.contacts.is_some()) {
+        let list = payload.contacts.as_ref().ok_or_else(|| ApiError::BadRequest("contacts requerido cuando type=contacts".into()))?;
+        if list.is_empty() {
+            return Err(ApiError::ValidationError {
+                field: "contacts".into(),
+                message: "array vacío".into(),
+            });
+        }
+        for (i, c) in list.iter().enumerate() {
+            let fname = c.get("name").and_then(|n| n.get("formatted_name")).and_then(|s| s.as_str()).unwrap_or("").trim();
+            if fname.is_empty() {
+                return Err(ApiError::ValidationError {
+                    field: format!("contacts[{}].name.formatted_name", i),
+                    message: "requerido y no-vacío".into(),
+                });
+            }
+        }
+        if !is_within_24h(conv.last_inbound_at) { return Err(ApiError::WindowExpired); }
+        return Ok(SendMode::Contacts { list: list.clone() });
+    }
+
     let content = payload.content.as_deref().unwrap_or("").trim();
     if content.is_empty() {
         return Err(ApiError::BadRequest(
@@ -1171,6 +1192,187 @@ fn resolve_send_mode(
     }
 
     Ok(SendMode::Text { content: content.to_string() })
+}
+
+fn nonempty(opt: &Option<String>) -> Option<String> {
+    opt.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| s.to_string())
+}
+
+fn validate_media_id(id: &str) -> Result<(), ApiError> {
+    let t = id.trim();
+    if t.is_empty() {
+        return Err(ApiError::ValidationError {
+            field: "media_id".into(),
+            message: "requerido".into(),
+        });
+    }
+    Ok(())
+}
+
+/// Resultado de despachar un `SendMode` al service: contiene todo lo que el
+/// handler necesita para persistir el `WaMessage` + armar la `ConversationTouch`.
+struct SentData {
+    wa_id: String,
+    preview: String,
+    msg_type: &'static str,
+    body: Option<String>,
+    media_id: Option<String>,
+    media_filename: Option<String>,
+    media_mime_type: Option<String>,
+    template_fields: Option<TemplateFields>,
+    interactive_payload: Option<serde_json::Value>,
+    contacts_payload: Option<serde_json::Value>,
+    location: Option<LocationPayload>,
+}
+
+/// Dispatcher único que cubre todos los `SendMode` — usado en el envío nuevo
+/// y en el retry idempotente para evitar duplicar lógica.
+async fn dispatch_send(
+    mode: &SendMode,
+    wa: &WhatsAppService,
+    to: &str,
+    reply_to: Option<&str>,
+    preview_url_flag: bool,
+) -> Result<SentData, ApiError> {
+    let internal = |e: anyhow::Error| ApiError::Internal(e.to_string());
+    let res = match mode {
+        SendMode::Text { content } => {
+            let wa_id = wa.send_text(to, content, reply_to, preview_url_flag).await.map_err(internal)?;
+            SentData {
+                wa_id, preview: content.clone(), msg_type: "text",
+                body: Some(content.clone()),
+                media_id: None, media_filename: None, media_mime_type: None,
+                template_fields: None, interactive_payload: None,
+                contacts_payload: None, location: None,
+            }
+        }
+        SendMode::Template { tpl } => {
+            let components_value = tpl.components.as_ref().map(|v| serde_json::Value::Array(v.clone()));
+            let wa_id = wa.send_template(to, &tpl.name, &tpl.language, components_value.as_ref()).await.map_err(internal)?;
+            let prev = template_preview(tpl);
+            let body = tpl.rendered_text.clone().or_else(|| Some(prev.clone()));
+            let fields = TemplateFields {
+                name: tpl.name.clone(),
+                language: tpl.language.clone(),
+                components: tpl.components.as_ref().map(|v| serde_json::Value::Array(v.clone())),
+            };
+            SentData {
+                wa_id, preview: prev, msg_type: "template", body,
+                media_id: None, media_filename: None, media_mime_type: None,
+                template_fields: Some(fields), interactive_payload: None,
+                contacts_payload: None, location: None,
+            }
+        }
+        SendMode::Interactive { payload: inter } => {
+            let wa_id = wa.send_interactive(to, inter, reply_to).await.map_err(internal)?;
+            let prev = interactive_preview(inter);
+            SentData {
+                wa_id, preview: prev.clone(), msg_type: "interactive",
+                body: Some(prev),
+                media_id: None, media_filename: None, media_mime_type: None,
+                template_fields: None, interactive_payload: Some(inter.clone()),
+                contacts_payload: None, location: None,
+            }
+        }
+        SendMode::Image { media_id, caption } => {
+            let wa_id = wa.send_image(to, media_id, caption.as_deref(), reply_to).await.map_err(internal)?;
+            SentData {
+                wa_id,
+                preview: caption.clone().unwrap_or_else(|| "[imagen]".into()),
+                msg_type: "image",
+                body: caption.clone(),
+                media_id: Some(media_id.clone()),
+                media_filename: None, media_mime_type: None,
+                template_fields: None, interactive_payload: None,
+                contacts_payload: None, location: None,
+            }
+        }
+        SendMode::Video { media_id, caption } => {
+            let wa_id = wa.send_video(to, media_id, caption.as_deref(), reply_to).await.map_err(internal)?;
+            SentData {
+                wa_id,
+                preview: caption.clone().unwrap_or_else(|| "[video]".into()),
+                msg_type: "video",
+                body: caption.clone(),
+                media_id: Some(media_id.clone()),
+                media_filename: None, media_mime_type: None,
+                template_fields: None, interactive_payload: None,
+                contacts_payload: None, location: None,
+            }
+        }
+        SendMode::Document { media_id, caption, filename } => {
+            let wa_id = wa.send_document(to, media_id, caption.as_deref(), filename.as_deref(), reply_to).await.map_err(internal)?;
+            let prev = caption.clone()
+                .or_else(|| filename.clone())
+                .unwrap_or_else(|| "[documento]".into());
+            SentData {
+                wa_id, preview: prev, msg_type: "document",
+                body: caption.clone(),
+                media_id: Some(media_id.clone()),
+                media_filename: filename.clone(),
+                media_mime_type: None,
+                template_fields: None, interactive_payload: None,
+                contacts_payload: None, location: None,
+            }
+        }
+        SendMode::Audio { media_id } => {
+            let wa_id = wa.send_audio(to, media_id, reply_to).await.map_err(internal)?;
+            SentData {
+                wa_id, preview: "[audio]".into(), msg_type: "audio",
+                body: None,
+                media_id: Some(media_id.clone()),
+                media_filename: None, media_mime_type: None,
+                template_fields: None, interactive_payload: None,
+                contacts_payload: None, location: None,
+            }
+        }
+        SendMode::Sticker { media_id } => {
+            let wa_id = wa.send_sticker(to, media_id, reply_to).await.map_err(internal)?;
+            SentData {
+                wa_id, preview: "[sticker]".into(), msg_type: "sticker",
+                body: None,
+                media_id: Some(media_id.clone()),
+                media_filename: None, media_mime_type: None,
+                template_fields: None, interactive_payload: None,
+                contacts_payload: None, location: None,
+            }
+        }
+        SendMode::Location { loc } => {
+            let wa_id = wa.send_location(
+                to, loc.latitude, loc.longitude,
+                loc.name.as_deref(), loc.address.as_deref(), reply_to,
+            ).await.map_err(internal)?;
+            let prev = loc.name.clone()
+                .or_else(|| loc.address.clone())
+                .unwrap_or_else(|| "Ubicación".into());
+            SentData {
+                wa_id, preview: prev, msg_type: "location",
+                body: None,
+                media_id: None, media_filename: None, media_mime_type: None,
+                template_fields: None, interactive_payload: None,
+                contacts_payload: None,
+                location: Some(loc.clone()),
+            }
+        }
+        SendMode::Contacts { list } => {
+            let wa_id = wa.send_contacts(to, list, reply_to).await.map_err(internal)?;
+            let prev = list.first()
+                .and_then(|c| c.get("name"))
+                .and_then(|n| n.get("formatted_name").or_else(|| n.get("first_name")))
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "[contacto]".into());
+            SentData {
+                wa_id, preview: prev, msg_type: "contacts",
+                body: None,
+                media_id: None, media_filename: None, media_mime_type: None,
+                template_fields: None, interactive_payload: None,
+                contacts_payload: Some(serde_json::Value::Array(list.clone())),
+                location: None,
+            }
+        }
+    };
+    Ok(res)
 }
 
 /// Resumen legible de un payload `interactive` para persistir como preview
@@ -2174,6 +2376,217 @@ pub async fn get_media_handler(
         .or(remote_filename)
         .unwrap_or_else(|| media_id.clone());
     Ok(build_media_response(bytes, &mime, &filename))
+}
+
+// Mime types aceptados por Meta Cloud API para cada tipo de upload.
+// Referencia: https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media
+const MIME_IMAGE:    &[&str] = &["image/jpeg", "image/png"];
+const MIME_VIDEO:    &[&str] = &["video/mp4", "video/3gpp"];
+const MIME_AUDIO:    &[&str] = &["audio/aac", "audio/mp4", "audio/mpeg", "audio/amr", "audio/ogg"];
+const MIME_DOCUMENT: &[&str] = &[
+    "application/pdf",
+    "application/vnd.ms-powerpoint",
+    "application/msword",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "text/plain",
+];
+const MIME_STICKER:  &[&str] = &["image/webp"];
+
+/// Resuelve `(max_bytes, mime_allowlist)` para un string de tipo.
+fn media_type_limits<'a>(
+    cfg: &'a crate::config::Config,
+    type_str: &str,
+) -> Option<(u64, &'a [&'a str])> {
+    match type_str {
+        "image"    => Some((cfg.wa_media_max_image_bytes,    MIME_IMAGE)),
+        "video"    => Some((cfg.wa_media_max_video_bytes,    MIME_VIDEO)),
+        "audio"    => Some((cfg.wa_media_max_audio_bytes,    MIME_AUDIO)),
+        "document" => Some((cfg.wa_media_max_document_bytes, MIME_DOCUMENT)),
+        "sticker"  => Some((cfg.wa_media_max_sticker_bytes,  MIME_STICKER)),
+        _ => None,
+    }
+}
+
+/// POST /v1/auth-user/whatsapp/media (multipart/form-data)
+///
+/// Sube un binario a Meta Cloud API y devuelve el `media_id` para usarlo en un
+/// `POST /conversations/:id/messages` posterior. Flujo replicado 1:1 del de
+/// Meta (dos pasos) para: validar tamaño/mime server-side, separar errores de
+/// upload vs. envío, y ocultar el access_token cifrado al browser.
+///
+/// Campos del multipart:
+/// - `file` (binary, requerido): el archivo a subir.
+/// - `type` (text, requerido): `"image" | "video" | "document" | "audio" | "sticker"`.
+/// - `conversation_id` (text, requerido): ID de la conversación; define qué
+///   `WaSettings` (phone_number_id + token) usar para subir. Meta asocia el
+///   `media_id` al phone_number_id que lo creó.
+///
+/// Autorización: el agente debe estar en `WaSettings.agents` del business_phone
+/// de la conversación.
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/media",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    request_body(
+        content = String,
+        content_type = "multipart/form-data",
+        description = "Campos: `file` (binario), `type` (image|video|document|audio|sticker), `conversation_id` (ObjectId hex)",
+    ),
+    responses(
+        (status = 200, description = "Media subido", body = MediaUploadResponse),
+        (status = 400, description = "Falta un campo o es inválido"),
+        (status = 403, description = "Agente no asignado al número de negocio"),
+        (status = 404, description = "Conversación no encontrada"),
+        (status = 422, description = "Validación falló: campo requerido vacío, tamaño excedido, o MIME no soportado"),
+    )
+)]
+pub async fn upload_media_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    mut multipart: Multipart,
+) -> Result<Json<MediaUploadResponse>, ApiError> {
+    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut file_mime: Option<String> = None;
+    let mut file_name: Option<String> = None;
+    let mut type_str: Option<String> = None;
+    let mut conv_id_str: Option<String> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        tracing::error!("[upload_media] multipart error: {}", e);
+        ApiError::BadRequest("error leyendo multipart".into())
+    })? {
+        match field.name().unwrap_or("") {
+            "file" => {
+                file_mime = field.content_type().map(|s| s.to_string());
+                file_name = field.file_name().map(|s| s.to_string());
+                let data = field.bytes().await.map_err(|_| ApiError::BadRequest("error leyendo file".into()))?;
+                file_bytes = Some(data.to_vec());
+            }
+            "type" => {
+                type_str = Some(field.text().await.map_err(|_| ApiError::BadRequest("type inválido".into()))?.trim().to_lowercase());
+            }
+            "conversation_id" => {
+                conv_id_str = Some(field.text().await.map_err(|_| ApiError::BadRequest("conversation_id inválido".into()))?.trim().to_string());
+            }
+            _ => { let _ = field.bytes().await; }
+        }
+    }
+
+    let bytes = file_bytes.ok_or_else(|| ApiError::ValidationError {
+        field: "file".into(), message: "requerido".into(),
+    })?;
+    if bytes.is_empty() {
+        return Err(ApiError::ValidationError { field: "file".into(), message: "vacío".into() });
+    }
+    let type_str = type_str.ok_or_else(|| ApiError::ValidationError {
+        field: "type".into(), message: "requerido".into(),
+    })?;
+    let conv_id_str = conv_id_str.ok_or_else(|| ApiError::ValidationError {
+        field: "conversation_id".into(), message: "requerido".into(),
+    })?;
+
+    let (max_bytes, allowed_mimes) = media_type_limits(&state.config, &type_str)
+        .ok_or_else(|| ApiError::ValidationError {
+            field: "type".into(),
+            message: "debe ser image|video|document|audio|sticker".into(),
+        })?;
+
+    if (bytes.len() as u64) > max_bytes {
+        return Err(ApiError::ValidationError {
+            field: "file".into(),
+            message: format!(
+                "{} bytes excede el límite {} bytes para type={}",
+                bytes.len(), max_bytes, type_str
+            ),
+        });
+    }
+
+    let mime = file_mime.as_deref().unwrap_or("application/octet-stream").to_lowercase();
+    if !allowed_mimes.iter().any(|m| *m == mime) {
+        return Err(ApiError::ValidationError {
+            field: "file.content_type".into(),
+            message: format!("MIME `{}` no soportado para type={}", mime, type_str),
+        });
+    }
+
+    // Autorización: resolver conversación y validar membresía en WaSettings.
+    let conv_oid = ObjectId::parse_str(&conv_id_str)
+        .map_err(|_| ApiError::BadRequest("conversation_id inválido".into()))?;
+    let conv = state.db
+        .find_conversation_by_id(&conv_oid).await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+    let settings = state.db
+        .find_wa_settings_by_phone(&conv.business_phone).await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| ApiError::Internal(format!(
+            "wa_settings no encontrado para {}", conv.business_phone
+        )))?;
+    if !settings.agents.iter().any(|id| id == &claims.id) {
+        return Err(ApiError::Forbidden);
+    }
+
+    // SHA-256 del binario — el front lo usa para deduplicar reenvíos idénticos.
+    let sha256_hex = {
+        let mut h = Sha256::new();
+        h.update(&bytes);
+        let out = h.finalize();
+        out.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+    };
+
+    let size = bytes.len() as u64;
+
+    // Subir a Meta (sin relay — el relay sólo aplica a downloads desde lookaside).
+    let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
+    let media_id = wa.upload_media(bytes, &mime, file_name.as_deref()).await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    tracing::info!(
+        "[upload_media] OK media_id={} size={}B type={} mime={} conv={}",
+        media_id, size, type_str, mime, conv_id_str
+    );
+
+    Ok(Json(MediaUploadResponse {
+        ok: true,
+        media_id,
+        mime_type: mime,
+        size,
+        sha256: sha256_hex,
+    }))
+}
+
+/// GET /v1/auth-user/whatsapp/media/limits
+///
+/// Devuelve los límites de tamaño y los MIME types aceptados por cada tipo de
+/// media. El front lo consulta para validar client-side antes de llamar al
+/// upload, y para mostrar mensajes de error coherentes con el backend.
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/media/limits",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Límites vigentes", body = MediaLimitsResponse),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn get_media_limits_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<MediaLimitsResponse> {
+    let cfg = &state.config;
+    let as_vec = |slice: &[&str]| slice.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    Json(MediaLimitsResponse {
+        ok: true,
+        image:    MediaTypeLimit { max_bytes: cfg.wa_media_max_image_bytes,    mime_types: as_vec(MIME_IMAGE) },
+        video:    MediaTypeLimit { max_bytes: cfg.wa_media_max_video_bytes,    mime_types: as_vec(MIME_VIDEO) },
+        audio:    MediaTypeLimit { max_bytes: cfg.wa_media_max_audio_bytes,    mime_types: as_vec(MIME_AUDIO) },
+        document: MediaTypeLimit { max_bytes: cfg.wa_media_max_document_bytes, mime_types: as_vec(MIME_DOCUMENT) },
+        sticker:  MediaTypeLimit { max_bytes: cfg.wa_media_max_sticker_bytes,  mime_types: as_vec(MIME_STICKER) },
+    })
 }
 
 /// Arma la respuesta HTTP con el binario y headers compartidos entre hit y miss.

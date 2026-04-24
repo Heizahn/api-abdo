@@ -49,6 +49,14 @@ pub struct Config {
     // desde la VM la ruta a esa CDN está bloqueada por el ISP.
     pub wa_media_relay_url: Option<String>,
     pub wa_media_relay_secret: Option<String>,
+
+    // WhatsApp — límites de upload por tipo (bytes). Defaults = Meta oficial.
+    // El front los lee de GET /whatsapp/media/limits para validar antes de subir.
+    pub wa_media_max_image_bytes: u64,
+    pub wa_media_max_video_bytes: u64,
+    pub wa_media_max_audio_bytes: u64,
+    pub wa_media_max_document_bytes: u64,
+    pub wa_media_max_sticker_bytes: u64,
 }
 
 impl Config {
@@ -121,6 +129,18 @@ impl Config {
             // al flow directo a Meta (útil en dev o si la red mejora).
             wa_media_relay_url: env::var("WA_MEDIA_RELAY_URL").ok().filter(|s| !s.is_empty()),
             wa_media_relay_secret: env::var("WA_MEDIA_RELAY_SECRET").ok().filter(|s| !s.is_empty()),
+
+            // Límites de upload por tipo (bytes). Defaults = límites oficiales de Meta.
+            wa_media_max_image_bytes: env::var("WA_MEDIA_MAX_IMAGE_BYTES")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(5 * 1024 * 1024),
+            wa_media_max_video_bytes: env::var("WA_MEDIA_MAX_VIDEO_BYTES")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(16 * 1024 * 1024),
+            wa_media_max_audio_bytes: env::var("WA_MEDIA_MAX_AUDIO_BYTES")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(16 * 1024 * 1024),
+            wa_media_max_document_bytes: env::var("WA_MEDIA_MAX_DOCUMENT_BYTES")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(100 * 1024 * 1024),
+            wa_media_max_sticker_bytes: env::var("WA_MEDIA_MAX_STICKER_BYTES")
+                .ok().and_then(|s| s.parse().ok()).unwrap_or(100 * 1024),
         }
     }
 
