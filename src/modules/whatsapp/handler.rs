@@ -2395,17 +2395,23 @@ const MIME_DOCUMENT: &[&str] = &[
 ];
 const MIME_STICKER:  &[&str] = &["image/webp"];
 
+// Tamaños máximos por tipo — son los límites oficiales de Meta Cloud API
+// (protocolo, iguales para todas las cuentas). Hardcoded aquí porque no hay
+// caso de uso real para tunearlos por deploy/workspace.
+const MAX_IMAGE_BYTES:    u64 = 5  * 1024 * 1024;
+const MAX_VIDEO_BYTES:    u64 = 16 * 1024 * 1024;
+const MAX_AUDIO_BYTES:    u64 = 16 * 1024 * 1024;
+const MAX_DOCUMENT_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_STICKER_BYTES:  u64 = 100 * 1024;
+
 /// Resuelve `(max_bytes, mime_allowlist)` para un string de tipo.
-fn media_type_limits<'a>(
-    cfg: &'a crate::config::Config,
-    type_str: &str,
-) -> Option<(u64, &'a [&'a str])> {
+fn media_type_limits(type_str: &str) -> Option<(u64, &'static [&'static str])> {
     match type_str {
-        "image"    => Some((cfg.wa_media_max_image_bytes,    MIME_IMAGE)),
-        "video"    => Some((cfg.wa_media_max_video_bytes,    MIME_VIDEO)),
-        "audio"    => Some((cfg.wa_media_max_audio_bytes,    MIME_AUDIO)),
-        "document" => Some((cfg.wa_media_max_document_bytes, MIME_DOCUMENT)),
-        "sticker"  => Some((cfg.wa_media_max_sticker_bytes,  MIME_STICKER)),
+        "image"    => Some((MAX_IMAGE_BYTES,    MIME_IMAGE)),
+        "video"    => Some((MAX_VIDEO_BYTES,    MIME_VIDEO)),
+        "audio"    => Some((MAX_AUDIO_BYTES,    MIME_AUDIO)),
+        "document" => Some((MAX_DOCUMENT_BYTES, MIME_DOCUMENT)),
+        "sticker"  => Some((MAX_STICKER_BYTES,  MIME_STICKER)),
         _ => None,
     }
 }
@@ -2489,7 +2495,7 @@ pub async fn upload_media_handler(
         field: "conversation_id".into(), message: "requerido".into(),
     })?;
 
-    let (max_bytes, allowed_mimes) = media_type_limits(&state.config, &type_str)
+    let (max_bytes, allowed_mimes) = media_type_limits(&type_str)
         .ok_or_else(|| ApiError::ValidationError {
             field: "type".into(),
             message: "debe ser image|video|document|audio|sticker".into(),
@@ -2574,18 +2580,15 @@ pub async fn upload_media_handler(
         (status = 401, description = "No autorizado"),
     )
 )]
-pub async fn get_media_limits_handler(
-    State(state): State<Arc<AppState>>,
-) -> Json<MediaLimitsResponse> {
-    let cfg = &state.config;
+pub async fn get_media_limits_handler() -> Json<MediaLimitsResponse> {
     let as_vec = |slice: &[&str]| slice.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     Json(MediaLimitsResponse {
         ok: true,
-        image:    MediaTypeLimit { max_bytes: cfg.wa_media_max_image_bytes,    mime_types: as_vec(MIME_IMAGE) },
-        video:    MediaTypeLimit { max_bytes: cfg.wa_media_max_video_bytes,    mime_types: as_vec(MIME_VIDEO) },
-        audio:    MediaTypeLimit { max_bytes: cfg.wa_media_max_audio_bytes,    mime_types: as_vec(MIME_AUDIO) },
-        document: MediaTypeLimit { max_bytes: cfg.wa_media_max_document_bytes, mime_types: as_vec(MIME_DOCUMENT) },
-        sticker:  MediaTypeLimit { max_bytes: cfg.wa_media_max_sticker_bytes,  mime_types: as_vec(MIME_STICKER) },
+        image:    MediaTypeLimit { max_bytes: MAX_IMAGE_BYTES,    mime_types: as_vec(MIME_IMAGE) },
+        video:    MediaTypeLimit { max_bytes: MAX_VIDEO_BYTES,    mime_types: as_vec(MIME_VIDEO) },
+        audio:    MediaTypeLimit { max_bytes: MAX_AUDIO_BYTES,    mime_types: as_vec(MIME_AUDIO) },
+        document: MediaTypeLimit { max_bytes: MAX_DOCUMENT_BYTES, mime_types: as_vec(MIME_DOCUMENT) },
+        sticker:  MediaTypeLimit { max_bytes: MAX_STICKER_BYTES,  mime_types: as_vec(MIME_STICKER) },
     })
 }
 
