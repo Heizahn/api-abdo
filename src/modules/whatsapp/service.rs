@@ -388,9 +388,9 @@ impl WhatsAppService {
     /// /`send_audio`/`send_sticker`. Meta mantiene el archivo ~30 días antes
     /// de borrarlo.
     ///
-    /// **No** usa el relay: el upload va directo a `graph.facebook.com`, que
-    /// sí es accesible desde la VM (el bloqueo del ISP afecta sólo a
-    /// `lookaside.fbsbx.com`, el CDN de descarga).
+    /// Ruta via relay de Cloudflare si está configurado (mismo motivo que
+    /// `download_media`: desde la VM de Debian/VE el ISP filtra el handshake
+    /// TCP a `graph.facebook.com`, no sólo a `lookaside.fbsbx.com`).
     pub async fn upload_media(
         &self,
         bytes: Vec<u8>,
@@ -417,8 +417,7 @@ impl WhatsAppService {
                 .text("messaging_product", "whatsapp")
                 .text("type", mime_owned.clone())
                 .part("file", part);
-            self.client
-                .post(&url)
+            self.meta_request(reqwest::Method::POST, &url)
                 .bearer_auth(&self.access_token)
                 .multipart(form)
         };
