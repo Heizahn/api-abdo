@@ -35,6 +35,18 @@ pub struct MetaTemplateCreateResp {
     pub category: Option<String>,
 }
 
+/// Snapshot del estado de un template en Meta. Usado para resync manual.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct MetaTemplateInfo {
+    /// `APPROVED` | `IN_REVIEW` | `PENDING` | `REJECTED` | `FLAGGED` | `DISABLED` | `PAUSED`.
+    pub status: String,
+    /// Razón cuando `status` ∈ {REJECTED}. Meta usa el campo `rejected_reason`
+    /// en este endpoint (NO `reason` como en el webhook).
+    pub rejected_reason: Option<String>,
+    pub category: Option<String>,
+}
+
 /// Metadata de un media antes de bajar el binario.
 /// `url` es firmada por Meta (TTL ~5 min) — no cachearla.
 pub struct MediaInfo {
@@ -915,6 +927,42 @@ impl WhatsAppService {
             .to_string();
 
         Ok(handle)
+    }
+
+    /// Lee el estado actual de un template desde Meta. Usado para resync
+    /// manual cuando se perdió un webhook de status update.
+    /// Endpoint Meta: `GET /{meta_template_id}?fields=status,...`.
+    pub async fn get_template_meta(
+        &self,
+        meta_template_id: &str,
+    ) -> Result<MetaTemplateInfo> {
+        let url = format!(
+            "https://graph.facebook.com/{}/{}?fields=status,rejected_reason,category,language,name",
+            WA_API_VERSION, meta_template_id
+        );
+
+        let resp = send_with_retry("get_template_meta", || {
+            self.meta_request(reqwest::Method::GET, &url)
+                .bearer_auth(&self.access_token)
+        }).await
+            .map_err(|e| describe_reqwest_error("get_template_meta request", e))?;
+
+        let http_status = resp.status();
+        let body = resp.text().await
+            .map_err(|e| describe_reqwest_error("get_template_meta response read", e))?;
+
+        if !http_status.is_success() {
+            return Err(parse_meta_error("get_template_meta", http_status, &body));
+        }
+
+        let json: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| anyhow::anyhow!("get_template_meta decode: {}", e))?;
+
+        Ok(MetaTemplateInfo {
+            status: json["status"].as_str().unwrap_or("").to_string(),
+            rejected_reason: json["rejected_reason"].as_str().map(|s| s.to_string()),
+            category: json["category"].as_str().map(|s| s.to_string()),
+        })
     }
 
     /// Borra UNA traducción de un template en Meta. `hsm_id` es el `id` que

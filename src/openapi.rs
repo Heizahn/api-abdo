@@ -140,6 +140,7 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
         crate::modules::whatsapp::handler::get_template_handler,
         crate::modules::whatsapp::handler::update_template_handler,
         crate::modules::whatsapp::handler::delete_template_handler,
+        crate::modules::whatsapp::handler::resync_template_handler,
         crate::modules::whatsapp::handler::upload_template_header_media_handler,
         // Users — CRUD
         crate::modules::users::handler::list_users_handler,

@@ -4914,6 +4914,117 @@ pub async fn delete_template_handler(
 }
 
 // ---------------------------------------------------------------------------
+// POST /v1/auth-user/whatsapp/templates/:id/resync
+// ---------------------------------------------------------------------------
+
+/// Resync manual del estado de un template desde Meta. Útil cuando se perdió
+/// un webhook de status update (subscription apagada, fallo transitorio,
+/// payload mal-deserializado, etc). Hace `GET /{meta_template_id}` a Meta,
+/// lee el `status` real, actualiza la DB y emite `WA_TEMPLATE_UPDATED` por WS.
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/templates/{id}/resync",
+    tag = "WhatsApp — Templates",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ObjectId hex de la plantilla")),
+    responses(
+        (status = 200, description = "Estado sincronizado desde Meta", body = WaTemplateResponse),
+        (status = 400, description = "draft_cannot_resync (la plantilla está en DRAFT)"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Sólo SUPERADMIN"),
+        (status = 404, description = "template_not_found"),
+        (status = 502, description = "meta_rejected (Meta no devolvió el template)"),
+    )
+)]
+pub async fn resync_template_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+) -> Result<Json<WaTemplateResponse>, ApiError> {
+    require_superadmin(&state, &claims.id).await?;
+
+    let oid = ObjectId::parse_str(&id).map_err(|_| template_not_found())?;
+
+    let doc = state.db
+        .find_template_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(template_not_found)?;
+
+    let meta_id = doc.meta_template_id.as_deref().ok_or_else(|| ApiError::domain_simple(
+        StatusCode::BAD_REQUEST,
+        "draft_cannot_resync",
+        "La plantilla está en DRAFT — todavía no fue enviada a Meta, no hay nada que sincronizar",
+    ))?;
+
+    // Resolver WaSettings + token
+    let settings = state.db
+        .find_wa_settings_by_phone_number_id(&doc.phone_number_id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| ApiError::domain_with_field(
+            StatusCode::NOT_FOUND,
+            "phone_number_not_found",
+            "phone_number_id",
+            "El número de WhatsApp no está configurado",
+        ))?;
+
+    let token = decrypt_payload(&settings_secret(), &settings.access_token)
+        .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
+
+    let wa = WhatsAppService::new(
+        state.reqwest_client.clone(),
+        settings.phone_number_id.clone(),
+        token,
+    );
+
+    // Leer estado real de Meta
+    let info = wa.get_template_meta(meta_id).await
+        .map_err(|e| map_meta_error(&e, "Meta no devolvió el template"))?;
+
+    // Mapear status Meta → WaTemplateStatus (mismo mapping que el webhook)
+    let (new_status, rejection_reason): (WaTemplateStatus, Option<String>) = match info.status.to_uppercase().as_str() {
+        "APPROVED" => (WaTemplateStatus::Approved, None),
+        "REJECTED" => (WaTemplateStatus::Rejected, info.rejected_reason),
+        "FLAGGED" => (WaTemplateStatus::Rejected, Some("flagged_by_meta_quality".to_string())),
+        "PAUSED" => (WaTemplateStatus::Paused, info.rejected_reason),
+        "DISABLED" => (WaTemplateStatus::Disabled, info.rejected_reason),
+        "PENDING" | "IN_REVIEW" | "" => (WaTemplateStatus::Pending, None),
+        other => {
+            return Err(ApiError::Internal(format!(
+                "Meta devolvió un status desconocido: '{}'", other
+            )));
+        }
+    };
+
+    // Update DB y capturar prev_status
+    let result = state.db
+        .update_template_status(meta_id, new_status, rejection_reason)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    let (updated_doc, prev_status) = match result {
+        Some(t) => t,
+        None => {
+            // No debería pasar: existe el doc en DB y tiene meta_template_id
+            return Err(ApiError::Internal(
+                "update_template_status retornó None pese a tener doc en DB".into()
+            ));
+        }
+    };
+
+    let item = to_template_item(updated_doc);
+
+    // Emit WS sólo si el status efectivamente cambió
+    if item.status != prev_status {
+        let payload = build_template_updated_event(&item, Some(prev_status));
+        emit_to_phone_number_agents(&state, &item.phone_number_id, payload).await;
+    }
+
+    Ok(Json(WaTemplateResponse { ok: true, data: item }))
+}
+
+// ---------------------------------------------------------------------------
 // Bundle 6 — process_template_status (webhook handler)
 // ---------------------------------------------------------------------------
 
