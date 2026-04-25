@@ -227,6 +227,12 @@ pub struct WebhookValue {
     /// Meta emite este shape al WABA cuando un template cambia de estado
     /// (review completado, flagged, paused, etc.).
     pub event: Option<String>,
+    /// Meta envía `message_template_id` como **integer** en webhooks de
+    /// template-status (¡aunque en el endpoint REST de templates lo devuelve
+    /// como string!). Aceptamos ambos formatos y normalizamos a string —
+    /// internamente comparamos contra `WaTemplate.meta_template_id` que es
+    /// String.
+    #[serde(default, deserialize_with = "deserialize_id_as_string")]
     pub message_template_id: Option<String>,
     pub message_template_name: Option<String>,
     pub message_template_language: Option<String>,
@@ -1098,6 +1104,24 @@ where
     D: serde::Deserializer<'de>,
 {
     T::deserialize(deserializer).map(Some)
+}
+
+/// Helper de serde: acepta tanto string como integer y normaliza a `Option<String>`.
+/// Existe porque Meta envía algunos IDs (como `message_template_id` en webhooks
+/// de status update) como **integer**, mientras que en otros endpoints los
+/// devuelve como string. Sin esto, la deserialización del webhook entero falla
+/// y dropeamos eventos críticos como APPROVED/REJECTED.
+fn deserialize_id_as_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    Ok(opt.and_then(|v| match v {
+        serde_json::Value::String(s) => Some(s),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Null => None,
+        _ => None,
+    }))
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
