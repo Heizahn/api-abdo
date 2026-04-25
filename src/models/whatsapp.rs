@@ -1229,6 +1229,40 @@ pub struct WaTemplateItem {
     pub updated_at: String,
 }
 
+/// Header del template en forma flat (más amigable que la estructura
+/// `components` de Meta). El back lo transforma a un componente Meta antes
+/// de persistir/enviar.
+#[derive(Debug, Deserialize, Clone, ToSchema)]
+pub struct WaTemplateHeaderInput {
+    /// `TEXT` | `IMAGE` | `VIDEO` | `DOCUMENT`. Si `TEXT`, mandar `text`.
+    /// Si IMAGE/VIDEO/DOCUMENT, mandar `example.header_handle: ["<media_id>"]`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Sólo cuando `kind == "TEXT"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Para media: `{ "header_handle": ["<media_id_nuestro>"] }`.
+    /// Para TEXT con placeholder: `{ "header_text": ["<sample>"] }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example: Option<serde_json::Value>,
+}
+
+/// Botón en forma flat. El back lo agrupa en un componente `BUTTONS`.
+#[derive(Debug, Deserialize, Clone, ToSchema)]
+pub struct WaTemplateButtonInput {
+    /// `QUICK_REPLY` | `URL` | `PHONE_NUMBER`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phone_number: Option<String>,
+    /// Para URL parametrizado (con `{{1}}` en el `url`): ejemplos.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example: Option<Vec<String>>,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateWaTemplateRequest {
     pub phone_number_id: String,
@@ -1239,12 +1273,31 @@ pub struct CreateWaTemplateRequest {
     pub is_system: bool,
     pub category: WaTemplateCategory,
     pub language: String,
-    pub components: Vec<serde_json::Value>,
+    /// Header opcional. Si se omite, el template no tiene header.
+    #[serde(default)]
+    pub header: Option<WaTemplateHeaderInput>,
+    /// Body — required. Texto principal del template, soporta placeholders `{{N}}`.
+    pub body: String,
+    /// Ejemplos para los placeholders del body. Orden importa: `body_samples[0]`
+    /// es el ejemplo de `{{1}}`. Meta los pide para revisar la plantilla.
+    #[serde(default)]
+    pub body_samples: Option<Vec<String>>,
+    /// Footer opcional, ≤ 60 chars.
+    #[serde(default)]
+    pub footer: Option<String>,
+    /// Botones — máx 3 QUICK_REPLY o 1 URL o 1 PHONE_NUMBER. NO mezclar tipos.
+    #[serde(default)]
+    pub buttons: Option<Vec<WaTemplateButtonInput>>,
     /// Si `false` (default), el doc queda en DRAFT sin tocar Meta.
     #[serde(default)]
     pub submit_to_meta: bool,
 }
 
+/// PATCH semantics: si CUALQUIERA de los fields de "components"
+/// (`header`, `body`, `body_samples`, `footer`, `buttons`) es `Some`, el back
+/// reconstruye el array de components completo desde estos fields. En ese caso
+/// `body` es obligatorio (BODY siempre requerido en Meta). Si todos son `None`,
+/// se preservan los components actuales del doc.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateWaTemplateRequest {
     /// Sólo aplicable en DRAFT/REJECTED — regenera el `name` Meta.
@@ -1252,7 +1305,16 @@ pub struct UpdateWaTemplateRequest {
     /// Sólo SUPERADMIN puede flippearlo.
     pub is_system: Option<bool>,
     pub category: Option<WaTemplateCategory>,
-    pub components: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    pub header: Option<WaTemplateHeaderInput>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub body_samples: Option<Vec<String>>,
+    #[serde(default)]
+    pub footer: Option<String>,
+    #[serde(default)]
+    pub buttons: Option<Vec<WaTemplateButtonInput>>,
     /// Pasar de `false` a `true` dispara el envío retroactivo a Meta
     /// (transición DRAFT → PENDING).
     pub submit_to_meta: Option<bool>,

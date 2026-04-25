@@ -145,7 +145,8 @@ Crea una plantilla. Si `submit_to_meta: true`, sincroniza con Meta antes de pers
 
 **Auth:** `user_jwt_auth_middleware` + `nRole == 0`.
 
-**Request body:**
+**Request body** (forma flat — el back transforma a `components: []` antes de hablar con Meta):
+
 ```json
 {
   "phone_number_id": "1234567890",
@@ -153,20 +154,44 @@ Crea una plantilla. Si `submit_to_meta: true`, sincroniza con Meta antes de pers
   "is_system": true,
   "category": "UTILITY",
   "language": "es",
-  "components": [
-    { "type": "HEADER", "format": "TEXT", "text": "Recordatorio" },
-    { "type": "BODY", "text": "Hola {{1}}, su pago de {{2}} vence el {{3}}." },
-    { "type": "FOOTER", "text": "Equipo Abdo" },
-    {
-      "type": "BUTTONS",
-      "buttons": [
-        { "type": "QUICK_REPLY", "text": "Pagar ahora" },
-        { "type": "QUICK_REPLY", "text": "Hablar con un agente" }
-      ]
-    }
+  "header": {
+    "type": "TEXT",
+    "text": "Recordatorio"
+  },
+  "body": "Hola {{1}}, su pago de {{2}} vence el {{3}}.",
+  "body_samples": ["Juan", "25 USD", "30 de abril"],
+  "footer": "Equipo Abdo",
+  "buttons": [
+    { "type": "QUICK_REPLY", "text": "Pagar ahora" },
+    { "type": "QUICK_REPLY", "text": "Hablar con un agente" }
   ],
   "submit_to_meta": true
 }
+```
+
+**Variantes de `header`:**
+
+```json
+// Header de texto
+"header": { "type": "TEXT", "text": "Hola {{1}}" }
+
+// Header con imagen (requiere upload previo a /header-media — ver §14)
+"header": {
+  "type": "IMAGE",
+  "example": { "header_handle": ["<media_id>"] }
+}
+
+// Sin header
+"header": null   // o simplemente omitirlo
+```
+
+**Variantes de `buttons[]`:**
+
+```json
+{ "type": "QUICK_REPLY", "text": "Hola" }
+{ "type": "URL", "text": "Ver", "url": "https://app.abdo77.com.ve" }
+{ "type": "URL", "text": "Cliente {{1}}", "url": "https://app.abdo77.com.ve/c/{{1}}", "example": ["123"] }
+{ "type": "PHONE_NUMBER", "text": "Llamar", "phone_number": "+584142000000" }
 ```
 
 **Lógica del back:**

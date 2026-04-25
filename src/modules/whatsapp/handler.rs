@@ -3907,6 +3907,79 @@ fn generate_template_name(name_input: &str, is_system: bool) -> String {
 }
 
 /// Valida los componentes del template. Devuelve el `body_placeholders` count.
+/// Construye el array `components` que espera Meta a partir de los campos
+/// flat del request del front (`header`, `body`, `body_samples`, `footer`,
+/// `buttons`). Mapea 1:1 a la estructura oficial:
+///
+/// - `header` → `{ type: "HEADER", format, text?, example? }`
+/// - `body`   → `{ type: "BODY", text, example?: { body_text: [[…samples]] } }`
+/// - `footer` → `{ type: "FOOTER", text }` (omite si vacío)
+/// - `buttons`→ `{ type: "BUTTONS", buttons: […] }` (omite si vacío)
+fn flat_to_components(
+    header: Option<&WaTemplateHeaderInput>,
+    body: &str,
+    body_samples: Option<&Vec<String>>,
+    footer: Option<&str>,
+    buttons: Option<&Vec<WaTemplateButtonInput>>,
+) -> Vec<serde_json::Value> {
+    let mut comps: Vec<serde_json::Value> = Vec::new();
+
+    if let Some(h) = header {
+        let mut comp = serde_json::json!({
+            "type": "HEADER",
+            "format": h.kind.to_uppercase(),
+        });
+        if let Some(t) = &h.text {
+            comp["text"] = serde_json::json!(t);
+        }
+        if let Some(ex) = &h.example {
+            comp["example"] = ex.clone();
+        }
+        comps.push(comp);
+    }
+
+    let mut body_comp = serde_json::json!({ "type": "BODY", "text": body });
+    if let Some(samples) = body_samples {
+        if !samples.is_empty() {
+            // Meta espera body_text como array de arrays (un set de ejemplos
+            // por cada juego de placeholders). Mandamos uno solo.
+            body_comp["example"] = serde_json::json!({ "body_text": [samples] });
+        }
+    }
+    comps.push(body_comp);
+
+    if let Some(f) = footer {
+        if !f.trim().is_empty() {
+            comps.push(serde_json::json!({ "type": "FOOTER", "text": f }));
+        }
+    }
+
+    if let Some(btns) = buttons {
+        if !btns.is_empty() {
+            let mut button_arr: Vec<serde_json::Value> = Vec::new();
+            for b in btns {
+                let mut bobj = serde_json::json!({
+                    "type": b.kind.to_uppercase(),
+                    "text": b.text,
+                });
+                if let Some(u) = &b.url {
+                    bobj["url"] = serde_json::json!(u);
+                }
+                if let Some(p) = &b.phone_number {
+                    bobj["phone_number"] = serde_json::json!(p);
+                }
+                if let Some(ex) = &b.example {
+                    bobj["example"] = serde_json::json!(ex);
+                }
+                button_arr.push(bobj);
+            }
+            comps.push(serde_json::json!({ "type": "BUTTONS", "buttons": button_arr }));
+        }
+    }
+
+    comps
+}
+
 fn validate_components(comps: &[serde_json::Value]) -> Result<u32, ApiError> {
     let has_body = comps.iter().any(|c| {
         c.get("type").and_then(|v| v.as_str())
@@ -4170,8 +4243,15 @@ pub async fn create_template_handler(
         }
     }
 
-    // 5. Validar componentes
-    let body_placeholders = validate_components(&body.components)?;
+    // 5. Construir components desde los flat fields y validar
+    let components = flat_to_components(
+        body.header.as_ref(),
+        &body.body,
+        body.body_samples.as_ref(),
+        body.footer.as_deref(),
+        body.buttons.as_ref(),
+    );
+    let body_placeholders = validate_components(&components)?;
 
     // 7. Resolver created_by_name (ya tenemos creator del paso de auth)
     let created_by_name = creator.name.clone();
@@ -4215,9 +4295,9 @@ pub async fn create_template_handler(
             WaTemplateCategory::Authentication => "AUTHENTICATION",
         };
         // Clonar components y swapear header media_id → handle Meta fresh.
-        // El original de body.components se mantiene intacto para la DB, así
-        // que el handle Meta (single-use, corto) nunca se persiste.
-        let mut components_for_meta = body.components.clone();
+        // El original (sin swap) se mantiene para persistir en DB, así que el
+        // handle Meta (single-use, corto) nunca se guarda.
+        let mut components_for_meta = components.clone();
         swap_header_handles_in_components(&state, &mut components_for_meta, &token).await?;
         let components_val = serde_json::Value::Array(components_for_meta);
 
@@ -4247,7 +4327,7 @@ pub async fn create_template_handler(
         name_input: body.name_input.clone(),
         language: body.language.clone(),
         category: body.category,
-        components: body.components,
+        components,
         body_placeholders,
         status,
         rejection_reason: None,
@@ -4490,6 +4570,34 @@ pub async fn update_template_handler(
 
     let prev_status = doc.status;
 
+    // 2. Construir new_components_opt desde los flat fields (header/body/footer/...).
+    //    Si CUALQUIERA de esos fields viene en el payload, reconstruimos el
+    //    array completo. En ese caso `body` es obligatorio (BODY siempre va en
+    //    components según Meta).
+    let any_flat_components = body.header.is_some()
+        || body.body.is_some()
+        || body.body_samples.is_some()
+        || body.footer.is_some()
+        || body.buttons.is_some();
+
+    let new_components_opt: Option<Vec<serde_json::Value>> = if any_flat_components {
+        let body_text = body.body.as_deref().ok_or_else(|| ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            "body_required",
+            "body",
+            "Para editar componentes (header/footer/buttons) debes incluir también el body",
+        ))?;
+        Some(flat_to_components(
+            body.header.as_ref(),
+            body_text,
+            body.body_samples.as_ref(),
+            body.footer.as_deref(),
+            body.buttons.as_ref(),
+        ))
+    } else {
+        None
+    };
+
     // 3. Validar edit policy según status
     match prev_status {
         WaTemplateStatus::Pending | WaTemplateStatus::Paused | WaTemplateStatus::Disabled => {
@@ -4511,8 +4619,8 @@ pub async fn update_template_handler(
                     "Solo el cuerpo es editable en plantillas aprobadas",
                 ));
             }
-            // Si hay components, validar que son solo BODY
-            if let Some(ref new_comps) = body.components {
+            // Si hay components nuevos, validar que son solo BODY
+            if let Some(ref new_comps) = new_components_opt {
                 let has_non_body = new_comps.iter().any(|c| {
                     c.get("type").and_then(|v| v.as_str())
                         .map(|t| !t.eq_ignore_ascii_case("BODY"))
@@ -4636,7 +4744,7 @@ pub async fn update_template_handler(
 
     // 6. Si cambió BODY de un Approved: llamar update_template_body_meta
     if prev_status == WaTemplateStatus::Approved {
-        if let Some(ref new_comps) = body.components {
+        if let Some(ref new_comps) = new_components_opt {
             let settings = state.db
                 .find_wa_settings_by_phone_number_id(&doc.phone_number_id)
                 .await
@@ -4672,7 +4780,7 @@ pub async fn update_template_handler(
     }
 
     // Actualizar components y recomputar body_placeholders
-    if let Some(ref new_comps) = body.components {
+    if let Some(ref new_comps) = new_components_opt {
         let bp = validate_components(new_comps)?;
         patch.components = Some(new_comps.clone());
         patch.body_placeholders = Some(bp);

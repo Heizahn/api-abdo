@@ -40,6 +40,7 @@ use crate::models::whatsapp::{
     TransferConversationRequest, TransferableAgentItem, TransferableAgentsResponse,
     HeaderMediaUploadData, HeaderMediaUploadResponse,
     UpdateQuickReplyRequest, UpdateResponse, UpdateSettingsRequest, UpdateWaTemplateRequest,
+    WaTemplateHeaderInput, WaTemplateButtonInput,
     UrlPreview, WaPurposeConfig, WaPurposes, WaPurposesPatch, WaPurposeUsage,
     WaTemplateCategory, WaTemplateItem, WaTemplateResponse, WaTemplatesListResponse,
     WaTemplateStatus,
@@ -204,6 +205,7 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
             QuickRepliesListResponse, QuickReplyResponse,
             // WhatsApp — Templates CRUD
             WaTemplateItem, WaTemplateCategory, WaTemplateStatus,
+            WaTemplateHeaderInput, WaTemplateButtonInput,
             CreateWaTemplateRequest, UpdateWaTemplateRequest,
             WaTemplateResponse, WaTemplatesListResponse,
             DeleteWaTemplateResponse, DeleteWaTemplateData,
