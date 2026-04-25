@@ -701,8 +701,7 @@ impl WhatsAppService {
         });
 
         let resp = send_with_retry("create_template_meta", || {
-            self.client
-                .post(&url)
+            self.meta_request(reqwest::Method::POST, &url)
                 .bearer_auth(&self.access_token)
                 .json(&payload)
         }).await
@@ -755,8 +754,7 @@ impl WhatsAppService {
         let payload = json!({ "components": new_components });
 
         let resp = send_with_retry("update_template_body_meta", || {
-            self.client
-                .post(&url)
+            self.meta_request(reqwest::Method::POST, &url)
                 .bearer_auth(&self.access_token)
                 .json(&payload)
         }).await
@@ -850,8 +848,7 @@ impl WhatsAppService {
         // Parámetros en query string — el body debe quedar vacío (spec Meta).
         let file_length = bytes.len().to_string();
         let resp1 = send_with_retry("upload_to_meta_resumable step1", || {
-            self.client
-                .post(&session_url)
+            self.meta_request(reqwest::Method::POST, &session_url)
                 .query(&[
                     ("file_length", file_length.as_str()),
                     ("file_type", mime),
@@ -890,8 +887,7 @@ impl WhatsAppService {
         // Meta exige "Authorization: OAuth <token>" en este endpoint, NO "Bearer".
         // Es una excepción documentada en las Graph API docs para Resumable Upload.
         let resp2 = self
-            .client
-            .post(&upload_url)
+            .meta_request(reqwest::Method::POST, &upload_url)
             .header(reqwest::header::AUTHORIZATION, format!("OAuth {}", self.access_token))
             .header("file_offset", "0")
             .header(reqwest::header::CONTENT_TYPE, mime)
@@ -945,8 +941,7 @@ impl WhatsAppService {
         // ante errores de transporte (timeout/connect), no errores de aplicación,
         // así que es seguro usarlo aquí.
         let resp = send_with_retry("delete_template_meta", || {
-            self.client
-                .delete(&url)
+            self.meta_request(reqwest::Method::DELETE, &url)
                 .bearer_auth(&self.access_token)
                 .query(&[("hsm_id", hsm_id), ("name", name)])
         }).await
