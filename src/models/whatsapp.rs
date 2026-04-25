@@ -63,6 +63,13 @@ pub struct WaConversation {
     /// conversación nunca recibió un inbound (raro — se abre con uno).
     #[serde(default)]
     pub last_inbound_at: Option<DateTime>,
+    /// Cooldown impuesto cuando Meta rechaza un envío con error
+    /// `131049 — engagement throttle`. Mientras `now < meta_throttle_until`,
+    /// el backend bloquea cualquier envío (texto o template) hacia esta
+    /// conversación devolviendo `template_throttled_by_meta`. Se limpia
+    /// automáticamente cuando llega un inbound (el cliente respondió).
+    #[serde(default)]
+    pub meta_throttle_until: Option<DateTime>,
 }
 
 /// Registro "conversación abierta por agente X en fecha Y" (colección `WaConversationOpens`).
@@ -566,6 +573,15 @@ pub struct ConversationItem {
     /// ISO-8601 de cuándo expira la ventana (`last_inbound_at + 24h`). `null`
     /// si no hay inbound previo. Ideal para countdown de UI.
     pub freeform_expires_at: Option<String>,
+    /// `true` si Meta está rate-limitando esta conversación con error 131049
+    /// (engagement throttle): demasiados templates al mismo destinatario sin
+    /// respuesta. Mientras sea `true` el backend rechaza cualquier envío con
+    /// el error `template_throttled_by_meta` (HTTP 409). Se libera al recibir
+    /// un inbound del cliente o al expirar `meta_throttle_until`.
+    pub meta_throttled: bool,
+    /// ISO-8601 hasta cuándo dura el cooldown de Meta (`131049`). `null` si la
+    /// conversación no está throttle-eada. Útil para el countdown de UI.
+    pub meta_throttle_until: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema)]

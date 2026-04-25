@@ -185,10 +185,30 @@ impl WhatsAppRepository for MongoDB {
         id: &ObjectId,
         when: DateTime,
     ) -> Result<(), String> {
+        // El inbound libera cualquier engagement throttle (131049) activo:
+        // el cliente acaba de responder, así que Meta deja de rate-limitar.
         self.wa_conversations()
             .update_one(
                 doc! { "_id": id },
-                doc! { "$set": { "last_inbound_at": when } },
+                doc! {
+                    "$set": { "last_inbound_at": when },
+                    "$unset": { "meta_throttle_until": "" },
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn set_meta_throttle_until(
+        &self,
+        id: &ObjectId,
+        until: DateTime,
+    ) -> Result<(), String> {
+        self.wa_conversations()
+            .update_one(
+                doc! { "_id": id },
+                doc! { "$set": { "meta_throttle_until": until } },
             )
             .await
             .map_err(|e| e.to_string())?;

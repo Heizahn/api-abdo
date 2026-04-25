@@ -39,6 +39,13 @@ use super::ws::{
     build_template_created_event, build_template_updated_event, build_template_deleted_event,
 };
 
+/// Cooldown que aplica el back cuando Meta rebota con error 131049
+/// (engagement throttle). Mientras `now < meta_throttle_until` toda la
+/// conversación queda bloqueada para envíos. Valor empírico — 6h es
+/// suficiente para cubrir la ventana típica del rate limit de Meta sin
+/// quedarse pegado en perpetuidad si el inbound del cliente nunca llega.
+const META_THROTTLE_COOLDOWN_MS: i64 = 6 * 60 * 60 * 1000;
+
 // ============================================
 // WEBHOOK (público)
 // ============================================
@@ -204,6 +211,54 @@ pub async fn receive_webhook(
                                 s.status, updated.wa_message_id, updated.conversation_id.to_hex()
                             );
                             broadcast_all(&state.ws_registry, &event).await;
+
+                            // 131049 — engagement throttle de Meta. Setea cooldown
+                            // en la conversación para que el siguiente envío sea
+                            // bloqueado en el back y el front pueda mostrarlo.
+                            // El cooldown se libera al recibir un inbound (ver
+                            // `update_last_inbound_at`) o al expirar `until`.
+                            let has_131049 = s.errors.as_ref().is_some_and(|errs| {
+                                errs.iter().any(|e| e.code == Some(131049))
+                            });
+                            if s.status == "failed" && has_131049 {
+                                let until = DateTime::from_millis(
+                                    DateTime::now().timestamp_millis() + META_THROTTLE_COOLDOWN_MS,
+                                );
+                                if let Err(e) = state.db
+                                    .set_meta_throttle_until(&updated.conversation_id, until)
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "[webhook] set_meta_throttle_until error (conv={}): {}",
+                                        updated.conversation_id.to_hex(), e
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "[webhook] meta_throttle_until seteado por 131049 (conv={}, until={})",
+                                        updated.conversation_id.to_hex(), iso8601(until)
+                                    );
+                                    let conv_now = state.db
+                                        .find_conversation_by_id(&updated.conversation_id)
+                                        .await
+                                        .ok()
+                                        .flatten();
+                                    let (can_send_freeform, freeform_expires_at) =
+                                        compute_freeform_state(conv_now.as_ref().and_then(|c| c.last_inbound_at));
+                                    let last_inbound_iso = conv_now
+                                        .as_ref()
+                                        .and_then(|c| c.last_inbound_at)
+                                        .map(iso8601);
+                                    let estado_ev = WsServerEvent::ConversacionEstado {
+                                        conversation_id: updated.conversation_id.to_hex(),
+                                        last_inbound_at: last_inbound_iso,
+                                        can_send_freeform,
+                                        freeform_expires_at,
+                                        meta_throttled: true,
+                                        meta_throttle_until: Some(iso8601(until)),
+                                    };
+                                    broadcast_all(&state.ws_registry, &estado_ev).await;
+                                }
+                            }
                         }
                         Ok(None) => {
                             tracing::debug!(
@@ -512,6 +567,8 @@ pub async fn receive_webhook(
                     // Ventana de 24h: el inbound reabre la ventana. Emitimos el
                     // evento siempre para que los countdowns del front se
                     // re-sincronicen con el nuevo `freeform_expires_at`.
+                    // El inbound también libera cualquier engagement throttle
+                    // (131049) activo (lo limpia `update_last_inbound_at`).
                     let (can_send_freeform, freeform_expires_at) =
                         compute_freeform_state(Some(msg_ts));
                     let estado_ev = WsServerEvent::ConversacionEstado {
@@ -519,6 +576,8 @@ pub async fn receive_webhook(
                         last_inbound_at: Some(iso8601(msg_ts)),
                         can_send_freeform,
                         freeform_expires_at,
+                        meta_throttled: false,
+                        meta_throttle_until: None,
                     };
                     broadcast_all(&state.ws_registry, &estado_ev).await;
 
@@ -1109,6 +1168,27 @@ fn resolve_send_mode(
     payload: &SendMessageRequest,
     conv: &WaConversation,
 ) -> Result<SendMode, ApiError> {
+    // Gate de engagement throttle (Meta error 131049): si ya nos rebotó un
+    // envío reciente y el cooldown sigue activo, bloqueamos cualquier modo
+    // (texto y template). El front debe esperar a que el cliente responda o
+    // a que expire `meta_throttle_until`.
+    if let Some(until) = conv.meta_throttle_until {
+        let now_ms = DateTime::now().timestamp_millis();
+        if until.timestamp_millis() > now_ms {
+            return Err(ApiError::Domain {
+                status: StatusCode::CONFLICT,
+                code: "template_throttled_by_meta".into(),
+                field: None,
+                message: "Meta bloqueó los envíos a este contacto temporalmente \
+                    (recibió demasiados mensajes sin responder). Espera a que \
+                    responda o vuelve a intentarlo más tarde.".into(),
+                details: Some(serde_json::json!({
+                    "meta_throttle_until": iso8601(until),
+                })),
+            });
+        }
+    }
+
     // Activamos modo template si viene `type="template"` o si `template` está
     // presente. Ambos caminos requieren el objeto `template`.
     let template_mode = payload.msg_type.as_deref().map(|t| t.eq_ignore_ascii_case("template"))
@@ -2066,6 +2146,26 @@ pub async fn initiate_conversation_handler(
         .map_err(ApiError::DatabaseError)?;
     let conv_id = conv.id
         .ok_or_else(|| ApiError::Internal("conversación sin _id tras upsert".into()))?;
+
+    // Engagement throttle (Meta error 131049): si la conversación ya está en
+    // cooldown, no llamamos a la Cloud API — Meta rechazaría igual y gastaríamos
+    // request. Mismo error que `resolve_send_mode` para uniformidad en el front.
+    if let Some(until) = conv.meta_throttle_until {
+        let now_ms = DateTime::now().timestamp_millis();
+        if until.timestamp_millis() > now_ms {
+            return Err(ApiError::Domain {
+                status: StatusCode::CONFLICT,
+                code: "template_throttled_by_meta".into(),
+                field: None,
+                message: "Meta bloqueó los envíos a este contacto temporalmente \
+                    (recibió demasiados mensajes sin responder). Espera a que \
+                    responda o vuelve a intentarlo más tarde.".into(),
+                details: Some(serde_json::json!({
+                    "meta_throttle_until": iso8601(until),
+                })),
+            });
+        }
+    }
 
     // Si se creó nueva y matcheó cliente, persistir el link. No reescribimos
     // client_id en conversaciones existentes para no pisar un link manual.
@@ -3525,6 +3625,8 @@ fn conv_to_item(
     last_message_from_user_name: Option<String>,
 ) -> ConversationItem {
     let (can_send_freeform, expires_iso) = compute_freeform_state(c.last_inbound_at);
+    let (meta_throttled, meta_throttle_until_iso) =
+        compute_meta_throttle_state(c.meta_throttle_until);
     // Prioridad: DB (Clients.sName) → WhatsApp profile (c.name) → null
     let customer_name = resolved_name
         .filter(|s| !s.trim().is_empty())
@@ -3552,6 +3654,25 @@ fn conv_to_item(
         last_inbound_at: c.last_inbound_at.map(iso8601),
         can_send_freeform,
         freeform_expires_at: expires_iso,
+        meta_throttled,
+        meta_throttle_until: meta_throttle_until_iso,
+    }
+}
+
+/// Devuelve `(meta_throttled, meta_throttle_until_iso)`. Si el cooldown ya
+/// expiró, devuelve `(false, None)` — un campo seteado en el pasado no debe
+/// confundir al front.
+fn compute_meta_throttle_state(until: Option<DateTime>) -> (bool, Option<String>) {
+    match until {
+        Some(t) => {
+            let now_ms = DateTime::now().timestamp_millis();
+            if t.timestamp_millis() > now_ms {
+                (true, Some(iso8601(t)))
+            } else {
+                (false, None)
+            }
+        }
+        None => (false, None),
     }
 }
 

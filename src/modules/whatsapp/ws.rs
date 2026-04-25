@@ -126,6 +126,11 @@ pub enum WsServerEvent {
         last_inbound_at: Option<String>,
         can_send_freeform: bool,
         freeform_expires_at: Option<String>,
+        /// `true` cuando Meta está rate-limitando con error 131049. El front
+        /// debe deshabilitar el envío y mostrar el aviso correspondiente.
+        meta_throttled: bool,
+        /// ISO-8601 hasta cuándo dura el cooldown. `null` si no aplica.
+        meta_throttle_until: Option<String>,
     },
 
     #[serde(rename = "ERROR")]

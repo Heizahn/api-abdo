@@ -330,7 +330,18 @@ pub trait WhatsAppRepository {
     /// Setea `last_inbound_at` en la conversación al timestamp indicado. Se usa
     /// desde el webhook al recibir un mensaje entrante para llevar la ventana
     /// de 24h (freeform) alineada con Meta.
+    ///
+    /// Atómicamente limpia `meta_throttle_until` (un inbound implica que el
+    /// destinatario respondió, por lo que el throttle de engagement se libera).
     async fn update_last_inbound_at(&self, id: &ObjectId, when: mongodb::bson::DateTime) -> Result<(), String>;
+    /// Setea `meta_throttle_until` cuando Meta nos rebota con error 131049
+    /// (engagement throttle). Mientras `now < until`, el backend bloquea
+    /// nuevos envíos a esa conversación.
+    async fn set_meta_throttle_until(
+        &self,
+        id: &ObjectId,
+        until: mongodb::bson::DateTime,
+    ) -> Result<(), String>;
     /// Setea `client_id` (link al cliente ISP) de una conversación. Usado por
     /// `POST /conversations/initiate` al crear una nueva conversación que
     /// matchea por teléfono con un cliente existente.
