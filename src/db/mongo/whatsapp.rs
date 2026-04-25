@@ -5,9 +5,9 @@ use futures::TryStreamExt;
 
 use std::collections::HashMap;
 
-use crate::db::{ConversationTouch, UpdateQuickReplyPatch, WhatsAppRepository};
+use crate::db::{ConversationTouch, UpdateQuickReplyPatch, WhatsAppRepository, WaTemplateListFilter, WaTemplateRepository, WaTemplateUpdatePatch};
 use crate::db::mongo::MongoDB;
-use crate::models::whatsapp::{ConversationStats, UrlPreview, WaConversation, WaConversationOpen, WaMessage, WaPurposesPatch, WaQuickReply, WaSettings};
+use crate::models::whatsapp::{ConversationStats, UrlPreview, WaConversation, WaConversationOpen, WaMessage, WaPurposesPatch, WaQuickReply, WaSettings, WaTemplate, WaTemplateStatus, WaPurposeUsage};
 
 impl MongoDB {
     pub(crate) fn wa_conversations(&self) -> mongodb::Collection<WaConversation> {
@@ -28,6 +28,10 @@ impl MongoDB {
 
     pub(crate) fn wa_quick_replies(&self) -> mongodb::Collection<WaQuickReply> {
         self.db.collection::<WaQuickReply>("WaQuickReplies")
+    }
+
+    pub(crate) fn wa_templates(&self) -> mongodb::Collection<WaTemplate> {
+        self.db.collection::<WaTemplate>("WaTemplates")
     }
 }
 
@@ -1101,4 +1105,348 @@ fn decode_cursor(cursor: &str) -> Option<(DateTime, ObjectId)> {
     let millis: i64 = millis_str.parse().ok()?;
     let oid = ObjectId::parse_str(oid_str).ok()?;
     Some((DateTime::from_millis(millis), oid))
+}
+
+// ============================================
+// WaTemplateRepository — impl
+// ============================================
+
+#[async_trait]
+impl WaTemplateRepository for MongoDB {
+    async fn create_template(&self, template: WaTemplate) -> Result<WaTemplate, String> {
+        let col = self.wa_templates();
+        match col.insert_one(&template).await {
+            Ok(res) => {
+                let inserted_id = res.inserted_id
+                    .as_object_id()
+                    .ok_or_else(|| "inserted_id is not ObjectId".to_string())?;
+                col.find_one(doc! { "_id": inserted_id })
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "template not found after insert".to_string())
+            }
+            Err(e) => {
+                // Detectar violación de índice único (código 11000)
+                if let mongodb::error::ErrorKind::Write(
+                    mongodb::error::WriteFailure::WriteError(ref we)
+                ) = *e.kind {
+                    if we.code == 11000 {
+                        return Err("name_already_exists".into());
+                    }
+                }
+                Err(e.to_string())
+            }
+        }
+    }
+
+    async fn find_template_by_id(&self, id: &ObjectId) -> Result<Option<WaTemplate>, String> {
+        self.wa_templates()
+            .find_one(doc! { "_id": id })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn find_template_by_phone_name_lang(
+        &self,
+        phone_number_id: &str,
+        name: &str,
+        language: &str,
+    ) -> Result<Option<WaTemplate>, String> {
+        self.wa_templates()
+            .find_one(doc! {
+                "phone_number_id": phone_number_id,
+                "name": name,
+                "language": language,
+            })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn find_template_by_meta_id(
+        &self,
+        meta_template_id: &str,
+    ) -> Result<Option<WaTemplate>, String> {
+        self.wa_templates()
+            .find_one(doc! { "meta_template_id": meta_template_id })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn list_templates_filtered(
+        &self,
+        filter: WaTemplateListFilter<'_>,
+    ) -> Result<Vec<WaTemplate>, String> {
+        let mut query = doc! { "phone_number_id": filter.phone_number_id };
+
+        // Status filter (multi)
+        if let Some(statuses) = filter.status {
+            if !statuses.is_empty() {
+                let status_bson: Vec<mongodb::bson::Bson> = statuses
+                    .iter()
+                    .filter_map(|s| mongodb::bson::to_bson(s).ok())
+                    .collect();
+                query.insert("status", doc! { "$in": status_bson });
+            }
+        }
+
+        // Category filter
+        if let Some(cat) = filter.category {
+            let cat_bson = mongodb::bson::to_bson(&cat).map_err(|e| e.to_string())?;
+            query.insert("category", cat_bson);
+        }
+
+        // only_system filter
+        if filter.only_system {
+            query.insert("is_system", true);
+        }
+
+        // Search: substring case-insensitive en display_name OR name
+        // Se usa $and para poder combinar sin colisión con el cursor $or.
+        if let Some(search) = filter.search {
+            if !search.is_empty() {
+                let escaped = regex_escape(search);
+                let search_clause = doc! {
+                    "$or": [
+                        { "display_name": { "$regex": &escaped, "$options": "i" } },
+                        { "name": { "$regex": &escaped, "$options": "i" } },
+                    ]
+                };
+                // Acumular en $and para no colisionar con el cursor $or
+                let mut and_clauses: Vec<mongodb::bson::Document> = query
+                    .remove("$and")
+                    .and_then(|v| v.as_array().cloned())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|b| b.as_document().cloned())
+                    .collect();
+                and_clauses.push(search_clause);
+                query.insert("$and", mongodb::bson::to_bson(&and_clauses).unwrap_or(mongodb::bson::Bson::Array(vec![])));
+            }
+        }
+
+        // Cursor-based pagination (mismo patrón que get_conversations)
+        if let Some(c) = filter.cursor {
+            if let Some((ts, oid)) = decode_cursor(c) {
+                let cursor_clause = doc! {
+                    "$or": [
+                        { "created_at": { "$lt": ts } },
+                        { "created_at": ts, "_id": { "$lt": oid } },
+                    ]
+                };
+                let mut and_clauses: Vec<mongodb::bson::Document> = query
+                    .remove("$and")
+                    .and_then(|v| v.as_array().cloned())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|b| b.as_document().cloned())
+                    .collect();
+                and_clauses.push(cursor_clause);
+                query.insert("$and", mongodb::bson::to_bson(&and_clauses).unwrap_or(mongodb::bson::Bson::Array(vec![])));
+            }
+        }
+
+        // Hard-cap limit a 100
+        let limit = filter.limit.min(100).max(1);
+
+        let opts = FindOptions::builder()
+            .sort(doc! { "created_at": -1, "_id": -1 })
+            .limit(limit)
+            .build();
+
+        self.wa_templates()
+            .find(query)
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn update_template(
+        &self,
+        id: &ObjectId,
+        patch: WaTemplateUpdatePatch,
+    ) -> Result<Option<WaTemplate>, String> {
+        use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+
+        let mut set_doc = doc! { "updated_at": DateTime::now() };
+        let mut unset_doc = Document::new();
+
+        if let Some(v) = patch.name {
+            set_doc.insert("name", v);
+        }
+        if let Some(v) = patch.display_name {
+            set_doc.insert("display_name", v);
+        }
+        if let Some(v) = patch.name_input {
+            set_doc.insert("name_input", v);
+        }
+        if let Some(v) = patch.category {
+            let bson = mongodb::bson::to_bson(&v).map_err(|e| e.to_string())?;
+            set_doc.insert("category", bson);
+        }
+        if let Some(v) = patch.components {
+            let bson = mongodb::bson::to_bson(&v).map_err(|e| e.to_string())?;
+            set_doc.insert("components", bson);
+        }
+        if let Some(v) = patch.body_placeholders {
+            set_doc.insert("body_placeholders", v as i64);
+        }
+        if let Some(v) = patch.status {
+            let bson = mongodb::bson::to_bson(&v).map_err(|e| e.to_string())?;
+            set_doc.insert("status", bson);
+        }
+        if let Some(v) = patch.is_system {
+            set_doc.insert("is_system", v);
+        }
+        if let Some(v) = patch.submit_to_meta {
+            set_doc.insert("submit_to_meta", v);
+        }
+
+        // Campos nullable (tri-state)
+        match patch.rejection_reason {
+            Some(Some(r)) => { set_doc.insert("rejection_reason", r); }
+            Some(None)    => { unset_doc.insert("rejection_reason", ""); }
+            None          => {}
+        }
+        match patch.meta_template_id {
+            Some(Some(m)) => { set_doc.insert("meta_template_id", m); }
+            Some(None)    => { unset_doc.insert("meta_template_id", ""); }
+            None          => {}
+        }
+
+        let mut update = doc! { "$set": set_doc };
+        if !unset_doc.is_empty() {
+            update.insert("$unset", unset_doc);
+        }
+
+        let opts = FindOneAndUpdateOptions::builder()
+            .return_document(ReturnDocument::After)
+            .build();
+
+        self.wa_templates()
+            .find_one_and_update(doc! { "_id": id }, update)
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn update_template_status(
+        &self,
+        meta_template_id: &str,
+        status: WaTemplateStatus,
+        rejection_reason: Option<String>,
+    ) -> Result<Option<(WaTemplate, WaTemplateStatus)>, String> {
+        use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+
+        // 1. Leer el doc actual para capturar el status previo
+        let existing = self.wa_templates()
+            .find_one(doc! { "meta_template_id": meta_template_id })
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let prev = match existing {
+            Some(ref t) => t.status,
+            None => return Ok(None),
+        };
+
+        // 2. Armar el update
+        let status_bson = mongodb::bson::to_bson(&status).map_err(|e| e.to_string())?;
+        let mut set_doc = doc! {
+            "status": status_bson,
+            "updated_at": DateTime::now(),
+        };
+        let mut unset_doc = Document::new();
+
+        match rejection_reason {
+            Some(r) => { set_doc.insert("rejection_reason", r); }
+            None    => { unset_doc.insert("rejection_reason", ""); }
+        }
+
+        let mut update = doc! { "$set": set_doc };
+        if !unset_doc.is_empty() {
+            update.insert("$unset", unset_doc);
+        }
+
+        let opts = FindOneAndUpdateOptions::builder()
+            .return_document(ReturnDocument::After)
+            .build();
+
+        let updated = self.wa_templates()
+            .find_one_and_update(doc! { "meta_template_id": meta_template_id }, update)
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(updated.map(|t| (t, prev)))
+    }
+
+    async fn delete_template(&self, id: &ObjectId) -> Result<bool, String> {
+        let res = self.wa_templates()
+            .delete_one(doc! { "_id": id })
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(res.deleted_count > 0)
+    }
+
+    async fn count_templates_in_purposes(
+        &self,
+        phone_number_id: &str,
+        name: &str,
+    ) -> Result<Vec<WaPurposeUsage>, String> {
+        // Buscar el WaSettings del phone_number_id
+        let settings = self.wa_settings()
+            .find_one(doc! { "phone_number_id": phone_number_id })
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let settings = match settings {
+            Some(s) => s,
+            None => return Ok(vec![]),
+        };
+
+        let mut usages = Vec::new();
+        let purposes = &settings.purposes;
+
+        // Verificar cada propósito configurado
+        if let Some(ref cfg) = purposes.otp {
+            if cfg.template_name == name {
+                usages.push(WaPurposeUsage {
+                    key: "otp".to_string(),
+                    label: "OTP / Códigos de verificación".to_string(),
+                });
+            }
+        }
+        if let Some(ref cfg) = purposes.notifications {
+            if cfg.template_name == name {
+                usages.push(WaPurposeUsage {
+                    key: "notifications".to_string(),
+                    label: "Notificaciones".to_string(),
+                });
+            }
+        }
+        if let Some(ref cfg) = purposes.payment_reminder {
+            if cfg.template_name == name {
+                usages.push(WaPurposeUsage {
+                    key: "payment_reminder".to_string(),
+                    label: "Recordatorios de pago".to_string(),
+                });
+            }
+        }
+
+        Ok(usages)
+    }
+}
+
+/// Escapa caracteres especiales de regex para usar en `$regex` de MongoDB.
+fn regex_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for ch in s.chars() {
+        if matches!(ch, '\\' | '^' | '$' | '.' | '|' | '?' | '*' | '+' | '(' | ')' | '[' | ']' | '{' | '}') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }

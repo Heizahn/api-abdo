@@ -3,6 +3,7 @@ use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, Clien
 use crate::models::whatsapp::{
     ConversationStats, QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyList,
     UrlPreview, WaConversation, WaMessage, WaQuickReply, WaSettings,
+    WaTemplate, WaTemplateCategory, WaTemplateStatus,
 };
 use std::collections::HashMap;
 
@@ -501,6 +502,107 @@ pub trait WhatsAppRepository {
 }
 
 // ============================================
+// 8. WaTemplateRepository: Plantillas WhatsApp
+// ============================================
+
+/// Filtros para `list_templates_filtered`.
+pub struct WaTemplateListFilter<'a> {
+    /// Requerido — filtra por `phone_number_id`.
+    pub phone_number_id: &'a str,
+    /// Filtra por uno o varios estados. `None` trae todos.
+    pub status: Option<&'a [WaTemplateStatus]>,
+    /// Filtra por categoría. `None` trae todas.
+    pub category: Option<WaTemplateCategory>,
+    /// Si `true`, filtra sólo `is_system == true`. Default `false`.
+    pub only_system: bool,
+    /// Substring case-insensitive sobre `display_name` y `name` (OR). `None` sin filtro.
+    pub search: Option<&'a str>,
+    /// Resultados por página. Máx 100 — el impl aplica hard-cap.
+    pub limit: i64,
+    /// Cursor opaco (`<millis>_<hex_id>`, mismo patrón que `get_conversations`).
+    pub cursor: Option<&'a str>,
+}
+
+/// Patch parcial para `update_template`. Sólo se aplican los campos `Some`.
+/// Para los campos nullable (`rejection_reason`, `meta_template_id`) se usa
+/// tri-state: `Some(None)` limpia el campo, `Some(Some(v))` lo setea.
+pub struct WaTemplateUpdatePatch {
+    pub name: Option<String>,
+    pub display_name: Option<String>,
+    pub name_input: Option<String>,
+    pub category: Option<WaTemplateCategory>,
+    pub components: Option<Vec<serde_json::Value>>,
+    pub body_placeholders: Option<u32>,
+    pub status: Option<WaTemplateStatus>,
+    /// Tri-state: `Some(None)` limpia, `Some(Some(s))` setea.
+    pub rejection_reason: Option<Option<String>>,
+    /// Tri-state: `Some(None)` limpia, `Some(Some(s))` setea.
+    pub meta_template_id: Option<Option<String>>,
+    pub is_system: Option<bool>,
+    pub submit_to_meta: Option<bool>,
+}
+
+#[async_trait::async_trait]
+#[allow(dead_code)]
+pub trait WaTemplateRepository {
+    /// Inserta una nueva plantilla. En caso de violación de unicidad
+    /// `(phone_number_id, name, language)` retorna `Err("name_already_exists")`.
+    async fn create_template(&self, doc: WaTemplate) -> Result<WaTemplate, String>;
+
+    /// Busca una plantilla por su `_id`.
+    async fn find_template_by_id(&self, id: &ObjectId) -> Result<Option<WaTemplate>, String>;
+
+    /// Busca por la tripleta única `(phone_number_id, name, language)`.
+    async fn find_template_by_phone_name_lang(
+        &self,
+        phone_number_id: &str,
+        name: &str,
+        language: &str,
+    ) -> Result<Option<WaTemplate>, String>;
+
+    /// Busca por `meta_template_id` (el `id` que expone Meta).
+    async fn find_template_by_meta_id(
+        &self,
+        meta_template_id: &str,
+    ) -> Result<Option<WaTemplate>, String>;
+
+    /// Listado paginado con filtros. Sort: `{ created_at: -1, _id: -1 }`.
+    async fn list_templates_filtered(
+        &self,
+        filter: WaTemplateListFilter<'_>,
+    ) -> Result<Vec<WaTemplate>, String>;
+
+    /// Actualización parcial tri-state. Devuelve el doc actualizado o `None`
+    /// si no existe.
+    async fn update_template(
+        &self,
+        id: &ObjectId,
+        patch: WaTemplateUpdatePatch,
+    ) -> Result<Option<WaTemplate>, String>;
+
+    /// Actualiza `status` y opcionalmente `rejection_reason` por `meta_template_id`.
+    /// Devuelve `(doc_actualizado, status_previo)` — el `prev_status` se usa para
+    /// armar el evento WS `WA_TEMPLATE_UPDATED`. `None` si no se encontró el doc.
+    async fn update_template_status(
+        &self,
+        meta_template_id: &str,
+        status: WaTemplateStatus,
+        rejection_reason: Option<String>,
+    ) -> Result<Option<(WaTemplate, WaTemplateStatus)>, String>;
+
+    /// Hard-delete. Retorna `true` si el doc existía.
+    async fn delete_template(&self, id: &ObjectId) -> Result<bool, String>;
+
+    /// Busca en `WaSettings.purposes` por `phone_number_id` y `template_name == name`,
+    /// devolviendo los propósitos donde está en uso. Usado para bloquear borrados.
+    async fn count_templates_in_purposes(
+        &self,
+        phone_number_id: &str,
+        name: &str,
+    ) -> Result<Vec<crate::models::whatsapp::WaPurposeUsage>, String>;
+}
+
+// ============================================
 // TRAIT MAESTRO
 // ============================================
 pub trait Db:
@@ -511,6 +613,7 @@ pub trait Db:
     + OnuRepository
     + UtilsRepository
     + WhatsAppRepository
+    + WaTemplateRepository
     + Clone
     + Send
     + Sync

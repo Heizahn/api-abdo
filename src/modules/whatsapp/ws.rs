@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     auth::user_jwt::UserJwtService,
+    db::WhatsAppRepository,
     models::whatsapp::{ConversationItem, MessageItem},
     state::{AppState, WsRegistry},
 };
@@ -151,6 +152,44 @@ pub async fn send_to_agent(registry: &WsRegistry, agent_id: &str, event: &WsServ
     let registry = registry.read().await;
     if let Some(sender) = registry.get(agent_id) {
         let _ = sender.send(json);
+    }
+}
+
+/// Envía un payload JSON (string) a un agente específico.
+/// Drop silencioso si el agente no está conectado.
+pub async fn send_to_user(registry: &WsRegistry, user_id: &str, payload: String) {
+    let registry = registry.read().await;
+    if let Some(sender) = registry.get(user_id) {
+        let _ = sender.send(payload);
+    }
+}
+
+/// Resuelve los agentes del `phone_number_id` desde `WaSettings.agents` y emite
+/// el `payload` JSON a cada uno via `WsRegistry::send_to_user`. Drop silencioso
+/// si el agente no está conectado (mismo comportamiento que mensajes).
+///
+/// `payload` ya viene serializado como `String` (JSON con `tipo` + `datos`).
+pub async fn emit_to_phone_number_agents(
+    state: &Arc<AppState>,
+    phone_number_id: &str,
+    payload: String,
+) {
+    // Resolver WaSettings via state.db
+    let settings = match state.db.find_wa_settings_by_phone_number_id(phone_number_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            tracing::warn!("[ws] WaSettings not found for phone_number_id: {}", phone_number_id);
+            return;
+        }
+        Err(e) => {
+            tracing::error!("[ws] error finding WaSettings: {}", e);
+            return;
+        }
+    };
+
+    // Emitir a cada agente en settings.agents
+    for agent_id in &settings.agents {
+        send_to_user(&state.ws_registry, agent_id, payload.clone()).await;
     }
 }
 
@@ -294,6 +333,75 @@ async fn handle_client_message(user_id: &str, user_name: &str, text: &str) {
                 user_id, conversation_id
             );
             // No-op: los eventos van por broadcast y el front filtra.
+        }
+    }
+}
+
+/// `WA_TEMPLATE_CREATED { template: WaTemplateItem }`
+pub fn build_template_created_event(template: &crate::models::whatsapp::WaTemplateItem) -> String {
+    match serde_json::to_string(&serde_json::json!({
+        "tipo": "WA_TEMPLATE_CREATED",
+        "datos": {
+            "template": template
+        }
+    })) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("[ws] serialize template_created error: {}", e);
+            String::new()
+        }
+    }
+}
+
+/// `WA_TEMPLATE_UPDATED { template, prev_status? }` — `prev_status` se omite
+/// (no se serializa) si es `None`.
+pub fn build_template_updated_event(
+    template: &crate::models::whatsapp::WaTemplateItem,
+    prev_status: Option<crate::models::whatsapp::WaTemplateStatus>,
+) -> String {
+    let datos = if let Some(status) = prev_status {
+        serde_json::json!({
+            "template": template,
+            "prev_status": status
+        })
+    } else {
+        serde_json::json!({
+            "template": template
+        })
+    };
+
+    match serde_json::to_string(&serde_json::json!({
+        "tipo": "WA_TEMPLATE_UPDATED",
+        "datos": datos
+    })) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("[ws] serialize template_updated error: {}", e);
+            String::new()
+        }
+    }
+}
+
+/// `WA_TEMPLATE_DELETED { id, name, language, phone_number_id }`
+pub fn build_template_deleted_event(
+    id: &str,
+    name: &str,
+    language: &str,
+    phone_number_id: &str,
+) -> String {
+    match serde_json::to_string(&serde_json::json!({
+        "tipo": "WA_TEMPLATE_DELETED",
+        "datos": {
+            "id": id,
+            "name": name,
+            "language": language,
+            "phone_number_id": phone_number_id
+        }
+    })) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("[ws] serialize template_deleted error: {}", e);
+            String::new()
         }
     }
 }

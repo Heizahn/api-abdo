@@ -79,6 +79,22 @@ pub enum ApiError {
     #[error("Validation error [{code}] on {field}: {message}")]
     ValidationError { code: String, field: String, message: String },
 
+    /// Error de dominio con código estable + status HTTP arbitrario + payload
+    /// estructurado opcional. Pensado para errores que necesitan más contexto que
+    /// `ValidationError` (ej: lista de propósitos que bloquean un delete, error
+    /// upstream de Meta con código y mensaje, rate limit con retry_after).
+    ///
+    /// Se sirve como el `status` indicado con shape:
+    /// `{ ok: false, error: "<code>", code, field?, message, details? }`.
+    #[error("Domain error [{code}]: {message}")]
+    Domain {
+        status: StatusCode,
+        code: String,
+        field: Option<String>,
+        message: String,
+        details: Option<serde_json::Value>,
+    },
+
     #[error("Database error: {0}")]
     DatabaseError(String),
 
@@ -111,6 +127,20 @@ impl IntoResponse for ApiError {
             return (StatusCode::UNPROCESSABLE_ENTITY, body).into_response();
         }
 
+        // Domain lleva status arbitrario + payload estructurado opcional.
+        if let ApiError::Domain { status, code, field, message, details } = self {
+            tracing::error!("API Error: Domain code={} field={:?} message={}", code, field, message);
+            let mut body = serde_json::json!({
+                "ok": false,
+                "error": code,
+                "code": code,
+                "message": message,
+            });
+            if let Some(f) = field { body["field"] = serde_json::Value::String(f); }
+            if let Some(d) = details { body["details"] = d; }
+            return (status, Json(body)).into_response();
+        }
+
         let (status, error_message) = match self {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             ApiError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized"),
@@ -126,6 +156,7 @@ impl IntoResponse for ApiError {
             ApiError::ClosedRequiresTemplate => (StatusCode::CONFLICT, "conversacion_cerrada_requiere_plantilla"),
             ApiError::MissingTemplateParams => (StatusCode::BAD_REQUEST, "missing_template_params"),
             ApiError::ValidationError { .. } => unreachable!(),
+            ApiError::Domain { .. } => unreachable!(),
             ApiError::DatabaseError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "database_error"),
             ApiError::CacheError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "cache_error"),
             ApiError::SmsError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "sms_error"),
@@ -143,6 +174,48 @@ impl IntoResponse for ApiError {
         }));
 
         (status, body).into_response()
+    }
+}
+
+impl ApiError {
+    pub fn domain_simple(status: StatusCode, code: impl Into<String>, message: impl Into<String>) -> Self {
+        ApiError::Domain {
+            status,
+            code: code.into(),
+            field: None,
+            message: message.into(),
+            details: None,
+        }
+    }
+
+    pub fn domain_with_field(
+        status: StatusCode,
+        code: impl Into<String>,
+        field: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        ApiError::Domain {
+            status,
+            code: code.into(),
+            field: Some(field.into()),
+            message: message.into(),
+            details: None,
+        }
+    }
+
+    pub fn domain_with_details(
+        status: StatusCode,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        details: serde_json::Value,
+    ) -> Self {
+        ApiError::Domain {
+            status,
+            code: code.into(),
+            field: None,
+            message: message.into(),
+            details: Some(details),
+        }
     }
 }
 

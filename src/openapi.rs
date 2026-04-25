@@ -28,17 +28,20 @@ use crate::models::users::{
 use crate::models::whatsapp::{
     ConversationDetailResponse, ConversationItem, ConversationMessagesResponse, ConversationStats,
     ConversationStatsResponse, ConversationsListResponse, CreateQuickReplyRequest,
-    CreateSettingsRequest, DuplicateQuickReplyRequest, InitiateConversationRequest,
+    CreateSettingsRequest, CreateWaTemplateRequest, DeleteWaTemplateData, DeleteWaTemplateResponse,
+    DuplicateQuickReplyRequest, InitiateConversationRequest,
     LocationPayload, MarkReadData, MarkReadResponse, MediaLimitsResponse, MediaSendPayload,
     MediaTypeLimit, MediaUploadData, MediaUploadResponse, MessageItem, QuickRepliesListResponse,
     QuickReplyButton,
     QuickReplyCtaUrl, QuickReplyHeader, QuickReplyItem, QuickReplyList, QuickReplyListRow,
     QuickReplyListSection, QuickReplyResponse, ReplyToItem, SendMessageData, SendMessageRequest,
     SendMessageResponse, SendTemplatePayload, SettingsItem, SettingsListResponse, SettingsResponse,
-    TakeConversationResponse, TemplatesListResponse, ToggleActiveRequest,
+    TakeConversationResponse, ToggleActiveRequest,
     TransferConversationRequest, TransferableAgentItem, TransferableAgentsResponse,
-    UpdateQuickReplyRequest, UpdateResponse, UpdateSettingsRequest, UrlPreview, WaPurposeConfig,
-    WaPurposes, WaPurposesPatch, WhatsAppTemplate,
+    UpdateQuickReplyRequest, UpdateResponse, UpdateSettingsRequest, UpdateWaTemplateRequest,
+    UrlPreview, WaPurposeConfig, WaPurposes, WaPurposesPatch, WaPurposeUsage,
+    WaTemplateCategory, WaTemplateItem, WaTemplateResponse, WaTemplatesListResponse,
+    WaTemplateStatus,
 };
 use crate::models::zabbix::{MonthlyTraffic, ZabbixTrafficResponse};
 use crate::modules::calculations::handler::{
@@ -131,6 +134,10 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
         crate::modules::whatsapp::handler::set_quick_reply_active_handler,
         crate::modules::whatsapp::handler::duplicate_quick_reply_handler,
         crate::modules::whatsapp::handler::list_templates_handler,
+        crate::modules::whatsapp::handler::create_template_handler,
+        crate::modules::whatsapp::handler::get_template_handler,
+        crate::modules::whatsapp::handler::update_template_handler,
+        crate::modules::whatsapp::handler::delete_template_handler,
         // Users — CRUD
         crate::modules::users::handler::list_users_handler,
         crate::modules::users::handler::create_user_handler,
@@ -193,7 +200,12 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
             TransferableAgentsResponse,
             SettingsListResponse, SettingsResponse,
             QuickRepliesListResponse, QuickReplyResponse,
-            TemplatesListResponse,
+            // WhatsApp — Templates CRUD
+            WaTemplateItem, WaTemplateCategory, WaTemplateStatus,
+            CreateWaTemplateRequest, UpdateWaTemplateRequest,
+            WaTemplateResponse, WaTemplatesListResponse,
+            DeleteWaTemplateResponse, DeleteWaTemplateData,
+            WaPurposeUsage,
             UpdateResponse,
             // Users — CRUD
             UserItem, UserListResponse, UserResponseEnvelope, OkResponse,
@@ -202,7 +214,6 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
             // WhatsApp — Items
             ConversationItem, MessageItem, SettingsItem,
             TransferableAgentItem, ReplyToItem, UrlPreview, LocationPayload, QuickReplyItem,
-            WhatsAppTemplate,
         )
     ),
     tags(
@@ -217,6 +228,7 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
         (name = "Providers", description = "Listados de agentes (staff) y providers"),
         (name = "Utils", description = "Helpers: ping, versión, BCV, bancos, IP PPPoE, Zabbix, imágenes, política de privacidad"),
         (name = "WhatsApp — Soporte", description = "Chat de soporte vía WhatsApp Business API"),
+        (name = "WhatsApp — Templates", description = "CRUD de plantillas de WhatsApp (WaTemplates). Writes requieren SUPERADMIN; GET list requiere bCanChat."),
         (name = "Users — CRUD", description = "Gestión de usuarios (staff/admin). Requiere rol SUPERADMIN (nRole == 0.0) salvo `/me/password`."),
     )
 )]

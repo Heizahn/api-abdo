@@ -223,6 +223,14 @@ pub struct WebhookValue {
     pub contacts: Option<Vec<WebhookContact>>,
     pub messages: Option<Vec<InboundMessage>>,
     pub statuses: Option<Vec<MessageStatus>>,
+    /// Presente cuando `WebhookChange.field == "message_template_status_update"`.
+    /// Meta emite este shape al WABA cuando un template cambia de estado
+    /// (review completado, flagged, paused, etc.).
+    pub event: Option<String>,
+    pub message_template_id: Option<String>,
+    pub message_template_name: Option<String>,
+    pub message_template_language: Option<String>,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -754,6 +762,11 @@ pub struct WaSettings {
     /// Los docs viejos llegan con `WaPurposes::default()` (todos `None`).
     #[serde(default)]
     pub purposes: WaPurposes,
+    /// Timestamp del último backfill de templates desde Meta. `None` mientras
+    /// no se haya sincronizado nunca; cuando es `Some` y la diferencia con
+    /// `now` es < 24h, el GET de templates lee directo de DB sin tocar Meta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub templates_synced_at: Option<DateTime>,
     pub created_at: DateTime,
     pub updated_at: DateTime,
 }
@@ -1116,26 +1129,168 @@ pub struct QuickReplyResponse {
 // TEMPLATES DE META
 // ============================================
 
-/// Plantilla aprobada por Meta. Se sirve tal cual viene del endpoint de Meta,
-/// filtrando sólo `status: "APPROVED"`.
-#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
-pub struct WhatsAppTemplate {
+// ============================================
+// CRUD DE TEMPLATES (WaTemplates)
+// ============================================
+//
+// Source of truth híbrido: la colección `WaTemplates` guarda metadatos
+// custom (display_name, is_system, created_by, submit_to_meta, etc.); Meta
+// es dueña de `name`, `language`, `components`. El webhook
+// `message_template_status_update` sincroniza `status` y `rejection_reason`.
+//
+// Ver `docs/wa-templates-api-spec.md` para el contrato completo.
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum WaTemplateCategory {
+    Marketing,
+    Utility,
+    Authentication,
+}
+
+/// Estados expuestos públicamente. Meta emite además `IN_REVIEW` y `FLAGGED`
+/// que se mapean internamente a `Pending` y `Rejected` (con
+/// `rejection_reason: "flagged_by_meta_quality"`) antes de persistir.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum WaTemplateStatus {
+    Draft,
+    Pending,
+    Approved,
+    Rejected,
+    Paused,
+    Disabled,
+}
+
+/// Documento Mongo en colección `WaTemplates`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WaTemplate {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    pub phone_number_id: String,
+    /// Nombre Meta (regex `[a-z][a-z0-9_]{0,511}`). Generado por backend a
+    /// partir de `name_input` + flag `is_system`.
     pub name: String,
+    /// Etiqueta legible para UI (= `name_input`).
+    pub display_name: String,
+    /// Texto humano original (auditoría + edits posteriores).
+    pub name_input: String,
     pub language: String,
-    /// "UTILITY" | "MARKETING" | "AUTHENTICATION" | otros (lo que Meta devuelva).
-    pub category: String,
-    /// Siempre "APPROVED" en el response (filtramos los demás).
-    pub status: String,
-    /// Estructura de Meta: array con items `{ type, format?, text?, buttons?, ... }`.
-    /// Se pasa tal cual — el front conoce el shape (ver spec del endpoint).
+    pub category: WaTemplateCategory,
+    /// Header + body + footer + buttons. Mismo shape que Meta espera.
     pub components: Vec<serde_json::Value>,
-    /// Cantidad de placeholders `{{n}}` detectados en el `text` del componente
-    /// `BODY` (N distintos). 0 si no hay BODY o no tiene placeholders.
+    /// Count de `{{N}}` distintos en BODY.text. Lo computa el back en write.
     pub body_placeholders: u32,
+    pub status: WaTemplateStatus,
+    /// Razón Meta cuando `status` ∈ {Rejected, Flagged→Rejected}.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection_reason: Option<String>,
+    /// `id` de Meta (alias `hsm_id`). `None` mientras `status == Draft`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta_template_id: Option<String>,
+    /// `true` si es plantilla del sistema (prefix `sistema_abdo_`).
+    pub is_system: bool,
+    /// Si `false`, queda DRAFT en DB sin tocar Meta. Pasa a `true` cuando
+    /// se envía retroactivamente vía PATCH.
+    pub submit_to_meta: bool,
+    /// UUID del user creador (claims.id). En migración inicial es el sentinel
+    /// `00000000-0000-0000-0000-000000000000`.
+    pub created_by: String,
+    /// Snapshot del nombre del creador al momento de crear (no se actualiza).
+    pub created_by_name: String,
+    pub created_at: DateTime,
+    pub updated_at: DateTime,
+}
+
+/// Shape de response (string IDs + ISO-8601 dates).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WaTemplateItem {
+    pub id: String,
+    pub phone_number_id: String,
+    pub name: String,
+    pub display_name: String,
+    pub name_input: String,
+    pub language: String,
+    pub category: WaTemplateCategory,
+    pub components: Vec<serde_json::Value>,
+    pub body_placeholders: u32,
+    pub status: WaTemplateStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejection_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta_template_id: Option<String>,
+    pub is_system: bool,
+    pub submit_to_meta: bool,
+    pub created_by: String,
+    pub created_by_name: String,
+    /// ISO-8601 (RFC 3339) UTC.
+    pub created_at: String,
+    /// ISO-8601 (RFC 3339) UTC.
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateWaTemplateRequest {
+    pub phone_number_id: String,
+    /// Texto libre humano (max 512 chars). Back lo slugea para el `name` Meta.
+    pub name_input: String,
+    /// Si `true`, back genera `name = sistema_abdo_<slug>_<YYYYMMDD>`. Si
+    /// `false`, `name = slug(name_input)` directo.
+    pub is_system: bool,
+    pub category: WaTemplateCategory,
+    pub language: String,
+    pub components: Vec<serde_json::Value>,
+    /// Si `false` (default), el doc queda en DRAFT sin tocar Meta.
+    #[serde(default)]
+    pub submit_to_meta: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateWaTemplateRequest {
+    /// Sólo aplicable en DRAFT/REJECTED — regenera el `name` Meta.
+    pub name_input: Option<String>,
+    /// Sólo SUPERADMIN puede flippearlo.
+    pub is_system: Option<bool>,
+    pub category: Option<WaTemplateCategory>,
+    pub components: Option<Vec<serde_json::Value>>,
+    /// Pasar de `false` a `true` dispara el envío retroactivo a Meta
+    /// (transición DRAFT → PENDING).
+    pub submit_to_meta: Option<bool>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct TemplatesListResponse {
+pub struct WaTemplateResponse {
     pub ok: bool,
-    pub data: Vec<WhatsAppTemplate>,
+    pub data: WaTemplateItem,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WaTemplatesListResponse {
+    pub ok: bool,
+    pub data: Vec<WaTemplateItem>,
+    /// Cursor opaco. `None` cuando no hay más páginas.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DeleteWaTemplateResponse {
+    pub ok: bool,
+    pub data: DeleteWaTemplateData,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DeleteWaTemplateData {
+    pub id: String,
+}
+
+/// Propósito del sistema en el que está en uso una plantilla.
+/// Devuelto en el error `template_in_use_cannot_delete` para que el front
+/// muestre qué propósitos bloquean el borrado.
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct WaPurposeUsage {
+    /// Clave del propósito ("otp" | "notifications" | "payment_reminder")
+    pub key: String,
+    /// Etiqueta para UI (mismo string user-facing en español)
+    pub label: String,
 }

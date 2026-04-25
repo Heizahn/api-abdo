@@ -195,6 +195,48 @@ print("  ✅ Users.nRole");
 print("");
 
 // ============================================
+// COLECCIÓN: WaTemplates
+// ============================================
+print("📦 Colección: WaTemplates");
+
+// Unicidad por (phone_number_id, name, language) — gate del 409 name_already_exists
+db.WaTemplates.createIndex(
+  { "phone_number_id": 1, "name": 1, "language": 1 },
+  { name: "idx_watemplates_phone_name_lang", unique: true, background: true }
+);
+print("  ✅ WaTemplates.phone_number_id + name + language (unique)");
+
+// Listado por número con filtro por status (caso típico de UI)
+db.WaTemplates.createIndex(
+  { "phone_number_id": 1, "status": 1 },
+  { name: "idx_watemplates_phone_status", background: true }
+);
+print("  ✅ WaTemplates.phone_number_id + status");
+
+// Filtro `only_system` del listado
+db.WaTemplates.createIndex(
+  { "phone_number_id": 1, "is_system": 1 },
+  { name: "idx_watemplates_phone_is_system", background: true }
+);
+print("  ✅ WaTemplates.phone_number_id + is_system");
+
+// Lookup desde el webhook `message_template_status_update` (DRAFT no tiene id, sparse)
+db.WaTemplates.createIndex(
+  { "meta_template_id": 1 },
+  { name: "idx_watemplates_meta_id", unique: true, sparse: true, background: true }
+);
+print("  ✅ WaTemplates.meta_template_id (unique, sparse)");
+
+// Orden por fecha (paginación cursor descendente)
+db.WaTemplates.createIndex(
+  { "phone_number_id": 1, "created_at": -1 },
+  { name: "idx_watemplates_phone_created_desc", background: true }
+);
+print("  ✅ WaTemplates.phone_number_id + created_at desc");
+
+print("");
+
+// ============================================
 // VERIFICAR ÍNDICES CREADOS
 // ============================================
 print("=".repeat(60));
@@ -202,7 +244,7 @@ print("📋 VERIFICACIÓN DE ÍNDICES");
 print("=".repeat(60));
 print("");
 
-const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes"];
+const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes", "WaTemplates"];
 toVerify.forEach(col => {
   print(col + ":");
   db.getCollection(col).getIndexes().forEach(idx => {

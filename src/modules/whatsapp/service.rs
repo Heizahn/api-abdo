@@ -4,6 +4,37 @@ use std::error::Error as StdError;
 
 const WA_API_VERSION: &str = "v25.0";
 
+// ---------------------------------------------------------------------------
+// Tipos para la integración con Meta Templates API
+// ---------------------------------------------------------------------------
+
+/// Error estructurado que Meta devuelve en el cuerpo de un 4xx/5xx.
+/// Cuando el service detecta este shape, lo envuelve en `anyhow::Error`
+/// para que el handler pueda hacer `err.downcast_ref::<MetaApiError>()`
+/// y convertirlo en la respuesta apropiada (p.ej. `meta_rejected`,
+/// `meta_edit_rate_limited`).
+#[derive(Debug, thiserror::Error)]
+#[error("Meta API error [{code}]: {message}")]
+pub struct MetaApiError {
+    pub code: i64,
+    pub message: String,
+    pub error_subcode: Option<i64>,
+    pub error_user_msg: Option<String>,
+}
+
+/// Respuesta de Meta al crear un template. Contiene el `id` interno que Meta
+/// le asigna (equivalente a `hsm_id`) y el `status` inicial — normalmente
+/// `"PENDING"`, pero puede ser `"REJECTED"` si Meta lo rechaza de inmediato.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct MetaTemplateCreateResp {
+    pub id: String,
+    pub status: String,
+    /// Algunos rejects traen `category` como campo adicional en la respuesta.
+    /// Se devuelve crudo para que el handler decida qué hacer con él.
+    pub category: Option<String>,
+}
+
 /// Metadata de un media antes de bajar el binario.
 /// `url` es firmada por Meta (TTL ~5 min) — no cachearla.
 pub struct MediaInfo {
@@ -11,6 +42,24 @@ pub struct MediaInfo {
     pub mime: String,
     pub file_size: Option<u64>,
     pub file_name: Option<String>,
+}
+
+/// Intenta parsear el body de un error 4xx/5xx de Meta como `MetaApiError`.
+/// Si el body tiene la forma `{ "error": { "code", "message", ... } }` retorna
+/// `Err(anyhow::Error::new(MetaApiError { ... }))` para que el handler pueda
+/// hacer downcast. Si el body no tiene ese shape (respuesta inesperada),
+/// retorna un `anyhow::Error` genérico con el texto crudo.
+fn parse_meta_error(ctx: &str, status: reqwest::StatusCode, body: &str) -> anyhow::Error {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(err_obj) = v.get("error") {
+            let code = err_obj["code"].as_i64().unwrap_or(0);
+            let message = err_obj["message"].as_str().unwrap_or("unknown").to_string();
+            let error_subcode = err_obj["error_subcode"].as_i64();
+            let error_user_msg = err_obj["error_user_msg"].as_str().map(|s| s.to_string());
+            return anyhow::Error::new(MetaApiError { code, message, error_subcode, error_user_msg });
+        }
+    }
+    anyhow::anyhow!("{} error [{}]: {}", ctx, status, body)
 }
 
 /// Formatea un `reqwest::Error` con toda la cadena de causas (is_timeout,
@@ -275,33 +324,6 @@ impl WhatsAppService {
         let info = self.download_media_info(media_id).await?;
         let bytes = self.download_media_body(&info.url).await?;
         Ok((bytes, info.mime, info.file_name))
-    }
-
-    /// Lista las plantillas (`message_templates`) de una cuenta WABA. La llamada
-    /// requiere WABA ID (no phone_number_id) y el mismo bearer de Meta Cloud.
-    /// Devuelve el JSON crudo; el filtrado/shaping vive en el handler.
-    pub async fn list_templates(&self, waba_id: &str) -> Result<serde_json::Value> {
-        let url = format!(
-            "https://graph.facebook.com/{}/{}/message_templates?fields=name,language,category,status,components&limit=100",
-            WA_API_VERSION, waba_id
-        );
-
-        let resp = send_with_retry("list_templates", || {
-            self.meta_request(reqwest::Method::GET, &url)
-                .bearer_auth(&self.access_token)
-        }).await
-            .map_err(|e| describe_reqwest_error("list_templates request", e))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("WhatsApp list_templates error [{}]: {}", status, body));
-        }
-
-        let json: serde_json::Value = resp.json().await
-            .map_err(|e| describe_reqwest_error("list_templates response decode", e))?;
-
-        Ok(json)
     }
 
     /// Obtiene el WABA ID (`whatsapp_business_account`) asociado a un phone_number_id.
@@ -639,6 +661,191 @@ impl WhatsAppService {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow::anyhow!("WhatsApp mark_as_read error [{}]: {}", status, body));
+        }
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Template management — Meta Cloud API
+    // -----------------------------------------------------------------------
+
+    /// Crea un template en Meta bajo el WABA `waba_id`. Retorna
+    /// `MetaTemplateCreateResp { id, status, category }` con los valores que
+    /// Meta asigna. `status` suele ser `"PENDING"` (entra a revisión) o, si
+    /// Meta lo rechaza de inmediato, `"REJECTED"`.
+    ///
+    /// `components` debe tener el shape Meta: array JSON con objetos
+    /// `{ type, ... }` (HEADER, BODY, FOOTER, BUTTONS).
+    ///
+    /// En caso de error 4xx de Meta retorna `Err(anyhow::Error::new(MetaApiError { .. }))`
+    /// para que el handler pueda hacer `err.downcast_ref::<MetaApiError>()` y
+    /// mapearlo a `meta_rejected` con `details`.
+    pub async fn create_template_meta(
+        &self,
+        waba_id: &str,
+        name: &str,
+        language: &str,
+        category: &str,
+        components: &serde_json::Value,
+    ) -> Result<MetaTemplateCreateResp> {
+        let url = format!(
+            "https://graph.facebook.com/{}/{}/message_templates",
+            WA_API_VERSION, waba_id
+        );
+        let payload = json!({
+            "name": name,
+            "language": language,
+            "category": category,
+            "components": components,
+        });
+
+        let resp = send_with_retry("create_template_meta", || {
+            self.client
+                .post(&url)
+                .bearer_auth(&self.access_token)
+                .json(&payload)
+        }).await
+            .map_err(|e| describe_reqwest_error("create_template_meta request", e))?;
+
+        let http_status = resp.status();
+        let body = resp.text().await
+            .map_err(|e| describe_reqwest_error("create_template_meta response read", e))?;
+
+        if !http_status.is_success() {
+            return Err(parse_meta_error("create_template_meta", http_status, &body));
+        }
+
+        let json: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| anyhow::anyhow!("create_template_meta response decode: {}", e))?;
+
+        let id = json["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("create_template_meta: Meta response sin `id`"))?
+            .to_string();
+        let status = json["status"]
+            .as_str()
+            .unwrap_or("PENDING")
+            .to_string();
+        let category = json["category"].as_str().map(|s| s.to_string());
+
+        Ok(MetaTemplateCreateResp { id, status, category })
+    }
+
+    /// Edita el/los componentes de un template en Meta usando su `meta_template_id`
+    /// (`hsm_id`). Meta sólo permite modificar el BODY en plantillas `APPROVED`
+    /// (1 edición por día, 10 por mes). Para plantillas en estado `DRAFT` o
+    /// `REJECTED`, pasar todos los componentes actualizados.
+    ///
+    /// `new_components` debe ser un array JSON con los componentes nuevos.
+    /// Meta usa POST para este endpoint (no PATCH ni PUT).
+    ///
+    /// Si Meta responde 429 (rate limit de edición), retorna
+    /// `Err(anyhow::Error::new(MetaApiError { code: 429, .. }))` para que el
+    /// handler lo convierta en `meta_edit_rate_limited`.
+    pub async fn update_template_body_meta(
+        &self,
+        meta_template_id: &str,
+        new_components: &serde_json::Value,
+    ) -> Result<()> {
+        let url = format!(
+            "https://graph.facebook.com/{}/{}",
+            WA_API_VERSION, meta_template_id
+        );
+        let payload = json!({ "components": new_components });
+
+        let resp = send_with_retry("update_template_body_meta", || {
+            self.client
+                .post(&url)
+                .bearer_auth(&self.access_token)
+                .json(&payload)
+        }).await
+            .map_err(|e| describe_reqwest_error("update_template_body_meta request", e))?;
+
+        let http_status = resp.status();
+        let body = resp.text().await
+            .map_err(|e| describe_reqwest_error("update_template_body_meta response read", e))?;
+
+        if http_status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            // Meta también devuelve 429 con un body de error estándar cuando se
+            // supera el límite de 1 edición/día o 10/mes. Mapeamos explícitamente
+            // para que el handler use `meta_edit_rate_limited` en la respuesta.
+            let meta_err = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| {
+                    let e = v.get("error")?;
+                    Some(MetaApiError {
+                        code: 429,
+                        message: e["message"].as_str().unwrap_or("rate limited").to_string(),
+                        error_subcode: e["error_subcode"].as_i64(),
+                        error_user_msg: e["error_user_msg"].as_str().map(|s| s.to_string()),
+                    })
+                })
+                .unwrap_or(MetaApiError {
+                    code: 429,
+                    message: "Meta edit rate limited".to_string(),
+                    error_subcode: None,
+                    error_user_msg: None,
+                });
+            return Err(anyhow::Error::new(meta_err));
+        }
+
+        if !http_status.is_success() {
+            return Err(parse_meta_error("update_template_body_meta", http_status, &body));
+        }
+
+        Ok(())
+    }
+
+    /// Borra UNA traducción de un template en Meta. `hsm_id` es el `id` que
+    /// Meta asignó al template (campo `meta_template_id` en `WaTemplates`).
+    /// Pasar `hsm_id` es obligatorio — sin él Meta borra **todas** las
+    /// traducciones del mismo `name`.
+    ///
+    /// Si Meta responde 404 (template ya no existe del lado de Meta) se
+    /// retorna `Ok(())` con un `tracing::warn!` — garantiza idempotencia.
+    /// Otros errores de Meta retornan `Err(anyhow::Error::new(MetaApiError))`.
+    pub async fn delete_template_meta(
+        &self,
+        waba_id: &str,
+        hsm_id: &str,
+        name: &str,
+    ) -> Result<()> {
+        let url = format!(
+            "https://graph.facebook.com/{}/{}/message_templates",
+            WA_API_VERSION, waba_id
+        );
+
+        // Meta no soporta retry automático en DELETE con los mismos parámetros
+        // sin riesgo de doble borrado, pero `send_with_retry` sólo reintenta
+        // ante errores de transporte (timeout/connect), no errores de aplicación,
+        // así que es seguro usarlo aquí.
+        let resp = send_with_retry("delete_template_meta", || {
+            self.client
+                .delete(&url)
+                .bearer_auth(&self.access_token)
+                .query(&[("hsm_id", hsm_id), ("name", name)])
+        }).await
+            .map_err(|e| describe_reqwest_error("delete_template_meta request", e))?;
+
+        let http_status = resp.status();
+
+        if http_status == reqwest::StatusCode::NOT_FOUND {
+            // El template ya no existe en Meta. Es idempotente: ignoramos y
+            // continuamos para que el caller borre el doc local de todas formas.
+            tracing::warn!(
+                hsm_id = %hsm_id,
+                name = %name,
+                waba_id = %waba_id,
+                "delete_template_meta: Meta devolvió 404 — template ya no existe en Meta, \
+                 procediendo con borrado local"
+            );
+            return Ok(());
+        }
+
+        if !http_status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(parse_meta_error("delete_template_meta", http_status, &body));
         }
 
         Ok(())
