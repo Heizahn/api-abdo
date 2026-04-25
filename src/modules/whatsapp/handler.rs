@@ -867,7 +867,7 @@ pub async fn send_message_handler(
     // Decidir modo: template (siempre permitido) vs texto (sólo dentro de la
     // ventana de 24h). El discriminador `type: "template"` o la presencia del
     // campo `template` activan el modo template.
-    let mode = resolve_send_mode(&payload, &conv)?;
+    let mut mode = resolve_send_mode(&payload, &conv)?;
 
     // Conversación cerrada:
     // - Template → reopen + take atómico (asignar al caller), luego enviar.
@@ -934,6 +934,13 @@ pub async fn send_message_handler(
             let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
             let retry_reply_to = existing.reply_to_wa_message_id.clone();
             let preview_url_flag = payload.preview_url.unwrap_or(false);
+            // Auto-fill del HEADER si la plantilla tiene IMAGE/VIDEO y el front no lo mandó.
+            if let SendMode::Template { tpl } = &mut mode {
+                auto_fill_template_header_media(
+                    &state, &mut tpl.components, &tpl.name, &tpl.language,
+                    &conv.business_phone, &wa,
+                ).await?;
+            }
             let sent = dispatch_send(&mode, &wa, &conv.phone, retry_reply_to.as_deref(), preview_url_flag).await?;
             let new_wa_id = sent.wa_id.clone();
             let preview = sent.preview.clone();
@@ -983,6 +990,13 @@ pub async fn send_message_handler(
     let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
 
     let preview_url_flag = payload.preview_url.unwrap_or(false);
+    // Auto-fill del HEADER si la plantilla tiene IMAGE/VIDEO y el front no lo mandó.
+    if let SendMode::Template { tpl } = &mut mode {
+        auto_fill_template_header_media(
+            &state, &mut tpl.components, &tpl.name, &tpl.language,
+            &conv.business_phone, &wa,
+        ).await?;
+    }
     let sent = dispatch_send(&mode, &wa, &conv.phone, payload.reply_to.as_deref(), preview_url_flag).await?;
 
     let is_text_mode = matches!(mode, SendMode::Text { .. });
@@ -1249,6 +1263,125 @@ struct SentData {
     interactive_payload: Option<serde_json::Value>,
     contacts_payload: Option<serde_json::Value>,
     location: Option<LocationPayload>,
+}
+
+/// Si el front no incluyó componente HEADER en `components` y la plantilla
+/// guardada en nuestra DB tiene header `IMAGE` o `VIDEO`, levanta el binario
+/// del GridFS, lo sube a la Cloud Media API de Meta, y mete el componente
+/// HEADER al inicio del array.
+///
+/// **NO aplica para `DOCUMENT`** — los documentos típicamente cambian por
+/// envío (recibos, facturas, comprobantes) y deben venir explícitos del front.
+/// **NO aplica para `TEXT`** — Meta no exige `parameters` para headers TEXT
+/// sin placeholder. Si tiene placeholder, el front manda el HEADER explícito.
+///
+/// No-ops si: ya hay HEADER en `components`, la plantilla no está en nuestra
+/// DB, no se encuentra el binario en GridFS, o el `header_handle` no es un
+/// ObjectId nuestro (caso de plantilla migrada con handle Meta legacy).
+async fn auto_fill_template_header_media(
+    state: &Arc<AppState>,
+    components: &mut Option<Vec<serde_json::Value>>,
+    template_name: &str,
+    template_language: &str,
+    business_phone: &str,
+    wa: &WhatsAppService,
+) -> Result<(), ApiError> {
+    // ¿Ya tiene HEADER? Passthrough — el front quiso personalizar.
+    let has_header = components.as_deref().unwrap_or(&[]).iter().any(|c| {
+        c.get("type").and_then(|v| v.as_str())
+            .map(|t| t.eq_ignore_ascii_case("HEADER"))
+            .unwrap_or(false)
+    });
+    if has_header {
+        return Ok(());
+    }
+
+    // Resolver phone_number_id desde business_phone
+    let settings = match state.db.find_wa_settings_by_phone(business_phone).await
+        .map_err(ApiError::DatabaseError)?
+    {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    // Buscar plantilla en nuestra DB
+    let doc = match state.db
+        .find_template_by_phone_name_lang(&settings.phone_number_id, template_name, template_language)
+        .await
+        .map_err(ApiError::DatabaseError)?
+    {
+        Some(d) => d,
+        None => return Ok(()),
+    };
+
+    // Buscar componente HEADER en los components guardados
+    let header_comp = match doc.components.iter().find(|c| {
+        c.get("type").and_then(|v| v.as_str())
+            .map(|t| t.eq_ignore_ascii_case("HEADER"))
+            .unwrap_or(false)
+    }) {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+
+    // Sólo IMAGE y VIDEO se auto-rellenan
+    let format = header_comp.get("format").and_then(|v| v.as_str()).unwrap_or("").to_uppercase();
+    let media_kind: &str = match format.as_str() {
+        "IMAGE" => "image",
+        "VIDEO" => "video",
+        _ => return Ok(()),
+    };
+
+    // Extraer ObjectId nuestro de example.header_handle[0]
+    let our_media_id = match header_comp.pointer("/example/header_handle/0").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+    let oid = match ObjectId::parse_str(our_media_id) {
+        Ok(o) => o,
+        Err(_) => return Ok(()),
+    };
+
+    // Leer binario del GridFS
+    let (bytes, mime) = match state.db.read_template_media_bytes(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+    {
+        Some(t) => t,
+        None => return Err(ApiError::Internal(format!(
+            "Template {} tiene header media {} pero el binario no existe en GridFS",
+            template_name, our_media_id
+        ))),
+    };
+
+    // Upload a la Cloud Media API de Meta (≠ Resumable Upload del approval)
+    let meta_media_id = wa.upload_media(bytes, &mime, None)
+        .await
+        .map_err(|e| ApiError::Internal(format!(
+            "auto-fill: falló upload del header media a Meta: {}", e
+        )))?;
+
+    // Construir el componente HEADER. La estructura es:
+    //   { type: "HEADER", parameters: [{ type: "image", image: { id: "..." } }] }
+    // El nombre del campo dinámico (image/video) se setea con un Map manual
+    // porque la macro `json!` no soporta keys variables en runtime.
+    let mut media_obj = serde_json::Map::new();
+    media_obj.insert("id".to_string(), serde_json::Value::String(meta_media_id));
+
+    let mut param = serde_json::Map::new();
+    param.insert("type".to_string(), serde_json::Value::String(media_kind.to_string()));
+    param.insert(media_kind.to_string(), serde_json::Value::Object(media_obj));
+
+    let header_param = serde_json::json!({
+        "type": "HEADER",
+        "parameters": [serde_json::Value::Object(param)]
+    });
+
+    let mut comps = components.take().unwrap_or_default();
+    comps.insert(0, header_param);
+    *components = Some(comps);
+
+    Ok(())
 }
 
 /// Dispatcher único que cubre todos los `SendMode` — usado en el envío nuevo
@@ -1895,9 +2028,11 @@ pub async fn initiate_conversation_handler(
         ));
     }
 
-    let tpl = payload.template;
-    let tpl_name = tpl.name.trim();
-    let tpl_lang = tpl.language.trim();
+    let mut tpl = payload.template;
+    // Owned para que el borrow de `tpl.name`/`tpl.language` se libere antes
+    // del `&mut tpl.components` que necesita `auto_fill_template_header_media`.
+    let tpl_name: String = tpl.name.trim().to_string();
+    let tpl_lang: String = tpl.language.trim().to_string();
     if tpl_name.is_empty() || tpl_lang.is_empty() {
         return Err(ApiError::MissingTemplateParams);
     }
@@ -1980,9 +2115,15 @@ pub async fn initiate_conversation_handler(
         token,
     );
 
+    // Auto-fill del HEADER si la plantilla tiene IMAGE/VIDEO y el front no lo mandó.
+    auto_fill_template_header_media(
+        &state, &mut tpl.components, &tpl_name, &tpl_lang,
+        &settings.phone, &wa,
+    ).await?;
+
     let components_value = tpl.components.as_ref()
         .map(|v| serde_json::Value::Array(v.clone()));
-    let wa_id = wa.send_template(&to, tpl_name, tpl_lang, components_value.as_ref())
+    let wa_id = wa.send_template(&to, &tpl_name, &tpl_lang, components_value.as_ref())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
