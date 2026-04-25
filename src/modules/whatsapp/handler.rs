@@ -103,6 +103,15 @@ pub async fn receive_webhook(
         }
     }
 
+    // Guardar payload crudo ANTES del parse tipado — así el debug funciona
+    // incluso cuando el shape no matchea nuestros structs (Meta agrega/cambia
+    // campos sin avisar; queremos verlos para poder ajustar).
+    {
+        let raw: serde_json::Value = serde_json::from_slice(&body)
+            .unwrap_or(serde_json::Value::Null);
+        *last_payload_store().lock().await = Some(raw);
+    }
+
     let payload: WebhookPayload = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(e) => {
@@ -110,12 +119,6 @@ pub async fn receive_webhook(
             return StatusCode::OK;
         }
     };
-
-    // Guardar payload crudo para diagnóstico
-    {
-        let raw = serde_json::to_value(&payload).unwrap_or(serde_json::Value::Null);
-        *last_payload_store().lock().await = Some(raw);
-    }
     let entries = match payload.entry {
         Some(e) => e,
         None => return StatusCode::OK,
