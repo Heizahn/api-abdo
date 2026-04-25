@@ -3948,9 +3948,14 @@ async fn resolve_last_message_agent_name_one(
 // HELPERS — QUICK REPLIES
 // ============================================
 
-/// Exige `bCanChat == true` y devuelve el `User` completo (para que el
-/// caller tenga el rol sin re-consultar DB). El `user_jwt_auth_middleware`
-/// solo valida que el token sea de staff; el permiso de chat vive en `Users`.
+/// Exige `bCanChat == true` (o `nRole == 0`, super admin) y devuelve el
+/// `User` completo (para que el caller tenga el rol sin re-consultar DB).
+/// El `user_jwt_auth_middleware` solo valida que el token sea de staff; el
+/// permiso de chat vive en `Users`.
+///
+/// Los super admins (`nRole == 0.0`) bypasean el gate de `bCanChat` —
+/// "super admin = acceso a todo" es regla transversal del sistema, así que
+/// no se les debe negar el módulo de WhatsApp aunque tengan `bCanChat=false`.
 ///
 /// Los call sites que sólo necesitan el gate escriben
 /// `require_can_chat(&state, &claims.id).await?;` y el valor se descarta. Los
@@ -3962,7 +3967,7 @@ async fn require_can_chat(state: &Arc<AppState>, user_id: &str) -> Result<crate:
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::Forbidden)?;
-    if !user.can_chat {
+    if user.role != 0.0 && !user.can_chat {
         return Err(ApiError::Forbidden);
     }
     Ok(user)
