@@ -1,11 +1,17 @@
 use async_trait::async_trait;
 use mongodb::bson::{doc, oid::ObjectId, DateTime, Document};
 use mongodb::options::{FindOptions, UpdateOptions};
+use mongodb::gridfs::GridFsBucket;
 use futures::TryStreamExt;
+use futures::{AsyncReadExt, AsyncWriteExt};
 
 use std::collections::HashMap;
 
-use crate::db::{ConversationTouch, UpdateQuickReplyPatch, WhatsAppRepository, WaTemplateListFilter, WaTemplateRepository, WaTemplateUpdatePatch};
+use crate::db::{
+    ConversationTouch, StoreTemplateMediaInput, UpdateQuickReplyPatch,
+    WaTemplateListFilter, WaTemplateMediaRepository, WaTemplateMediaRef,
+    WaTemplateRepository, WaTemplateUpdatePatch, WhatsAppRepository,
+};
 use crate::db::mongo::MongoDB;
 use crate::models::whatsapp::{ConversationStats, UrlPreview, WaConversation, WaConversationOpen, WaMessage, WaPurposesPatch, WaQuickReply, WaSettings, WaTemplate, WaTemplateStatus, WaPurposeUsage};
 
@@ -32,6 +38,15 @@ impl MongoDB {
 
     pub(crate) fn wa_templates(&self) -> mongodb::Collection<WaTemplate> {
         self.db.collection::<WaTemplate>("WaTemplates")
+    }
+
+    /// Bucket GridFS dedicado a media de headers de templates.
+    /// Colecciones resultantes: `wa_template_media.files` y `wa_template_media.chunks`.
+    pub(crate) fn wa_template_media_bucket(&self) -> GridFsBucket {
+        let opts = mongodb::options::GridFsBucketOptions::builder()
+            .bucket_name("wa_template_media".to_string())
+            .build();
+        self.db.gridfs_bucket(opts)
     }
 }
 
@@ -1449,4 +1464,217 @@ fn regex_escape(s: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+// ============================================
+// WaTemplateMediaRepository — impl (GridFS)
+// ============================================
+
+/// Struct de proyección para leer metadatos de `wa_template_media.files`.
+/// GridFS almacena campos custom en `metadata`.
+#[derive(serde::Deserialize)]
+struct WaTemplateMediaFilesDoc {
+    #[serde(rename = "_id")]
+    id: ObjectId,
+    length: i64,
+    metadata: Option<WaTemplateMediaMetadata>,
+}
+
+#[derive(serde::Deserialize)]
+struct WaTemplateMediaMetadata {
+    #[serde(default)]
+    phone_number_id: String,
+    #[serde(default)]
+    mime_type: String,
+    #[serde(default)]
+    sha256: String,
+}
+
+#[async_trait]
+impl WaTemplateMediaRepository for MongoDB {
+    async fn store_template_media(
+        &self,
+        input: StoreTemplateMediaInput<'_>,
+    ) -> Result<WaTemplateMediaRef, String> {
+        let files_col = self
+            .db
+            .collection::<WaTemplateMediaFilesDoc>("wa_template_media.files");
+
+        // --- Dedup: buscar si ya existe (phone_number_id, sha256) ---
+        let existing = files_col
+            .find_one(doc! {
+                "metadata.phone_number_id": input.phone_number_id,
+                "metadata.sha256": input.sha256,
+            })
+            .await
+            .map_err(|e| format!("store_template_media dedup query: {e}"))?;
+
+        if let Some(doc) = existing {
+            let meta = doc.metadata.unwrap_or_else(|| WaTemplateMediaMetadata {
+                phone_number_id: input.phone_number_id.to_string(),
+                mime_type: input.mime_type.to_string(),
+                sha256: input.sha256.to_string(),
+            });
+            return Ok(WaTemplateMediaRef {
+                id: doc.id,
+                phone_number_id: meta.phone_number_id,
+                mime_type: meta.mime_type,
+                sha256: meta.sha256,
+                file_size: doc.length as u64,
+            });
+        }
+
+        // --- Upload nuevo ---
+        let filename = format!("{}_{}", input.phone_number_id, input.sha256);
+        let meta_doc = doc! {
+            "phone_number_id": input.phone_number_id,
+            "mime_type":        input.mime_type,
+            "sha256":           input.sha256,
+            "format":           input.format,
+            "uploaded_by":      input.uploaded_by,
+            "uploaded_by_name": input.uploaded_by_name,
+            "uploaded_at":      DateTime::now(),
+        };
+        let upload_opts = mongodb::options::GridFsUploadOptions::builder()
+            .metadata(meta_doc)
+            .build();
+
+        let bucket = self.wa_template_media_bucket();
+        let mut stream = bucket
+            .open_upload_stream(filename)
+            .with_options(upload_opts)
+            .await
+            .map_err(|e| format!("store_template_media open_upload_stream: {e}"))?;
+
+        // Capturar el id ANTES de cerrar (generado client-side)
+        let file_id = stream
+            .id()
+            .as_object_id()
+            .ok_or_else(|| "store_template_media: upload stream id is not ObjectId".to_string())?;
+
+        stream
+            .write_all(input.bytes)
+            .await
+            .map_err(|e| format!("store_template_media write_all: {e}"))?;
+
+        stream
+            .close()
+            .await
+            .map_err(|e| {
+                // Race condition: duplicate key en índice único → re-query y devolver existente
+                let msg = e.to_string();
+                if msg.contains("11000") || msg.contains("duplicate key") {
+                    "store_template_media_duplicate_key".to_string()
+                } else {
+                    format!("store_template_media close: {e}")
+                }
+            })?;
+
+        Ok(WaTemplateMediaRef {
+            id: file_id,
+            phone_number_id: input.phone_number_id.to_string(),
+            mime_type: input.mime_type.to_string(),
+            sha256: input.sha256.to_string(),
+            file_size: input.bytes.len() as u64,
+        })
+    }
+
+    async fn find_template_media_by_id(
+        &self,
+        id: &ObjectId,
+    ) -> Result<Option<WaTemplateMediaRef>, String> {
+        let files_col = self
+            .db
+            .collection::<WaTemplateMediaFilesDoc>("wa_template_media.files");
+
+        let doc = files_col
+            .find_one(doc! { "_id": id })
+            .await
+            .map_err(|e| format!("find_template_media_by_id: {e}"))?;
+
+        Ok(doc.map(|d| {
+            let meta = d.metadata.unwrap_or_else(|| WaTemplateMediaMetadata {
+                phone_number_id: String::new(),
+                mime_type: String::new(),
+                sha256: String::new(),
+            });
+            WaTemplateMediaRef {
+                id: d.id,
+                phone_number_id: meta.phone_number_id,
+                mime_type: meta.mime_type,
+                sha256: meta.sha256,
+                file_size: d.length as u64,
+            }
+        }))
+    }
+
+    async fn read_template_media_bytes(
+        &self,
+        id: &ObjectId,
+    ) -> Result<Option<(Vec<u8>, String)>, String> {
+        // 1. Obtener mime_type de .files antes de abrir el stream de descarga
+        let files_col = self
+            .db
+            .collection::<WaTemplateMediaFilesDoc>("wa_template_media.files");
+
+        let file_doc = files_col
+            .find_one(doc! { "_id": id })
+            .await
+            .map_err(|e| format!("read_template_media_bytes files lookup: {e}"))?;
+
+        let file_doc = match file_doc {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        let mime_type = file_doc
+            .metadata
+            .as_ref()
+            .map(|m| m.mime_type.clone())
+            .unwrap_or_default();
+
+        // 2. Abrir download stream y leer todos los bytes
+        let bucket = self.wa_template_media_bucket();
+        let mut stream = bucket
+            .open_download_stream(mongodb::bson::Bson::ObjectId(*id))
+            .await
+            .map_err(|e| {
+                let msg = e.to_string();
+                // FileNotFound → tratar como None
+                if msg.contains("FileNotFound") || msg.contains("file not found") {
+                    "read_template_media_not_found".to_string()
+                } else {
+                    format!("read_template_media_bytes open_download_stream: {e}")
+                }
+            })?;
+
+        let mut bytes = Vec::with_capacity(file_doc.length as usize);
+        stream
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|e| format!("read_template_media_bytes read_to_end: {e}"))?;
+
+        Ok(Some((bytes, mime_type)))
+    }
+
+    async fn delete_template_media(
+        &self,
+        id: &ObjectId,
+    ) -> Result<bool, String> {
+        let bucket = self.wa_template_media_bucket();
+        match bucket
+            .delete(mongodb::bson::Bson::ObjectId(*id))
+            .await
+        {
+            Ok(()) => Ok(true),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("FileNotFound") || msg.contains("file not found") {
+                    Ok(false)
+                } else {
+                    Err(format!("delete_template_media: {e}"))
+                }
+            }
+        }
+    }
 }

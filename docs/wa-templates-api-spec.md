@@ -593,4 +593,176 @@ Estos puntos se resuelven en review del spec (antes o durante implementación):
 
 ---
 
+---
+
+## 14. Upload de media para headers de templates
+
+Templates con header `IMAGE`, `VIDEO` o `DOCUMENT` requieren que Meta reciba un **handle** producido por su **Resumable Upload API** — NO es el media upload normal de WhatsApp (ése es sólo para mensajes).
+
+Flujo de Meta (oficial, 2 pasos):
+1. `POST graph.facebook.com/v22.0/{whatsapp_app_id}/uploads?file_length=X&file_type=Y` → devuelve `{ id: "upload:abc..." }`
+2. `POST graph.facebook.com/v22.0/{upload_id}` con el binario → devuelve `{ h: "<handle>" }`
+
+El `handle` es **single-use y corta vida** (~30 min). Se consume al crear/editar el template. NO se cachea.
+
+### Decisiones cerradas
+
+- **Persistencia del binario:** GridFS bucket `wa_template_media` (evita dependencia de S3, aprovecha MongoDB existente). Reutilizable entre re-creaciones y DRAFT → submit retroactivo.
+- **Handle on-demand:** el endpoint de upload NO habla con Meta. Solo persiste binario + devuelve `media_id` nuestro. El swap a handle Meta ocurre dentro de `create_template_handler` y `update_template_handler` cuando detectan nuestros IDs en `components[].example.header_handle`.
+- **Dedup por SHA-256:** si el mismo binario fue subido antes para el mismo `phone_number_id`, reusamos el `media_id` existente.
+- **Meta App ID en env var** (`WHATSAPP_APP_ID`). Opcional — si falta, el endpoint responde `503 app_id_not_configured`.
+
+### Endpoint
+
+`POST /v1/auth-user/whatsapp/templates/header-media`
+
+**Auth:** `user_jwt_auth_middleware` + `nRole == 0`.
+
+**Request:** `multipart/form-data`
+
+| Field | Tipo | Required | Descripción |
+|---|---|---|---|
+| `file` | File | sí | Binario. Stream o buffered en memoria según tamaño |
+| `phone_number_id` | string | sí | Para scoping del dedup |
+| `format` | string | sí | `IMAGE` \| `VIDEO` \| `DOCUMENT` |
+
+**Response 200:**
+```json
+{
+  "ok": true,
+  "data": {
+    "media_id": "65fc...e4",
+    "mime_type": "image/jpeg",
+    "file_size": 284719,
+    "sha256": "a94f..."
+  }
+}
+```
+
+> **Sin `header_handle`, sin `expires_at`, sin `url`.** El `media_id` es el único ID que el front usa. El handle real se genera on-demand al crear el template.
+
+**Errores:**
+
+| Code | HTTP | Notas |
+|---|---|---|
+| `invalid_file_type` | 400 | `details: { allowed_mime_types: [...] }` según format |
+| `file_too_large` | 413 | `details: { max_size: N, actual_size: M }` |
+| `invalid_format` | 400 | `format` no es IMAGE/VIDEO/DOCUMENT |
+| `phone_number_not_found` | 404 | `phone_number_id` no existe |
+| `file_required` | 400 | multipart sin field `file` |
+| `app_id_not_configured` | 503 | `WHATSAPP_APP_ID` no seteado en server |
+
+### Mime whitelist y max sizes (impuestos por Meta)
+
+| Format | Mime types aceptados | Max size |
+|---|---|---|
+| `IMAGE` | `image/jpeg`, `image/png` | 5 MB |
+| `VIDEO` | `video/mp4`, `video/3gpp` | 16 MB |
+| `DOCUMENT` | `application/pdf` | 100 MB |
+
+### Uso desde el front
+
+Al crear/editar template con header media:
+```json
+{
+  "components": [
+    {
+      "type": "HEADER",
+      "format": "IMAGE",
+      "example": { "header_handle": ["<media_id_nuestro>"] }
+    },
+    ...
+  ]
+}
+```
+
+El back en `create_template_handler` / `update_template_handler`:
+1. Antes de llamar a Meta, itera `components`.
+2. Para cada HEADER con `format != TEXT`, valida que `example.header_handle[0]` sea un ObjectId nuestro existente en GridFS.
+3. Fetch del binario, llamada a Resumable Upload API → obtiene `h`.
+4. Reemplaza `example.header_handle[0] = h` (el handle Meta real).
+5. Llama a `create_template_meta` / `update_template_body_meta` con el components ya swapeado.
+
+Si el `media_id` no existe en GridFS → `400 invalid_component` con `details: { component_index, reason: "header_media_not_found" }`.
+
+### Modelo Mongo (GridFS metadata)
+
+GridFS en MongoDB almacena `fs.files` y `fs.chunks`. Usamos bucket custom `wa_template_media`:
+- Colección `wa_template_media.files` — metadatos (filename, length, uploadDate, metadata).
+- Colección `wa_template_media.chunks` — binario troceado.
+
+En `metadata` del file doc guardamos:
+```json
+{
+  "phone_number_id": "1234567890",
+  "mime_type": "image/jpeg",
+  "sha256": "a94f...",
+  "format": "IMAGE",
+  "uploaded_by": "uuid-...",
+  "uploaded_by_name": "Juan Pérez"
+}
+```
+
+Índice para dedup:
+```js
+db.wa_template_media.files.createIndex(
+  { "metadata.phone_number_id": 1, "metadata.sha256": 1 },
+  { unique: true, name: "idx_wa_template_media_phone_sha" }
+);
+```
+
+### Repo trait `WaTemplateMediaRepository`
+
+```rust
+pub struct StoreTemplateMediaInput<'a> {
+    pub phone_number_id: &'a str,
+    pub format: &'a str,
+    pub mime_type: &'a str,
+    pub sha256: &'a str,
+    pub bytes: &'a [u8],
+    pub uploaded_by: &'a str,
+    pub uploaded_by_name: &'a str,
+}
+
+#[async_trait::async_trait]
+pub trait WaTemplateMediaRepository {
+    /// Persiste el binario en GridFS. Si ya existe uno con mismo
+    /// `(phone_number_id, sha256)`, devuelve el `media_id` existente (dedup).
+    async fn store_template_media(&self, input: StoreTemplateMediaInput<'_>) -> Result<WaTemplateMediaRef, String>;
+    async fn find_template_media_by_id(&self, id: &ObjectId) -> Result<Option<WaTemplateMediaRef>, String>;
+    async fn read_template_media_bytes(&self, id: &ObjectId) -> Result<Option<(Vec<u8>, String)>, String>; // (bytes, mime)
+    #[allow(dead_code)]
+    async fn delete_template_media(&self, id: &ObjectId) -> Result<bool, String>;
+}
+
+pub struct WaTemplateMediaRef {
+    pub id: ObjectId,
+    pub phone_number_id: String,
+    pub mime_type: String,
+    pub sha256: String,
+    pub file_size: u64,
+}
+```
+
+### Service `upload_to_meta_resumable`
+
+```rust
+/// Los 2 pasos del Resumable Upload API. Devuelve el handle `h` que va en
+/// `components[i].example.header_handle[0]`. NO cachear — single-use.
+pub async fn upload_to_meta_resumable(
+    &self,
+    app_id: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> Result<String, anyhow::Error> { ... }
+```
+
+Usa el mismo `access_token` que el resto de llamadas Meta del service.
+
+### Validación extra en BODY (placeholder position)
+
+Además de las validaciones de §9, agregar: el `body.text` **no puede empezar con `{{N}}` ni terminar con `{{N}}`** (Meta las rechaza). Si incumple → `invalid_component` con `details: { reason: "placeholder_at_edge" }`.
+
+---
+
 **Fin del spec.**

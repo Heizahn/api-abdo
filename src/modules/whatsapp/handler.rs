@@ -24,7 +24,7 @@ use std::sync::Arc;
 use crate::{
     auth::user_jwt::UserProfileClaims,
     crypto::aes::{decrypt_payload, encrypt_payload},
-    db::{WaTemplateRepository, WaTemplateListFilter, WaTemplateUpdatePatch, WhatsAppRepository},
+    db::{WaTemplateRepository, WaTemplateListFilter, WaTemplateUpdatePatch, WhatsAppRepository, WaTemplateMediaRepository, StoreTemplateMediaInput},
     error::ApiError,
     models::whatsapp::*,
     state::AppState,
@@ -4209,18 +4209,23 @@ pub async fn create_template_handler(
             ));
         }
 
-        let wa = WhatsAppService::new(
-            state.reqwest_client.clone(),
-            settings.phone_number_id.clone(),
-            token,
-        );
-
         let category_str = match body.category {
             WaTemplateCategory::Marketing => "MARKETING",
             WaTemplateCategory::Utility => "UTILITY",
             WaTemplateCategory::Authentication => "AUTHENTICATION",
         };
-        let components_val = serde_json::Value::Array(body.components.clone());
+        // Clonar components y swapear header media_id → handle Meta fresh.
+        // El original de body.components se mantiene intacto para la DB, así
+        // que el handle Meta (single-use, corto) nunca se persiste.
+        let mut components_for_meta = body.components.clone();
+        swap_header_handles_in_components(&state, &mut components_for_meta, &token).await?;
+        let components_val = serde_json::Value::Array(components_for_meta);
+
+        let wa = WhatsAppService::new(
+            state.reqwest_client.clone(),
+            settings.phone_number_id.clone(),
+            token,
+        );
 
         match wa.create_template_meta(&waba_id, &name, &body.language, category_str, &components_val).await {
             Ok(resp) => {
@@ -4600,20 +4605,22 @@ pub async fn update_template_handler(
             .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
         let waba_id = settings.whatsapp_business_account_id.trim().to_string();
 
-        let wa = WhatsAppService::new(
-            state.reqwest_client.clone(),
-            settings.phone_number_id.clone(),
-            token,
-        );
-
         let name_for_meta = patch.name.as_deref().unwrap_or(&doc.name);
         let category_str = match patch.category.unwrap_or(doc.category) {
             WaTemplateCategory::Marketing => "MARKETING",
             WaTemplateCategory::Utility => "UTILITY",
             WaTemplateCategory::Authentication => "AUTHENTICATION",
         };
-        let comps_for_meta = patch.components.as_ref().unwrap_or(&doc.components);
-        let comps_val = serde_json::Value::Array(comps_for_meta.clone());
+        // Clonar + swap header media_ids → handles Meta (antes de mover el token al service)
+        let mut comps_for_meta = patch.components.as_ref().unwrap_or(&doc.components).clone();
+        swap_header_handles_in_components(&state, &mut comps_for_meta, &token).await?;
+        let comps_val = serde_json::Value::Array(comps_for_meta);
+
+        let wa = WhatsAppService::new(
+            state.reqwest_client.clone(),
+            settings.phone_number_id.clone(),
+            token,
+        );
 
         match wa.create_template_meta(&waba_id, name_for_meta, &doc.language, category_str, &comps_val).await {
             Ok(resp) => {
@@ -4643,17 +4650,21 @@ pub async fn update_template_handler(
             let token = decrypt_payload(&settings_secret(), &settings.access_token)
                 .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
 
+            let meta_id = doc.meta_template_id.as_deref().ok_or_else(|| {
+                ApiError::Internal("plantilla aprobada sin meta_template_id".into())
+            })?;
+
+            // Swap header media_ids → handles Meta (antes de mover el token al service)
+            let mut comps_for_meta = new_comps.clone();
+            swap_header_handles_in_components(&state, &mut comps_for_meta, &token).await?;
+            let comps_val = serde_json::Value::Array(comps_for_meta);
+
             let wa = WhatsAppService::new(
                 state.reqwest_client.clone(),
                 settings.phone_number_id.clone(),
                 token,
             );
 
-            let meta_id = doc.meta_template_id.as_deref().ok_or_else(|| {
-                ApiError::Internal("plantilla aprobada sin meta_template_id".into())
-            })?;
-
-            let comps_val = serde_json::Value::Array(new_comps.clone());
             if let Err(e) = wa.update_template_body_meta(meta_id, &comps_val).await {
                 return Err(map_meta_error(&e, "Meta rechazó la edición del template"));
             }
@@ -4847,4 +4858,291 @@ async fn process_template_status(
             );
         }
     }
+}
+
+// ============================================
+// TEMPLATE HEADER MEDIA (GridFS + Resumable Upload)
+// ============================================
+
+/// Límites de mime + tamaño por `format` impuestos por Meta para headers de
+/// template. Cualquier cosa fuera de esto rebota client-side antes de llegar
+/// a la Resumable Upload API.
+fn header_media_limits(format: &str) -> Option<(&'static [&'static str], u64)> {
+    match format.to_uppercase().as_str() {
+        "IMAGE" => Some((&["image/jpeg", "image/png"], 5 * 1024 * 1024)),
+        "VIDEO" => Some((&["video/mp4", "video/3gpp"], 16 * 1024 * 1024)),
+        "DOCUMENT" => Some((&["application/pdf"], 100 * 1024 * 1024)),
+        _ => None,
+    }
+}
+
+/// SHA-256 en hex minúsculas. Usado para dedup (`wa_template_media.files` tiene
+/// índice único por `(metadata.phone_number_id, metadata.sha256)`).
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    digest.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Recorre `components` in-place. Para cada HEADER con `format` != TEXT que
+/// contenga un `example.header_handle[0]` que sea un ObjectId válido (nuestro
+/// `media_id`), fetchea el binario de GridFS, lo sube a Meta via Resumable
+/// Upload y reemplaza el ID por el handle `h` que devuelve Meta.
+///
+/// Si `header_handle[0]` NO parsea como ObjectId, asumimos que es ya un handle
+/// Meta (caso de re-uso o test manual) y lo dejamos intacto.
+async fn swap_header_handles_in_components(
+    state: &Arc<AppState>,
+    components: &mut [serde_json::Value],
+    access_token: &str,
+) -> Result<(), ApiError> {
+    let mut needs_swap = false;
+    // Primer pase: detectar si hay algo que swapear (ObjectIds nuestros)
+    for c in components.iter() {
+        let is_header = c.get("type").and_then(|v| v.as_str())
+            .map(|t| t.eq_ignore_ascii_case("HEADER"))
+            .unwrap_or(false);
+        if !is_header { continue; }
+        let format = c.get("format").and_then(|v| v.as_str()).unwrap_or("");
+        if format.eq_ignore_ascii_case("TEXT") || format.is_empty() { continue; }
+        if let Some(id_str) = c.pointer("/example/header_handle/0").and_then(|v| v.as_str()) {
+            if ObjectId::parse_str(id_str).is_ok() {
+                needs_swap = true;
+                break;
+            }
+        }
+    }
+    if !needs_swap { return Ok(()); }
+
+    // Requerido sólo cuando hay algo que subir
+    let app_id = state.config.whatsapp_app_id.as_deref().ok_or_else(|| {
+        ApiError::domain_simple(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "app_id_not_configured",
+            "El servidor no tiene configurado WHATSAPP_APP_ID; no se puede subir media de header",
+        )
+    })?;
+
+    let wa = WhatsAppService::new(
+        state.reqwest_client.clone(),
+        String::new(), // phone_number_id no se usa en upload_to_meta_resumable
+        access_token.to_string(),
+    );
+
+    for (idx, c) in components.iter_mut().enumerate() {
+        let is_header = c.get("type").and_then(|v| v.as_str())
+            .map(|t| t.eq_ignore_ascii_case("HEADER"))
+            .unwrap_or(false);
+        if !is_header { continue; }
+        let format = c.get("format").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if format.eq_ignore_ascii_case("TEXT") || format.is_empty() { continue; }
+
+        let id_str = match c.pointer("/example/header_handle/0").and_then(|v| v.as_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let oid = match ObjectId::parse_str(&id_str) {
+            Ok(o) => o,
+            Err(_) => continue, // no es nuestro media_id — probablemente un handle Meta ya
+        };
+
+        // Fetch del binario
+        let (bytes, mime) = state.db
+            .read_template_media_bytes(&oid)
+            .await
+            .map_err(ApiError::DatabaseError)?
+            .ok_or_else(|| ApiError::domain_with_details(
+                StatusCode::BAD_REQUEST,
+                "invalid_component",
+                "Media de header no encontrada",
+                serde_json::json!({ "component_index": idx, "reason": "header_media_not_found" }),
+            ))?;
+
+        // Upload-resumable a Meta
+        let handle = wa.upload_to_meta_resumable(app_id, &mime, &bytes)
+            .await
+            .map_err(|e| map_meta_error(&e, "Meta rechazó el upload del header media"))?;
+
+        // Swap: example.header_handle[0] = handle
+        if let Some(example) = c.get_mut("example") {
+            if let Some(arr) = example.get_mut("header_handle").and_then(|v| v.as_array_mut()) {
+                if let Some(first) = arr.get_mut(0) {
+                    *first = serde_json::Value::String(handle);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// `POST /v1/auth-user/whatsapp/templates/header-media` — multipart upload.
+/// Persiste el binario en GridFS con dedup por SHA-256. El front usa el
+/// `media_id` devuelto como `example.header_handle[0]` al crear/editar un
+/// template; el swap real a handle Meta ocurre en `create_template_handler` /
+/// `update_template_handler` cuando llaman a la Resumable Upload API.
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/templates/header-media",
+    tag = "WhatsApp — Templates",
+    security(("bearerAuth" = [])),
+    request_body(
+        content = String,
+        content_type = "multipart/form-data",
+        description = "Campos: `file` (binario), `phone_number_id` (string), `format` (IMAGE|VIDEO|DOCUMENT)",
+    ),
+    responses(
+        (status = 200, description = "Media persistida en GridFS", body = HeaderMediaUploadResponse),
+        (status = 400, description = "invalid_file_type | invalid_format | file_required | file_empty"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Sólo SUPERADMIN"),
+        (status = 404, description = "phone_number_not_found"),
+        (status = 413, description = "file_too_large"),
+        (status = 503, description = "app_id_not_configured"),
+    )
+)]
+pub async fn upload_template_header_media_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    mut multipart: Multipart,
+) -> Result<Json<HeaderMediaUploadResponse>, ApiError> {
+    // Auth
+    let uploader = require_superadmin(&state, &claims.id).await?;
+
+    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut file_mime: Option<String> = None;
+    let mut phone_number_id: Option<String> = None;
+    let mut format: Option<String> = None;
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        tracing::error!("[upload_template_header_media] multipart error: {}", e);
+        ApiError::domain_simple(
+            StatusCode::BAD_REQUEST,
+            "invalid_multipart",
+            "Error leyendo el multipart",
+        )
+    })? {
+        match field.name().unwrap_or("") {
+            "file" => {
+                file_mime = field.content_type().map(|s| s.to_string());
+                let data = field.bytes().await.map_err(|_| ApiError::domain_with_field(
+                    StatusCode::BAD_REQUEST,
+                    "file_required",
+                    "file",
+                    "No se pudo leer el archivo adjunto",
+                ))?;
+                file_bytes = Some(data.to_vec());
+            }
+            "phone_number_id" => {
+                phone_number_id = Some(field.text().await.map_err(|_| ApiError::domain_with_field(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_field",
+                    "phone_number_id",
+                    "phone_number_id inválido",
+                ))?.trim().to_string());
+            }
+            "format" => {
+                format = Some(field.text().await.map_err(|_| ApiError::domain_with_field(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_field",
+                    "format",
+                    "format inválido",
+                ))?.trim().to_uppercase());
+            }
+            _ => { let _ = field.bytes().await; }
+        }
+    }
+
+    // Validar fields requeridos
+    let bytes = file_bytes.ok_or_else(|| ApiError::domain_with_field(
+        StatusCode::BAD_REQUEST,
+        "file_required",
+        "file",
+        "Adjuntá el archivo a subir",
+    ))?;
+    if bytes.is_empty() {
+        return Err(ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            "file_empty",
+            "file",
+            "El archivo está vacío",
+        ));
+    }
+    let phone_number_id = phone_number_id.ok_or_else(|| ApiError::domain_with_field(
+        StatusCode::BAD_REQUEST,
+        "missing_field",
+        "phone_number_id",
+        "phone_number_id es requerido",
+    ))?;
+    let format = format.ok_or_else(|| ApiError::domain_with_field(
+        StatusCode::BAD_REQUEST,
+        "missing_field",
+        "format",
+        "format es requerido",
+    ))?;
+
+    // Validar format + mime + size
+    let (allowed_mimes, max_size) = header_media_limits(&format).ok_or_else(|| ApiError::domain_with_details(
+        StatusCode::BAD_REQUEST,
+        "invalid_format",
+        "Formato no soportado. Usa IMAGE, VIDEO o DOCUMENT",
+        serde_json::json!({ "field": "format", "received": format }),
+    ))?;
+
+    let mime = file_mime.as_deref().unwrap_or("application/octet-stream").to_lowercase();
+    if !allowed_mimes.iter().any(|m| *m == mime.as_str()) {
+        return Err(ApiError::domain_with_details(
+            StatusCode::BAD_REQUEST,
+            "invalid_file_type",
+            "Tipo MIME no permitido para este formato",
+            serde_json::json!({ "allowed_mime_types": allowed_mimes, "received": mime }),
+        ));
+    }
+    let size = bytes.len() as u64;
+    if size > max_size {
+        return Err(ApiError::domain_with_details(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "file_too_large",
+            "El archivo supera el tamaño máximo permitido",
+            serde_json::json!({ "max_size": max_size, "actual_size": size }),
+        ));
+    }
+
+    // Validar que phone_number_id existe
+    let _settings = state.db
+        .find_wa_settings_by_phone_number_id(&phone_number_id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| ApiError::domain_with_field(
+            StatusCode::NOT_FOUND,
+            "phone_number_not_found",
+            "phone_number_id",
+            "El número de WhatsApp no está configurado",
+        ))?;
+
+    // SHA-256 + persistencia (con dedup)
+    let sha = sha256_hex(&bytes);
+    let stored = state.db
+        .store_template_media(StoreTemplateMediaInput {
+            phone_number_id: &phone_number_id,
+            format: &format,
+            mime_type: &mime,
+            sha256: &sha,
+            bytes: &bytes,
+            uploaded_by: &claims.id,
+            uploaded_by_name: &uploader.name,
+        })
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    Ok(Json(HeaderMediaUploadResponse {
+        ok: true,
+        data: HeaderMediaUploadData {
+            media_id: stored.id.to_hex(),
+            mime_type: stored.mime_type,
+            file_size: stored.file_size,
+            sha256: stored.sha256,
+        },
+    }))
 }

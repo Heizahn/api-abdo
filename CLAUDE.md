@@ -242,6 +242,7 @@ components(schemas(MiRequest, MiResponse, ...))
 | `ID_SIMCOT` | ID del editor para operaciones automáticas (crons) |
 | `WHATSAPP_VERIFY_TOKEN` | Token de verificación del webhook de Meta (handshake GET) |
 | `WHATSAPP_APP_SECRET` | Secret de la Meta App — valida la firma HMAC-SHA256 del webhook |
+| `WHATSAPP_APP_ID` | (opcional) ID numérico de la Meta App — usado por la Resumable Upload API para subir media de headers de templates. Si falta, `POST /v1/auth-user/whatsapp/templates/header-media` responde 503 `app_id_not_configured` |
 | `WA_MEDIA_RELAY_URL` | (opcional) URL del Cloudflare Worker relay para descargas de media — ver `tools/cf-worker-media-relay/` |
 | `WA_MEDIA_RELAY_SECRET` | (opcional) Secret compartido con el Worker; si ambas están seteadas, las descargas pasan por el relay en vez de `lookaside.fbsbx.com` directo |
 

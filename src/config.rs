@@ -49,6 +49,12 @@ pub struct Config {
     // desde la VM la ruta a esa CDN está bloqueada por el ISP.
     pub wa_media_relay_url: Option<String>,
     pub wa_media_relay_secret: Option<String>,
+
+    // Meta App ID — usado por la Resumable Upload API para subir media de
+    // headers de templates. URL: `/{whatsapp_app_id}/uploads`. Si no está
+    // seteada, el endpoint de upload responde 503 con código `app_id_not_configured`
+    // y el resto del módulo WhatsApp sigue funcionando.
+    pub whatsapp_app_id: Option<String>,
 }
 
 impl Config {
@@ -121,6 +127,10 @@ impl Config {
             // al flow directo a Meta (útil en dev o si la red mejora).
             wa_media_relay_url: env::var("WA_MEDIA_RELAY_URL").ok().filter(|s| !s.is_empty()),
             wa_media_relay_secret: env::var("WA_MEDIA_RELAY_SECRET").ok().filter(|s| !s.is_empty()),
+
+            // Meta App ID — opcional. Si falta, el endpoint de upload de
+            // header media responde 503; el resto sigue funcionando.
+            whatsapp_app_id: env::var("WHATSAPP_APP_ID").ok().filter(|s| !s.is_empty()),
         }
     }
 

@@ -1284,6 +1284,32 @@ pub struct DeleteWaTemplateData {
     pub id: String,
 }
 
+// ============================================
+// UPLOAD DE HEADER MEDIA (GridFS)
+// ============================================
+//
+// El `media_id` devuelto es el ObjectId hex del doc en GridFS. El front
+// lo mete en `components[i].example.header_handle[0]` al crear/editar un
+// template. NO es el handle Meta — ése se genera on-demand al llamar a
+// `upload_to_meta_resumable` dentro de create/update de templates.
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HeaderMediaUploadData {
+    /// ObjectId hex del doc GridFS — identificador estable y reusable entre
+    /// templates mientras el binario exista en nuestra DB.
+    pub media_id: String,
+    pub mime_type: String,
+    pub file_size: u64,
+    /// SHA-256 hex del binario. Garantiza integridad + habilita dedup server-side.
+    pub sha256: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HeaderMediaUploadResponse {
+    pub ok: bool,
+    pub data: HeaderMediaUploadData,
+}
+
 /// Propósito del sistema en el que está en uso una plantilla.
 /// Devuelto en el error `template_in_use_cannot_delete` para que el front
 /// muestre qué propósitos bloquean el borrado.

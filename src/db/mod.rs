@@ -603,6 +603,64 @@ pub trait WaTemplateRepository {
 }
 
 // ============================================
+// 9. WaTemplateMediaRepository: Media para headers de templates
+// ============================================
+
+/// Input para persistir un binario de media en GridFS.
+pub struct StoreTemplateMediaInput<'a> {
+    pub phone_number_id: &'a str,
+    /// "IMAGE" | "VIDEO" | "DOCUMENT"
+    pub format: &'a str,
+    pub mime_type: &'a str,
+    /// SHA-256 hex del contenido
+    pub sha256: &'a str,
+    pub bytes: &'a [u8],
+    /// UUID del usuario que sube el archivo
+    pub uploaded_by: &'a str,
+    pub uploaded_by_name: &'a str,
+}
+
+/// Referencia a un archivo de media almacenado en GridFS.
+#[allow(dead_code)]
+pub struct WaTemplateMediaRef {
+    pub id: mongodb::bson::oid::ObjectId,
+    pub phone_number_id: String,
+    pub mime_type: String,
+    pub sha256: String,
+    pub file_size: u64,
+}
+
+#[allow(dead_code)]
+#[async_trait::async_trait]
+pub trait WaTemplateMediaRepository {
+    /// Persiste el binario en GridFS. Dedup por `(phone_number_id, sha256)`:
+    /// si ya existe, retorna el `media_id` existente sin re-subir.
+    async fn store_template_media(
+        &self,
+        input: StoreTemplateMediaInput<'_>,
+    ) -> Result<WaTemplateMediaRef, String>;
+
+    /// Busca metadatos de un archivo de media por su `_id` de GridFS.
+    async fn find_template_media_by_id(
+        &self,
+        id: &mongodb::bson::oid::ObjectId,
+    ) -> Result<Option<WaTemplateMediaRef>, String>;
+
+    /// Lee el binario completo y el mime_type de un archivo de GridFS.
+    /// Retorna `Some((bytes, mime_type))` o `None` si no existe.
+    async fn read_template_media_bytes(
+        &self,
+        id: &mongodb::bson::oid::ObjectId,
+    ) -> Result<Option<(Vec<u8>, String)>, String>;
+
+    /// Elimina un archivo de GridFS. Retorna `true` si existía, `false` si no.
+    async fn delete_template_media(
+        &self,
+        id: &mongodb::bson::oid::ObjectId,
+    ) -> Result<bool, String>;
+}
+
+// ============================================
 // TRAIT MAESTRO
 // ============================================
 pub trait Db:
@@ -614,6 +672,7 @@ pub trait Db:
     + UtilsRepository
     + WhatsAppRepository
     + WaTemplateRepository
+    + WaTemplateMediaRepository
     + Clone
     + Send
     + Sync

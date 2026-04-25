@@ -797,6 +797,130 @@ impl WhatsAppService {
         Ok(())
     }
 
+    /// Implementa los 2 pasos del Resumable Upload API de Meta. Devuelve el
+    /// `handle` (campo `h` en la respuesta del paso 2) que debe ir en
+    /// `components[i].example.header_handle[0]` al crear/editar un template.
+    ///
+    /// El handle es **single-use y de vida corta** (~30 min). NO cachear.
+    ///
+    /// # Args
+    /// - `app_id`: Meta App ID (de `config.whatsapp_app_id`, no confundir con app_secret).
+    /// - `mime`: tipo MIME del binario (`image/jpeg`, `video/mp4`, `application/pdf`, etc).
+    /// - `bytes`: binario en memoria (ya validado en tamaño por el caller).
+    ///
+    /// # Errores
+    /// - Si Meta responde 4xx con su shape de error, retorna `MetaApiError` via anyhow
+    ///   (downcasteable como hacen los otros métodos).
+    /// - Errores de transporte → `describe_reqwest_error`.
+    ///
+    /// # Paso 1 — Crear upload session (idempotente, usa retry)
+    /// `POST https://graph.facebook.com/{WA_API_VERSION}/{app_id}/uploads
+    ///   ?file_length={bytes.len()}&file_type={url_encoded_mime}&access_token={token}`
+    /// Respuesta: `{ "id": "upload:<hash>" }`
+    ///
+    /// # Paso 2 — Upload del binario (NO retry — repetir puede romper la sesión)
+    /// `POST https://graph.facebook.com/{WA_API_VERSION}/{upload_id}`
+    ///   Header: `Authorization: OAuth <token>` (excepción documentada — NO Bearer)
+    ///   Header: `file_offset: 0`
+    ///   Body: binario raw (no multipart)
+    /// Respuesta: `{ "h": "<handle>" }`
+    ///
+    // TODO: test manual con curl:
+    //   curl -X POST "https://graph.facebook.com/v25.0/{app_id}/uploads?file_length=1024&file_type=image/jpeg&access_token=..."
+    //   → { "id": "upload:abc..." }
+    //   curl -X POST "https://graph.facebook.com/v25.0/upload:abc..." \
+    //       -H "Authorization: OAuth ..." \
+    //       -H "file_offset: 0" \
+    //       --data-binary @img.jpg
+    //   → { "h": "..." }
+    pub async fn upload_to_meta_resumable(
+        &self,
+        app_id: &str,
+        mime: &str,
+        bytes: &[u8],
+    ) -> Result<String> {
+        // ---------------------------------------------------------------
+        // Paso 1: crear upload session
+        // ---------------------------------------------------------------
+        let session_url = format!(
+            "https://graph.facebook.com/{}/{}/uploads",
+            WA_API_VERSION, app_id
+        );
+
+        // Parámetros en query string — el body debe quedar vacío (spec Meta).
+        let file_length = bytes.len().to_string();
+        let resp1 = send_with_retry("upload_to_meta_resumable step1", || {
+            self.client
+                .post(&session_url)
+                .query(&[
+                    ("file_length", file_length.as_str()),
+                    ("file_type", mime),
+                    ("access_token", self.access_token.as_str()),
+                ])
+        })
+        .await
+        .map_err(|e| describe_reqwest_error("upload_to_meta_resumable step1 request", e))?;
+
+        let status1 = resp1.status();
+        let body1 = resp1
+            .text()
+            .await
+            .map_err(|e| describe_reqwest_error("upload_to_meta_resumable step1 response read", e))?;
+
+        if !status1.is_success() {
+            return Err(parse_meta_error("upload_to_meta_resumable step1", status1, &body1));
+        }
+
+        let json1: serde_json::Value = serde_json::from_str(&body1)
+            .map_err(|e| anyhow::anyhow!("upload_to_meta_resumable step1 decode: {}", e))?;
+
+        let upload_id = json1["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("upload_to_meta_resumable step1: Meta response sin `id`"))?
+            .to_string();
+
+        // ---------------------------------------------------------------
+        // Paso 2: subir el binario — SIN retry (sesión de upload es stateful)
+        // ---------------------------------------------------------------
+        let upload_url = format!(
+            "https://graph.facebook.com/{}/{}",
+            WA_API_VERSION, upload_id
+        );
+
+        // Meta exige "Authorization: OAuth <token>" en este endpoint, NO "Bearer".
+        // Es una excepción documentada en las Graph API docs para Resumable Upload.
+        let resp2 = self
+            .client
+            .post(&upload_url)
+            .header(reqwest::header::AUTHORIZATION, format!("OAuth {}", self.access_token))
+            .header("file_offset", "0")
+            .header(reqwest::header::CONTENT_TYPE, mime)
+            .body(bytes.to_vec())
+            .send()
+            .await
+            .map_err(|e| describe_reqwest_error("upload_to_meta_resumable step2 request", e))?;
+
+        let status2 = resp2.status();
+        let body2 = resp2
+            .text()
+            .await
+            .map_err(|e| describe_reqwest_error("upload_to_meta_resumable step2 response read", e))?;
+
+        if !status2.is_success() {
+            return Err(parse_meta_error("upload_to_meta_resumable step2", status2, &body2));
+        }
+
+        let json2: serde_json::Value = serde_json::from_str(&body2)
+            .map_err(|e| anyhow::anyhow!("upload_to_meta_resumable step2 decode: {}", e))?;
+
+        let handle = json2["h"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("upload_to_meta_resumable step2: Meta response sin `h`"))?
+            .to_string();
+
+        Ok(handle)
+    }
+
     /// Borra UNA traducción de un template en Meta. `hsm_id` es el `id` que
     /// Meta asignó al template (campo `meta_template_id` en `WaTemplates`).
     /// Pasar `hsm_id` es obligatorio — sin él Meta borra **todas** las

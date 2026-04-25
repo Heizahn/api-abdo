@@ -195,6 +195,22 @@ print("  ✅ Users.nRole");
 print("");
 
 // ============================================
+// COLECCIÓN: wa_template_media.files (GridFS)
+// ============================================
+print("📦 Colección: wa_template_media.files (GridFS)");
+
+// Dedup por (phone_number_id, sha256): si el mismo binario se sube 2 veces,
+// reusamos el media_id. El bucket de GridFS es `wa_template_media` ⇒ el doc
+// de metadatos vive en `wa_template_media.files`.
+db.wa_template_media.files.createIndex(
+  { "metadata.phone_number_id": 1, "metadata.sha256": 1 },
+  { name: "idx_wa_template_media_phone_sha", unique: true, background: true }
+);
+print("  ✅ wa_template_media.files.metadata.phone_number_id + sha256 (unique)");
+
+print("");
+
+// ============================================
 // COLECCIÓN: WaTemplates
 // ============================================
 print("📦 Colección: WaTemplates");
@@ -244,7 +260,7 @@ print("📋 VERIFICACIÓN DE ÍNDICES");
 print("=".repeat(60));
 print("");
 
-const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes", "WaTemplates"];
+const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes", "WaTemplates", "wa_template_media.files"];
 toVerify.forEach(col => {
   print(col + ":");
   db.getCollection(col).getIndexes().forEach(idx => {
