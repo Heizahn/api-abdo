@@ -462,10 +462,13 @@ pub async fn update_ai_agent_settings_handler(
     }))
 }
 
-/// Aplica el patch sobre un setting existente. Cada bloque es full-replace
-/// cuando viene `Some` (PATCH coarse-grained) — más simple que tri-state por
-/// campo y refleja la UI: el front siempre envía el bloque completo cuando
-/// el SUPERADMIN guarda esa sección.
+/// Aplica el patch sobre un setting existente. **Merge campo a campo** dentro
+/// de cada bloque: el FE puede mandar `model: { api_key: "..." }` y el resto
+/// del bloque se preserva con lo que ya estaba guardado. Misma lógica para
+/// schedule/personality/escalation/limits.
+///
+/// Excepción: `tools` reemplaza el array completo cuando viene — el FE tiene
+/// el listado entero, no necesita mergear por nombre.
 fn apply_patch(
     setting: &mut AiAgentSetting,
     patch: UpdateAiAgentSettingsRequest,
@@ -478,47 +481,43 @@ fn apply_patch(
         setting.mode = m;
     }
     if let Some(s) = patch.schedule {
-        setting.schedule = AiSchedule {
-            timezone: s.timezone,
-            always_on: s.always_on,
-            weekdays: s.weekdays,
-            from_hour: s.from_hour,
-            to_hour: s.to_hour,
-        };
+        let cur = &mut setting.schedule;
+        if let Some(v) = s.timezone { cur.timezone = v; }
+        if let Some(v) = s.always_on { cur.always_on = v; }
+        if let Some(v) = s.weekdays { cur.weekdays = v; }
+        if let Some(v) = s.from_hour { cur.from_hour = v; }
+        if let Some(v) = s.to_hour { cur.to_hour = v; }
     }
     if let Some(m) = patch.model {
-        // `api_key`: viene en claro. Sólo si no es `None` ni `""` se cifra y
-        // se reemplaza el guardado.
-        let new_key_cipher = match m.api_key.as_deref() {
-            Some(raw) if !raw.trim().is_empty() => {
-                Some(encrypt_payload(&ai_agent_secret(), raw.trim()))
+        let cur = &mut setting.model;
+        if let Some(v) = m.provider { cur.provider = v; }
+        if let Some(v) = m.model_id { cur.model_id = v; }
+        if let Some(v) = m.temperature { cur.temperature = v; }
+        if let Some(v) = m.max_tokens { cur.max_tokens = v; }
+        if let Some(v) = m.timeout_seconds { cur.timeout_seconds = v; }
+        // api_key: sólo se cifra y guarda si vino non-empty; si vino "" o
+        // None, conservamos la api_key_encrypted previa.
+        if let Some(raw) = m.api_key.as_deref() {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                cur.api_key_encrypted = encrypt_payload(&ai_agent_secret(), trimmed);
             }
-            _ => None,
-        };
-        setting.model = AiModelConfig {
-            provider: m.provider,
-            model_id: m.model_id,
-            temperature: m.temperature,
-            max_tokens: m.max_tokens,
-            timeout_seconds: m.timeout_seconds,
-            api_key_encrypted: new_key_cipher
-                .unwrap_or_else(|| setting.model.api_key_encrypted.clone()),
-        };
+        }
     }
     if let Some(p) = patch.personality {
-        setting.personality = AiPersonality {
-            assistant_name: p.assistant_name,
-            locale: p.locale,
-            tone: p.tone,
-            greeting: p.greeting,
-            farewell: p.farewell,
-            forbidden_phrases: p.forbidden_phrases,
-        };
+        let cur = &mut setting.personality;
+        if let Some(v) = p.assistant_name { cur.assistant_name = v; }
+        if let Some(v) = p.locale { cur.locale = v; }
+        if let Some(v) = p.tone { cur.tone = v; }
+        if let Some(v) = p.greeting { cur.greeting = v; }
+        if let Some(v) = p.farewell { cur.farewell = v; }
+        if let Some(v) = p.forbidden_phrases { cur.forbidden_phrases = v; }
     }
     if let Some(sp) = patch.system_prompt {
         setting.system_prompt = sp;
     }
     if let Some(tools) = patch.tools {
+        // Reemplazo total — el FE manda la lista completa cuando edita tools.
         setting.tools = tools
             .into_iter()
             .map(|t| AiToolConfig {
@@ -529,22 +528,25 @@ fn apply_patch(
             .collect();
     }
     if let Some(e) = patch.escalation {
-        setting.escalation = AiEscalationRules {
-            keywords: e.keywords,
-            max_turns_without_resolution: e.max_turns_without_resolution,
-            max_identification_attempts: e.max_identification_attempts,
-            escalate_on_critical_tool_failure: e.escalate_on_critical_tool_failure,
-            always_escalate_when_asked: e.always_escalate_when_asked,
-            default_ticket_category_id: e.default_ticket_category_id,
-        };
+        let cur = &mut setting.escalation;
+        if let Some(v) = e.keywords { cur.keywords = v; }
+        if let Some(v) = e.max_turns_without_resolution { cur.max_turns_without_resolution = v; }
+        if let Some(v) = e.max_identification_attempts { cur.max_identification_attempts = v; }
+        if let Some(v) = e.escalate_on_critical_tool_failure { cur.escalate_on_critical_tool_failure = v; }
+        if let Some(v) = e.always_escalate_when_asked { cur.always_escalate_when_asked = v; }
+        // default_ticket_category_id: sólo override si vino. Para "limpiarlo"
+        // habría que agregar tri-state — por ahora no se necesita (la UI
+        // siempre exige una categoría default).
+        if e.default_ticket_category_id.is_some() {
+            cur.default_ticket_category_id = e.default_ticket_category_id;
+        }
     }
     if let Some(l) = patch.limits {
-        setting.limits = AiLimits {
-            max_turns_per_day: l.max_turns_per_day,
-            max_turns_per_conversation: l.max_turns_per_conversation,
-            max_tokens_per_day: l.max_tokens_per_day,
-            cost_alert_threshold_pct: l.cost_alert_threshold_pct,
-        };
+        let cur = &mut setting.limits;
+        if let Some(v) = l.max_turns_per_day { cur.max_turns_per_day = v; }
+        if let Some(v) = l.max_turns_per_conversation { cur.max_turns_per_conversation = v; }
+        if let Some(v) = l.max_tokens_per_day { cur.max_tokens_per_day = v; }
+        if let Some(v) = l.cost_alert_threshold_pct { cur.cost_alert_threshold_pct = v; }
     }
     setting.updated_at = now;
     Ok(())

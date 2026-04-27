@@ -398,39 +398,59 @@ pub struct UpdateAiAgentSettingsRequest {
     pub limits: Option<AiLimitsInput>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+/// Patch parcial del schedule. Todos los campos opcionales — el handler
+/// merge-ea con el setting actual.
+#[derive(Debug, Deserialize, ToSchema, Default)]
 pub struct AiScheduleInput {
-    pub timezone: String,
-    pub always_on: bool,
-    pub weekdays: Vec<u8>,
-    pub from_hour: u8,
-    pub to_hour: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_on: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weekdays: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_hour: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_hour: Option<u8>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+/// Patch parcial del modelo. Todos los campos opcionales (incluida `api_key`).
+/// `api_key`: `Some(non-empty)` cifra y guarda; `None` o `Some("")` no toca la
+/// guardada.
+#[derive(Debug, Deserialize, ToSchema, Default)]
 pub struct AiModelConfigInput {
-    pub provider: String,
-    pub model_id: String,
-    pub temperature: f32,
-    pub max_tokens: u32,
-    pub timeout_seconds: u32,
-    /// Si viene en `Some(non-empty)` se cifra y se guarda. `None` o `Some("")`
-    /// no tocan la api_key existente.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, ToSchema, Default)]
 pub struct AiPersonalityInput {
-    pub assistant_name: String,
-    pub locale: String,
-    pub tone: String,
-    pub greeting: String,
-    pub farewell: String,
-    #[serde(default)]
-    pub forbidden_phrases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub greeting: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub farewell: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forbidden_phrases: Option<Vec<String>>,
 }
 
+/// Una entrada del array de tools. Cuando el array viene completo se reemplaza
+/// la lista entera (es la semántica natural de "configurá los tools así").
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AiToolConfigInput {
     pub name: String,
@@ -439,24 +459,32 @@ pub struct AiToolConfigInput {
     pub description_override: Option<String>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, ToSchema, Default)]
 pub struct AiEscalationRulesInput {
-    #[serde(default)]
-    pub keywords: Vec<String>,
-    pub max_turns_without_resolution: u32,
-    pub max_identification_attempts: u32,
-    pub escalate_on_critical_tool_failure: bool,
-    pub always_escalate_when_asked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keywords: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns_without_resolution: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_identification_attempts: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalate_on_critical_tool_failure: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub always_escalate_when_asked: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_ticket_category_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, ToSchema, Default)]
 pub struct AiLimitsInput {
-    pub max_turns_per_day: u32,
-    pub max_turns_per_conversation: u32,
-    pub max_tokens_per_day: u64,
-    pub cost_alert_threshold_pct: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns_per_day: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns_per_conversation: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens_per_day: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_alert_threshold_pct: Option<u8>,
 }
 
 // ─── Response envelopes ─────────────────────────────────────────────────────
