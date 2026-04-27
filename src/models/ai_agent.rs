@@ -149,6 +149,32 @@ impl AiLimits {
 }
 
 // ============================================
+// Tool I/O shapes — usados por los tools del AI Agent (PR 2)
+// ============================================
+
+/// Resultado de `lookup_customer`. Una entrada por cliente match.
+#[derive(Debug, Serialize, Clone)]
+pub struct AiClientLookup {
+    pub client_id: String,
+    pub name: Option<String>,
+    /// `sDni` con prefijo `V-` si existe; si no, `sRif` con prefijo correspondiente.
+    pub identification: Option<String>,
+    pub phone: String,
+    pub status: String,
+    pub balance: f64,
+}
+
+/// Resultado de `get_invoices`. Una entrada por deuda activa o reciente.
+#[derive(Debug, Serialize, Clone)]
+pub struct AiInvoice {
+    pub id: String,
+    pub amount: f64,
+    pub reason: String,
+    pub state: String,
+    pub due_date: String,
+}
+
+// ============================================
 // AiAgentFaq — knowledge base
 // ============================================
 

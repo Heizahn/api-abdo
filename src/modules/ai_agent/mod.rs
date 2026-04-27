@@ -4,7 +4,11 @@
 //! El loop de Gemini, los tools y el dispatch del inbound se agregan en PRs
 //! posteriores (ver plan v1.4 §8).
 
+pub mod gemini;
 pub mod handler;
+pub mod runner;
+pub mod sandbox;
+pub mod tools;
 
 use axum::{
     routing::{delete, get, patch, post},
@@ -47,5 +51,11 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/auth-user/whatsapp/ai-agent/faqs/item/:id",
             delete(handler::delete_ai_agent_faq_handler),
+        )
+        // Sandbox: ejecuta un turno IA con tools reales pero sin persistir
+        // AiInteraction ni crear tickets reales (is_sandbox=true).
+        .route(
+            "/v1/auth-user/whatsapp/ai-agent/sandbox/:workspace_id",
+            post(sandbox::sandbox_handler),
         )
 }

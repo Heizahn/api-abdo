@@ -55,6 +55,15 @@ pub struct Config {
     // seteada, el endpoint de upload responde 503 con código `app_id_not_configured`
     // y el resto del módulo WhatsApp sigue funcionando.
     pub whatsapp_app_id: Option<String>,
+
+    // AI Agent Relay (Cloudflare Worker) — mismo patrón que `wa_media_relay`.
+    // Si ambas están seteadas, las llamadas a Gemini
+    // (`generativelanguage.googleapis.com`) pasan por el worker en lugar
+    // de conectar directo. Pueden apuntar al mismo worker que WA media o
+    // a uno separado — el worker `tools/cf-worker-media-relay` ya soporta
+    // ambos hosts en la whitelist.
+    pub ai_relay_url: Option<String>,
+    pub ai_relay_secret: Option<String>,
 }
 
 impl Config {
@@ -131,6 +140,12 @@ impl Config {
             // Meta App ID — opcional. Si falta, el endpoint de upload de
             // header media responde 503; el resto sigue funcionando.
             whatsapp_app_id: env::var("WHATSAPP_APP_ID").ok().filter(|s| !s.is_empty()),
+
+            // AI Agent Relay — opcional. Si no están seteadas, las llamadas
+            // a Gemini van directo (probablemente fallen desde la VM por
+            // bloqueo del ISP, igual que WA).
+            ai_relay_url: env::var("AI_RELAY_URL").ok().filter(|s| !s.is_empty()),
+            ai_relay_secret: env::var("AI_RELAY_SECRET").ok().filter(|s| !s.is_empty()),
         }
     }
 

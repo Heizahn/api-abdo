@@ -1,0 +1,304 @@
+//! Endpoint sandbox del AI Agent.
+//!
+//! `POST /v1/auth-user/whatsapp/ai-agent/sandbox/:workspace_id`
+//!
+//! Ejecuta un turno completo del runner con tools reales, pero con
+//! `is_sandbox=true` — no persiste `AiInteraction`, no crea tickets reales,
+//! no toca conversaciones. Sirve para que el SUPERADMIN valide que el
+//! system prompt + tools + api_key + relay funcionan extremo a extremo
+//! antes de pasar a `mode = live`.
+//!
+//! El test-connection del front (config formato `api_key`) no llega acá;
+//! se mantiene como validación FE-only por ahora (per plan §8 PR 1 FE).
+
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    Extension, Json,
+};
+use mongodb::bson::oid::ObjectId;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use utoipa::ToSchema;
+
+use crate::{
+    db::{AiAgentRepository, WhatsAppRepository},
+    error::ApiError,
+    models::{
+        ai_agent::AiToolCallLog,
+        users::User,
+    },
+    state::AppState,
+};
+
+use super::{
+    gemini::AiRelay,
+    runner::{run_turn, ConvRole, ConvTurn},
+    tools::ToolContext,
+};
+
+const SUPERADMIN_ROLE: f32 = 0.0;
+const HISTORY_MAX_TURNS: usize = 20;
+const MESSAGE_MAX_CHARS: usize = 4_000;
+
+fn require_superadmin(u: &User) -> Result<(), ApiError> {
+    if u.role != SUPERADMIN_ROLE {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(())
+}
+
+fn parse_oid(s: &str, field: &str) -> Result<ObjectId, ApiError> {
+    ObjectId::parse_str(s).map_err(|_| ApiError::ValidationError {
+        code: "invalid_id".into(),
+        field: field.into(),
+        message: format!("'{}' no es un ObjectId válido", field),
+    })
+}
+
+fn ai_agent_secret() -> String {
+    std::env::var("JWT_SECRET").unwrap_or_default()
+}
+
+// ============================================
+// Request / response shapes
+// ============================================
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SandboxRequest {
+    /// Mensaje "del cliente" simulado.
+    pub message: String,
+    /// Historial opcional de turnos previos. El front lo arma desde el chat
+    /// del sandbox (ej. múltiples idas y vueltas en la misma sesión).
+    #[serde(default)]
+    pub history: Vec<SandboxHistoryEntry>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SandboxHistoryEntry {
+    /// `"user"` (cliente) o `"assistant"` (IA o humano outbound).
+    pub role: String,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SandboxResponse {
+    pub ok: bool,
+    pub data: SandboxData,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SandboxData {
+    /// Respuesta de la IA en texto. `None` solo en escenarios degenerados
+    /// (sin candidates, max_iterations sin converger) — el runner ya genera
+    /// un fallback en español.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_text: Option<String>,
+    pub tool_calls: Vec<SandboxToolCall>,
+    pub usage: SandboxUsage,
+    pub escalated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub escalation_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SandboxToolCall {
+    pub tool_name: String,
+    pub args: serde_json::Value,
+    pub result_summary: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub duration_ms: u32,
+}
+
+impl From<AiToolCallLog> for SandboxToolCall {
+    fn from(l: AiToolCallLog) -> Self {
+        SandboxToolCall {
+            tool_name: l.tool_name,
+            args: l.args,
+            result_summary: l.result_summary,
+            success: l.success,
+            error: l.error,
+            duration_ms: l.duration_ms,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SandboxUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    pub total_tokens: u32,
+    pub cost_usd_estimate: f64,
+    pub latency_ms: u32,
+}
+
+// ============================================
+// Handler
+// ============================================
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/ai-agent/sandbox/{workspace_id}",
+    tag = "WhatsApp — AI Agent",
+    security(("bearerAuth" = [])),
+    params(("workspace_id" = String, Path, description = "ObjectId hex del WaSettings")),
+    request_body = SandboxRequest,
+    responses(
+        (status = 200, description = "Turno IA ejecutado en modo sandbox", body = SandboxResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Requiere rol SUPERADMIN"),
+        (status = 404, description = "workspace_not_found / ai_agent_setting_not_found"),
+        (status = 422, description = "Validación: invalid_id / missing_field / field_too_long"),
+        (status = 502, description = "ai_upstream_unreachable / ai_invalid_request / ai_auth_failed / ai_rate_limited"),
+        (status = 503, description = "ai_api_key_missing"),
+    )
+)]
+pub async fn sandbox_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user): Extension<User>,
+    Path(workspace_id): Path<String>,
+    Json(body): Json<SandboxRequest>,
+) -> Result<Json<SandboxResponse>, ApiError> {
+    require_superadmin(&current_user)?;
+    let workspace_oid = parse_oid(&workspace_id, "workspace_id")?;
+
+    // Validaciones del body antes de pegar a Gemini.
+    let message = body.message.trim().to_string();
+    if message.is_empty() {
+        return Err(ApiError::ValidationError {
+            code: "missing_field".into(),
+            field: "message".into(),
+            message: "El mensaje es requerido".into(),
+        });
+    }
+    if message.chars().count() > MESSAGE_MAX_CHARS {
+        return Err(ApiError::ValidationError {
+            code: "field_too_long".into(),
+            field: "message".into(),
+            message: format!("El mensaje no puede superar {} caracteres", MESSAGE_MAX_CHARS),
+        });
+    }
+    if body.history.len() > HISTORY_MAX_TURNS {
+        return Err(ApiError::ValidationError {
+            code: "history_too_long".into(),
+            field: "history".into(),
+            message: format!("El historial no puede superar {} turnos", HISTORY_MAX_TURNS),
+        });
+    }
+
+    let history: Vec<ConvTurn> = body
+        .history
+        .into_iter()
+        .filter_map(|h| {
+            let role = match h.role.as_str() {
+                "user" => ConvRole::User,
+                "assistant" | "model" => ConvRole::Assistant,
+                _ => return None,
+            };
+            let text = h.text.trim().to_string();
+            if text.is_empty() { return None; }
+            Some(ConvTurn { role, text })
+        })
+        .collect();
+
+    // Workspace tiene que existir.
+    let wa_setting = state
+        .db
+        .find_wa_settings_by_id(&workspace_oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| {
+            ApiError::domain_simple(
+                StatusCode::NOT_FOUND,
+                "workspace_not_found",
+                "El workspace de WhatsApp no existe",
+            )
+        })?;
+
+    // Setting IA del workspace tiene que existir.
+    let setting = state
+        .db
+        .find_ai_agent_setting_by_workspace(&workspace_oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| {
+            ApiError::domain_simple(
+                StatusCode::NOT_FOUND,
+                "ai_agent_setting_not_found",
+                "Configuración de Asistente Virtual no encontrada",
+            )
+        })?;
+
+    // Descifrar api_key. Falla con 503 ai_api_key_missing si no hay.
+    let api_key = super::runner::decrypt_api_key(&setting, &ai_agent_secret())?;
+
+    // FAQs inline (formato `Q: ... A: ...`). Sandbox SIEMPRE las inyecta para
+    // que el SUPERADMIN valide cómo respondés con knowledge real.
+    let faqs = state
+        .db
+        .list_ai_agent_faqs(&workspace_oid)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    let faqs_inline = if faqs.is_empty() {
+        None
+    } else {
+        let mut buf = String::new();
+        for f in &faqs {
+            buf.push_str("Q: ");
+            buf.push_str(&f.question);
+            buf.push_str("\nA: ");
+            buf.push_str(&f.answer);
+            buf.push_str("\n\n");
+        }
+        Some(buf)
+    };
+
+    let relay_owned = AiRelay::from_config(&state.config);
+    let relay = relay_owned.as_ref();
+
+    let tool_ctx = ToolContext {
+        state: state.clone(),
+        workspace_id: workspace_oid,
+        business_phone: wa_setting.phone.clone(),
+        // Sandbox no tiene conv real — los tools de escritura cortan por
+        // `is_sandbox=true` antes de necesitar conv_id.
+        conversation_id: None,
+        ai_user_id: setting.ai_user_id.clone(),
+        ai_user_name: setting.personality.assistant_name.clone(),
+        is_sandbox: true,
+    };
+
+    let output = run_turn(
+        &state.reqwest_client,
+        &setting,
+        &api_key,
+        relay,
+        &history,
+        &message,
+        faqs_inline.as_deref(),
+        &tool_ctx,
+    )
+    .await?;
+
+    Ok(Json(SandboxResponse {
+        ok: true,
+        data: SandboxData {
+            response_text: output.response_text,
+            tool_calls: output.tool_calls.into_iter().map(Into::into).collect(),
+            usage: SandboxUsage {
+                input_tokens: output.input_tokens,
+                output_tokens: output.output_tokens,
+                total_tokens: output.total_tokens,
+                cost_usd_estimate: output.cost_usd_estimate,
+                latency_ms: output.latency_ms,
+            },
+            escalated: output.escalated,
+            escalation_reason: output.escalation_reason,
+            finish_reason: output.finish_reason,
+        },
+    }))
+}

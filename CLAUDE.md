@@ -245,6 +245,8 @@ components(schemas(MiRequest, MiResponse, ...))
 | `WHATSAPP_APP_ID` | (opcional) ID numérico de la Meta App — usado por la Resumable Upload API para subir media de headers de templates. Si falta, `POST /v1/auth-user/whatsapp/templates/header-media` responde 503 `app_id_not_configured` |
 | `WA_MEDIA_RELAY_URL` | (opcional) URL del Cloudflare Worker relay para descargas de media — ver `tools/cf-worker-media-relay/` |
 | `WA_MEDIA_RELAY_SECRET` | (opcional) Secret compartido con el Worker; si ambas están seteadas, las descargas pasan por el relay en vez de `lookaside.fbsbx.com` directo |
+| `AI_RELAY_URL` | (opcional) URL del Worker para llamadas a Gemini (`generativelanguage.googleapis.com`). Mismo Worker que WA media o uno separado — la whitelist en `tools/cf-worker-media-relay/worker.js` ya cubre Google AI. Si falta, el módulo AI Agent conecta directo (puede fallar desde la VM por bloqueo del ISP) |
+| `AI_RELAY_SECRET` | (opcional) Secret compartido con el Worker para AI. Independiente de `WA_MEDIA_RELAY_SECRET` para permitir rotación/aislamiento |
 
 > El `access_token` y `phone_number_id` de Meta Cloud API **no** son env vars: se
 > configuran por cuenta en la colección `WaSettings` (el token se guarda cifrado

@@ -9,6 +9,10 @@ use crate::models::ai_agent::{
     AiToolConfigDto, AiToolConfigInput, CreateAiAgentFaqRequest, UpdateAiAgentFaqRequest,
     UpdateAiAgentSettingsRequest,
 };
+use crate::modules::ai_agent::sandbox::{
+    SandboxData, SandboxHistoryEntry, SandboxRequest, SandboxResponse, SandboxToolCall,
+    SandboxUsage,
+};
 use crate::models::auth::{
     LoginRequest, LoginResponse, RefreshRequest, RefreshResponse,
     TokenPair, VerifyNumberRequest, VerifyNumberResponse,
@@ -168,6 +172,7 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
         crate::modules::ai_agent::handler::create_ai_agent_faq_handler,
         crate::modules::ai_agent::handler::update_ai_agent_faq_handler,
         crate::modules::ai_agent::handler::delete_ai_agent_faq_handler,
+        crate::modules::ai_agent::sandbox::sandbox_handler,
         // Users — CRUD
         crate::modules::users::handler::list_users_handler,
         crate::modules::users::handler::create_user_handler,
@@ -266,6 +271,9 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
             AiAgentFaqItem, CreateAiAgentFaqRequest, UpdateAiAgentFaqRequest,
             AiAgentFaqResponse, AiAgentFaqListResponse,
             AiAgentDeleteResponse,
+            // AI Agent — Sandbox
+            SandboxRequest, SandboxHistoryEntry,
+            SandboxResponse, SandboxData, SandboxToolCall, SandboxUsage,
         )
     ),
     tags(

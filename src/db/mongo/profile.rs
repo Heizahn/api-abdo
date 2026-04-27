@@ -2,6 +2,7 @@ use super::MongoDB;
 use crate::db::mongo::ResultGroupedByDate;
 use crate::db::ProfileRepository;
 use crate::domain::customer::{Customer, CustomerView};
+use crate::models::ai_agent::AiClientLookup;
 use crate::models::db::{ActiveClientBalance, Client, ClientDetail, ClientListItem, ClientOnu, ClientStatusHistoryItem, CustomerInfoItem, SolvencyCounts, Tax};
 use crate::utils::get_bson_amount::get_bson_amount;
 use crate::utils::timezone::VenezuelaDateTime;
@@ -901,5 +902,89 @@ impl ProfileRepository for MongoDB {
         }
 
         Ok(results)
+    }
+
+    async fn find_clients_for_ai_lookup(
+        &self,
+        phone: Option<&str>,
+        identification: Option<&str>,
+    ) -> Result<Vec<AiClientLookup>, String> {
+        // Hard cap: el AI nunca debería ver más de 10 — si hay más, el LLM
+        // se confunde y elige mal. Si el cliente real tiene 11+ servicios,
+        // habría que rediseñar.
+        const LIMIT: i64 = 10;
+
+        let phone_clean = phone.map(str::trim).filter(|s| !s.is_empty());
+        let id_clean = identification.map(str::trim).filter(|s| !s.is_empty());
+
+        if phone_clean.is_none() && id_clean.is_none() {
+            return Ok(Vec::new());
+        }
+
+        let mut or_clauses: Vec<Document> = Vec::new();
+
+        if let Some(p) = phone_clean {
+            or_clauses.push(doc! { "sPhone": p });
+            // Match permisivo por core (últimos 10 dígitos) para tolerar
+            // formatos distintos (con/sin +58, paréntesis, etc.).
+            if let Some(core) = phone_core(p) {
+                or_clauses.push(doc! { "sPhone": { "$regex": &core, "$options": "i" } });
+            }
+        }
+
+        if let Some(id) = id_clean {
+            // Cédula: el cliente puede ingresar `12345678` o `V-12345678` o
+            // `j-50001234`. Match contra crudo y con prefijo en sDni y sRif.
+            let raw = id.to_string();
+            let with_v = format_dni(id, "sDni");
+            let with_j = format_dni(id, "sRif");
+            or_clauses.push(doc! { "sDni": &raw });
+            or_clauses.push(doc! { "sRif": &raw });
+            or_clauses.push(doc! { "sDni": &with_v });
+            or_clauses.push(doc! { "sRif": &with_j });
+        }
+
+        let filter = doc! { "$or": or_clauses };
+        let opts = mongodb::options::FindOptions::builder()
+            .projection(doc! {
+                "_id": 1, "sPhone": 1, "sName": 1,
+                "sDni": 1, "sRif": 1, "sState": 1, "nBalance": 1,
+            })
+            .limit(LIMIT)
+            .build();
+
+        let mut cursor = self
+            .customers()
+            .find(filter)
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut out = Vec::new();
+        while let Some(Ok(doc)) = cursor.next().await {
+            let id_obj = match doc.get_object_id("_id") {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+            // Identification: sDni con `V-` preferido; fallback sRif con su prefijo.
+            let identification = doc.get_str("sDni").ok().filter(|s| !s.is_empty())
+                .map(|v| format_dni(v, "sDni"))
+                .or_else(|| {
+                    doc.get_str("sRif").ok().filter(|s| !s.is_empty())
+                        .map(|v| format_dni(v, "sRif"))
+                });
+            // Balance: get_bson_amount maneja int/double/decimal128 sin pérdida.
+            let balance = get_bson_amount(&doc, "nBalance");
+
+            out.push(AiClientLookup {
+                client_id: id_obj.to_hex(),
+                name: doc.get_str("sName").ok().filter(|s| !s.is_empty()).map(str::to_string),
+                identification,
+                phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
+                status: doc.get_str("sState").unwrap_or_default().to_string(),
+                balance,
+            });
+        }
+        Ok(out)
     }
 }

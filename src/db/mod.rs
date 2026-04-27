@@ -1,5 +1,5 @@
 pub mod mongo;
-use crate::models::ai_agent::{AiAgentFaq, AiAgentSetting};
+use crate::models::ai_agent::{AiAgentFaq, AiAgentSetting, AiClientLookup};
 use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
 use crate::models::whatsapp::{
     ConversationStats, QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyList,
@@ -150,6 +150,17 @@ pub trait ProfileRepository {
         &self,
         owner_id: Option<&str>,
     ) -> Result<Vec<CustomerInfoItem>, String>;
+
+    /// Lookup compacto para el tool `lookup_customer` del AI Agent. Acepta
+    /// teléfono y/o cédula (`sDni` o `sRif`); cualquiera puede venir vacío.
+    /// Devuelve hasta `limit` resultados (cap dentro del impl). Match exacto
+    /// sobre `sPhone`; sobre identificación se compara contra `sDni`/`sRif`
+    /// tanto crudos como con prefijo (`V-`/`J-`).
+    async fn find_clients_for_ai_lookup(
+        &self,
+        phone: Option<&str>,
+        identification: Option<&str>,
+    ) -> Result<Vec<AiClientLookup>, String>;
 }
 
 // ============================================

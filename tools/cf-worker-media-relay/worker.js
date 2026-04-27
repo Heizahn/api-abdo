@@ -1,31 +1,46 @@
-// Cloudflare Worker — WhatsApp Meta Relay
+// Cloudflare Worker — Outbound Relay (WhatsApp Meta + Gemini)
 //
-// Relayea TODAS las llamadas a Meta (graph.facebook.com + lookaside.fbsbx.com)
-// para el backend api-abdo. Existe porque la VM de Debian no logra conectar
-// con fiabilidad a esos hosts desde Venezuela (bloqueo/filtrado del ISP) y
-// Cloudflare Workers sí tienen ruta limpia.
+// Relayea las llamadas externas del backend api-abdo:
+//   - Meta WhatsApp Cloud API (graph.facebook.com + lookaside.fbsbx.com).
+//   - Gemini Generative Language API (generativelanguage.googleapis.com)
+//     para el módulo AI Agent.
+//
+// Existe porque la VM de Debian no logra conectar con fiabilidad a esos
+// hosts desde Venezuela (bloqueo/filtrado del ISP) y Cloudflare Workers
+// sí tienen ruta limpia.
 //
 // Contrato:
-//   <METHOD> https://<worker>/?url=<meta_url_url_encoded>
-//   Métodos soportados: GET, POST (los que usa WhatsApp Cloud API hoy).
+//   <METHOD> https://<worker>/?url=<destination_url_url_encoded>
+//   Métodos soportados: GET, POST.
 //   Headers obligatorios:
 //     - x-relay-secret: <RELAY_SECRET>  (compartido con el backend)
-//     - authorization:  Bearer <meta_access_token>  (passthrough a Meta)
+//   Headers passthrough (cuando aplica):
+//     - authorization:    Bearer <token>          (Meta WA Cloud API)
+//     - x-goog-api-key:   <gemini_api_key>        (Gemini)
+//     - content-type:     application/json | ...  (POST body type)
 //   Para POST:
-//     - content-type: application/json (o lo que corresponda)
-//     - body: el JSON que iría directo a Meta
+//     - body: el JSON que iría directo al destino
 //
 // Seguridad:
 //   - RELAY_SECRET previene que cualquier tercero use esto como proxy abierto.
-//   - Whitelist de host destino (*.fbsbx.com, *.facebook.com, *.cdninstagram.com).
+//   - Whitelist de host destino (Meta + Google AI). Cualquier intento de
+//     usar el relay para otro host devuelve 403.
 //
 // Deploy:
 //   wrangler deploy
-//   wrangler secret put RELAY_SECRET  (mismo valor que el WA_MEDIA_RELAY_SECRET
-//                                       del backend).
+//   wrangler secret put RELAY_SECRET  (compartido con el backend; la misma
+//                                       pieza puede atender WA y AI o se
+//                                       puede correr en workers separados).
 
 const ALLOWED_METHODS = ['GET', 'POST'];
-const ALLOWED_HOST_SUFFIXES = ['.fbsbx.com', '.facebook.com', '.cdninstagram.com'];
+const ALLOWED_HOST_SUFFIXES = [
+  // WhatsApp / Meta
+  '.fbsbx.com',
+  '.facebook.com',
+  '.cdninstagram.com',
+  // Gemini (Google Generative Language API)
+  '.googleapis.com',
+];
 
 export default {
   async fetch(request, env) {
@@ -61,10 +76,15 @@ export default {
       return new Response('host not allowed', { status: 403 });
     }
 
-    // 4. Reenviar headers relevantes a Meta
+    // 4. Reenviar headers relevantes al destino
+    //    - authorization: Meta usa Bearer.
+    //    - x-goog-api-key: Gemini lo prefiere así (más seguro que ?key=...
+    //      en query string — no termina en logs ni access_log).
     const upstreamHeaders = new Headers();
     const auth = request.headers.get('authorization');
     if (auth) upstreamHeaders.set('authorization', auth);
+    const googKey = request.headers.get('x-goog-api-key');
+    if (googKey) upstreamHeaders.set('x-goog-api-key', googKey);
     const ct = request.headers.get('content-type');
     if (ct) upstreamHeaders.set('content-type', ct);
     upstreamHeaders.set('accept', '*/*');
