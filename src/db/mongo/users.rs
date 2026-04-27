@@ -106,7 +106,12 @@ impl UserRepository for MongoDB {
     async fn find_agents(&self) -> Result<Vec<User>, String> {
         let collection: Collection<User> = self.db.collection("Users");
         // nRole >= 0 AND nRole < 3 (excluye providers con nRole == 3.0)
-        let filter = doc! { "nRole": { "$gte": 0.0, "$lt": 3.0 }, "visible": true };
+        // `bIsBot` distinto de true → mantiene fuera al user sintético del AI Agent.
+        let filter = doc! {
+            "nRole": { "$gte": 0.0, "$lt": 3.0 },
+            "visible": true,
+            "bIsBot": { "$ne": true },
+        };
 
         collection
             .find(filter)
@@ -120,7 +125,14 @@ impl UserRepository for MongoDB {
 
     async fn find_chat_agents(&self) -> Result<Vec<User>, String> {
         let collection: Collection<User> = self.db.collection("Users");
-        let filter = doc! { "bCanChat": true, "visible": true };
+        // El bot tiene `bCanChat = false` por construcción; `bIsBot != true`
+        // es defensa adicional por si en el futuro alguien crea otro user con
+        // can_chat habilitado por error.
+        let filter = doc! {
+            "bCanChat": true,
+            "visible": true,
+            "bIsBot": { "$ne": true },
+        };
 
         collection
             .find(filter)
@@ -134,7 +146,11 @@ impl UserRepository for MongoDB {
 
     async fn find_superadmin_ids(&self) -> Result<Vec<String>, String> {
         let collection: Collection<User> = self.db.collection("Users");
-        let filter = doc! { "nRole": 0.0, "visible": true };
+        let filter = doc! {
+            "nRole": 0.0,
+            "visible": true,
+            "bIsBot": { "$ne": true },
+        };
 
         let users: Vec<User> = collection
             .find(filter)

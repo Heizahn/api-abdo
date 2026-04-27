@@ -1,6 +1,14 @@
 use utoipa::OpenApi;
 
 use crate::db::mongo::{PaymentDetails, ResultGroupedByDate};
+use crate::models::ai_agent::{
+    AiAgentDeleteResponse, AiAgentFaqItem, AiAgentFaqListResponse, AiAgentFaqResponse,
+    AiAgentMode, AiAgentSettingItem, AiAgentSettingResponse, AiAgentSettingsListResponse,
+    AiEscalationRulesDto, AiEscalationRulesInput, AiLimitsDto, AiLimitsInput, AiModelConfigDto,
+    AiModelConfigInput, AiPersonalityDto, AiPersonalityInput, AiScheduleDto, AiScheduleInput,
+    AiToolConfigDto, AiToolConfigInput, CreateAiAgentFaqRequest, UpdateAiAgentFaqRequest,
+    UpdateAiAgentSettingsRequest,
+};
 use crate::models::auth::{
     LoginRequest, LoginResponse, RefreshRequest, RefreshResponse,
     TokenPair, VerifyNumberRequest, VerifyNumberResponse,
@@ -152,6 +160,14 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
         crate::modules::whatsapp::tickets::get_ticket_handler,
         crate::modules::whatsapp::tickets::update_ticket_handler,
         crate::modules::whatsapp::tickets::transfer_and_ticket_handler,
+        // WhatsApp — AI Agent
+        crate::modules::ai_agent::handler::list_ai_agent_settings_handler,
+        crate::modules::ai_agent::handler::get_ai_agent_settings_handler,
+        crate::modules::ai_agent::handler::update_ai_agent_settings_handler,
+        crate::modules::ai_agent::handler::list_ai_agent_faqs_handler,
+        crate::modules::ai_agent::handler::create_ai_agent_faq_handler,
+        crate::modules::ai_agent::handler::update_ai_agent_faq_handler,
+        crate::modules::ai_agent::handler::delete_ai_agent_faq_handler,
         // Users — CRUD
         crate::modules::users::handler::list_users_handler,
         crate::modules::users::handler::create_user_handler,
@@ -236,6 +252,20 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
             TicketCategoryItem, TicketCategoriesResponse,
             TicketResponse, TicketsListResponse,
             TransferAndTicketData, TransferAndTicketResponse,
+            // WhatsApp — AI Agent
+            AiAgentMode,
+            AiScheduleDto, AiScheduleInput,
+            AiModelConfigDto, AiModelConfigInput,
+            AiPersonalityDto, AiPersonalityInput,
+            AiToolConfigDto, AiToolConfigInput,
+            AiEscalationRulesDto, AiEscalationRulesInput,
+            AiLimitsDto, AiLimitsInput,
+            AiAgentSettingItem,
+            UpdateAiAgentSettingsRequest,
+            AiAgentSettingResponse, AiAgentSettingsListResponse,
+            AiAgentFaqItem, CreateAiAgentFaqRequest, UpdateAiAgentFaqRequest,
+            AiAgentFaqResponse, AiAgentFaqListResponse,
+            AiAgentDeleteResponse,
         )
     ),
     tags(
@@ -252,6 +282,7 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
         (name = "WhatsApp — Soporte", description = "Chat de soporte vía WhatsApp Business API"),
         (name = "WhatsApp — Templates", description = "CRUD de plantillas de WhatsApp (WaTemplates). Writes requieren SUPERADMIN; GET list requiere bCanChat."),
         (name = "WhatsApp — Tickets", description = "Tickets de soporte derivados de conversaciones WA. POST cierra la conv referenciada; estados: open/in_progress/resolved/closed/cancelled. Acceso requiere bCanChat."),
+        (name = "WhatsApp — AI Agent", description = "Configuración del Asistente Virtual (Gemini) por workspace WhatsApp. PR 1: settings + FAQs. SUPERADMIN-only."),
         (name = "Users — CRUD", description = "Gestión de usuarios (staff/admin). Requiere rol SUPERADMIN (nRole == 0.0) salvo `/me/password`."),
     )
 )]

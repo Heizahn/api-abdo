@@ -281,6 +281,35 @@ print("  ✅ WaConversationEvents.actor_id + event_type + created_at desc (spars
 print("");
 
 // ============================================
+// COLECCIÓN: AiAgentSettings — config IA por workspace
+// ============================================
+print("📦 Colección: AiAgentSettings");
+
+// Unicidad: un setting por workspace. El back se apoya en este índice para
+// servir 409 `workspace_id_already_exists` cuando un PATCH crea uno nuevo.
+db.AiAgentSettings.createIndex(
+  { "workspace_id": 1 },
+  { name: "idx_ai_agent_settings_workspace", unique: true, background: true }
+);
+print("  ✅ AiAgentSettings.workspace_id (unique)");
+
+print("");
+
+// ============================================
+// COLECCIÓN: AiAgentFaqs — knowledge base por workspace
+// ============================================
+print("📦 Colección: AiAgentFaqs");
+
+// Listado por workspace ordenado por `created_at` desc.
+db.AiAgentFaqs.createIndex(
+  { "workspace_id": 1, "created_at": -1 },
+  { name: "idx_ai_agent_faqs_workspace_created", background: true }
+);
+print("  ✅ AiAgentFaqs.workspace_id + created_at desc");
+
+print("");
+
+// ============================================
 // COLECCIÓN: WaMessages — auditoría cross-conversation
 // ============================================
 print("📦 Colección: WaMessages (auditoría)");
@@ -309,7 +338,7 @@ print("📋 VERIFICACIÓN DE ÍNDICES");
 print("=".repeat(60));
 print("");
 
-const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes", "WaTemplates", "wa_template_media.files", "WaConversationEvents", "WaMessages"];
+const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes", "WaTemplates", "wa_template_media.files", "WaConversationEvents", "WaMessages", "AiAgentSettings", "AiAgentFaqs"];
 toVerify.forEach(col => {
   print(col + ":");
   db.getCollection(col).getIndexes().forEach(idx => {

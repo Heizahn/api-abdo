@@ -2573,6 +2573,13 @@ impl WaTicketRepository for MongoDB {
             ]);
         }
 
+        if let Some(tags) = filter.tags.filter(|ts| !ts.is_empty()) {
+            // `$all`: el ticket debe contener todas las tags pasadas.
+            // Es match exacto — los valores son etiquetas controladas, no
+            // texto libre, así que no necesitamos regex/case-insensitive.
+            q.insert("tags", doc! { "$all": tags.iter().collect::<Vec<_>>() });
+        }
+
         if let Some(c) = filter.cursor {
             if let Some((ts, oid)) = decode_cursor(c) {
                 q.insert(

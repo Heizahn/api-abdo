@@ -24,6 +24,13 @@ pub struct User {
     #[serde(rename = "bCanChat", default)]
     pub can_chat: bool,
 
+    /// `true` cuando el usuario es un bot (Asistente Virtual del módulo
+    /// AI Agent). Los pickers de agentes y filtros que devuelven humanos
+    /// deben excluir estos registros — existen sólo para atribución
+    /// (timeline de tickets/conversaciones, métricas).
+    #[serde(rename = "bIsBot", default)]
+    pub is_bot: bool,
+
     #[serde(rename = "nTag", skip_serializing_if = "Option::is_none")]
     pub tag: Option<u32>,
 
@@ -59,6 +66,9 @@ pub struct UserResponse {
     /// Permiso para atender chats de WhatsApp. El front lo usa para mostrar
     /// la sección de soporte sin depender del rol.
     pub can_chat: bool,
+    /// `true` para usuarios bot (AI Agent). El front debería excluirlos de
+    /// pickers humanos.
+    pub is_bot: bool,
     /// Fecha de creación en ISO-8601 (RFC 3339). `null` si el documento no la tiene.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub creation_date: Option<String>,
@@ -81,6 +91,7 @@ impl From<User> for UserResponse {
             email: user.email,
             role: user.role,
             can_chat: user.can_chat,
+            is_bot: user.is_bot,
             creation_date,
         }
     }
@@ -137,6 +148,9 @@ pub struct UserItem {
     pub role: f32,
     pub visible: bool,
     pub can_chat: bool,
+    /// `true` para usuarios bot (AI Agent). FE debe filtrar pickers humanos
+    /// con `!is_bot`.
+    pub is_bot: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -155,6 +169,7 @@ impl From<User> for UserItem {
             role: u.role,
             visible: u.visible,
             can_chat: u.can_chat,
+            is_bot: u.is_bot,
             tag: u.tag,
             creator_id: u.id_creator,
             creation_date,

@@ -1,3 +1,4 @@
+pub mod ai_agent;
 pub mod auth;
 pub mod db;
 pub mod onu;

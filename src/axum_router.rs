@@ -12,7 +12,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
     middleware::{auth::jwt_auth_middleware, auth_user::user_jwt_auth_middleware, rate_limit},
-    modules::{api_utils, auth_client, auth_user, calculations, clients, dashboard, payments, profile, providers, receivables, users, whatsapp},
+    modules::{ai_agent, api_utils, auth_client, auth_user, calculations, clients, dashboard, payments, profile, providers, receivables, users, whatsapp},
     openapi::ApiDoc,
     state::AppState,
 };
@@ -50,6 +50,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(payments::user_routes())
         .merge(whatsapp::user_routes())
         .merge(users::user_routes())
+        .merge(ai_agent::user_routes())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             user_jwt_auth_middleware,

@@ -214,6 +214,7 @@ pub async fn create_user_handler(
         email: email.clone(),
         visible: payload.visible.unwrap_or(true),
         can_chat: payload.can_chat.unwrap_or(false),
+        is_bot: false,
         tag: payload.tag,
         id_creator: Some(caller.id.clone()),
         role_prev: None,

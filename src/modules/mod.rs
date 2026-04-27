@@ -1,3 +1,4 @@
+pub mod ai_agent;
 pub mod api_utils;
 pub mod auth_client;
 pub mod auth_user;

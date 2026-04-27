@@ -966,6 +966,10 @@ pub struct TransferableAgentItem {
     pub name: String,
     pub email: String,
     pub role: f32,
+    /// `true` para usuarios bot (AI Agent). El front excluye estos del
+    /// dropdown de transferencia humana. `find_chat_agents` ya no los
+    /// devuelve, este campo es señal explícita por si llegara a aparecer.
+    pub is_bot: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1765,6 +1769,13 @@ pub struct WaTicket {
     /// `POST /tickets`. Único por `(created_by_id, idempotency_key)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
+    /// Etiquetas libres asociadas al ticket. Pensadas para clasificación
+    /// ortogonal a la categoría: tags como `lead_potencial` (prospect),
+    /// `cliente_no_identificado_*` (sin match en Clients) son sembrados por
+    /// el AI Agent al escalar; humanos pueden añadir tags al crear/actualizar.
+    /// Lista cerrada inicialmente, ampliable sin migración.
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub created_at: DateTime,
     pub updated_at: DateTime,
     /// Historial embebido. Cada acción append una entry; se persiste con el
@@ -1909,6 +1920,11 @@ pub struct TicketItem {
     pub transferred_from_name: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Etiquetas libres asociadas al ticket. Vacío por default. Sembrado por
+    /// el AI Agent al escalar (`lead_potencial`, `cliente_no_identificado_*`)
+    /// o agregado manualmente. Se devuelve siempre, incluso vacío, para que
+    /// el FE renderice consistente.
+    pub tags: Vec<String>,
     /// Sólo se popula en GET detail (`/tickets/:id`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeline: Option<Vec<TicketTimelineEntryItem>>,

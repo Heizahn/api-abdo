@@ -1,4 +1,5 @@
 pub mod mongo;
+use crate::models::ai_agent::{AiAgentFaq, AiAgentSetting};
 use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
 use crate::models::whatsapp::{
     ConversationStats, QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyList,
@@ -915,6 +916,9 @@ pub struct TicketListFilter<'a> {
     pub to_date: Option<mongodb::bson::DateTime>,
     /// Substring case-insensitive sobre `reason` y `resolution`.
     pub search: Option<&'a str>,
+    /// Si vienen tags, el ticket debe contener **todas** (`$all`). El front
+    /// no necesita match parcial — los tags son etiquetas exactas.
+    pub tags: Option<&'a [String]>,
     pub limit: i64,
     /// Cursor opaco `<millis>_<hex_id>` (descendente por `created_at`).
     pub cursor: Option<&'a str>,
@@ -990,6 +994,59 @@ pub trait WaTicketRepository {
 }
 
 // ============================================
+// 11. AiAgentRepository: Configuración y FAQs del Asistente Virtual
+// ============================================
+
+#[async_trait::async_trait]
+#[allow(dead_code)]
+pub trait AiAgentRepository {
+    /// Devuelve el setting de un workspace, o `None` si no existe.
+    async fn find_ai_agent_setting_by_workspace(
+        &self,
+        workspace_id: &ObjectId,
+    ) -> Result<Option<AiAgentSetting>, String>;
+
+    /// Lista todos los settings (uno por workspace).
+    async fn list_ai_agent_settings(&self) -> Result<Vec<AiAgentSetting>, String>;
+
+    /// Inserta un setting nuevo. El caller ya validó que no haya uno previo
+    /// para el `workspace_id`. Falla con `"workspace_id_already_exists"` si
+    /// existe colisión por unicidad.
+    async fn create_ai_agent_setting(
+        &self,
+        setting: AiAgentSetting,
+    ) -> Result<AiAgentSetting, String>;
+
+    /// Update completo del setting (full document replace excepto `_id` y
+    /// `created_at`). El caller debe pasar el doc con `updated_at` ya seteado.
+    /// Devuelve el doc actualizado o `None` si no existe.
+    async fn replace_ai_agent_setting(
+        &self,
+        id: &ObjectId,
+        setting: AiAgentSetting,
+    ) -> Result<Option<AiAgentSetting>, String>;
+
+    /// Lista FAQs de un workspace, ordenadas por `created_at` descendente.
+    async fn list_ai_agent_faqs(&self, workspace_id: &ObjectId) -> Result<Vec<AiAgentFaq>, String>;
+
+    async fn find_ai_agent_faq_by_id(&self, id: &ObjectId) -> Result<Option<AiAgentFaq>, String>;
+
+    async fn create_ai_agent_faq(&self, faq: AiAgentFaq) -> Result<AiAgentFaq, String>;
+
+    /// Patch parcial. Si el doc no existe devuelve `None`.
+    async fn update_ai_agent_faq(
+        &self,
+        id: &ObjectId,
+        question: Option<String>,
+        answer: Option<String>,
+        tags: Option<Vec<String>>,
+    ) -> Result<Option<AiAgentFaq>, String>;
+
+    /// `true` si el FAQ existía.
+    async fn delete_ai_agent_faq(&self, id: &ObjectId) -> Result<bool, String>;
+}
+
+// ============================================
 // TRAIT MAESTRO
 // ============================================
 pub trait Db:
@@ -1003,6 +1060,7 @@ pub trait Db:
     + WaTemplateRepository
     + WaTemplateMediaRepository
     + WaTicketRepository
+    + AiAgentRepository
     + Clone
     + Send
     + Sync

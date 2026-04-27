@@ -232,6 +232,7 @@ fn ticket_to_item(t: WaTicket, include_timeline: bool) -> TicketItem {
         transferred_from_name: t.transferred_from_name,
         created_at: iso8601(t.created_at),
         updated_at: iso8601(t.updated_at),
+        tags: t.tags,
         timeline,
     }
 }
@@ -670,6 +671,7 @@ pub async fn create_ticket_handler(
         transferred_from_id: None,
         transferred_from_name: None,
         idempotency_key,
+        tags: Vec::new(),
         created_at: now,
         updated_at: now,
         timeline: timeline_entries,
@@ -711,6 +713,9 @@ pub struct TicketsListQuery {
     pub from_date: Option<String>,
     pub to_date: Option<String>,
     pub search: Option<String>,
+    /// CSV de tags. El ticket debe contener **todas**. Ejemplo:
+    /// `?tags=lead_potencial` o `?tags=lead_potencial,cliente_no_identificado_sin_intent`.
+    pub tags: Option<String>,
     pub limit: Option<i64>,
     pub cursor: Option<String>,
 }
@@ -741,6 +746,7 @@ fn parse_iso(s: &str, field: &str) -> Result<BsonDateTime, ApiError> {
         ("from_date" = Option<String>, Query, description = "ISO-8601"),
         ("to_date" = Option<String>, Query, description = "ISO-8601"),
         ("search" = Option<String>, Query, description = "Substring case-insensitive en reason/resolution"),
+        ("tags" = Option<String>, Query, description = "CSV de tags (ej: 'lead_potencial,cliente_no_identificado_sin_intent'). Match exacto, AND lógico ($all)"),
         ("limit" = Option<i64>, Query, description = "Default 30, máx 100"),
         ("cursor" = Option<String>, Query, description = "Cursor opaco"),
     ),
@@ -777,6 +783,25 @@ pub async fn list_tickets_handler(
         .map(|n| n.clamp(1, TICKET_LIST_MAX_LIMIT))
         .unwrap_or(TICKET_LIST_DEFAULT_LIMIT);
 
+    // Tags vienen como CSV — se parten por coma, se trimean, se filtran vacíos.
+    // Si tras eso queda vacío, no se aplica filtro de tags.
+    let tags_vec: Vec<String> = q
+        .tags
+        .as_deref()
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let tags_filter: Option<&[String]> = if tags_vec.is_empty() {
+        None
+    } else {
+        Some(tags_vec.as_slice())
+    };
+
     // Scope por rol: agente sólo ve los suyos (asignado o creador). El front
     // puede filtrar adicionalmente con `assigned_to_id` o `created_by_id`,
     // pero el back los pisa para evitar leak.
@@ -797,6 +822,7 @@ pub async fn list_tickets_handler(
         from_date,
         to_date,
         search: q.search.as_deref().filter(|s| !s.is_empty()),
+        tags: tags_filter,
         limit,
         cursor: q.cursor.as_deref().filter(|s| !s.is_empty()),
     };
@@ -1200,6 +1226,7 @@ pub async fn transfer_and_ticket_handler(
         transferred_from_id: Some(claims.id.clone()),
         transferred_from_name: Some(creator.name.clone()),
         idempotency_key,
+        tags: Vec::new(),
         created_at: now,
         updated_at: now,
         timeline,

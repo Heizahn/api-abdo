@@ -2451,6 +2451,7 @@ pub async fn list_transferable_agents_handler(
             name: u.name,
             email: u.email,
             role: u.role,
+            is_bot: u.is_bot,
         })
         .collect();
     Ok(Json(TransferableAgentsResponse { ok: true, data }))
