@@ -21,7 +21,11 @@ use std::time::Duration;
 
 use crate::error::ApiError;
 
-const GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1";
+/// Base URL de la Generative Language API. Usamos `v1beta` porque ahí viven
+/// las familias `gemini-1.5-*` y `gemini-2.x-*`. La `v1` "stable" sólo
+/// expone modelos legacy (`gemini-pro` 1.0) — si el SUPERADMIN configurara
+/// uno de esos, Gemini igual responde porque ambos endpoints coexisten.
+const GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 
 /// Configuración del relay AI (Cloudflare Worker). Cuando ambos campos
 /// están presentes, `generate_content` enruta el POST por el worker:
