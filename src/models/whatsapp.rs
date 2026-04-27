@@ -1523,6 +1523,18 @@ pub struct AuditMessageItem {
     /// ISO-8601 del momento de la primera marca de read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_at: Option<String>,
+    /// Sólo cuando `type == "template"`: nombre del template enviado.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template_name: Option<String>,
+    /// Sólo cuando `type == "template"`: language tag (ej. "es", "es_VE").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template_language: Option<String>,
+    /// Sólo cuando `type == "template"`: snapshot del `components[]` enviado
+    /// a Meta (header + body + footer + buttons, con parameters ya
+    /// interpolados). El front lo usa para rerenderizar la burbuja como
+    /// se envió originalmente.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template_components: Option<serde_json::Value>,
     pub created_at: String,
 }
 

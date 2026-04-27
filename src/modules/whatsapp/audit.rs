@@ -51,7 +51,7 @@ const AUDIT_MAX_LIMIT: i64 = 200;
 const AUDIT_EXPORT_MAX_ROWS: u64 = 100_000;
 
 /// Header del CSV de export — mantener alineado con el orden de `csv_row(...)`.
-const CSV_HEADER: &str = "created_at,conversation_id,customer_phone,customer_name,business_phone,direction,type,content,from_user_name,status,read_by_user_name,read_at\n";
+const CSV_HEADER: &str = "created_at,conversation_id,customer_phone,customer_name,business_phone,direction,type,content,from_user_name,status,read_by_user_name,read_at,template_name\n";
 
 // ============================================
 // QUERY PARAMS
@@ -367,6 +367,9 @@ pub async fn audit_messages_handler(
             read_by_user_id: m.read_by_user_id,
             read_by_user_name,
             read_at,
+            template_name: m.template_name,
+            template_language: m.template_language,
+            template_components: m.template_components,
             created_at: iso8601(m.timestamp),
         });
     }
@@ -505,6 +508,9 @@ pub async fn audit_conversation_messages_handler(
             read_by_user_id: m.read_by_user_id,
             read_by_user_name,
             read_at,
+            template_name: m.template_name,
+            template_language: m.template_language,
+            template_components: m.template_components,
             created_at: iso8601(m.timestamp),
         });
     }
@@ -1055,6 +1061,7 @@ pub async fn audit_export_handler(
         let read_at_str = m.read_at.map(iso8601).unwrap_or_default();
         let content = m.body.as_deref().unwrap_or("");
         let status = m.status.as_deref().unwrap_or("");
+        let template_name = m.template_name.as_deref().unwrap_or("");
 
         body.push_str(&csv_row(&[
             &iso8601(m.timestamp),
@@ -1069,6 +1076,7 @@ pub async fn audit_export_handler(
             status,
             read_by_user_name,
             &read_at_str,
+            template_name,
         ]));
         body.push('\n');
     }
