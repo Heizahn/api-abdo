@@ -582,6 +582,13 @@ pub trait WhatsAppRepository {
         &self,
         ids: &[ObjectId],
     ) -> Result<HashMap<ObjectId, WaConversation>, String>;
+
+    /// Cantidad total de mensajes en una conversación. Usado por el endpoint
+    /// de timeline para mostrar un contador sin paginar.
+    async fn count_messages_for_conversation(
+        &self,
+        conversation_id: &ObjectId,
+    ) -> Result<u64, String>;
 }
 
 // ============================================

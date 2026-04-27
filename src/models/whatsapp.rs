@@ -1513,3 +1513,66 @@ pub struct AuditMessagesResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
 }
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AuditConversationHeader {
+    pub id: String,
+    pub customer_phone: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub customer_name: Option<String>,
+    pub business_phone: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_name: Option<String>,
+    /// `"pending"`, `"in_progress"` o `"closed"`.
+    pub status: String,
+    pub created_at: String,
+    /// `last_message_at` se usa como proxy de `updated_at` (no hay campo
+    /// dedicado en `WaConversations`).
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AuditConversationEventItem {
+    pub id: String,
+    /// `created` | `taken` | `transferred` | `closed` | `reopened`
+    pub event_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AuditAssignedToHistoryItem {
+    /// UUID del agente que tuvo la conversación durante este intervalo.
+    /// `None` cuando el intervalo representa "nadie asignado" (post-cierre/reopen).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
+    pub from: String,
+    /// `None` indica que es el intervalo activo (sin cierre todavía).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AuditConversationTimeline {
+    pub conversation: AuditConversationHeader,
+    pub events: Vec<AuditConversationEventItem>,
+    pub message_count: u64,
+    pub assigned_to_history: Vec<AuditAssignedToHistoryItem>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AuditConversationTimelineResponse {
+    pub ok: bool,
+    pub data: AuditConversationTimeline,
+}

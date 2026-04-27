@@ -1313,6 +1313,16 @@ impl WhatsAppRepository for MongoDB {
         Ok(out)
     }
 
+    async fn count_messages_for_conversation(
+        &self,
+        conversation_id: &ObjectId,
+    ) -> Result<u64, String> {
+        self.wa_messages()
+            .count_documents(doc! { "conversation_id": conversation_id })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn backfill_conversation_events(&self) -> Result<u64, String> {
         // Recorre WaConversations y, para cada una sin eventos previos,
         // siembra: created (con created_at) y, si tiene assigned_to, taken

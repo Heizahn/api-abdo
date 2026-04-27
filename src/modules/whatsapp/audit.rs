@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     Extension, Json,
 };
 use mongodb::bson::{oid::ObjectId, DateTime as BsonDateTime};
@@ -20,7 +20,9 @@ use crate::{
     db::{AuditMessageFilter, ProfileRepository, WhatsAppRepository},
     error::ApiError,
     models::whatsapp::{
-        AuditMessageItem, AuditMessagesResponse, WaConversation, WaMessage,
+        AuditAssignedToHistoryItem, AuditConversationEventItem, AuditConversationHeader,
+        AuditConversationTimeline, AuditConversationTimelineResponse, AuditMessageItem,
+        AuditMessagesResponse, WaConversation, WaConversationEvent, WaMessage,
     },
     state::AppState,
 };
@@ -33,6 +35,9 @@ use super::handler::require_superadmin;
 
 /// Máximo rango de fechas aceptado (ISO-8601 → milisegundos). 90 días.
 const AUDIT_MAX_RANGE_MS: i64 = 90 * 24 * 60 * 60 * 1000;
+/// Rango por defecto cuando el caller no manda `from_date`/`to_date` — evita
+/// que el dashboard abra mostrando histórico completo en la primera página.
+const AUDIT_DEFAULT_RANGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const AUDIT_DEFAULT_LIMIT: i64 = 50;
 const AUDIT_MAX_LIMIT: i64 = 200;
 
@@ -207,14 +212,32 @@ pub async fn audit_messages_handler(
     // 1. Auth: SUPERADMIN only.
     require_superadmin(&state, &claims.id).await?;
 
-    // 2. Validar fechas y rango.
-    let from_date = match q.from_date.as_deref() {
+    // 2. Validar fechas y rango. Si ambos faltan, defaultear a últimos 30 días
+    //    (cap de 90 días igual aplica). Si sólo viene uno, completar el otro
+    //    para mantener un rango bien definido.
+    let from_raw = match q.from_date.as_deref() {
         Some(s) if !s.is_empty() => Some(parse_iso_to_bson(s, "from_date")?),
         _ => None,
     };
-    let to_date = match q.to_date.as_deref() {
+    let to_raw = match q.to_date.as_deref() {
         Some(s) if !s.is_empty() => Some(parse_iso_to_bson(s, "to_date")?),
         _ => None,
+    };
+    let now_ms = BsonDateTime::now().timestamp_millis();
+    let (from_date, to_date) = match (from_raw, to_raw) {
+        (Some(f), Some(t)) => (Some(f), Some(t)),
+        (Some(f), None) => (
+            Some(f),
+            Some(BsonDateTime::from_millis(now_ms)),
+        ),
+        (None, Some(t)) => (
+            Some(BsonDateTime::from_millis(t.timestamp_millis() - AUDIT_DEFAULT_RANGE_MS)),
+            Some(t),
+        ),
+        (None, None) => (
+            Some(BsonDateTime::from_millis(now_ms - AUDIT_DEFAULT_RANGE_MS)),
+            Some(BsonDateTime::from_millis(now_ms)),
+        ),
     };
     validate_range(from_date, to_date)?;
 
@@ -331,4 +354,189 @@ pub async fn audit_messages_handler(
         data,
         next_cursor,
     }))
+}
+
+// ============================================
+// HANDLER: GET /v1/auth-user/whatsapp/audit/conversations/:id/timeline
+// ============================================
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/audit/conversations/{id}/timeline",
+    tag = "WhatsApp — Auditoría",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ID de la conversación")),
+    responses(
+        (status = 200, description = "Timeline completo de la conversación", body = AuditConversationTimelineResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Forbidden — requiere SUPERADMIN"),
+        (status = 404, description = "Conversación no encontrada"),
+    )
+)]
+pub async fn audit_conversation_timeline_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+) -> Result<Json<AuditConversationTimelineResponse>, ApiError> {
+    require_superadmin(&state, &claims.id).await?;
+
+    let oid = ObjectId::parse_str(&id)
+        .map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+
+    // 1. Conversación.
+    let conv = state.db
+        .find_conversation_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    // 2. Eventos ordenados ASC (created_at).
+    let events: Vec<WaConversationEvent> = state.db
+        .list_conversation_events(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    // 3. Conteo de mensajes.
+    let message_count = state.db
+        .count_messages_for_conversation(&oid)
+        .await
+        .unwrap_or(0);
+
+    // 4. Resolución de nombres faltantes (eventos backfilled tienen names en None).
+    let missing_user_ids: Vec<String> = events
+        .iter()
+        .flat_map(|e| {
+            let mut v = Vec::new();
+            if let (Some(id), None) = (e.actor_id.as_deref(), e.actor_name.as_deref()) {
+                v.push(id.to_string());
+            }
+            if let (Some(id), None) = (e.target_id.as_deref(), e.target_name.as_deref()) {
+                v.push(id.to_string());
+            }
+            v
+        })
+        .collect();
+    let agent_names = resolve_agent_names(&state, &missing_user_ids).await;
+
+    // 5. Customer + workspace.
+    let mut conv_map = HashMap::new();
+    conv_map.insert(oid, conv.clone());
+    let customer_names = resolve_customer_names(&state, &conv_map).await;
+    let customer_name = customer_names.get(&oid).cloned();
+    let workspace_name = state.db
+        .get_workspace_names(&[conv.business_phone.clone()])
+        .await
+        .ok()
+        .and_then(|m| m.get(&conv.business_phone).cloned());
+
+    // 6. Mapear eventos al shape API.
+    let events_out: Vec<AuditConversationEventItem> = events
+        .iter()
+        .map(|e| AuditConversationEventItem {
+            id: e.id.map(|o| o.to_hex()).unwrap_or_default(),
+            event_type: e.event_type.clone(),
+            actor_id: e.actor_id.clone(),
+            actor_name: e
+                .actor_name
+                .clone()
+                .or_else(|| e.actor_id.as_deref().and_then(|id| agent_names.get(id).cloned())),
+            target_id: e.target_id.clone(),
+            target_name: e
+                .target_name
+                .clone()
+                .or_else(|| e.target_id.as_deref().and_then(|id| agent_names.get(id).cloned())),
+            note: e.note.clone(),
+            created_at: iso8601(e.created_at),
+        })
+        .collect();
+
+    // 7. Reconstruir assigned_to_history. Regla: el dueño nuevo es target_id
+    //    (en `taken` actor==target; en `transferred` target==destino).
+    //    `closed` cierra el intervalo; `reopened` no abre uno nuevo (se queda
+    //    `pending` sin dueño hasta que llegue un `taken`).
+    let assigned_to_history = build_assigned_to_history(&events_out);
+
+    let header = AuditConversationHeader {
+        id: oid.to_hex(),
+        customer_phone: conv.phone,
+        customer_name,
+        business_phone: conv.business_phone,
+        workspace_name,
+        status: conv.status,
+        created_at: iso8601(conv.created_at),
+        updated_at: iso8601(conv.last_message_at),
+    };
+
+    Ok(Json(AuditConversationTimelineResponse {
+        ok: true,
+        data: AuditConversationTimeline {
+            conversation: header,
+            events: events_out,
+            message_count,
+            assigned_to_history,
+        },
+    }))
+}
+
+/// Reconstruye los intervalos de "quién tuvo asignada esta conversación"
+/// recorriendo los eventos en orden ASC. Cada `taken`/`transferred` con
+/// `target_id` distinto al dueño actual cierra el intervalo previo y abre
+/// uno nuevo. `closed` cierra el intervalo activo. `reopened` y `created`
+/// no abren intervalos por sí solos (no hay dueño hasta el próximo `taken`).
+fn build_assigned_to_history(
+    events: &[AuditConversationEventItem],
+) -> Vec<AuditAssignedToHistoryItem> {
+    let mut out: Vec<AuditAssignedToHistoryItem> = Vec::new();
+    let mut current_owner: Option<(String, Option<String>, String)> = None; // (user_id, user_name, from)
+
+    let close_current = |out: &mut Vec<AuditAssignedToHistoryItem>,
+                         current: &mut Option<(String, Option<String>, String)>,
+                         to_at: &str| {
+        if let Some((uid, uname, from)) = current.take() {
+            out.push(AuditAssignedToHistoryItem {
+                user_id: Some(uid),
+                user_name: uname,
+                from,
+                to: Some(to_at.to_string()),
+            });
+        }
+    };
+
+    for ev in events {
+        match ev.event_type.as_str() {
+            "taken" | "transferred" => {
+                let new_owner = match ev.target_id.as_deref() {
+                    Some(s) if !s.is_empty() => s.to_string(),
+                    _ => continue,
+                };
+                let same_owner = current_owner
+                    .as_ref()
+                    .map(|(uid, _, _)| uid == &new_owner)
+                    .unwrap_or(false);
+                if !same_owner {
+                    close_current(&mut out, &mut current_owner, &ev.created_at);
+                    current_owner = Some((
+                        new_owner,
+                        ev.target_name.clone(),
+                        ev.created_at.clone(),
+                    ));
+                }
+            }
+            "closed" => {
+                close_current(&mut out, &mut current_owner, &ev.created_at);
+            }
+            _ => {} // created, reopened, etc. no afectan ownership por sí solos.
+        }
+    }
+
+    if let Some((uid, uname, from)) = current_owner {
+        out.push(AuditAssignedToHistoryItem {
+            user_id: Some(uid),
+            user_name: uname,
+            from,
+            to: None,
+        });
+    }
+
+    out
 }
