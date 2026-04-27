@@ -53,16 +53,99 @@ use super::ws::{send_to_user, WsServerEvent};
 // ============================================
 // CATÁLOGO DE CATEGORÍAS (MVP — hardcoded)
 // ============================================
+//
+// 10 categorías agrupadas en 2 pilares:
+// - `administration` — Ventas + Admin (contratos, dinero, datos del cliente).
+// - `operators` — Soporte Técnico (red, equipos, despacho de campo).
+//
+// `target_roles` lista los `nRole` (f32) habilitados para ser asignados como
+// dueños del ticket en esa categoría. SUPERADMIN (`0.0`) está en todas como
+// fallback universal. El front filtra el picker; el back valida server-side
+// en POST /tickets, PATCH transfer y POST /transfer-and-ticket.
+//
+// Mapping de roles (ver memoria `user_roles.md`):
+//   0   superadmin
+//   0.5 operador             → operators (soporte general)
+//   1   contador              → administration (cobranzas/facturación)
+//   1.5 contador mensajero    → administration (operativo)
+//   2   supercajero           → administration (full admin)
+//   3   proveedor             → ninguna (externo, no recibe tickets)
+//   4   cajero                → administration (cobranzas + ventas)
+//   5   instalador            → operators (despacho técnico/aprovisionamiento)
 
-/// Catálogo estático de categorías. La key es estable (se persiste en
-/// `WaTicket.category_id`); el label es user-facing en español.
-const TICKET_CATEGORIES: &[(&str, &str)] = &[
-    ("falla_tecnica", "Falla técnica"),
-    ("reclamo_facturacion", "Reclamo de facturación"),
-    ("consulta_comercial", "Consulta comercial"),
-    ("cambio_servicio", "Cambio de servicio"),
-    ("escalado_supervisor", "Escalado a supervisor"),
-    ("otro", "Otro"),
+struct CategorySpec {
+    id: &'static str,
+    label: &'static str,
+    department: &'static str,
+    target_roles: &'static [f32],
+}
+
+const DEPT_ADMIN: &str = "administration";
+const DEPT_OPS: &str = "operators";
+
+const TICKET_CATEGORIES: &[CategorySpec] = &[
+    // ─── Administración (Ventas + Admin) ─────────────────────────────────
+    CategorySpec {
+        id: "ventas_contrataciones",
+        label: "Ventas y Contrataciones",
+        department: DEPT_ADMIN,
+        target_roles: &[0.0, 1.0, 2.0, 4.0],
+    },
+    CategorySpec {
+        id: "cobranzas_facturacion",
+        label: "Cobranzas y Facturación",
+        department: DEPT_ADMIN,
+        target_roles: &[0.0, 1.0, 1.5, 2.0, 4.0],
+    },
+    CategorySpec {
+        id: "gestion_planes",
+        label: "Gestión de Planes",
+        department: DEPT_ADMIN,
+        target_roles: &[0.0, 1.0, 2.0],
+    },
+    CategorySpec {
+        id: "bajas_retencion",
+        label: "Bajas y Retención",
+        department: DEPT_ADMIN,
+        target_roles: &[0.0, 1.0, 2.0],
+    },
+    CategorySpec {
+        id: "actualizacion_datos",
+        label: "Actualización de Datos",
+        department: DEPT_ADMIN,
+        target_roles: &[0.0, 1.0, 1.5, 2.0, 4.0],
+    },
+    // ─── Operadores (Soporte Técnico) ─────────────────────────────────────
+    CategorySpec {
+        id: "soporte_primer_segundo_nivel",
+        label: "Soporte de Primer y Segundo Nivel",
+        department: DEPT_OPS,
+        target_roles: &[0.0, 0.5],
+    },
+    CategorySpec {
+        id: "configuraciones_tecnicas",
+        label: "Configuraciones Técnicas",
+        department: DEPT_OPS,
+        target_roles: &[0.0, 0.5, 5.0],
+    },
+    CategorySpec {
+        id: "mantenimiento_red",
+        label: "Mantenimiento de Red",
+        department: DEPT_OPS,
+        target_roles: &[0.0, 0.5],
+    },
+    CategorySpec {
+        id: "despacho_tecnico",
+        label: "Despacho Técnico (Campo)",
+        department: DEPT_OPS,
+        target_roles: &[0.0, 0.5, 5.0],
+    },
+    CategorySpec {
+        id: "aprovisionamiento",
+        label: "Aprovisionamiento",
+        department: DEPT_OPS,
+        target_roles: &[0.0, 0.5, 5.0],
+    },
 ];
 
 const REASON_MAX_LEN: usize = 500;
@@ -73,10 +156,12 @@ const TICKET_LIST_MAX_LIMIT: i64 = 100;
 const IDEMPOTENCY_KEY_HEADER: &str = "Idempotency-Key";
 const IDEMPOTENCY_KEY_MAX_LEN: usize = 128;
 
+fn find_category(id: &str) -> Option<&'static CategorySpec> {
+    TICKET_CATEGORIES.iter().find(|c| c.id == id)
+}
+
 fn category_label(id: &str) -> Option<&'static str> {
-    TICKET_CATEGORIES
-        .iter()
-        .find_map(|(k, v)| if *k == id { Some(*v) } else { None })
+    find_category(id).map(|c| c.label)
 }
 
 // ============================================
@@ -231,7 +316,12 @@ fn resolve_category(
     }
 }
 
-async fn resolve_user_name(state: &Arc<AppState>, user_id: &str) -> Result<String, ApiError> {
+/// Resuelve `(name, role)` del agente destino. Útil cuando además del nombre
+/// hay que validar que el rol esté permitido en `target_roles` de la categoría.
+async fn resolve_assignee(
+    state: &Arc<AppState>,
+    user_id: &str,
+) -> Result<(String, f32), ApiError> {
     let u = state
         .db
         .find_user_by_id(user_id)
@@ -242,7 +332,45 @@ async fn resolve_user_name(state: &Arc<AppState>, user_id: &str) -> Result<Strin
             field: "assign_to_id".into(),
             message: format!("El usuario {} no existe", user_id),
         })?;
-    Ok(u.name)
+    Ok((u.name, u.role))
+}
+
+/// Valida que el rol del agente destino esté en `target_roles` de la
+/// categoría del ticket. Si no, devuelve `409 invalid_assignee_for_category`
+/// con `details = { category_id, allowed_roles, agent_role }` para que el
+/// front pueda mostrar el error con contexto.
+///
+/// La comparación es exacta sobre `f32` — `nRole` vive en valores
+/// determinados (0.0, 0.5, 1.0, 1.5, ...) que son representables sin
+/// pérdida en f32, así que `==` es seguro.
+fn validate_assignee_for_category(
+    category_id: &str,
+    assignee_role: f32,
+) -> Result<(), ApiError> {
+    let cat = match find_category(category_id) {
+        Some(c) => c,
+        // Si la categoría no existe en el catálogo (probablemente legacy),
+        // dejamos pasar — la creación del ticket ya valida `category_id`
+        // contra el catálogo en `resolve_category`. Acá no es nuestro deber
+        // bloquear por una categoría desconocida.
+        None => return Ok(()),
+    };
+    if !cat.target_roles.iter().any(|r| *r == assignee_role) {
+        return Err(ApiError::domain_with_details(
+            StatusCode::CONFLICT,
+            "invalid_assignee_for_category",
+            format!(
+                "El rol {} no puede ser asignado a tickets de '{}'",
+                assignee_role, cat.label
+            ),
+            serde_json::json!({
+                "category_id": cat.id,
+                "allowed_roles": cat.target_roles,
+                "agent_role": assignee_role,
+            }),
+        ));
+    }
+    Ok(())
 }
 
 fn ticket_already_open(existing: &WaTicket) -> ApiError {
@@ -354,9 +482,11 @@ pub async fn list_ticket_categories_handler(
     require_can_chat(&state, &claims.id).await?;
     let data = TICKET_CATEGORIES
         .iter()
-        .map(|(id, label)| TicketCategoryItem {
-            id: (*id).to_string(),
-            label: (*label).to_string(),
+        .map(|c| TicketCategoryItem {
+            id: c.id.to_string(),
+            label: c.label.to_string(),
+            department: c.department.to_string(),
+            target_roles: c.target_roles.to_vec(),
         })
         .collect();
     Ok(Json(TicketCategoriesResponse { ok: true, data }))
@@ -430,9 +560,15 @@ pub async fn create_ticket_handler(
         return Err(ticket_already_open(&existing));
     }
 
-    // 3. Resolver agente destino si vino assign_to_id.
+    // 3. Resolver agente destino si vino assign_to_id, validando rol vs categoría.
     let assignee_name = match body.assign_to_id.as_deref().filter(|s| !s.is_empty()) {
-        Some(uid) => Some(resolve_user_name(&state, uid).await?),
+        Some(uid) => {
+            let (name, role) = resolve_assignee(&state, uid).await?;
+            if let Some(cid) = category_id.as_deref() {
+                validate_assignee_for_category(cid, role)?;
+            }
+            Some(name)
+        }
         None => None,
     };
 
@@ -803,7 +939,11 @@ pub async fn update_ticket_handler(
             if !expects_assign_to_id {
                 // Defensive — el match arriba ya dice que sí lo espera.
             }
-            let name = resolve_user_name(&state, target_id).await?;
+            let (name, role) = resolve_assignee(&state, target_id).await?;
+            // Si el ticket tiene categoría, validar que el destino pueda atenderla.
+            if let Some(cid) = ticket.category_id.as_deref() {
+                validate_assignee_for_category(cid, role)?;
+            }
             new_assigned_id = Some(target_id.to_string());
             new_assigned_name = Some(name);
         }
@@ -971,8 +1111,11 @@ pub async fn transfer_and_ticket_handler(
         }
     }
 
-    // Validar destino.
-    let assignee_name = resolve_user_name(&state, &body.transfer_to_id).await?;
+    // Validar destino + rol vs categoría (si aplica).
+    let (assignee_name, assignee_role) = resolve_assignee(&state, &body.transfer_to_id).await?;
+    if let Some(cid) = category_id.as_deref() {
+        validate_assignee_for_category(cid, assignee_role)?;
+    }
     let (customer_name, customer_id) = resolve_customer_snapshot(&state, &conv).await;
 
     let now = BsonDateTime::now();

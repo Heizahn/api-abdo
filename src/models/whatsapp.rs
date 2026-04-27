@@ -1851,6 +1851,15 @@ pub struct TransferAndTicketRequest {
 pub struct TicketCategoryItem {
     pub id: String,
     pub label: String,
+    /// Pilar al que pertenece la categoría: `"administration"` (Ventas + Admin)
+    /// o `"operators"` (Soporte Técnico). El front lo usa para agrupar
+    /// visualmente las categorías y para inferir el dropdown de assignees.
+    pub department: String,
+    /// Roles (`nRole` numéricos) que pueden ser asignados como dueños del
+    /// ticket en esta categoría. SUPERADMIN (`0.0`) está incluido en todas
+    /// las categorías como universal-fallback. El front filtra el picker
+    /// por este array; el back valida server-side al crear/transferir.
+    pub target_roles: Vec<f32>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
