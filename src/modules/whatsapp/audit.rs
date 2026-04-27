@@ -51,7 +51,7 @@ const AUDIT_MAX_LIMIT: i64 = 200;
 const AUDIT_EXPORT_MAX_ROWS: u64 = 100_000;
 
 /// Header del CSV de export — mantener alineado con el orden de `csv_row(...)`.
-const CSV_HEADER: &str = "created_at,conversation_id,customer_phone,customer_name,business_phone,direction,type,content,from_user_name,status,read_by_user_name,read_at,template_name\n";
+const CSV_HEADER: &str = "created_at,conversation_id,customer_phone,customer_name,business_phone,direction,type,content,from_user_name,status,read_by_user_name,read_at,template_name,media_id,media_mime_type,media_filename,latitude,longitude\n";
 
 // ============================================
 // QUERY PARAMS
@@ -350,9 +350,12 @@ pub async fn audit_messages_handler(
             .and_then(|id| agent_names.get(id).cloned());
         let read_at = m.read_at.map(iso8601);
 
+        let voice = if m.msg_type == "audio" { Some(m.voice) } else { None };
+
         data.push(AuditMessageItem {
             id: m.id.map(|o| o.to_hex()).unwrap_or_default(),
             conversation_id: m.conversation_id.to_hex(),
+            wa_message_id: m.wa_message_id,
             customer_phone,
             customer_name,
             business_phone,
@@ -360,7 +363,13 @@ pub async fn audit_messages_handler(
             direction: m.direction,
             msg_type: m.msg_type,
             content: m.body,
+            media_id: m.media_id,
+            media_mime_type: m.media_mime_type,
             media_filename: m.media_filename,
+            voice,
+            location: m.location,
+            contacts_payload: m.contacts_payload,
+            interactive_payload: m.interactive_payload,
             from_user_id: m.sent_by,
             from_user_name,
             status: m.status,
@@ -491,9 +500,12 @@ pub async fn audit_conversation_messages_handler(
             .and_then(|id| agent_names.get(id).cloned());
         let read_at = m.read_at.map(iso8601);
 
+        let voice = if m.msg_type == "audio" { Some(m.voice) } else { None };
+
         data.push(AuditMessageItem {
             id: m.id.map(|o| o.to_hex()).unwrap_or_default(),
             conversation_id: m.conversation_id.to_hex(),
+            wa_message_id: m.wa_message_id,
             customer_phone: customer_phone.clone(),
             customer_name: customer_name.clone(),
             business_phone: business_phone.clone(),
@@ -501,7 +513,13 @@ pub async fn audit_conversation_messages_handler(
             direction: m.direction,
             msg_type: m.msg_type,
             content: m.body,
+            media_id: m.media_id,
+            media_mime_type: m.media_mime_type,
             media_filename: m.media_filename,
+            voice,
+            location: m.location,
+            contacts_payload: m.contacts_payload,
+            interactive_payload: m.interactive_payload,
             from_user_id: m.sent_by,
             from_user_name,
             status: m.status,
@@ -1081,6 +1099,19 @@ pub async fn audit_export_handler(
         let content = m.body.as_deref().unwrap_or("");
         let status = m.status.as_deref().unwrap_or("");
         let template_name = m.template_name.as_deref().unwrap_or("");
+        let media_id = m.media_id.as_deref().unwrap_or("");
+        let media_mime_type = m.media_mime_type.as_deref().unwrap_or("");
+        let media_filename = m.media_filename.as_deref().unwrap_or("");
+        let latitude = m
+            .location
+            .as_ref()
+            .map(|l| l.latitude.to_string())
+            .unwrap_or_default();
+        let longitude = m
+            .location
+            .as_ref()
+            .map(|l| l.longitude.to_string())
+            .unwrap_or_default();
 
         body.push_str(&csv_row(&[
             &iso8601(m.timestamp),
@@ -1096,6 +1127,11 @@ pub async fn audit_export_handler(
             read_by_user_name,
             &read_at_str,
             template_name,
+            media_id,
+            media_mime_type,
+            media_filename,
+            &latitude,
+            &longitude,
         ]));
         body.push('\n');
     }

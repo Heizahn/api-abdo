@@ -1490,6 +1490,9 @@ pub struct WaPurposeUsage {
 pub struct AuditMessageItem {
     pub id: String,
     pub conversation_id: String,
+    /// `wamid` de Meta — identificador estable del mensaje original. Útil
+    /// para correlacionar con webhooks/logs externos.
+    pub wa_message_id: String,
     pub customer_phone: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub customer_name: Option<String>,
@@ -1503,8 +1506,30 @@ pub struct AuditMessageItem {
     pub msg_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Sólo en mensajes con media (image/video/audio/document/sticker).
+    /// `media_id` es el id que reportó Meta en el webhook — combinado con
+    /// `GET /v1/auth-user/whatsapp/media/:media_id` da el binario.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_mime_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub media_filename: Option<String>,
+    /// Sólo cuando `type == "audio"`: `true` = nota de voz (push-to-talk),
+    /// `false` = archivo de audio. Ausente para otros tipos.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voice: Option<bool>,
+    /// Sólo cuando `type == "location"`: coordenadas + (opcional) nombre/dirección.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<LocationPayload>,
+    /// Sólo cuando `type == "contacts"`: array passthrough de tarjetas vCard
+    /// como las envía Meta. El front lo decodifica con su tipo `ContactCard[]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contacts_payload: Option<serde_json::Value>,
+    /// Sólo cuando `type == "interactive"`: snapshot del payload interactive
+    /// (button/list reply). Front lo decodifica con `InteractiveMessagePayload`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interactive_payload: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from_user_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
