@@ -274,7 +274,7 @@ pub async fn audit_messages_handler(
 
     // Si pidieron filtrar y no hay match, retornar lista vacía sin tocar WaMessages.
     if matches!(conversation_ids.as_deref(), Some(ids) if ids.is_empty()) {
-        return Ok(Json(AuditMessagesResponse { ok: true, data: vec![], next_cursor: None }));
+        return Ok(Json(AuditMessagesResponse { ok: true, data: vec![], next_cursor: None, total: None }));
     }
 
     // 4. Query principal sobre WaMessages.
@@ -375,6 +375,145 @@ pub async fn audit_messages_handler(
         ok: true,
         data,
         next_cursor,
+        total: None,
+    }))
+}
+
+// ============================================
+// HANDLER: GET /v1/auth-user/whatsapp/audit/conversations/:id/messages
+// ============================================
+// Drilldown read-only de una conversación: devuelve TODOS los mensajes
+// (sin filtro de fechas), paginados por cursor descendente. Independiente
+// del endpoint de operador `/conversations/:id/messages` — no dispara
+// mark-read ni record_conversation_open. SUPERADMIN-only.
+
+#[derive(Debug, Deserialize)]
+pub struct AuditConversationMessagesQuery {
+    pub limit: Option<i64>,
+    pub cursor: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/audit/conversations/{id}/messages",
+    tag = "WhatsApp — Auditoría",
+    security(("bearerAuth" = [])),
+    params(
+        ("id" = String, Path, description = "ID de la conversación"),
+        ("limit" = Option<i64>, Query, description = "Default 50, máx 200"),
+        ("cursor" = Option<String>, Query, description = "Cursor opaco de la página anterior"),
+    ),
+    responses(
+        (status = 200, description = "Mensajes de la conversación con total", body = AuditMessagesResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Forbidden — requiere SUPERADMIN"),
+        (status = 404, description = "Conversación no encontrada"),
+    )
+)]
+pub async fn audit_conversation_messages_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+    Query(q): Query<AuditConversationMessagesQuery>,
+) -> Result<Json<AuditMessagesResponse>, ApiError> {
+    require_superadmin(&state, &claims.id).await?;
+
+    let oid = ObjectId::parse_str(&id)
+        .map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+
+    // Verificar que la conversación existe (404 explícito).
+    let conv = state.db
+        .find_conversation_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    let limit = q
+        .limit
+        .map(|n| n.clamp(1, AUDIT_MAX_LIMIT))
+        .unwrap_or(AUDIT_DEFAULT_LIMIT);
+
+    let conv_ids = vec![oid];
+    let filter = AuditMessageFilter {
+        from_date: None, // Drilldown: sin recorte temporal — mostramos todos.
+        to_date: None,
+        agent_id: None,
+        conversation_ids: Some(&conv_ids),
+        direction: None,
+        msg_type: None,
+        search: None,
+        limit,
+        cursor: q.cursor.as_deref(),
+    };
+
+    // Total real de la conversación (independiente del cursor/limit).
+    let total = state.db
+        .audit_count_messages(&filter)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    let messages: Vec<WaMessage> = state.db
+        .audit_list_messages(filter)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    // Resolución batch reusando los helpers — la conv ya la tenemos.
+    let mut conv_map = HashMap::new();
+    conv_map.insert(oid, conv.clone());
+    let customer_names = resolve_customer_names(&state, &conv_map).await;
+    let business_phone = conv.business_phone.clone();
+    let workspace_name = state.db
+        .get_workspace_names(&[business_phone.clone()])
+        .await
+        .ok()
+        .and_then(|m| m.get(&business_phone).cloned());
+
+    let mut all_agent_ids: Vec<String> = messages.iter().filter_map(|m| m.sent_by.clone()).collect();
+    all_agent_ids.extend(messages.iter().filter_map(|m| m.read_by_user_id.clone()));
+    let agent_names = resolve_agent_names(&state, &all_agent_ids).await;
+
+    let next_cursor = messages.last().and_then(|m| {
+        m.id.map(|oid| encode_cursor(m.timestamp, oid))
+    }).filter(|_| messages.len() as i64 == limit);
+
+    let customer_phone = conv.phone.clone();
+    let customer_name = customer_names.get(&oid).cloned();
+
+    let mut data: Vec<AuditMessageItem> = Vec::with_capacity(messages.len());
+    for m in messages {
+        let from_user_name = m.sent_by.as_deref().and_then(|id| agent_names.get(id).cloned());
+        let read_by_user_name = m
+            .read_by_user_id
+            .as_deref()
+            .and_then(|id| agent_names.get(id).cloned());
+        let read_at = m.read_at.map(iso8601);
+
+        data.push(AuditMessageItem {
+            id: m.id.map(|o| o.to_hex()).unwrap_or_default(),
+            conversation_id: m.conversation_id.to_hex(),
+            customer_phone: customer_phone.clone(),
+            customer_name: customer_name.clone(),
+            business_phone: business_phone.clone(),
+            workspace_name: workspace_name.clone(),
+            direction: m.direction,
+            msg_type: m.msg_type,
+            content: m.body,
+            media_filename: m.media_filename,
+            from_user_id: m.sent_by,
+            from_user_name,
+            status: m.status,
+            read_by_user_id: m.read_by_user_id,
+            read_by_user_name,
+            read_at,
+            created_at: iso8601(m.timestamp),
+        });
+    }
+
+    Ok(Json(AuditMessagesResponse {
+        ok: true,
+        data,
+        next_cursor,
+        total: Some(total),
     }))
 }
 

@@ -1533,6 +1533,11 @@ pub struct AuditMessagesResponse {
     /// Cursor opaco (`<millis>_<hex_id>`) para la página siguiente. `None` cuando no hay más.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    /// Total de mensajes que matchean los filtros, ignorando cursor/limit.
+    /// Se popula en el endpoint de drilldown de conversación; en `/audit/messages`
+    /// queda `None` para no pagar el `count_documents` global por defecto.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
