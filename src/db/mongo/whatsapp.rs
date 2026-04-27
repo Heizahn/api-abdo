@@ -1489,7 +1489,12 @@ impl WhatsAppRepository for MongoDB {
     ) -> Result<Vec<AuditMessagesByAgentBucket>, String> {
         let mut match_stage = build_messages_match(filter);
         match_stage.insert("direction", "out");
-        match_stage.insert("sent_by", doc! { "$ne": null, "$exists": true });
+        // Si filter.agent_id ya está, build_messages_match insertó `sent_by:
+        // <id>` específico. Sólo agregamos el chequeo de existencia cuando no
+        // hay filtro por agente, para que el listado natural ignore inbounds.
+        if filter.agent_id.is_none() {
+            match_stage.insert("sent_by", doc! { "$ne": null, "$exists": true });
+        }
 
         let pipeline = vec![
             doc! { "$match": match_stage },
@@ -1564,7 +1569,19 @@ impl WhatsAppRepository for MongoDB {
         //    primer timestamp + (sólo para `out`) el primer `sent_by`.
         // 2. En Rust: unir los dos lados por conversation_id, descartar las
         //    que no tienen ambos o donde first_out <= first_in.
-        let match_stage = build_messages_match(filter);
+        //
+        // Nota: NO aplicamos `filter.agent_id` al `$match` (rompería los
+        // inbounds porque los inbounds no tienen `sent_by`). Lo aplicamos
+        // como post-filter sobre la lista resultante.
+        let mut sub_filter = AuditMetricsFilter {
+            from_date: filter.from_date,
+            to_date: filter.to_date,
+            conversation_ids: filter.conversation_ids,
+            agent_id: None, // ⚠️ a propósito — ver comentario.
+            granularity: filter.granularity,
+        };
+        let _ = &mut sub_filter; // silenciar warning si futuro código no muta.
+        let match_stage = build_messages_match(&sub_filter);
         let pipeline = vec![
             doc! { "$match": match_stage },
             doc! { "$sort": { "conversation_id": 1, "timestamp": 1 } },
@@ -1621,6 +1638,15 @@ impl WhatsAppRepository for MongoDB {
             if out_ts <= in_ts {
                 continue;
             }
+            // Post-filter: si la query pidió un agente específico, sólo
+            // contamos las respuestas donde ese agente fue el primero en
+            // contestar. Las demás conversaciones (otro agente respondió
+            // primero) no aportan al avg de este agente.
+            if let Some(target) = filter.agent_id {
+                if agent.as_deref() != Some(target) {
+                    continue;
+                }
+            }
             out.push(AuditFirstResponse {
                 agent_id: agent,
                 delta_seconds: (out_ts - in_ts) / 1000,
@@ -1634,6 +1660,7 @@ impl WhatsAppRepository for MongoDB {
         from: DateTime,
         to: DateTime,
         business_phone: Option<&str>,
+        conversation_ids: Option<&[ObjectId]>,
         granularity: &str,
     ) -> Result<Vec<AuditLifecycleByDayBucket>, String> {
         let date_format = granularity_to_date_format(granularity);
@@ -1643,6 +1670,9 @@ impl WhatsAppRepository for MongoDB {
         };
         if let Some(b) = business_phone {
             match_stage.insert("business_phone", b);
+        }
+        if let Some(ids) = conversation_ids {
+            match_stage.insert("conversation_id", doc! { "$in": ids });
         }
 
         let pipeline = vec![
@@ -1691,6 +1721,7 @@ impl WhatsAppRepository for MongoDB {
         from: DateTime,
         to: DateTime,
         business_phone: Option<&str>,
+        conversation_ids: Option<&[ObjectId]>,
     ) -> Result<Vec<i64>, String> {
         // 1. Conversaciones cerradas en el rango (un evento `closed`).
         let mut match_closed = doc! {
@@ -1699,6 +1730,9 @@ impl WhatsAppRepository for MongoDB {
         };
         if let Some(b) = business_phone {
             match_closed.insert("business_phone", b);
+        }
+        if let Some(ids) = conversation_ids {
+            match_closed.insert("conversation_id", doc! { "$in": ids });
         }
 
         let pipeline = vec![
@@ -1831,13 +1865,17 @@ fn decode_cursor(cursor: &str) -> Option<(DateTime, ObjectId)> {
 }
 
 /// Construye el `$match` común para los aggregates de `/audit/metrics` sobre
-/// `WaMessages`: rango temporal + (opcional) `conversation_id ∈ ids`.
+/// `WaMessages`: rango temporal + (opcional) `conversation_id ∈ ids` y/o
+/// `sent_by == agent_id`.
 fn build_messages_match(filter: &AuditMetricsFilter<'_>) -> Document {
     let mut q = doc! {
         "timestamp": { "$gte": filter.from_date, "$lte": filter.to_date },
     };
     if let Some(ids) = filter.conversation_ids {
         q.insert("conversation_id", doc! { "$in": ids });
+    }
+    if let Some(agent) = filter.agent_id {
+        q.insert("sent_by", agent);
     }
     q
 }

@@ -654,6 +654,14 @@ pub struct AuditMetricsQuery {
     pub from_date: Option<String>,
     pub to_date: Option<String>,
     pub business_phone: Option<String>,
+    /// E.164 sin "+". Si viene, las agregaciones se acotan a las conversaciones
+    /// de ese cliente (combinable con `business_phone` — se aplica AND).
+    pub customer_phone: Option<String>,
+    /// UUID del agente. Si viene, las agregaciones de mensajes filtran por
+    /// `sent_by`. `by_agent` devuelve un único item; `summary.total_inbound`
+    /// queda en 0 (los inbounds no tienen sent_by). Lifecycle (new/closed)
+    /// no se ve afectado — el ciclo de vida es a nivel conversación, no agente.
+    pub agent_id: Option<String>,
     pub granularity: Option<String>,
 }
 
@@ -666,6 +674,8 @@ pub struct AuditMetricsQuery {
         ("from_date" = String, Query, description = "ISO-8601 — REQUERIDO"),
         ("to_date" = String, Query, description = "ISO-8601 — REQUERIDO"),
         ("business_phone" = Option<String>, Query, description = "E.164 sin '+' (filtra por workspace)"),
+        ("customer_phone" = Option<String>, Query, description = "E.164 sin '+' (filtra por cliente)"),
+        ("agent_id" = Option<String>, Query, description = "UUID del agente (filtra mensajes por sent_by)"),
         ("granularity" = Option<String>, Query, description = "'day' | 'week' | 'month' (default 'day')"),
     ),
     responses(
@@ -713,10 +723,16 @@ pub async fn audit_metrics_handler(
         });
     }
 
-    // 3. Resolver conversation_ids si el caller filtra por business_phone.
-    let conversation_ids: Option<Vec<ObjectId>> = if let Some(b) = q.business_phone.as_deref() {
+    // 3. Resolver conversation_ids si el caller filtra por customer_phone y/o
+    //    business_phone. Se combinan con AND (find_conversation_ids_by_phones
+    //    matchea por ambos campos cuando los dos vienen).
+    let needs_phone_resolution = q.business_phone.is_some() || q.customer_phone.is_some();
+    let conversation_ids: Option<Vec<ObjectId>> = if needs_phone_resolution {
         let ids = state.db
-            .find_conversation_ids_by_phones(None, Some(b))
+            .find_conversation_ids_by_phones(
+                q.customer_phone.as_deref(),
+                q.business_phone.as_deref(),
+            )
             .await
             .map_err(ApiError::DatabaseError)?;
         Some(ids)
@@ -724,20 +740,23 @@ pub async fn audit_metrics_handler(
         None
     };
 
-    // Si filtraron por workspace y no hay match, devolver shape vacío.
+    // Si filtraron por teléfono y no hay match, devolver shape vacío.
     if matches!(conversation_ids.as_deref(), Some(ids) if ids.is_empty()) {
         return Ok(Json(empty_metrics_response()));
     }
+
+    let agent_id = q.agent_id.as_deref().filter(|s| !s.is_empty());
 
     let filter = AuditMetricsFilter {
         from_date,
         to_date,
         conversation_ids: conversation_ids.as_deref(),
+        agent_id,
         granularity,
     };
 
-    // 4. Aggregates en paralelo. Algunas dependen de WaConversationEvents (no
-    //    aceptan filtro de conversation_ids) y se filtran sólo por business_phone.
+    // 4. Aggregates en paralelo. Lifecycle (new/closed) no acepta agent_id —
+    //    el ciclo de vida es a nivel conversación, no agente.
     let business_phone = q.business_phone.as_deref();
     let (
         summary_res,
@@ -753,8 +772,8 @@ pub async fn audit_metrics_handler(
         state.db.audit_messages_by_agent(&filter),
         state.db.audit_messages_by_type(&filter),
         state.db.audit_first_responses(&filter),
-        state.db.audit_lifecycle_by_day(from_date, to_date, business_phone, granularity),
-        state.db.audit_resolution_times(from_date, to_date, business_phone),
+        state.db.audit_lifecycle_by_day(from_date, to_date, business_phone, conversation_ids.as_deref(), granularity),
+        state.db.audit_resolution_times(from_date, to_date, business_phone, conversation_ids.as_deref()),
     );
 
     let summary_raw = summary_res.map_err(ApiError::DatabaseError)?;

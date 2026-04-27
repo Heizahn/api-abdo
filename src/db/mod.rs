@@ -329,12 +329,16 @@ pub struct AuditMessageFilter<'a> {
 
 /// Filtro común para los aggregates del endpoint `/audit/metrics`. Todas las
 /// queries comparten el mismo recorte temporal + opcionalmente un set de
-/// `conversation_ids` (resueltos en el handler a partir de `business_phone`).
+/// `conversation_ids` (resueltos en el handler a partir de `business_phone`/
+/// `customer_phone`) y/o un `agent_id` que recorta a `sent_by`.
 pub struct AuditMetricsFilter<'a> {
     pub from_date: mongodb::bson::DateTime,
     pub to_date: mongodb::bson::DateTime,
     /// `None` = sin filtro. `Some([])` = sin matches (handler debe atajar antes).
     pub conversation_ids: Option<&'a [ObjectId]>,
+    /// UUID del agente — filtra `sent_by`. Aplica scope "mensajes enviados
+    /// por este agente"; los inbounds (sin `sent_by`) quedan fuera.
+    pub agent_id: Option<&'a str>,
     /// `"day" | "week" | "month"`.
     pub granularity: &'a str,
 }
@@ -704,11 +708,14 @@ pub trait WhatsAppRepository {
 
     /// Eventos de ciclo de vida agregados por bucket temporal — sólo `created`
     /// y `closed`. Si `business_phone` está, se filtra por ese workspace.
+    /// Si `conversation_ids` está, se acota a esas conversaciones (usado al
+    /// filtrar por `customer_phone` en `/audit/metrics`).
     async fn audit_lifecycle_by_day(
         &self,
         from: mongodb::bson::DateTime,
         to: mongodb::bson::DateTime,
         business_phone: Option<&str>,
+        conversation_ids: Option<&[ObjectId]>,
         granularity: &str,
     ) -> Result<Vec<AuditLifecycleByDayBucket>, String>;
 
@@ -720,6 +727,7 @@ pub trait WhatsAppRepository {
         from: mongodb::bson::DateTime,
         to: mongodb::bson::DateTime,
         business_phone: Option<&str>,
+        conversation_ids: Option<&[ObjectId]>,
     ) -> Result<Vec<i64>, String>;
 }
 
