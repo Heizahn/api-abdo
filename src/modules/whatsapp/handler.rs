@@ -4077,7 +4077,7 @@ async fn resolve_last_message_agent_name_one(
 /// `require_can_chat(&state, &claims.id).await?;` y el valor se descarta. Los
 /// que además necesitan el rol (`can_edit`, auditoría, etc.) lo capturan con
 /// `let caller = require_can_chat(...).await?;`.
-async fn require_can_chat(state: &Arc<AppState>, user_id: &str) -> Result<crate::models::users::User, ApiError> {
+pub(super) async fn require_can_chat(state: &Arc<AppState>, user_id: &str) -> Result<crate::models::users::User, ApiError> {
     use crate::db::UserRepository;
     let user = state.db.find_user_by_id(user_id)
         .await
@@ -4088,6 +4088,28 @@ async fn require_can_chat(state: &Arc<AppState>, user_id: &str) -> Result<crate:
     }
     Ok(user)
 }
+
+/// Construye un `ConversationItem` completo desde un `WaConversation` resolviendo
+/// workspace_name + nombres en una sola pasada. Reusable desde otros módulos
+/// del feature (tickets) sin tener que reexportar todos los helpers internos.
+pub(super) async fn build_conversation_item(
+    state: &Arc<AppState>,
+    conv: WaConversation,
+    caller_id: &str,
+) -> Result<ConversationItem, ApiError> {
+    let oid = conv.id.unwrap_or_default();
+    let opens = state.db
+        .get_conversation_opens(caller_id, &[oid])
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    let last_opened = opens.get(&oid).copied();
+    let workspace_name = resolve_workspace_name(state, &conv.business_phone).await;
+    let resolved = resolve_customer_name(state, &conv).await;
+    let agent_name = resolve_last_message_agent_name_one(state, &conv).await;
+    Ok(conv_to_item(conv, true, last_opened, workspace_name, resolved, agent_name))
+}
+
+pub(super) fn iso8601_pub(dt: DateTime) -> String { iso8601(dt) }
 
 /// Regla de `can_edit` (controla el botón de **eliminar** una quick reply):
 ///

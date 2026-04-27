@@ -1697,3 +1697,255 @@ pub struct AuditMetricsResponse {
     pub ok: bool,
     pub data: AuditMetricsData,
 }
+
+// ============================================
+// TICKETS (escalation system sobre WhatsApp)
+// ============================================
+//
+// Un ticket es una unidad de seguimiento que un agente genera a partir de una
+// conversación: deja constancia del problema, asigna a otro agente o supervisor,
+// y cierra la conversación origen para que no quede flotando en la cola del
+// chat. Vive en la colección `WaTickets`.
+//
+// El timeline (`timeline`) se persiste embebido — cada acción (creación,
+// transfer, resolución, etc) appendea un `WaTicketTimelineEntry` con actor,
+// timestamp y nota. Se devuelve sólo en `GET /tickets/:id`, no en list.
+
+/// Documento Mongo de la colección `WaTickets`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WaTicket {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    pub conversation_id: ObjectId,
+    /// Snapshot del cliente al momento de crear — desnormalizado para que el
+    /// historial siga siendo legible aunque la conversación cambie de teléfono
+    /// o el cliente sea eliminado.
+    pub customer_phone: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub customer_name: Option<String>,
+    /// `_id` del cliente ISP en `Clients` cuando hay match por teléfono.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub customer_id: Option<ObjectId>,
+    /// Número WA del negocio que recibió la conversación. Se desnormaliza para
+    /// que la lista por workspace no tenga que joinear contra `WaConversations`.
+    pub business_phone: String,
+    pub created_by_id: String,
+    pub created_by_name: String,
+    /// Agente actualmente asignado. `None` cuando el ticket vuelve a `open`
+    /// tras una transferencia que aún no fue tomada.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_to_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_to_name: Option<String>,
+    /// Categoría del problema. Hoy es un catálogo hardcodeado (ver
+    /// `TICKET_CATEGORIES` en `modules/whatsapp/tickets.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_label: Option<String>,
+    /// Descripción libre del problema (1..500 chars). Validado al crear.
+    pub reason: String,
+    /// `open` | `in_progress` | `resolved` | `closed` | `cancelled`.
+    pub status: String,
+    /// Texto libre que el agente escribe al resolver/cerrar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<DateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<DateTime>,
+    /// Cuando el ticket vino de un transfer, el agente origen queda registrado
+    /// para auditoría. No se borra al transferir de nuevo (el primer origen es
+    /// el más relevante).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transferred_from_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transferred_from_name: Option<String>,
+    /// Idempotency-Key opcional del cliente — soporta anti-doble-click en
+    /// `POST /tickets`. Único por `(created_by_id, idempotency_key)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    pub created_at: DateTime,
+    pub updated_at: DateTime,
+    /// Historial embebido. Cada acción append una entry; se persiste con el
+    /// mismo `$push` que aplica el cambio de status.
+    #[serde(default)]
+    pub timeline: Vec<WaTicketTimelineEntry>,
+}
+
+/// Entry individual del historial embebido. Cada acción (creación, take,
+/// transfer, resolve, close, cancel, reopen, note) inserta una entry.
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+pub struct WaTicketTimelineEntry {
+    /// `created` | `taken` | `transferred` | `resolved` | `closed` | `cancelled` | `reopened` | `note_added`
+    pub action: String,
+    pub actor_id: String,
+    pub actor_name: String,
+    /// Estado del ticket previo a esta acción. `None` para `created`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_status: Option<String>,
+    /// Estado del ticket después de esta acción.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_status: Option<String>,
+    /// Sólo en `transferred`: agente destino.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_to_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_to_name: Option<String>,
+    /// Nota libre del agente al ejecutar la acción.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub created_at: DateTime,
+}
+
+// ─── Requests ───────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateTicketRequest {
+    /// `_id` hex de la conversación origen.
+    pub conversation_id: String,
+    /// 1..500 chars. Trimeado server-side.
+    pub reason: String,
+    /// Clave del catálogo (`TICKET_CATEGORIES`). Si no matchea, error de validación.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<String>,
+    /// UUID del agente destino. Si viene, el ticket se crea ya asignado y
+    /// se emite `TICKET_ASIGNADO` al destino.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assign_to_id: Option<String>,
+    /// Nota libre que se mergea como `note` en el entry `created`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateTicketStatusRequest {
+    /// `take` | `transfer` | `resolve` | `close` | `cancel` | `reopen`.
+    /// Determina la transición permitida y los campos requeridos:
+    /// - `transfer` requiere `assign_to_id`.
+    /// - `resolve`/`close`: `resolution` opcional pero recomendado.
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assign_to_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    /// Nota libre de la acción — siempre se appendea al timeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct TransferAndTicketRequest {
+    /// UUID del agente destino.
+    pub transfer_to_id: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+// ─── Response items ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct TicketCategoryItem {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TicketCategoriesResponse {
+    pub ok: bool,
+    pub data: Vec<TicketCategoryItem>,
+}
+
+/// Shape API de un ticket. Cuando viene de `GET /tickets/:id` incluye
+/// `timeline`; en list (`GET /tickets`) `timeline` queda `None` para no
+/// inflar la respuesta.
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct TicketItem {
+    pub id: String,
+    pub conversation_id: String,
+    pub customer_phone: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub customer_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub customer_id: Option<String>,
+    pub business_phone: String,
+    pub created_by_id: String,
+    pub created_by_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assigned_to_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assigned_to_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category_label: Option<String>,
+    pub reason: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<String>,
+    /// `closed_at | resolved_at | None` − `created_at` en segundos. `None`
+    /// mientras el ticket esté abierto/en progreso.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution_time_seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transferred_from_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transferred_from_name: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    /// Sólo se popula en GET detail (`/tickets/:id`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<Vec<TicketTimelineEntryItem>>,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct TicketTimelineEntryItem {
+    pub action: String,
+    pub actor_id: String,
+    pub actor_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assigned_to_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assigned_to_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TicketResponse {
+    pub ok: bool,
+    pub data: TicketItem,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TicketsListResponse {
+    pub ok: bool,
+    pub data: Vec<TicketItem>,
+    /// Cursor opaco para la siguiente página. `None` cuando no hay más.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TransferAndTicketData {
+    pub ticket: TicketItem,
+    pub conversation: ConversationItem,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TransferAndTicketResponse {
+    pub ok: bool,
+    pub data: TransferAndTicketData,
+}

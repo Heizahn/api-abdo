@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use crate::{
     auth::user_jwt::UserJwtService,
     db::WhatsAppRepository,
-    models::whatsapp::{ConversationItem, MessageItem},
+    models::whatsapp::{ConversationItem, MessageItem, TicketItem},
     state::{AppState, WsRegistry},
 };
 
@@ -131,6 +131,24 @@ pub enum WsServerEvent {
         meta_throttled: bool,
         /// ISO-8601 hasta cuándo dura el cooldown. `null` si no aplica.
         meta_throttle_until: Option<String>,
+    },
+
+    /// Push personal al agente destino cuando un ticket queda asignado a él.
+    /// Scope: sólo `assigned_to_id` — no broadcast.
+    #[serde(rename = "TICKET_ASIGNADO")]
+    TicketAsignado {
+        ticket: TicketItem,
+        assigned_by_name: String,
+    },
+
+    /// Cambio de estado o asignación de un ticket existente. Scope:
+    /// creador + asignado actual + SUPERADMIN. Se emite por `send_to_user`
+    /// a cada destinatario (no broadcast global).
+    #[serde(rename = "TICKET_ACTUALIZADO")]
+    TicketActualizado {
+        ticket: TicketItem,
+        previous_status: String,
+        changed_by_name: String,
     },
 
     #[serde(rename = "ERROR")]

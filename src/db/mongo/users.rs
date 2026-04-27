@@ -132,6 +132,20 @@ impl UserRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
+    async fn find_superadmin_ids(&self) -> Result<Vec<String>, String> {
+        let collection: Collection<User> = self.db.collection("Users");
+        let filter = doc! { "nRole": 0.0, "visible": true };
+
+        let users: Vec<User> = collection
+            .find(filter)
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(users.into_iter().map(|u| u.id).collect())
+    }
+
     async fn find_providers(&self) -> Result<Vec<User>, String> {
         let collection: Collection<User> = self.db.collection("Users");
         let filter = doc! { "nRole": 3.0 };

@@ -28,22 +28,25 @@ use crate::models::users::{
 use crate::models::whatsapp::{
     ConversationDetailResponse, ConversationItem, ConversationMessagesResponse, ConversationStats,
     ConversationStatsResponse, ConversationsListResponse, CreateQuickReplyRequest,
-    CreateSettingsRequest, CreateWaTemplateRequest, DeleteWaTemplateData, DeleteWaTemplateResponse,
-    DuplicateQuickReplyRequest, InitiateConversationRequest,
+    CreateSettingsRequest, CreateTicketRequest, CreateWaTemplateRequest, DeleteWaTemplateData,
+    DeleteWaTemplateResponse, DuplicateQuickReplyRequest, InitiateConversationRequest,
     LocationPayload, MarkReadData, MarkReadResponse, MediaLimitsResponse, MediaSendPayload,
     MediaTypeLimit, MediaUploadData, MediaUploadResponse, MessageItem, QuickRepliesListResponse,
     QuickReplyButton,
     QuickReplyCtaUrl, QuickReplyHeader, QuickReplyItem, QuickReplyList, QuickReplyListRow,
     QuickReplyListSection, QuickReplyResponse, ReplyToItem, SendMessageData, SendMessageRequest,
     SendMessageResponse, SendTemplatePayload, SettingsItem, SettingsListResponse, SettingsResponse,
-    TakeConversationResponse, ToggleActiveRequest,
+    TakeConversationResponse, TicketCategoriesResponse, TicketCategoryItem, TicketItem,
+    TicketResponse, TicketTimelineEntryItem, TicketsListResponse, ToggleActiveRequest,
+    TransferAndTicketData, TransferAndTicketRequest, TransferAndTicketResponse,
     TransferConversationRequest, TransferableAgentItem, TransferableAgentsResponse,
     HeaderMediaUploadData, HeaderMediaUploadResponse,
-    UpdateQuickReplyRequest, UpdateResponse, UpdateSettingsRequest, UpdateWaTemplateRequest,
+    UpdateQuickReplyRequest, UpdateResponse, UpdateSettingsRequest, UpdateTicketStatusRequest,
+    UpdateWaTemplateRequest,
     WaTemplateHeaderInput, WaTemplateButtonInput,
     UrlPreview, WaPurposeConfig, WaPurposes, WaPurposesPatch, WaPurposeUsage,
     WaTemplateCategory, WaTemplateItem, WaTemplateResponse, WaTemplatesListResponse,
-    WaTemplateStatus,
+    WaTemplateStatus, WaTicketTimelineEntry,
 };
 use crate::models::zabbix::{MonthlyTraffic, ZabbixTrafficResponse};
 use crate::modules::calculations::handler::{
@@ -142,6 +145,13 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
         crate::modules::whatsapp::handler::delete_template_handler,
         crate::modules::whatsapp::handler::resync_template_handler,
         crate::modules::whatsapp::handler::upload_template_header_media_handler,
+        // WhatsApp — Tickets
+        crate::modules::whatsapp::tickets::list_ticket_categories_handler,
+        crate::modules::whatsapp::tickets::list_tickets_handler,
+        crate::modules::whatsapp::tickets::create_ticket_handler,
+        crate::modules::whatsapp::tickets::get_ticket_handler,
+        crate::modules::whatsapp::tickets::update_ticket_handler,
+        crate::modules::whatsapp::tickets::transfer_and_ticket_handler,
         // Users — CRUD
         crate::modules::users::handler::list_users_handler,
         crate::modules::users::handler::create_user_handler,
@@ -220,6 +230,12 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
             // WhatsApp — Items
             ConversationItem, MessageItem, SettingsItem,
             TransferableAgentItem, ReplyToItem, UrlPreview, LocationPayload, QuickReplyItem,
+            // WhatsApp — Tickets
+            CreateTicketRequest, UpdateTicketStatusRequest, TransferAndTicketRequest,
+            TicketItem, TicketTimelineEntryItem, WaTicketTimelineEntry,
+            TicketCategoryItem, TicketCategoriesResponse,
+            TicketResponse, TicketsListResponse,
+            TransferAndTicketData, TransferAndTicketResponse,
         )
     ),
     tags(
@@ -235,6 +251,7 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
         (name = "Utils", description = "Helpers: ping, versión, BCV, bancos, IP PPPoE, Zabbix, imágenes, política de privacidad"),
         (name = "WhatsApp — Soporte", description = "Chat de soporte vía WhatsApp Business API"),
         (name = "WhatsApp — Templates", description = "CRUD de plantillas de WhatsApp (WaTemplates). Writes requieren SUPERADMIN; GET list requiere bCanChat."),
+        (name = "WhatsApp — Tickets", description = "Tickets de soporte derivados de conversaciones WA. POST cierra la conv referenciada; estados: open/in_progress/resolved/closed/cancelled. Acceso requiere bCanChat."),
         (name = "Users — CRUD", description = "Gestión de usuarios (staff/admin). Requiere rol SUPERADMIN (nRole == 0.0) salvo `/me/password`."),
     )
 )]

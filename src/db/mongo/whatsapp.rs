@@ -11,11 +11,12 @@ use crate::db::{
     AuditFirstResponse, AuditLifecycleByDayBucket, AuditMessageFilter,
     AuditMessagesByAgentBucket, AuditMessagesByDayBucket, AuditMessagesByTypeBucket,
     AuditMessagesSummary, AuditMetricsFilter, ConversationTouch, StoreTemplateMediaInput,
-    UpdateQuickReplyPatch, WaTemplateListFilter, WaTemplateMediaRepository,
-    WaTemplateMediaRef, WaTemplateRepository, WaTemplateUpdatePatch, WhatsAppRepository,
+    TicketActionUpdate, TicketListFilter, UpdateQuickReplyPatch, WaTemplateListFilter,
+    WaTemplateMediaRepository, WaTemplateMediaRef, WaTemplateRepository, WaTemplateUpdatePatch,
+    WaTicketRepository, WhatsAppRepository,
 };
 use crate::db::mongo::MongoDB;
-use crate::models::whatsapp::{ConversationStats, UrlPreview, WaConversation, WaConversationEvent, WaConversationEventInput, WaConversationOpen, WaMessage, WaPurposesPatch, WaQuickReply, WaSettings, WaTemplate, WaTemplateStatus, WaPurposeUsage};
+use crate::models::whatsapp::{ConversationStats, UrlPreview, WaConversation, WaConversationEvent, WaConversationEventInput, WaConversationOpen, WaMessage, WaPurposesPatch, WaQuickReply, WaSettings, WaTemplate, WaTemplateStatus, WaPurposeUsage, WaTicket};
 
 impl MongoDB {
     pub(crate) fn wa_conversations(&self) -> mongodb::Collection<WaConversation> {
@@ -40,6 +41,10 @@ impl MongoDB {
 
     pub(crate) fn wa_quick_replies(&self) -> mongodb::Collection<WaQuickReply> {
         self.db.collection::<WaQuickReply>("WaQuickReplies")
+    }
+
+    pub(crate) fn wa_tickets(&self) -> mongodb::Collection<WaTicket> {
+        self.db.collection::<WaTicket>("WaTickets")
     }
 
     pub(crate) fn wa_templates(&self) -> mongodb::Collection<WaTemplate> {
@@ -2455,5 +2460,209 @@ impl WaTemplateMediaRepository for MongoDB {
                 }
             }
         }
+    }
+}
+
+// ============================================
+// WaTicketRepository
+// ============================================
+
+#[async_trait]
+impl WaTicketRepository for MongoDB {
+    async fn create_ticket(&self, mut ticket: WaTicket) -> Result<WaTicket, String> {
+        // El _id puede venir None — Mongo lo asigna en insert.
+        let res = self
+            .wa_tickets()
+            .insert_one(&ticket)
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(oid) = res.inserted_id.as_object_id() {
+            ticket.id = Some(oid);
+        }
+        Ok(ticket)
+    }
+
+    async fn find_ticket_by_id(&self, id: &ObjectId) -> Result<Option<WaTicket>, String> {
+        self.wa_tickets()
+            .find_one(doc! { "_id": id })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn find_open_ticket_for_conversation(
+        &self,
+        conversation_id: &ObjectId,
+    ) -> Result<Option<WaTicket>, String> {
+        self.wa_tickets()
+            .find_one(doc! {
+                "conversation_id": conversation_id,
+                "status": { "$in": ["open", "in_progress"] },
+            })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn find_ticket_by_idempotency(
+        &self,
+        created_by_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<WaTicket>, String> {
+        self.wa_tickets()
+            .find_one(doc! {
+                "created_by_id": created_by_id,
+                "idempotency_key": idempotency_key,
+            })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn list_tickets(
+        &self,
+        filter: TicketListFilter<'_>,
+    ) -> Result<Vec<WaTicket>, String> {
+        let mut q = Document::new();
+
+        if let Some(s) = filter.status {
+            q.insert("status", s);
+        }
+
+        // Si llegan `assigned_to_id` y `created_by_id` juntos, el alcance es
+        // "visibles para este agente" (asignado **o** creador). Si sólo viene
+        // uno, filtramos por ese campo exacto.
+        match (filter.assigned_to_id, filter.created_by_id) {
+            (Some(a), Some(c)) if a == c => {
+                q.insert("$or", vec![
+                    doc! { "assigned_to_id": a },
+                    doc! { "created_by_id": c },
+                ]);
+            }
+            (Some(a), Some(c)) => {
+                q.insert("$or", vec![
+                    doc! { "assigned_to_id": a },
+                    doc! { "created_by_id": c },
+                ]);
+            }
+            (Some(a), None) => { q.insert("assigned_to_id", a); }
+            (None, Some(c)) => { q.insert("created_by_id", c); }
+            (None, None) => {}
+        }
+
+        if let Some(cid) = filter.conversation_id {
+            q.insert("conversation_id", cid);
+        }
+        if let Some(p) = filter.customer_phone {
+            q.insert("customer_phone", p);
+        }
+        if let Some(p) = filter.business_phone {
+            q.insert("business_phone", p);
+        }
+
+        let mut date_range = Document::new();
+        if let Some(f) = filter.from_date { date_range.insert("$gte", f); }
+        if let Some(t) = filter.to_date { date_range.insert("$lte", t); }
+        if !date_range.is_empty() {
+            q.insert("created_at", date_range);
+        }
+
+        if let Some(s) = filter.search.filter(|s| !s.is_empty()) {
+            let escaped = regex_escape(s);
+            // OR sobre `reason` y `resolution`.
+            q.insert("$or", vec![
+                doc! { "reason": { "$regex": &escaped, "$options": "i" } },
+                doc! { "resolution": { "$regex": &escaped, "$options": "i" } },
+            ]);
+        }
+
+        if let Some(c) = filter.cursor {
+            if let Some((ts, oid)) = decode_cursor(c) {
+                q.insert(
+                    "$and",
+                    vec![doc! {
+                        "$or": vec![
+                            doc! { "created_at": { "$lt": ts } },
+                            doc! { "created_at": ts, "_id": { "$lt": oid } },
+                        ]
+                    }],
+                );
+            }
+        }
+
+        let opts = FindOptions::builder()
+            .sort(doc! { "created_at": -1, "_id": -1 })
+            .limit(filter.limit)
+            .build();
+
+        self.wa_tickets()
+            .find(q)
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn update_ticket_action(
+        &self,
+        id: &ObjectId,
+        patch: TicketActionUpdate<'_>,
+    ) -> Result<Option<WaTicket>, String> {
+        let now = DateTime::now();
+        let mut set_doc = doc! {
+            "status": patch.new_status,
+            "updated_at": now,
+        };
+        let mut unset_doc = Document::new();
+
+        if patch.set_resolved_at {
+            set_doc.insert("resolved_at", now);
+        }
+        if patch.set_closed_at {
+            set_doc.insert("closed_at", now);
+        }
+        if let Some(r) = patch.resolution {
+            set_doc.insert("resolution", r);
+        }
+
+        if patch.assignment_changed {
+            match patch.assigned_to_id {
+                Some(uid) => {
+                    set_doc.insert("assigned_to_id", uid);
+                    if let Some(name) = patch.assigned_to_name {
+                        set_doc.insert("assigned_to_name", name);
+                    } else {
+                        unset_doc.insert("assigned_to_name", "");
+                    }
+                }
+                None if patch.clear_assignment => {
+                    unset_doc.insert("assigned_to_id", "");
+                    unset_doc.insert("assigned_to_name", "");
+                }
+                None => {}
+            }
+        }
+
+        // El timeline embebido lo serializamos a Bson explícitamente para que
+        // `$push` reciba un Document con la forma esperada (Mongo no acepta el
+        // serializador derivado de serde sin mongodb::bson::to_bson).
+        let entry_bson = mongodb::bson::to_bson(&patch.timeline_entry)
+            .map_err(|e| format!("serialize timeline entry: {e}"))?;
+
+        let mut update_doc = doc! {
+            "$set": set_doc,
+            "$push": { "timeline": entry_bson },
+        };
+        if !unset_doc.is_empty() {
+            update_doc.insert("$unset", unset_doc);
+        }
+
+        self.wa_tickets()
+            .update_one(doc! { "_id": id }, update_doc)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Devolvemos el doc actualizado para que el handler arme el response
+        // y la entrada al timeline aparezca persistida.
+        self.find_ticket_by_id(id).await
     }
 }

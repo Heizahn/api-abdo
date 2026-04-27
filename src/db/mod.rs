@@ -3,7 +3,8 @@ use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, Clien
 use crate::models::whatsapp::{
     ConversationStats, QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyList,
     UrlPreview, WaConversation, WaConversationEvent, WaConversationEventInput, WaMessage,
-    WaQuickReply, WaSettings, WaTemplate, WaTemplateCategory, WaTemplateStatus,
+    WaQuickReply, WaSettings, WaTemplate, WaTemplateCategory, WaTemplateStatus, WaTicket,
+    WaTicketTimelineEntry,
 };
 use std::collections::HashMap;
 
@@ -69,6 +70,11 @@ pub trait UserRepository {
     /// Usuarios con permiso para atender chats (campo `bCanChat == true` y `visible == true`).
     /// Usado para poblar el dropdown de transferencia de conversaciones.
     async fn find_chat_agents(&self) -> Result<Vec<User>, String>;
+    /// UUIDs de todos los SUPERADMIN visibles (`nRole == 0` y `visible == true`).
+    /// Usado por el módulo de tickets para determinar el scope de broadcast
+    /// del evento `TICKET_ACTUALIZADO` (creador + asignado + supervisores).
+    /// Devuelve sólo strings — el caller no necesita el doc User completo.
+    async fn find_superadmin_ids(&self) -> Result<Vec<String>, String>;
     /// Listado paginado con filtros para el CRUD de usuarios.
     /// Ordenado por `sName` ascendente con `_id` como tiebreaker estable.
     async fn list_users(&self, filter: UserListFilter<'_>) -> Result<Vec<User>, String>;
@@ -891,6 +897,99 @@ pub trait WaTemplateMediaRepository {
 }
 
 // ============================================
+// 10. WaTicketRepository: Tickets de soporte derivados de WhatsApp
+// ============================================
+
+/// Filtros para `list_tickets`. Todos opcionales; el handler colapsa
+/// status y rango de fechas según el rol del caller.
+pub struct TicketListFilter<'a> {
+    pub status: Option<&'a str>,
+    /// UUID. Si viene combinado con `created_by_id`, el repo arma un `$or`
+    /// (visible al agente porque es asignado **o** creador).
+    pub assigned_to_id: Option<&'a str>,
+    pub created_by_id: Option<&'a str>,
+    pub conversation_id: Option<&'a ObjectId>,
+    pub customer_phone: Option<&'a str>,
+    pub business_phone: Option<&'a str>,
+    pub from_date: Option<mongodb::bson::DateTime>,
+    pub to_date: Option<mongodb::bson::DateTime>,
+    /// Substring case-insensitive sobre `reason` y `resolution`.
+    pub search: Option<&'a str>,
+    pub limit: i64,
+    /// Cursor opaco `<millis>_<hex_id>` (descendente por `created_at`).
+    pub cursor: Option<&'a str>,
+}
+
+/// Patch que aplica una transición de estado sobre un ticket existente +
+/// appendea la entry correspondiente al timeline embebido. El repo es
+/// responsable de hacer ambos cambios en un único `$set`/`$push`.
+pub struct TicketActionUpdate<'a> {
+    /// Status nuevo (`open` | `in_progress` | `resolved` | `closed` | `cancelled`).
+    pub new_status: &'a str,
+    /// Si la acción es `transfer`, el agente destino (Some). En otras
+    /// acciones que no tocan asignación, mandar `None` y `assignment_changed=false`.
+    pub assigned_to_id: Option<&'a str>,
+    pub assigned_to_name: Option<&'a str>,
+    /// Si `true` y `assigned_to_id` es `None`, el repo limpia el campo
+    /// (`$unset`). Útil para `cancel`/`close`/`reopen` que sueltan al agente.
+    pub clear_assignment: bool,
+    /// Si la acción setea/limpia asignación efectivamente. Cuando es `false`
+    /// el repo deja `assigned_to_*` como estaba.
+    pub assignment_changed: bool,
+    /// Sólo en `resolve`/`close`: texto libre de la resolución.
+    pub resolution: Option<&'a str>,
+    /// `true` cuando `new_status == "resolved"` por primera vez. Marca `resolved_at`.
+    pub set_resolved_at: bool,
+    /// `true` cuando `new_status == "closed"` por primera vez. Marca `closed_at`.
+    pub set_closed_at: bool,
+    /// Entry del timeline que se appendea con la acción.
+    pub timeline_entry: WaTicketTimelineEntry,
+}
+
+#[async_trait::async_trait]
+pub trait WaTicketRepository {
+    /// Inserta un ticket nuevo. El caller ya validó que no haya un ticket
+    /// abierto previo + idempotency. Si el back se cae entre dos requests
+    /// idénticos, el chequeo de idempotency_key se hace por separado vía
+    /// `find_ticket_by_idempotency`.
+    async fn create_ticket(&self, ticket: WaTicket) -> Result<WaTicket, String>;
+
+    async fn find_ticket_by_id(&self, id: &ObjectId) -> Result<Option<WaTicket>, String>;
+
+    /// Busca el primer ticket en estado `open` o `in_progress` para una
+    /// conversación. Usado para emitir `409 ticket_already_open` con el id
+    /// del ticket conflictivo.
+    async fn find_open_ticket_for_conversation(
+        &self,
+        conversation_id: &ObjectId,
+    ) -> Result<Option<WaTicket>, String>;
+
+    /// Soporte de `Idempotency-Key` en `POST /tickets`: si el mismo agente
+    /// reintenta con la misma key, devolvemos el ticket creado original sin
+    /// duplicar. La unicidad es `(created_by_id, idempotency_key)` —
+    /// distintos agentes pueden usar la misma key sin colisión.
+    async fn find_ticket_by_idempotency(
+        &self,
+        created_by_id: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<WaTicket>, String>;
+
+    async fn list_tickets(
+        &self,
+        filter: TicketListFilter<'_>,
+    ) -> Result<Vec<WaTicket>, String>;
+
+    /// Aplica la transición en una sola operación: `$set status` (+ campos
+    /// derivados) y `$push timeline`. Devuelve el doc actualizado. `None`
+    /// si el `_id` no existe.
+    async fn update_ticket_action(
+        &self,
+        id: &ObjectId,
+        patch: TicketActionUpdate<'_>,
+    ) -> Result<Option<WaTicket>, String>;
+}
+
+// ============================================
 // TRAIT MAESTRO
 // ============================================
 pub trait Db:
@@ -903,6 +1002,7 @@ pub trait Db:
     + WhatsAppRepository
     + WaTemplateRepository
     + WaTemplateMediaRepository
+    + WaTicketRepository
     + Clone
     + Send
     + Sync

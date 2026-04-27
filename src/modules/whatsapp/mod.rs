@@ -4,6 +4,7 @@ pub mod backfill;
 pub mod handler;
 pub mod quick_reply_validation;
 pub mod service;
+pub mod tickets;
 pub mod url_preview;
 pub mod ws;
 
@@ -91,4 +92,14 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route("/v1/auth-user/whatsapp/audit/export", get(audit::audit_export_handler))
         .route("/v1/auth-user/whatsapp/audit/conversations/:id/messages", get(audit::audit_conversation_messages_handler))
         .route("/v1/auth-user/whatsapp/audit/conversations/:id/timeline", get(audit::audit_conversation_timeline_handler))
+        // Tickets — soporte derivado de chats (bCanChat). El catálogo de
+        // categorías se sirve estático en el back; el resto opera sobre
+        // `WaTickets`. La ruta `categories` debe ir ANTES de `:id` para que
+        // axum no la interprete como un id literal.
+        .route("/v1/auth-user/whatsapp/tickets/categories", get(tickets::list_ticket_categories_handler))
+        .route("/v1/auth-user/whatsapp/tickets", get(tickets::list_tickets_handler))
+        .route("/v1/auth-user/whatsapp/tickets", post(tickets::create_ticket_handler))
+        .route("/v1/auth-user/whatsapp/tickets/:id", get(tickets::get_ticket_handler))
+        .route("/v1/auth-user/whatsapp/tickets/:id", patch(tickets::update_ticket_handler))
+        .route("/v1/auth-user/whatsapp/conversations/:id/transfer-and-ticket", post(tickets::transfer_and_ticket_handler))
 }
