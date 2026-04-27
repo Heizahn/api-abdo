@@ -30,12 +30,16 @@ use crate::{
             AiAgentFaqResponse, AiAgentMode, AiAgentSetting, AiAgentSettingItem,
             AiAgentSettingResponse, AiAgentSettingsListResponse, AiEscalationRules,
             AiLimits, AiModelConfig, AiPersonality, AiSchedule, AiToolConfig,
-            CreateAiAgentFaqRequest, UpdateAiAgentFaqRequest, UpdateAiAgentSettingsRequest,
+            CreateAiAgentFaqRequest, TestConnectionData, TestConnectionRequest,
+            TestConnectionResponse, TestConnectionSource, UpdateAiAgentFaqRequest,
+            UpdateAiAgentSettingsRequest,
         },
         users::User,
     },
     state::AppState,
 };
+
+use super::{gemini::AiRelay, runner::decrypt_api_key};
 
 const SUPERADMIN_ROLE: f32 = 0.0;
 /// Valor sentinel para `nRole` del bot. Ver plan v1.4 §1.2: 99 deja libres
@@ -710,6 +714,96 @@ pub async fn update_ai_agent_faq_handler(
     Ok(Json(AiAgentFaqResponse {
         ok: true,
         data: faq_to_item(updated),
+    }))
+}
+
+// ============================================
+// TEST CONNECTION handler
+// ============================================
+
+const DEFAULT_TEST_MODEL: &str = "gemini-1.5-flash";
+const TEST_TIMEOUT_MAX: u32 = 30;
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/ai-agent/test-connection",
+    tag = "WhatsApp — AI Agent",
+    security(("bearerAuth" = [])),
+    request_body = TestConnectionRequest,
+    responses(
+        (status = 200, description = "Conexión OK", body = TestConnectionResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Requiere rol SUPERADMIN"),
+        (status = 422, description = "Falta api_key o workspace_id"),
+        (status = 502, description = "ai_auth_failed / ai_model_not_found / ai_upstream_unreachable / ai_rate_limited"),
+        (status = 503, description = "ai_api_key_missing"),
+    )
+)]
+pub async fn test_connection_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user): Extension<User>,
+    Json(body): Json<TestConnectionRequest>,
+) -> Result<Json<TestConnectionResponse>, ApiError> {
+    require_superadmin(&current_user)?;
+
+    let model_id = body
+        .model_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_TEST_MODEL)
+        .to_string();
+
+    let timeout = body
+        .timeout_seconds
+        .map(|n| n.clamp(1, TEST_TIMEOUT_MAX))
+        .unwrap_or(10);
+
+    // Resolver api_key. Body gana si vino non-empty; si no, intentar
+    // descifrar la guardada del workspace.
+    let body_key = body.api_key.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let (api_key, source) = if let Some(k) = body_key {
+        (k.to_string(), TestConnectionSource::Body)
+    } else if let Some(ws_raw) = body
+        .workspace_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let ws_oid = parse_oid(ws_raw, "workspace_id")?;
+        let setting = state
+            .db
+            .find_ai_agent_setting_by_workspace(&ws_oid)
+            .await
+            .map_err(ApiError::DatabaseError)?
+            .ok_or_else(setting_not_found)?;
+        let key = decrypt_api_key(&setting, &ai_agent_secret())?;
+        (key, TestConnectionSource::Stored)
+    } else {
+        return Err(ApiError::ValidationError {
+            code: "missing_field".into(),
+            field: "api_key".into(),
+            message: "Pasá `api_key` o `workspace_id` para probar la conexión".into(),
+        });
+    };
+
+    let relay = AiRelay::from_config(&state.config);
+    super::gemini::test_connection(
+        &state.reqwest_client,
+        &api_key,
+        &model_id,
+        timeout,
+        relay.as_ref(),
+    )
+    .await?;
+
+    Ok(Json(TestConnectionResponse {
+        ok: true,
+        data: TestConnectionData {
+            reachable: true,
+            model_id,
+            source,
+        },
     }))
 }
 

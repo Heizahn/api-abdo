@@ -275,6 +275,84 @@ pub async fn generate_content(
     })
 }
 
+// ─── Test de conexión ───────────────────────────────────────────────────────
+
+/// Verifica que `api_key` + `model_id` sean válidos. Usa
+/// `GET /v1/models/{model_id}` que devuelve metadata del modelo y NO consume
+/// cuota de generación. Si todo bien devuelve `Ok(())`; cualquier error sube
+/// como `ApiError::Domain` con código diagnóstico (mismo mapping que
+/// `generate_content`).
+pub async fn test_connection(
+    http: &reqwest::Client,
+    api_key: &str,
+    model_id: &str,
+    timeout_seconds: u32,
+    relay: Option<&AiRelay>,
+) -> Result<(), ApiError> {
+    if api_key.is_empty() {
+        return Err(ApiError::domain_simple(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "ai_api_key_missing",
+            "api_key requerida",
+        ));
+    }
+    if model_id.is_empty() {
+        return Err(ApiError::domain_simple(
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            "missing_field",
+            "model_id requerido",
+        ));
+    }
+
+    let target_url = format!("{}/models/{}", GEMINI_BASE, model_id);
+
+    let req = match relay {
+        Some(r) => http
+            .get(&r.url)
+            .query(&[("url", target_url.as_str())])
+            .header("x-relay-secret", &r.secret)
+            .header("x-goog-api-key", api_key),
+        None => http
+            .get(&target_url)
+            .header("x-goog-api-key", api_key),
+    };
+
+    let resp = req
+        .timeout(Duration::from_secs(timeout_seconds.max(1) as u64))
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!("[gemini] test_connection request failed: {}", e);
+            ApiError::domain_simple(
+                axum::http::StatusCode::BAD_GATEWAY,
+                "ai_upstream_unreachable",
+                "No se pudo contactar a Gemini",
+            )
+        })?;
+
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(());
+    }
+
+    let body_text = resp.text().await.unwrap_or_default();
+    tracing::warn!("[gemini] test_connection non-2xx {}: {}", status, body_text);
+    let code = match status.as_u16() {
+        400 => "ai_invalid_request",
+        401 | 403 => "ai_auth_failed",
+        404 => "ai_model_not_found",
+        429 => "ai_rate_limited",
+        500..=599 => "ai_upstream_error",
+        _ => "ai_unexpected",
+    };
+    Err(ApiError::domain_with_details(
+        axum::http::StatusCode::BAD_GATEWAY,
+        code,
+        format!("Gemini respondió {}", status.as_u16()),
+        serde_json::json!({ "upstream_status": status.as_u16(), "body": body_text }),
+    ))
+}
+
 // ─── Helpers de costos (estimación) ─────────────────────────────────────────
 
 /// Estimación grosera de costo USD basada en tarifas Gemini 1.5 Flash (2025-Q1):

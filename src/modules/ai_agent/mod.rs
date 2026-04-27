@@ -58,4 +58,10 @@ pub fn user_routes() -> Router<Arc<AppState>> {
             "/v1/auth-user/whatsapp/ai-agent/sandbox/:workspace_id",
             post(sandbox::sandbox_handler),
         )
+        // Test de conexión a Gemini — GET /v1/models/{model_id} con la
+        // api_key. No consume cuota de generación.
+        .route(
+            "/v1/auth-user/whatsapp/ai-agent/test-connection",
+            post(handler::test_connection_handler),
+        )
 }

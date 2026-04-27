@@ -6,7 +6,8 @@ use crate::models::ai_agent::{
     AiAgentMode, AiAgentSettingItem, AiAgentSettingResponse, AiAgentSettingsListResponse,
     AiEscalationRulesDto, AiEscalationRulesInput, AiLimitsDto, AiLimitsInput, AiModelConfigDto,
     AiModelConfigInput, AiPersonalityDto, AiPersonalityInput, AiScheduleDto, AiScheduleInput,
-    AiToolConfigDto, AiToolConfigInput, CreateAiAgentFaqRequest, UpdateAiAgentFaqRequest,
+    AiToolConfigDto, AiToolConfigInput, CreateAiAgentFaqRequest, TestConnectionData,
+    TestConnectionRequest, TestConnectionResponse, TestConnectionSource, UpdateAiAgentFaqRequest,
     UpdateAiAgentSettingsRequest,
 };
 use crate::modules::ai_agent::sandbox::{
@@ -173,6 +174,7 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
         crate::modules::ai_agent::handler::update_ai_agent_faq_handler,
         crate::modules::ai_agent::handler::delete_ai_agent_faq_handler,
         crate::modules::ai_agent::sandbox::sandbox_handler,
+        crate::modules::ai_agent::handler::test_connection_handler,
         // Users — CRUD
         crate::modules::users::handler::list_users_handler,
         crate::modules::users::handler::create_user_handler,
@@ -274,6 +276,9 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
             // AI Agent — Sandbox
             SandboxRequest, SandboxHistoryEntry,
             SandboxResponse, SandboxData, SandboxToolCall, SandboxUsage,
+            // AI Agent — Test connection
+            TestConnectionRequest, TestConnectionResponse, TestConnectionData,
+            TestConnectionSource,
         )
     ),
     tags(

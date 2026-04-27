@@ -548,3 +548,49 @@ pub struct AiAgentFaqListResponse {
 pub struct AiAgentDeleteResponse {
     pub ok: bool,
 }
+
+// ─── Test connection ────────────────────────────────────────────────────────
+
+/// Body de `POST /ai-agent/test-connection`. Soporta dos modos:
+/// - `api_key` + `model_id` explícitos → testea la combinación cruda (típico
+///   antes de guardar).
+/// - `workspace_id` → usa la `api_key` cifrada que ya tiene ese workspace
+///   (útil para diagnosticar si la guardada sigue funcionando).
+///
+/// Si vienen ambos, gana `api_key` (override explícito).
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct TestConnectionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    /// ObjectId hex del WaSettings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// Override de timeout en segundos. Default 10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u32>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TestConnectionData {
+    pub reachable: bool,
+    pub model_id: String,
+    /// Cuál origen se usó para la api_key.
+    pub source: TestConnectionSource,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TestConnectionSource {
+    /// `api_key` vino en el body.
+    Body,
+    /// Se descifró desde `AiAgentSetting.model.api_key_encrypted`.
+    Stored,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TestConnectionResponse {
+    pub ok: bool,
+    pub data: TestConnectionData,
+}
