@@ -4522,7 +4522,7 @@ fn map_meta_error(err: &anyhow::Error, default_msg: &str) -> ApiError {
 }
 
 /// Exige `nRole == 0` (SUPERADMIN). Devuelve `403` si no se cumple.
-async fn require_superadmin(state: &Arc<AppState>, user_id: &str) -> Result<crate::models::users::User, ApiError> {
+pub(super) async fn require_superadmin(state: &Arc<AppState>, user_id: &str) -> Result<crate::models::users::User, ApiError> {
     use crate::db::UserRepository;
     let user = state.db.find_user_by_id(user_id)
         .await

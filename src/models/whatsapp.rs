@@ -1471,3 +1471,45 @@ pub struct WaPurposeUsage {
     /// Etiqueta para UI (mismo string user-facing en español)
     pub label: String,
 }
+
+// ============================================
+// AUDIT (cross-conversation, SUPERADMIN)
+// ============================================
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AuditMessageItem {
+    pub id: String,
+    pub conversation_id: String,
+    pub customer_phone: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub customer_name: Option<String>,
+    pub business_phone: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_name: Option<String>,
+    /// `"in"` o `"out"` (mismo shape que `MessageItem.direction`).
+    pub direction: String,
+    /// `WaMessage.msg_type` — text|image|audio|video|document|template|...
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_user_name: Option<String>,
+    /// `WaMessage.status` (None en inbounds; "sent"/"delivered"/"read"/"failed" en outbounds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AuditMessagesResponse {
+    pub ok: bool,
+    pub data: Vec<AuditMessageItem>,
+    /// Cursor opaco (`<millis>_<hex_id>`) para la página siguiente. `None` cuando no hay más.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}

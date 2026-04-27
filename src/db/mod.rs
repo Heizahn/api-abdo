@@ -305,6 +305,28 @@ pub struct ConversationTouch<'a> {
 // ============================================
 // 7. WhatsAppRepository: Soporte / Chat
 // ============================================
+
+/// Filtros para `audit_list_messages` (cross-conversation, SUPERADMIN only).
+/// `conversation_ids` se resuelve en el handler a partir de `customer_phone`/
+/// `business_phone` antes de llamar al repo — el repo no toca `WaConversations`.
+pub struct AuditMessageFilter<'a> {
+    pub from_date: Option<mongodb::bson::DateTime>,
+    pub to_date: Option<mongodb::bson::DateTime>,
+    /// UUID del agente — filtra por `sent_by` (sólo aplica a outbound; un
+    /// inbound nunca tiene `sent_by` y se descarta cuando se filtra por agente).
+    pub agent_id: Option<&'a str>,
+    /// `None` = sin filtro de conversación. `Some([])` = filtro vacío que
+    /// devuelve 0 resultados (el handler ya resolvió que no hay match).
+    pub conversation_ids: Option<&'a [ObjectId]>,
+    /// `"in"` o `"out"`. Otros valores se ignoran.
+    pub direction: Option<&'a str>,
+    pub msg_type: Option<&'a str>,
+    /// Substring case-insensitive sobre `body`.
+    pub search: Option<&'a str>,
+    pub limit: i64,
+    pub cursor: Option<&'a str>,
+}
+
 #[async_trait::async_trait]
 pub trait WhatsAppRepository {
     async fn find_conversation_by_phones(&self, contact_phone: &str, business_phone: &str) -> Result<Option<WaConversation>, String>;
@@ -535,6 +557,31 @@ pub trait WhatsAppRepository {
     /// Idempotente: skipea conversaciones que ya tengan al menos un evento.
     /// Retorna la cantidad de eventos insertados.
     async fn backfill_conversation_events(&self) -> Result<u64, String>;
+
+    // Audit cross-conversation
+    /// Lista mensajes con filtros de auditoría, paginación cursor descendente
+    /// por `(timestamp, _id)`. SUPERADMIN-only — el handler valida el rol.
+    async fn audit_list_messages(
+        &self,
+        filter: AuditMessageFilter<'_>,
+    ) -> Result<Vec<WaMessage>, String>;
+
+    /// Resuelve los `_id` de `WaConversations` que matchean por
+    /// `customer_phone` (campo `phone`) y/o `business_phone`. Si ambos son
+    /// `None`, retorna error — el caller siempre debe pasar al menos uno.
+    async fn find_conversation_ids_by_phones(
+        &self,
+        customer_phone: Option<&str>,
+        business_phone: Option<&str>,
+    ) -> Result<Vec<ObjectId>, String>;
+
+    /// Batch-lookup: `_id → WaConversation` para los IDs dados. Usado por
+    /// el handler de auditoría para resolver `customer_phone`/`business_phone`/
+    /// `customer_name` de cada mensaje sin un `$lookup`.
+    async fn find_conversations_by_ids(
+        &self,
+        ids: &[ObjectId],
+    ) -> Result<HashMap<ObjectId, WaConversation>, String>;
 }
 
 // ============================================

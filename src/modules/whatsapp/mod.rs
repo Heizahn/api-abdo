@@ -1,4 +1,5 @@
 pub mod assignment;
+pub mod audit;
 pub mod backfill;
 pub mod handler;
 pub mod quick_reply_validation;
@@ -84,4 +85,6 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route("/v1/auth-user/whatsapp/templates/:id/resync", post(handler::resync_template_handler))
         // Debug
         .route("/v1/auth-user/whatsapp/debug/last-webhook", get(handler::debug_last_webhook_handler))
+        // Auditoría / trazabilidad (SUPERADMIN only)
+        .route("/v1/auth-user/whatsapp/audit/messages", get(audit::audit_messages_handler))
 }

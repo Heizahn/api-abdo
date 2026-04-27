@@ -8,7 +8,7 @@ use futures::{AsyncReadExt, AsyncWriteExt};
 use std::collections::HashMap;
 
 use crate::db::{
-    ConversationTouch, StoreTemplateMediaInput, UpdateQuickReplyPatch,
+    AuditMessageFilter, ConversationTouch, StoreTemplateMediaInput, UpdateQuickReplyPatch,
     WaTemplateListFilter, WaTemplateMediaRepository, WaTemplateMediaRef,
     WaTemplateRepository, WaTemplateUpdatePatch, WhatsAppRepository,
 };
@@ -1174,6 +1174,143 @@ impl WhatsAppRepository for MongoDB {
             .try_collect::<Vec<_>>()
             .await
             .map_err(|e| e.to_string())
+    }
+
+    async fn audit_list_messages(
+        &self,
+        filter: AuditMessageFilter<'_>,
+    ) -> Result<Vec<WaMessage>, String> {
+        let mut q = Document::new();
+
+        // Rango de fechas sobre `timestamp`.
+        let mut ts_range = Document::new();
+        if let Some(from) = filter.from_date {
+            ts_range.insert("$gte", from);
+        }
+        if let Some(to) = filter.to_date {
+            ts_range.insert("$lte", to);
+        }
+        if !ts_range.is_empty() {
+            q.insert("timestamp", ts_range);
+        }
+
+        if let Some(agent) = filter.agent_id {
+            q.insert("sent_by", agent);
+        }
+
+        if let Some(ids) = filter.conversation_ids {
+            // `Some([])` deliberado: sin matches.
+            q.insert("conversation_id", doc! { "$in": ids });
+        }
+
+        if let Some(d) = filter.direction {
+            if d == "in" || d == "out" {
+                q.insert("direction", d);
+            }
+        }
+
+        if let Some(t) = filter.msg_type {
+            q.insert("msg_type", t);
+        }
+
+        if let Some(s) = filter.search.filter(|s| !s.is_empty()) {
+            // Regex case-insensitive sobre `body` — escape básico de los
+            // metacaracteres más comunes para evitar regex injection.
+            let escaped = regex_escape(s);
+            q.insert(
+                "body",
+                doc! { "$regex": escaped, "$options": "i" },
+            );
+        }
+
+        // Cursor descendente por (timestamp, _id).
+        if let Some(c) = filter.cursor {
+            if let Some((ts, oid)) = decode_cursor(c) {
+                q.insert(
+                    "$or",
+                    vec![
+                        doc! { "timestamp": { "$lt": ts } },
+                        doc! { "timestamp": ts, "_id": { "$lt": oid } },
+                    ],
+                );
+            }
+        }
+
+        let opts = FindOptions::builder()
+            .sort(doc! { "timestamp": -1, "_id": -1 })
+            .limit(filter.limit)
+            .build();
+
+        self.wa_messages()
+            .find(q)
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn find_conversation_ids_by_phones(
+        &self,
+        customer_phone: Option<&str>,
+        business_phone: Option<&str>,
+    ) -> Result<Vec<ObjectId>, String> {
+        if customer_phone.is_none() && business_phone.is_none() {
+            return Err("at least one phone filter required".into());
+        }
+
+        let mut q = Document::new();
+        if let Some(p) = customer_phone {
+            q.insert("phone", p);
+        }
+        if let Some(b) = business_phone {
+            q.insert("business_phone", b);
+        }
+
+        #[derive(serde::Deserialize)]
+        struct ConvIdProj {
+            #[serde(rename = "_id")]
+            id: ObjectId,
+        }
+
+        let projection = FindOptions::builder()
+            .projection(doc! { "_id": 1 })
+            .build();
+
+        let mut ids = Vec::new();
+        let mut cursor = self
+            .db
+            .collection::<ConvIdProj>("WaConversations")
+            .find(q)
+            .with_options(projection)
+            .await
+            .map_err(|e| e.to_string())?;
+        while let Some(d) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            ids.push(d.id);
+        }
+        Ok(ids)
+    }
+
+    async fn find_conversations_by_ids(
+        &self,
+        ids: &[ObjectId],
+    ) -> Result<HashMap<ObjectId, WaConversation>, String> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut cursor = self
+            .wa_conversations()
+            .find(doc! { "_id": { "$in": ids } })
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut out = HashMap::new();
+        while let Some(c) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            if let Some(id) = c.id {
+                out.insert(id, c);
+            }
+        }
+        Ok(out)
     }
 
     async fn backfill_conversation_events(&self) -> Result<u64, String> {
