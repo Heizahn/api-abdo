@@ -436,6 +436,56 @@ async fn broadcast_ticket_updated(
     }
 }
 
+/// Cierra la conversación referenciada por un ticket como efecto colateral
+/// (creación o close/resolve). No-op si la conv ya está `closed`. Best-effort:
+/// loggea cualquier falla pero no propaga el error — el response del ticket
+/// no debe bloquearse por una falla en el cierre de la conv.
+///
+/// Side effects cuando efectivamente cierra:
+/// - decr de `agent_load` en Redis para el agente que tenía la conv.
+/// - Broadcast WS `CHAT_CERRADO` (los handlers del front actualizan la lista).
+/// - Audit event `closed` en `WaConversationEvents` con la `audit_note` para
+///   distinguir el origen (ticket_created vs ticket_closed vs ticket_resolved
+///   vs transfer_and_ticket).
+async fn cascade_close_conversation(
+    state: &Arc<AppState>,
+    conv: &crate::models::whatsapp::WaConversation,
+    actor_id: &str,
+    actor_name: &str,
+    audit_note: &str,
+) {
+    if conv.status == "closed" {
+        return;
+    }
+    let conv_id = match conv.id {
+        Some(id) => id,
+        None => return,
+    };
+    if let Err(e) = state.db.close_conversation(&conv_id).await {
+        tracing::warn!("[tickets] close_conversation failed: {}", e);
+        return;
+    }
+    if let Some(prev_agent) = conv.assigned_to.as_deref() {
+        state.redis.decr_agent_load(prev_agent).await;
+    }
+    let close_ev = WsServerEvent::ChatCerrado {
+        conversation_id: conv_id.to_hex(),
+    };
+    super::ws::broadcast_all(&state.ws_registry, &close_ev).await;
+    if let Err(e) = state.db.record_conversation_event(crate::models::whatsapp::WaConversationEventInput {
+        conversation_id: &conv_id,
+        business_phone: &conv.business_phone,
+        event_type: "closed",
+        actor_id: Some(actor_id),
+        actor_name: Some(actor_name),
+        target_id: None,
+        target_name: None,
+        note: Some(audit_note),
+    }).await {
+        tracing::warn!("[tickets] record_conversation_event(closed) failed: {}", e);
+    }
+}
+
 /// Envía `TICKET_ASIGNADO` sólo al destino. Drop silencioso si no está conectado.
 async fn send_ticket_assigned(
     state: &Arc<AppState>,
@@ -630,37 +680,8 @@ pub async fn create_ticket_handler(
         .await
         .map_err(ApiError::DatabaseError)?;
 
-    // 6. Cierre best-effort de la conversación origen. Si ya estaba cerrada,
-    // `close_conversation` sigue siendo seguro (es un $set sin precondición
-    // de status). El error no bloquea la respuesta del ticket — se loggea.
-    if conv.status != "closed" {
-        if let Err(e) = state.db.close_conversation(&conv_oid).await {
-            tracing::warn!("[tickets] close_conversation tras create_ticket falló: {}", e);
-        } else {
-            // Liberar carga del agente que tenía el chat (si lo había).
-            if let Some(prev_agent) = conv.assigned_to.as_deref() {
-                state.redis.decr_agent_load(prev_agent).await;
-            }
-            // Broadcast del cierre — mismo pattern que close_conversation_handler.
-            let close_ev = WsServerEvent::ChatCerrado {
-                conversation_id: body.conversation_id.clone(),
-            };
-            super::ws::broadcast_all(&state.ws_registry, &close_ev).await;
-            // Auditoría — best-effort.
-            if let Err(e) = state.db.record_conversation_event(crate::models::whatsapp::WaConversationEventInput {
-                conversation_id: &conv_oid,
-                business_phone: &conv.business_phone,
-                event_type: "closed",
-                actor_id: Some(claims.id.as_str()),
-                actor_name: Some(creator.name.as_str()),
-                target_id: None,
-                target_name: None,
-                note: Some("ticket_created"),
-            }).await {
-                tracing::warn!("[tickets] record_conversation_event(closed) failed: {}", e);
-            }
-        }
-    }
+    // 6. Cierre best-effort de la conversación origen. No-op si ya estaba cerrada.
+    cascade_close_conversation(&state, &conv, &claims.id, &creator.name, "ticket_created").await;
 
     let item = ticket_to_item(ticket, true);
 
@@ -884,7 +905,10 @@ pub async fn update_ticket_handler(
     let is_assignee = ticket.assigned_to_id.as_deref() == Some(claims.id.as_str());
     let is_creator = ticket.created_by_id == claims.id;
 
-    // Resolución de transición + autorización.
+    // Resolución de transición + autorización. `closed` y `cancelled` son
+    // estados terminales (no permiten `reopen`) — un cierre formal o cancelación
+    // explícita no se deshace; si el cliente vuelve a reportar el problema, se
+    // crea un ticket nuevo. Solo `resolved` (cierre tentativo) admite reopen.
     let (new_status, requires_assignee, requires_creator_or_super, expects_assign_to_id, set_resolved_at, set_closed_at, clear_assignment, change_assignment) =
         match (current, action) {
             ("open", "take")        => ("in_progress", false, false, false, false, false, false, true),
@@ -895,8 +919,7 @@ pub async fn update_ticket_handler(
             ("in_progress", "close")    => ("closed",   true,  false, false, false, true,  true,  true),
             ("resolved", "close")       => ("closed",   true,  false, false, false, true,  true,  true),
             ("resolved", "reopen")      => ("open",     false, false, false, false, false, true,  true),
-            ("closed", "reopen")        => ("open",     false, false, false, false, false, true,  true),
-            ("cancelled", "reopen")     => ("open",     false, false, false, false, false, true,  true),
+            // `closed` y `cancelled` son terminales — no hay transición salida.
             _ => return Err(invalid_transition(current, action)),
         };
 
@@ -998,6 +1021,25 @@ pub async fn update_ticket_handler(
         .ok_or_else(ticket_not_found)?;
 
     let item = ticket_to_item(updated, true);
+
+    // Cascada: close|resolve cierran la conv referenciada si está abierta.
+    // `cancel` NO cascadea — el ticket fue erróneo pero el cliente puede
+    // seguir necesitando atención. `transfer`, `take`, `reopen` tampoco
+    // tocan la conv.
+    if action == "close" || action == "resolve" {
+        match state.db.find_conversation_by_id(&ticket.conversation_id).await {
+            Ok(Some(conv)) => {
+                let audit_note = if action == "close" { "ticket_closed" } else { "ticket_resolved" };
+                cascade_close_conversation(&state, &conv, &claims.id, &user.name, audit_note).await;
+            }
+            Ok(None) => {
+                tracing::warn!("[tickets] cascade_close: conv {} no existe", ticket.conversation_id);
+            }
+            Err(e) => {
+                tracing::warn!("[tickets] cascade_close find_conversation failed: {}", e);
+            }
+        }
+    }
 
     // WS broadcast.
     if action == "transfer" {
@@ -1165,30 +1207,8 @@ pub async fn transfer_and_ticket_handler(
 
     let ticket = state.db.create_ticket(ticket).await.map_err(ApiError::DatabaseError)?;
 
-    // Cierre de la conversación + auditoría + WS, igual que POST /tickets.
-    if conv.status != "closed" {
-        if let Err(e) = state.db.close_conversation(&conv_oid).await {
-            tracing::warn!("[tickets] close_conversation tras transfer-and-ticket falló: {}", e);
-        } else {
-            if let Some(prev_agent) = conv.assigned_to.as_deref() {
-                state.redis.decr_agent_load(prev_agent).await;
-            }
-            let close_ev = WsServerEvent::ChatCerrado { conversation_id: id.clone() };
-            super::ws::broadcast_all(&state.ws_registry, &close_ev).await;
-            if let Err(e) = state.db.record_conversation_event(crate::models::whatsapp::WaConversationEventInput {
-                conversation_id: &conv_oid,
-                business_phone: &conv.business_phone,
-                event_type: "closed",
-                actor_id: Some(claims.id.as_str()),
-                actor_name: Some(creator.name.as_str()),
-                target_id: None,
-                target_name: None,
-                note: Some("transfer_and_ticket"),
-            }).await {
-                tracing::warn!("[tickets] record_conversation_event(closed) failed: {}", e);
-            }
-        }
-    }
+    // Cierre de la conversación + auditoría + WS, mismo patrón que POST /tickets.
+    cascade_close_conversation(&state, &conv, &claims.id, &creator.name, "transfer_and_ticket").await;
 
     let item = ticket_to_item(ticket, true);
     send_ticket_assigned(&state, &item, &creator.name).await;
