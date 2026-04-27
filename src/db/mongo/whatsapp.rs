@@ -535,7 +535,11 @@ impl WhatsAppRepository for MongoDB {
         Ok(())
     }
 
-    async fn mark_inbound_as_read(&self, conversation_id: &ObjectId) -> Result<Vec<String>, String> {
+    async fn mark_inbound_as_read(
+        &self,
+        conversation_id: &ObjectId,
+        agent_id: &str,
+    ) -> Result<Vec<String>, String> {
         let col = self.wa_messages();
 
         // Buscar inbound no leídos antes del update para poder devolverlos.
@@ -576,9 +580,21 @@ impl WhatsAppRepository for MongoDB {
             return Ok(Vec::new());
         }
 
-        col.update_many(filter, doc! { "$set": { "status": "read" } })
-            .await
-            .map_err(|e| e.to_string())?;
+        // First-read-wins: el filtro `status != "read"` garantiza que sólo
+        // matcheen los inbounds aún no leídos, así `read_by_user_id`/`read_at`
+        // se setean una única vez (el primer agente que abrió el chat).
+        col.update_many(
+            filter,
+            doc! {
+                "$set": {
+                    "status": "read",
+                    "read_by_user_id": agent_id,
+                    "read_at": DateTime::now(),
+                }
+            },
+        )
+        .await
+        .map_err(|e| e.to_string())?;
 
         Ok(ids)
     }
@@ -1401,7 +1417,7 @@ impl WhatsAppRepository for MongoDB {
                 for item in by_dir {
                     if let Some(obj) = item.as_document() {
                         let dir = obj.get_str("_id").unwrap_or("");
-                        let n = obj.get_i64("n").unwrap_or(0).max(0) as u64;
+                        let n = read_count(obj, "n");
                         match dir {
                             "in" => summary.inbound = n,
                             "out" => summary.outbound = n,
@@ -1413,7 +1429,7 @@ impl WhatsAppRepository for MongoDB {
             }
             if let Ok(convs) = d.get_array("convs") {
                 if let Some(first) = convs.first().and_then(|b| b.as_document()) {
-                    summary.distinct_conversations = first.get_i64("n").unwrap_or(0).max(0) as u64;
+                    summary.distinct_conversations = read_count(first, "n");
                 }
             }
         }
@@ -1450,7 +1466,7 @@ impl WhatsAppRepository for MongoDB {
             let id = d.get_document("_id").map_err(|e| e.to_string())?;
             let date = id.get_str("date").unwrap_or_default().to_string();
             let dir = id.get_str("direction").unwrap_or_default().to_string();
-            let n = d.get_i64("n").unwrap_or(0).max(0) as u64;
+            let n = read_count(&d, "n");
             let entry = buckets.entry(date.clone()).or_insert_with(|| AuditMessagesByDayBucket {
                 date,
                 inbound: 0,
@@ -1503,8 +1519,8 @@ impl WhatsAppRepository for MongoDB {
         while let Some(d) = cursor.try_next().await.map_err(|e| e.to_string())? {
             out.push(AuditMessagesByAgentBucket {
                 agent_id: d.get_str("_id").unwrap_or_default().to_string(),
-                messages_sent: d.get_i64("messages_sent").unwrap_or(0).max(0) as u64,
-                conversations_handled: d.get_i32("conversations_handled").unwrap_or(0).max(0) as u64,
+                messages_sent: read_count(&d, "messages_sent"),
+                conversations_handled: read_count(&d, "conversations_handled"),
             });
         }
         Ok(out)
@@ -1530,7 +1546,7 @@ impl WhatsAppRepository for MongoDB {
         while let Some(d) = cursor.try_next().await.map_err(|e| e.to_string())? {
             out.push(AuditMessagesByTypeBucket {
                 msg_type: d.get_str("_id").unwrap_or_default().to_string(),
-                count: d.get_i64("n").unwrap_or(0).max(0) as u64,
+                count: read_count(&d, "n"),
             });
         }
         Ok(out)
@@ -1653,7 +1669,7 @@ impl WhatsAppRepository for MongoDB {
             let id = d.get_document("_id").map_err(|e| e.to_string())?;
             let date = id.get_str("date").unwrap_or_default().to_string();
             let etype = id.get_str("type").unwrap_or_default().to_string();
-            let n = d.get_i64("n").unwrap_or(0).max(0) as u64;
+            let n = read_count(&d, "n");
             let entry = buckets.entry(date.clone()).or_insert_with(|| AuditLifecycleByDayBucket {
                 date,
                 new_conversations: 0,
@@ -1834,6 +1850,17 @@ fn granularity_to_date_format(g: &str) -> &'static str {
         "month" => "%Y-%m",
         _ => "%Y-%m-%d",
     }
+}
+
+/// Lee un campo numérico aceptando tanto Int32 como Int64. Mongo devuelve
+/// `$count` y `$size` como Int32 pero `$sum: 1_i64` como Int64 — leer todos
+/// los conteos vía `get_i64` produce 0 en los Int32 (silently). Esta helper
+/// prueba ambas representaciones.
+fn read_count(d: &mongodb::bson::Document, key: &str) -> u64 {
+    d.get_i64(key)
+        .or_else(|_| d.get_i32(key).map(i64::from))
+        .unwrap_or(0)
+        .max(0) as u64
 }
 
 // ============================================

@@ -503,6 +503,8 @@ pub async fn receive_webhook(
                         media_filename,
                         status: None,
                         sent_by: None,
+                        read_by_user_id: None,
+                        read_at: None,
                         idempotency_key: None,
                         reply_to_wa_message_id: msg.context.as_ref().map(|c| c.id.clone()),
                         url_preview: None,
@@ -1110,6 +1112,8 @@ pub async fn send_message_handler(
         media_filename: sent.media_filename,
         status: Some("sent".to_string()),
         sent_by: Some(claims.id.clone()),
+        read_by_user_id: None,
+        read_at: None,
         idempotency_key: payload.idempotency_key.clone(),
         reply_to_wa_message_id: payload.reply_to.clone(),
         url_preview: None,
@@ -1695,6 +1699,7 @@ fn template_preview(tpl: &SendTemplatePayload) -> String {
 )]
 pub async fn mark_read_handler(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
     Path(id): Path<String>,
 ) -> Result<Json<MarkReadResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
@@ -1706,8 +1711,10 @@ pub async fn mark_read_handler(
         .ok_or(ApiError::NotFound)?;
 
     // Actualizar status de inbound en DB y obtener los que cambiaron.
+    // El `agent_id` queda persistido en `read_by_user_id` (first-read-wins)
+    // para que la auditoría pueda atribuir el inbound a quien lo atendió.
     let changed_ids = state.db
-        .mark_inbound_as_read(&oid)
+        .mark_inbound_as_read(&oid, &claims.id)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
 
@@ -2352,6 +2359,8 @@ pub async fn initiate_conversation_handler(
         media_filename: None,
         status: Some("sent".to_string()),
         sent_by: Some(claims.id.clone()),
+        read_by_user_id: None,
+        read_at: None,
         idempotency_key: Some(idempotency_key),
         reply_to_wa_message_id: None,
         url_preview: None,

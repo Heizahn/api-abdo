@@ -50,6 +50,9 @@ const AUDIT_MAX_LIMIT: i64 = 200;
 /// `export_too_large` para que el caller reduzca el rango.
 const AUDIT_EXPORT_MAX_ROWS: u64 = 100_000;
 
+/// Header del CSV de export — mantener alineado con el orden de `csv_row(...)`.
+const CSV_HEADER: &str = "created_at,conversation_id,customer_phone,customer_name,business_phone,direction,type,content,from_user_name,status,read_by_user_name,read_at\n";
+
 // ============================================
 // QUERY PARAMS
 // ============================================
@@ -319,10 +322,12 @@ pub async fn audit_messages_handler(
 
     let customer_names = resolve_customer_names(&state, &convs).await;
 
-    let agent_ids: Vec<String> = messages
+    // Resolver nombres de agentes (sent_by + read_by_user_id) en una sola pasada.
+    let mut agent_ids: Vec<String> = messages
         .iter()
         .filter_map(|m| m.sent_by.clone())
         .collect();
+    agent_ids.extend(messages.iter().filter_map(|m| m.read_by_user_id.clone()));
     let agent_names = resolve_agent_names(&state, &agent_ids).await;
 
     // 6. Armar el response item por mensaje.
@@ -339,6 +344,11 @@ pub async fn audit_messages_handler(
         let customer_name = customer_names.get(&m.conversation_id).cloned();
         let workspace_name = workspace_names.get(&business_phone).cloned();
         let from_user_name = m.sent_by.as_deref().and_then(|id| agent_names.get(id).cloned());
+        let read_by_user_name = m
+            .read_by_user_id
+            .as_deref()
+            .and_then(|id| agent_names.get(id).cloned());
+        let read_at = m.read_at.map(iso8601);
 
         data.push(AuditMessageItem {
             id: m.id.map(|o| o.to_hex()).unwrap_or_default(),
@@ -354,6 +364,9 @@ pub async fn audit_messages_handler(
             from_user_id: m.sent_by,
             from_user_name,
             status: m.status,
+            read_by_user_id: m.read_by_user_id,
+            read_by_user_name,
+            read_at,
             created_at: iso8601(m.timestamp),
         });
     }
@@ -870,14 +883,19 @@ pub async fn audit_export_handler(
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
-    let _workspace_names = state.db.get_workspace_names(&business_phones).await.unwrap_or_default();
+    let _ = state.db.get_workspace_names(&business_phones).await; // workspace_name no va al CSV
     let customer_names = resolve_customer_names(&state, &convs).await;
-    let agent_ids: Vec<String> = messages.iter().filter_map(|m| m.sent_by.clone()).collect();
-    let agent_names = resolve_agent_names(&state, &agent_ids).await;
 
-    // 7. Construir CSV en memoria.
-    let mut body = String::with_capacity(messages.len() * 200);
-    body.push_str("created_at,conversation_id,customer_phone,customer_name,business_phone,direction,type,content,from_user_name,status\n");
+    // 7. Resolver nombres de agentes — sent_by + read_by_user_id en una pasada.
+    let mut all_agent_ids: Vec<String> = messages.iter().filter_map(|m| m.sent_by.clone()).collect();
+    all_agent_ids.extend(messages.iter().filter_map(|m| m.read_by_user_id.clone()));
+    let agent_names = resolve_agent_names(&state, &all_agent_ids).await;
+
+    // 8. Construir CSV en memoria. Columnas: created_at, conversation_id,
+    //    customer_phone, customer_name, business_phone, direction, type,
+    //    content, from_user_name, status, read_by_user_name, read_at.
+    let mut body = String::with_capacity(messages.len() * 220);
+    body.push_str(CSV_HEADER);
 
     for m in &messages {
         let conv = convs.get(&m.conversation_id);
@@ -890,6 +908,12 @@ pub async fn audit_export_handler(
             .as_deref()
             .and_then(|id| agent_names.get(id).map(|s| s.as_str()))
             .unwrap_or("");
+        let read_by_user_name = m
+            .read_by_user_id
+            .as_deref()
+            .and_then(|id| agent_names.get(id).map(|s| s.as_str()))
+            .unwrap_or("");
+        let read_at_str = m.read_at.map(iso8601).unwrap_or_default();
         let content = m.body.as_deref().unwrap_or("");
         let status = m.status.as_deref().unwrap_or("");
 
@@ -904,6 +928,8 @@ pub async fn audit_export_handler(
             content,
             from_user_name,
             status,
+            read_by_user_name,
+            &read_at_str,
         ]));
         body.push('\n');
     }
@@ -938,7 +964,7 @@ fn build_csv_response(
 ) -> Response {
     // Si body está vacío, igual escribimos el header para que el archivo sea válido.
     let final_body = if body.is_empty() {
-        "created_at,conversation_id,customer_phone,customer_name,business_phone,direction,type,content,from_user_name,status\n".to_string()
+        CSV_HEADER.to_string()
     } else {
         body
     };

@@ -464,8 +464,15 @@ pub trait WhatsAppRepository {
     async fn reset_unread(&self, id: &ObjectId) -> Result<(), String>;
     async fn update_message_status(&self, wa_message_id: &str, status: &str) -> Result<Option<WaMessage>, String>;
     /// Marca todos los inbound de una conversación con status != "read" como "read".
+    /// Persiste también `read_by_user_id = agent_id` y `read_at = now` en cada
+    /// mensaje que efectivamente cambió — el filtro `status != "read"` garantiza
+    /// first-read-wins (lecturas posteriores no sobreescriben al primer agente).
     /// Retorna la lista de `wa_message_id` que cambiaron (para emitir MENSAJES_VISTOS).
-    async fn mark_inbound_as_read(&self, conversation_id: &ObjectId) -> Result<Vec<String>, String>;
+    async fn mark_inbound_as_read(
+        &self,
+        conversation_id: &ObjectId,
+        agent_id: &str,
+    ) -> Result<Vec<String>, String>;
     /// Busca un mensaje por `(conversation_id, idempotency_key)`. Fuente de verdad
     /// para reintentos idempotentes: permite detectar envíos previos `failed` y reintentarlos.
     async fn find_message_by_idempotency(

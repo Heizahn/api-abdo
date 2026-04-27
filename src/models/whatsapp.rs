@@ -162,6 +162,16 @@ pub struct WaMessage {
     /// UUID del agente que envió (solo outbound)
     #[serde(default)]
     pub sent_by: Option<String>,
+    /// Solo para inbound: UUID del primer agente que abrió la conversación y
+    /// disparó el `mark-read` que cambió este mensaje a `status = "read"`.
+    /// First-read-wins: una vez seteado no se sobreescribe en transfers ni
+    /// re-aperturas. `None` en mensajes anteriores al deploy de esta feature
+    /// o nunca leídos.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_by_user_id: Option<String>,
+    /// Timestamp de la primera marca de read. `None` si nunca se leyó.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_at: Option<DateTime>,
     /// Clave de idempotencia con la que el front disparó el envío. Usada para
     /// asociar respuesta HTTP con evento WS y deduplicar en la UI.
     #[serde(default)]
@@ -1502,6 +1512,17 @@ pub struct AuditMessageItem {
     /// `WaMessage.status` (None en inbounds; "sent"/"delivered"/"read"/"failed" en outbounds).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// Sólo para inbound: UUID del primer agente que abrió el chat y disparó
+    /// el `mark-read` que pasó este mensaje a `status = "read"`. Null hasta
+    /// que algún agente lo atienda; ausente en outbound.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_by_user_id: Option<String>,
+    /// Nombre resuelto desde `Users` para `read_by_user_id`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_by_user_name: Option<String>,
+    /// ISO-8601 del momento de la primera marca de read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_at: Option<String>,
     pub created_at: String,
 }
 
