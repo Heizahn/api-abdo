@@ -629,6 +629,14 @@ pub trait WhatsAppRepository {
         filter: AuditMessageFilter<'_>,
     ) -> Result<Vec<WaMessage>, String>;
 
+    /// Cuenta mensajes que matchean el filtro (ignora `cursor` y `limit`).
+    /// Usado por `/audit/export` para chequear el cap de 100k antes de
+    /// materializar el CSV.
+    async fn audit_count_messages(
+        &self,
+        filter: &AuditMessageFilter<'_>,
+    ) -> Result<u64, String>;
+
     /// Resuelve los `_id` de `WaConversations` que matchean por
     /// `customer_phone` (campo `phone`) y/o `business_phone`. Si ambos son
     /// `None`, retorna error — el caller siempre debe pasar al menos uno.

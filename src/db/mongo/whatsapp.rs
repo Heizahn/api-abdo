@@ -1253,6 +1253,49 @@ impl WhatsAppRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
+    async fn audit_count_messages(
+        &self,
+        filter: &AuditMessageFilter<'_>,
+    ) -> Result<u64, String> {
+        // Reusamos la misma lógica de armado de filtro que `audit_list_messages`,
+        // pero ignoramos cursor/limit (no aplican para count).
+        let mut q = Document::new();
+
+        let mut ts_range = Document::new();
+        if let Some(from) = filter.from_date {
+            ts_range.insert("$gte", from);
+        }
+        if let Some(to) = filter.to_date {
+            ts_range.insert("$lte", to);
+        }
+        if !ts_range.is_empty() {
+            q.insert("timestamp", ts_range);
+        }
+        if let Some(agent) = filter.agent_id {
+            q.insert("sent_by", agent);
+        }
+        if let Some(ids) = filter.conversation_ids {
+            q.insert("conversation_id", doc! { "$in": ids });
+        }
+        if let Some(d) = filter.direction {
+            if d == "in" || d == "out" {
+                q.insert("direction", d);
+            }
+        }
+        if let Some(t) = filter.msg_type {
+            q.insert("msg_type", t);
+        }
+        if let Some(s) = filter.search.filter(|s| !s.is_empty()) {
+            let escaped = regex_escape(s);
+            q.insert("body", doc! { "$regex": escaped, "$options": "i" });
+        }
+
+        self.wa_messages()
+            .count_documents(q)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn find_conversation_ids_by_phones(
         &self,
         customer_phone: Option<&str>,

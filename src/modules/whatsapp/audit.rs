@@ -9,7 +9,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
+    http::{header, HeaderMap, StatusCode},
+    response::Response,
     Extension, Json,
 };
 use mongodb::bson::{oid::ObjectId, DateTime as BsonDateTime};
@@ -42,6 +45,10 @@ const AUDIT_MAX_RANGE_MS: i64 = 90 * 24 * 60 * 60 * 1000;
 const AUDIT_DEFAULT_RANGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const AUDIT_DEFAULT_LIMIT: i64 = 50;
 const AUDIT_MAX_LIMIT: i64 = 200;
+
+/// Cap del export CSV. Si el rango contiene más mensajes, se devuelve 503
+/// `export_too_large` para que el caller reduzca el rango.
+const AUDIT_EXPORT_MAX_ROWS: u64 = 100_000;
 
 // ============================================
 // QUERY PARAMS
@@ -716,6 +723,258 @@ fn avg_or_none<I: Iterator<Item = i64>>(iter: I) -> Option<f64> {
     } else {
         Some(sum as f64 / count as f64)
     }
+}
+
+// ============================================
+// HANDLER: GET /v1/auth-user/whatsapp/audit/export
+// ============================================
+
+#[derive(Debug, Deserialize)]
+pub struct AuditExportQuery {
+    pub from_date: Option<String>,
+    pub to_date: Option<String>,
+    pub agent_id: Option<String>,
+    pub customer_phone: Option<String>,
+    pub business_phone: Option<String>,
+    pub direction: Option<String>,
+    #[serde(rename = "type")]
+    pub msg_type: Option<String>,
+    pub search: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/audit/export",
+    tag = "WhatsApp — Auditoría",
+    security(("bearerAuth" = [])),
+    params(
+        ("from_date" = Option<String>, Query, description = "ISO-8601"),
+        ("to_date" = Option<String>, Query, description = "ISO-8601"),
+        ("agent_id" = Option<String>, Query, description = "UUID agente"),
+        ("customer_phone" = Option<String>, Query, description = "E.164 sin '+'"),
+        ("business_phone" = Option<String>, Query, description = "E.164 sin '+'"),
+        ("direction" = Option<String>, Query, description = "'in' | 'out'"),
+        ("type" = Option<String>, Query, description = "WaMessageType"),
+        ("search" = Option<String>, Query, description = "Substring case-insensitive en body"),
+    ),
+    responses(
+        (status = 200, description = "CSV adjunto", content_type = "text/csv"),
+        (status = 400, description = "invalid_date_range"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Forbidden — requiere SUPERADMIN"),
+        (status = 503, description = "export_too_large — reducir rango"),
+    )
+)]
+pub async fn audit_export_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Query(q): Query<AuditExportQuery>,
+) -> Result<Response, ApiError> {
+    require_superadmin(&state, &claims.id).await?;
+
+    // 1. Mismo defaulting de fechas que /audit/messages (últimos 30d si vacío).
+    let from_raw = match q.from_date.as_deref() {
+        Some(s) if !s.is_empty() => Some(parse_iso_to_bson(s, "from_date")?),
+        _ => None,
+    };
+    let to_raw = match q.to_date.as_deref() {
+        Some(s) if !s.is_empty() => Some(parse_iso_to_bson(s, "to_date")?),
+        _ => None,
+    };
+    let now_ms = BsonDateTime::now().timestamp_millis();
+    let (from_date, to_date) = match (from_raw, to_raw) {
+        (Some(f), Some(t)) => (Some(f), Some(t)),
+        (Some(f), None) => (Some(f), Some(BsonDateTime::from_millis(now_ms))),
+        (None, Some(t)) => (
+            Some(BsonDateTime::from_millis(t.timestamp_millis() - AUDIT_DEFAULT_RANGE_MS)),
+            Some(t),
+        ),
+        (None, None) => (
+            Some(BsonDateTime::from_millis(now_ms - AUDIT_DEFAULT_RANGE_MS)),
+            Some(BsonDateTime::from_millis(now_ms)),
+        ),
+    };
+    validate_range(from_date, to_date)?;
+
+    // 2. Resolver conv ids por filtros de teléfono.
+    let conversation_ids: Option<Vec<ObjectId>> = if q.customer_phone.is_some() || q.business_phone.is_some() {
+        let ids = state.db
+            .find_conversation_ids_by_phones(
+                q.customer_phone.as_deref(),
+                q.business_phone.as_deref(),
+            )
+            .await
+            .map_err(ApiError::DatabaseError)?;
+        Some(ids)
+    } else {
+        None
+    };
+
+    // 3. Build filter sin cursor; limit alto para fetch completo (ya validado por count).
+    let filter = AuditMessageFilter {
+        from_date,
+        to_date,
+        agent_id: q.agent_id.as_deref(),
+        conversation_ids: conversation_ids.as_deref(),
+        direction: q.direction.as_deref(),
+        msg_type: q.msg_type.as_deref(),
+        search: q.search.as_deref(),
+        limit: AUDIT_EXPORT_MAX_ROWS as i64,
+        cursor: None,
+    };
+
+    // 4. Count antes de materializar.
+    let total = state.db
+        .audit_count_messages(&filter)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    if total > AUDIT_EXPORT_MAX_ROWS {
+        return Err(ApiError::Domain {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "export_too_large".into(),
+            field: None,
+            message: format!(
+                "El rango contiene {} mensajes; el máximo de export es {}. Reducí el período o filtrá más.",
+                total, AUDIT_EXPORT_MAX_ROWS
+            ),
+            details: None,
+        });
+    }
+
+    // 5. Match-empty atajo: si filtramos por phone pero no hay conv, devolver
+    // CSV vacío (sólo header).
+    if matches!(conversation_ids.as_deref(), Some(ids) if ids.is_empty()) {
+        return Ok(build_csv_response(&from_date, &to_date, String::new(), 0));
+    }
+
+    let messages: Vec<WaMessage> = state.db
+        .audit_list_messages(filter)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    // 6. Resolver conversaciones + nombres en batch (igual que /audit/messages).
+    let conv_ids: Vec<ObjectId> = messages
+        .iter()
+        .map(|m| m.conversation_id)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let convs = state.db
+        .find_conversations_by_ids(&conv_ids)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    let business_phones: Vec<String> = convs
+        .values()
+        .map(|c| c.business_phone.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let _workspace_names = state.db.get_workspace_names(&business_phones).await.unwrap_or_default();
+    let customer_names = resolve_customer_names(&state, &convs).await;
+    let agent_ids: Vec<String> = messages.iter().filter_map(|m| m.sent_by.clone()).collect();
+    let agent_names = resolve_agent_names(&state, &agent_ids).await;
+
+    // 7. Construir CSV en memoria.
+    let mut body = String::with_capacity(messages.len() * 200);
+    body.push_str("created_at,conversation_id,customer_phone,customer_name,business_phone,direction,type,content,from_user_name,status\n");
+
+    for m in &messages {
+        let conv = convs.get(&m.conversation_id);
+        let (customer_phone, business_phone) = conv
+            .map(|c| (c.phone.as_str(), c.business_phone.as_str()))
+            .unwrap_or(("", ""));
+        let customer_name = customer_names.get(&m.conversation_id).map(|s| s.as_str()).unwrap_or("");
+        let from_user_name = m
+            .sent_by
+            .as_deref()
+            .and_then(|id| agent_names.get(id).map(|s| s.as_str()))
+            .unwrap_or("");
+        let content = m.body.as_deref().unwrap_or("");
+        let status = m.status.as_deref().unwrap_or("");
+
+        body.push_str(&csv_row(&[
+            &iso8601(m.timestamp),
+            &m.conversation_id.to_hex(),
+            customer_phone,
+            customer_name,
+            business_phone,
+            &m.direction,
+            &m.msg_type,
+            content,
+            from_user_name,
+            status,
+        ]));
+        body.push('\n');
+    }
+
+    Ok(build_csv_response(&from_date, &to_date, body, messages.len()))
+}
+
+/// Escapa un campo CSV según RFC 4180: si contiene `,`, `"`, `\n` o `\r`
+/// se envuelve entre comillas y los `"` se duplican.
+fn csv_escape(field: &str) -> String {
+    if field.bytes().any(|b| b == b',' || b == b'"' || b == b'\n' || b == b'\r') {
+        let escaped = field.replace('"', "\"\"");
+        format!("\"{}\"", escaped)
+    } else {
+        field.to_string()
+    }
+}
+
+fn csv_row(fields: &[&str]) -> String {
+    fields
+        .iter()
+        .map(|f| csv_escape(f))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn build_csv_response(
+    from: &Option<BsonDateTime>,
+    to: &Option<BsonDateTime>,
+    body: String,
+    row_count: usize,
+) -> Response {
+    // Si body está vacío, igual escribimos el header para que el archivo sea válido.
+    let final_body = if body.is_empty() {
+        "created_at,conversation_id,customer_phone,customer_name,business_phone,direction,type,content,from_user_name,status\n".to_string()
+    } else {
+        body
+    };
+
+    let from_label = from
+        .map(|f| iso_short(f))
+        .unwrap_or_else(|| "all".to_string());
+    let to_label = to
+        .map(|t| iso_short(t))
+        .unwrap_or_else(|| "all".to_string());
+    let filename = format!("wa-messages-{}_{}.csv", from_label, to_label);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        "text/csv; charset=utf-8".parse().unwrap(),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        format!("attachment; filename=\"{}\"", filename).parse().unwrap(),
+    );
+    headers.insert(
+        "X-Audit-Row-Count",
+        row_count.to_string().parse().unwrap(),
+    );
+
+    let mut resp = Response::new(Body::from(final_body));
+    *resp.headers_mut() = headers;
+    *resp.status_mut() = StatusCode::OK;
+    resp
+}
+
+/// `YYYY-MM-DD` para nombres de archivo (sin hora, sin timezone).
+fn iso_short(dt: BsonDateTime) -> String {
+    let full = dt.try_to_rfc3339_string().unwrap_or_default();
+    full.chars().take(10).collect()
 }
 
 /// Reconstruye los intervalos de "quién tuvo asignada esta conversación"
