@@ -1576,3 +1576,61 @@ pub struct AuditConversationTimelineResponse {
     pub ok: bool,
     pub data: AuditConversationTimeline,
 }
+
+// ─── Métricas agregadas ─────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AuditMetricsSummary {
+    pub total_messages: u64,
+    pub total_inbound: u64,
+    pub total_outbound: u64,
+    /// Conversaciones distintas con al menos un mensaje en el rango.
+    pub total_conversations: u64,
+    /// Tiempo de primera respuesta promedio (segundos) — primer `in` sin
+    /// respuesta previa del negocio → primer `out` del agente, mismo
+    /// `conversation_id`. `None` si no hubo conversaciones con par in→out.
+    pub avg_response_time_seconds: Option<f64>,
+    /// Tiempo promedio (segundos) entre `created` y `closed` para
+    /// conversaciones cerradas en el rango. `None` si no hubo cierres.
+    pub avg_resolution_time_seconds: Option<f64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AuditMetricsByDay {
+    /// Etiqueta temporal según `granularity` (`YYYY-MM-DD`, `YYYY-WW`, `YYYY-MM`).
+    pub date: String,
+    pub inbound: u64,
+    pub outbound: u64,
+    pub new_conversations: u64,
+    pub closed_conversations: u64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AuditMetricsByAgent {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub messages_sent: u64,
+    pub conversations_handled: u64,
+    pub avg_response_time_seconds: Option<f64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AuditMetricsByType {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub count: u64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AuditMetricsData {
+    pub summary: AuditMetricsSummary,
+    pub by_day: Vec<AuditMetricsByDay>,
+    pub by_agent: Vec<AuditMetricsByAgent>,
+    pub by_message_type: Vec<AuditMetricsByType>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AuditMetricsResponse {
+    pub ok: bool,
+    pub data: AuditMetricsData,
+}

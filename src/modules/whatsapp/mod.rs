@@ -87,5 +87,6 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route("/v1/auth-user/whatsapp/debug/last-webhook", get(handler::debug_last_webhook_handler))
         // Auditoría / trazabilidad (SUPERADMIN only)
         .route("/v1/auth-user/whatsapp/audit/messages", get(audit::audit_messages_handler))
+        .route("/v1/auth-user/whatsapp/audit/metrics", get(audit::audit_metrics_handler))
         .route("/v1/auth-user/whatsapp/audit/conversations/:id/timeline", get(audit::audit_conversation_timeline_handler))
 }

@@ -17,12 +17,14 @@ use serde::Deserialize;
 
 use crate::{
     auth::user_jwt::UserProfileClaims,
-    db::{AuditMessageFilter, ProfileRepository, WhatsAppRepository},
+    db::{AuditMessageFilter, AuditMetricsFilter, ProfileRepository, WhatsAppRepository},
     error::ApiError,
     models::whatsapp::{
         AuditAssignedToHistoryItem, AuditConversationEventItem, AuditConversationHeader,
         AuditConversationTimeline, AuditConversationTimelineResponse, AuditMessageItem,
-        AuditMessagesResponse, WaConversation, WaConversationEvent, WaMessage,
+        AuditMessagesResponse, AuditMetricsByAgent, AuditMetricsByDay, AuditMetricsByType,
+        AuditMetricsData, AuditMetricsResponse, AuditMetricsSummary, WaConversation,
+        WaConversationEvent, WaMessage,
     },
     state::AppState,
 };
@@ -476,6 +478,244 @@ pub async fn audit_conversation_timeline_handler(
             assigned_to_history,
         },
     }))
+}
+
+// ============================================
+// HANDLER: GET /v1/auth-user/whatsapp/audit/metrics
+// ============================================
+
+#[derive(Debug, Deserialize)]
+pub struct AuditMetricsQuery {
+    pub from_date: Option<String>,
+    pub to_date: Option<String>,
+    pub business_phone: Option<String>,
+    pub granularity: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/audit/metrics",
+    tag = "WhatsApp — Auditoría",
+    security(("bearerAuth" = [])),
+    params(
+        ("from_date" = String, Query, description = "ISO-8601 — REQUERIDO"),
+        ("to_date" = String, Query, description = "ISO-8601 — REQUERIDO"),
+        ("business_phone" = Option<String>, Query, description = "E.164 sin '+' (filtra por workspace)"),
+        ("granularity" = Option<String>, Query, description = "'day' | 'week' | 'month' (default 'day')"),
+    ),
+    responses(
+        (status = 200, description = "Métricas agregadas", body = AuditMetricsResponse),
+        (status = 400, description = "invalid_date_range | invalid_granularity"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Forbidden — requiere SUPERADMIN"),
+    )
+)]
+pub async fn audit_metrics_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Query(q): Query<AuditMetricsQuery>,
+) -> Result<Json<AuditMetricsResponse>, ApiError> {
+    require_superadmin(&state, &claims.id).await?;
+
+    // 1. Fechas REQUERIDAS para metrics (a diferencia de /messages que defaultea).
+    let from_str = q.from_date.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| ApiError::Domain {
+        status: axum::http::StatusCode::BAD_REQUEST,
+        code: "invalid_date_range".into(),
+        field: Some("from_date".into()),
+        message: "from_date es requerido".into(),
+        details: None,
+    })?;
+    let to_str = q.to_date.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| ApiError::Domain {
+        status: axum::http::StatusCode::BAD_REQUEST,
+        code: "invalid_date_range".into(),
+        field: Some("to_date".into()),
+        message: "to_date es requerido".into(),
+        details: None,
+    })?;
+    let from_date = parse_iso_to_bson(from_str, "from_date")?;
+    let to_date = parse_iso_to_bson(to_str, "to_date")?;
+    validate_range(Some(from_date), Some(to_date))?;
+
+    // 2. Granularity.
+    let granularity = q.granularity.as_deref().unwrap_or("day");
+    if !matches!(granularity, "day" | "week" | "month") {
+        return Err(ApiError::Domain {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            code: "invalid_granularity".into(),
+            field: Some("granularity".into()),
+            message: "granularity debe ser 'day', 'week' o 'month'".into(),
+            details: None,
+        });
+    }
+
+    // 3. Resolver conversation_ids si el caller filtra por business_phone.
+    let conversation_ids: Option<Vec<ObjectId>> = if let Some(b) = q.business_phone.as_deref() {
+        let ids = state.db
+            .find_conversation_ids_by_phones(None, Some(b))
+            .await
+            .map_err(ApiError::DatabaseError)?;
+        Some(ids)
+    } else {
+        None
+    };
+
+    // Si filtraron por workspace y no hay match, devolver shape vacío.
+    if matches!(conversation_ids.as_deref(), Some(ids) if ids.is_empty()) {
+        return Ok(Json(empty_metrics_response()));
+    }
+
+    let filter = AuditMetricsFilter {
+        from_date,
+        to_date,
+        conversation_ids: conversation_ids.as_deref(),
+        granularity,
+    };
+
+    // 4. Aggregates en paralelo. Algunas dependen de WaConversationEvents (no
+    //    aceptan filtro de conversation_ids) y se filtran sólo por business_phone.
+    let business_phone = q.business_phone.as_deref();
+    let (
+        summary_res,
+        by_day_msgs_res,
+        by_agent_res,
+        by_type_res,
+        first_resp_res,
+        lifecycle_res,
+        resolution_res,
+    ) = tokio::join!(
+        state.db.audit_messages_summary(&filter),
+        state.db.audit_messages_by_day(&filter),
+        state.db.audit_messages_by_agent(&filter),
+        state.db.audit_messages_by_type(&filter),
+        state.db.audit_first_responses(&filter),
+        state.db.audit_lifecycle_by_day(from_date, to_date, business_phone, granularity),
+        state.db.audit_resolution_times(from_date, to_date, business_phone),
+    );
+
+    let summary_raw = summary_res.map_err(ApiError::DatabaseError)?;
+    let by_day_msgs = by_day_msgs_res.map_err(ApiError::DatabaseError)?;
+    let by_agent_raw = by_agent_res.map_err(ApiError::DatabaseError)?;
+    let by_type_raw = by_type_res.map_err(ApiError::DatabaseError)?;
+    let first_responses = first_resp_res.map_err(ApiError::DatabaseError)?;
+    let lifecycle = lifecycle_res.map_err(ApiError::DatabaseError)?;
+    let resolution_times = resolution_res.map_err(ApiError::DatabaseError)?;
+
+    // 5. Avg response time: avg de delta_seconds sobre conversaciones con par válido.
+    let avg_response_time_seconds = avg_or_none(first_responses.iter().map(|f| f.delta_seconds));
+    let avg_resolution_time_seconds = avg_or_none(resolution_times.iter().copied());
+
+    // 6. Mapa agent_id → avg de delta_seconds (para `by_agent.avg_response_time_seconds`).
+    let mut by_agent_avg: HashMap<String, (i64, u64)> = HashMap::new(); // (sum, count)
+    for fr in &first_responses {
+        if let Some(a) = fr.agent_id.as_deref() {
+            let entry = by_agent_avg.entry(a.to_string()).or_insert((0, 0));
+            entry.0 += fr.delta_seconds;
+            entry.1 += 1;
+        }
+    }
+
+    // 7. Resolver nombres de agentes en by_agent.
+    let agent_ids: Vec<String> = by_agent_raw.iter().map(|a| a.agent_id.clone()).collect();
+    let agent_names = resolve_agent_names(&state, &agent_ids).await;
+
+    let by_agent: Vec<AuditMetricsByAgent> = by_agent_raw
+        .into_iter()
+        .map(|a| {
+            let avg = by_agent_avg.get(&a.agent_id).map(|(sum, n)| {
+                if *n == 0 { 0.0 } else { *sum as f64 / *n as f64 }
+            });
+            AuditMetricsByAgent {
+                agent_name: agent_names.get(&a.agent_id).cloned().unwrap_or_default(),
+                agent_id: a.agent_id,
+                messages_sent: a.messages_sent,
+                conversations_handled: a.conversations_handled,
+                avg_response_time_seconds: avg,
+            }
+        })
+        .collect();
+
+    // 8. Merge by_day mensajes ↔ ciclo de vida en una sola lista por bucket.
+    let mut by_day_map: HashMap<String, AuditMetricsByDay> = HashMap::new();
+    for b in by_day_msgs {
+        by_day_map.insert(
+            b.date.clone(),
+            AuditMetricsByDay {
+                date: b.date,
+                inbound: b.inbound,
+                outbound: b.outbound,
+                new_conversations: 0,
+                closed_conversations: 0,
+            },
+        );
+    }
+    for b in lifecycle {
+        let entry = by_day_map.entry(b.date.clone()).or_insert(AuditMetricsByDay {
+            date: b.date,
+            inbound: 0,
+            outbound: 0,
+            new_conversations: 0,
+            closed_conversations: 0,
+        });
+        entry.new_conversations = b.new_conversations;
+        entry.closed_conversations = b.closed_conversations;
+    }
+    let mut by_day: Vec<AuditMetricsByDay> = by_day_map.into_values().collect();
+    by_day.sort_by(|a, b| a.date.cmp(&b.date));
+
+    let by_message_type: Vec<AuditMetricsByType> = by_type_raw
+        .into_iter()
+        .map(|t| AuditMetricsByType { msg_type: t.msg_type, count: t.count })
+        .collect();
+
+    Ok(Json(AuditMetricsResponse {
+        ok: true,
+        data: AuditMetricsData {
+            summary: AuditMetricsSummary {
+                total_messages: summary_raw.total,
+                total_inbound: summary_raw.inbound,
+                total_outbound: summary_raw.outbound,
+                total_conversations: summary_raw.distinct_conversations,
+                avg_response_time_seconds,
+                avg_resolution_time_seconds,
+            },
+            by_day,
+            by_agent,
+            by_message_type,
+        },
+    }))
+}
+
+fn empty_metrics_response() -> AuditMetricsResponse {
+    AuditMetricsResponse {
+        ok: true,
+        data: AuditMetricsData {
+            summary: AuditMetricsSummary {
+                total_messages: 0,
+                total_inbound: 0,
+                total_outbound: 0,
+                total_conversations: 0,
+                avg_response_time_seconds: None,
+                avg_resolution_time_seconds: None,
+            },
+            by_day: vec![],
+            by_agent: vec![],
+            by_message_type: vec![],
+        },
+    }
+}
+
+fn avg_or_none<I: Iterator<Item = i64>>(iter: I) -> Option<f64> {
+    let mut sum: i64 = 0;
+    let mut count: u64 = 0;
+    for v in iter {
+        sum += v;
+        count += 1;
+    }
+    if count == 0 {
+        None
+    } else {
+        Some(sum as f64 / count as f64)
+    }
 }
 
 /// Reconstruye los intervalos de "quién tuvo asignada esta conversación"

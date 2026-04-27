@@ -327,6 +327,69 @@ pub struct AuditMessageFilter<'a> {
     pub cursor: Option<&'a str>,
 }
 
+/// Filtro común para los aggregates del endpoint `/audit/metrics`. Todas las
+/// queries comparten el mismo recorte temporal + opcionalmente un set de
+/// `conversation_ids` (resueltos en el handler a partir de `business_phone`).
+pub struct AuditMetricsFilter<'a> {
+    pub from_date: mongodb::bson::DateTime,
+    pub to_date: mongodb::bson::DateTime,
+    /// `None` = sin filtro. `Some([])` = sin matches (handler debe atajar antes).
+    pub conversation_ids: Option<&'a [ObjectId]>,
+    /// `"day" | "week" | "month"`.
+    pub granularity: &'a str,
+}
+
+/// Salida agregada por bucket temporal (mensajes inbound/outbound).
+#[derive(Debug, Clone)]
+pub struct AuditMessagesByDayBucket {
+    pub date: String,
+    pub inbound: u64,
+    pub outbound: u64,
+}
+
+/// Salida agregada por agente.
+#[derive(Debug, Clone)]
+pub struct AuditMessagesByAgentBucket {
+    pub agent_id: String,
+    pub messages_sent: u64,
+    pub conversations_handled: u64,
+}
+
+/// Salida agregada por tipo de mensaje.
+#[derive(Debug, Clone)]
+pub struct AuditMessagesByTypeBucket {
+    pub msg_type: String,
+    pub count: u64,
+}
+
+/// Resumen base de mensajes para el header del endpoint.
+#[derive(Debug, Clone)]
+pub struct AuditMessagesSummary {
+    pub total: u64,
+    pub inbound: u64,
+    pub outbound: u64,
+    /// Conversaciones distintas con ≥1 mensaje en el rango.
+    pub distinct_conversations: u64,
+}
+
+/// Par primer-inbound/primer-outbound de una conversación dentro del rango,
+/// usado para calcular `avg_response_time_seconds`. Si la conversación no
+/// tiene un par válido (in seguido de out), la entrada no aparece.
+#[derive(Debug, Clone)]
+pub struct AuditFirstResponse {
+    /// UUID del agente que respondió primero (responsable del delta para `by_agent`).
+    pub agent_id: Option<String>,
+    pub delta_seconds: i64,
+}
+
+/// Bucket temporal del ciclo de vida (eventos `created` / `closed` por día).
+#[derive(Debug, Clone)]
+pub struct AuditLifecycleByDayBucket {
+    pub date: String,
+    pub new_conversations: u64,
+    pub closed_conversations: u64,
+}
+
 #[async_trait::async_trait]
 pub trait WhatsAppRepository {
     async fn find_conversation_by_phones(&self, contact_phone: &str, business_phone: &str) -> Result<Option<WaConversation>, String>;
@@ -589,6 +652,60 @@ pub trait WhatsAppRepository {
         &self,
         conversation_id: &ObjectId,
     ) -> Result<u64, String>;
+
+    // Métricas (`/audit/metrics`)
+    /// Resumen base: totales por dirección + conversaciones distintas con
+    /// actividad en el rango.
+    async fn audit_messages_summary(
+        &self,
+        filter: &AuditMetricsFilter<'_>,
+    ) -> Result<AuditMessagesSummary, String>;
+
+    /// Mensajes por bucket temporal (granularity).
+    async fn audit_messages_by_day(
+        &self,
+        filter: &AuditMetricsFilter<'_>,
+    ) -> Result<Vec<AuditMessagesByDayBucket>, String>;
+
+    /// Mensajes por agente (sólo `out` con `sent_by` no nulo).
+    async fn audit_messages_by_agent(
+        &self,
+        filter: &AuditMetricsFilter<'_>,
+    ) -> Result<Vec<AuditMessagesByAgentBucket>, String>;
+
+    /// Distribución por `msg_type`.
+    async fn audit_messages_by_type(
+        &self,
+        filter: &AuditMetricsFilter<'_>,
+    ) -> Result<Vec<AuditMessagesByTypeBucket>, String>;
+
+    /// Por cada conversación con un par (in seguido de out) en el rango,
+    /// devuelve el delta entre el primer in y el primer out posterior.
+    /// Lista vacía si no hubo pares.
+    async fn audit_first_responses(
+        &self,
+        filter: &AuditMetricsFilter<'_>,
+    ) -> Result<Vec<AuditFirstResponse>, String>;
+
+    /// Eventos de ciclo de vida agregados por bucket temporal — sólo `created`
+    /// y `closed`. Si `business_phone` está, se filtra por ese workspace.
+    async fn audit_lifecycle_by_day(
+        &self,
+        from: mongodb::bson::DateTime,
+        to: mongodb::bson::DateTime,
+        business_phone: Option<&str>,
+        granularity: &str,
+    ) -> Result<Vec<AuditLifecycleByDayBucket>, String>;
+
+    /// Para cada conversación cerrada en el rango, retorna la duración en
+    /// segundos entre el primer evento `created` y el último `closed`. Lista
+    /// vacía si no hubo cierres en el rango.
+    async fn audit_resolution_times(
+        &self,
+        from: mongodb::bson::DateTime,
+        to: mongodb::bson::DateTime,
+        business_phone: Option<&str>,
+    ) -> Result<Vec<i64>, String>;
 }
 
 // ============================================

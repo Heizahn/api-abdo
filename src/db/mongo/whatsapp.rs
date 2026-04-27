@@ -8,9 +8,11 @@ use futures::{AsyncReadExt, AsyncWriteExt};
 use std::collections::HashMap;
 
 use crate::db::{
-    AuditMessageFilter, ConversationTouch, StoreTemplateMediaInput, UpdateQuickReplyPatch,
-    WaTemplateListFilter, WaTemplateMediaRepository, WaTemplateMediaRef,
-    WaTemplateRepository, WaTemplateUpdatePatch, WhatsAppRepository,
+    AuditFirstResponse, AuditLifecycleByDayBucket, AuditMessageFilter,
+    AuditMessagesByAgentBucket, AuditMessagesByDayBucket, AuditMessagesByTypeBucket,
+    AuditMessagesSummary, AuditMetricsFilter, ConversationTouch, StoreTemplateMediaInput,
+    UpdateQuickReplyPatch, WaTemplateListFilter, WaTemplateMediaRepository,
+    WaTemplateMediaRef, WaTemplateRepository, WaTemplateUpdatePatch, WhatsAppRepository,
 };
 use crate::db::mongo::MongoDB;
 use crate::models::whatsapp::{ConversationStats, UrlPreview, WaConversation, WaConversationEvent, WaConversationEventInput, WaConversationOpen, WaMessage, WaPurposesPatch, WaQuickReply, WaSettings, WaTemplate, WaTemplateStatus, WaPurposeUsage};
@@ -1323,6 +1325,371 @@ impl WhatsAppRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
+    async fn audit_messages_summary(
+        &self,
+        filter: &AuditMetricsFilter<'_>,
+    ) -> Result<AuditMessagesSummary, String> {
+        let match_stage = build_messages_match(filter);
+        // $facet single-pipeline: 4 cifras en una sola query.
+        let pipeline = vec![
+            doc! { "$match": match_stage },
+            doc! {
+                "$facet": {
+                    "by_dir": [
+                        { "$group": { "_id": "$direction", "n": { "$sum": 1_i64 } } }
+                    ],
+                    "convs": [
+                        { "$group": { "_id": "$conversation_id" } },
+                        { "$count": "n" }
+                    ],
+                }
+            },
+        ];
+
+        let mut cursor = self.wa_messages()
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let doc = cursor.try_next().await.map_err(|e| e.to_string())?;
+        let mut summary = AuditMessagesSummary { total: 0, inbound: 0, outbound: 0, distinct_conversations: 0 };
+        if let Some(d) = doc {
+            if let Ok(by_dir) = d.get_array("by_dir") {
+                for item in by_dir {
+                    if let Some(obj) = item.as_document() {
+                        let dir = obj.get_str("_id").unwrap_or("");
+                        let n = obj.get_i64("n").unwrap_or(0).max(0) as u64;
+                        match dir {
+                            "in" => summary.inbound = n,
+                            "out" => summary.outbound = n,
+                            _ => {}
+                        }
+                        summary.total += n;
+                    }
+                }
+            }
+            if let Ok(convs) = d.get_array("convs") {
+                if let Some(first) = convs.first().and_then(|b| b.as_document()) {
+                    summary.distinct_conversations = first.get_i64("n").unwrap_or(0).max(0) as u64;
+                }
+            }
+        }
+        Ok(summary)
+    }
+
+    async fn audit_messages_by_day(
+        &self,
+        filter: &AuditMetricsFilter<'_>,
+    ) -> Result<Vec<AuditMessagesByDayBucket>, String> {
+        let match_stage = build_messages_match(filter);
+        let date_format = granularity_to_date_format(filter.granularity);
+        let pipeline = vec![
+            doc! { "$match": match_stage },
+            doc! {
+                "$group": {
+                    "_id": {
+                        "date": { "$dateToString": { "format": date_format, "date": "$timestamp" } },
+                        "direction": "$direction",
+                    },
+                    "n": { "$sum": 1_i64 }
+                }
+            },
+            doc! { "$sort": { "_id.date": 1 } },
+        ];
+
+        let mut cursor = self.wa_messages()
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut buckets: HashMap<String, AuditMessagesByDayBucket> = HashMap::new();
+        while let Some(d) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            let id = d.get_document("_id").map_err(|e| e.to_string())?;
+            let date = id.get_str("date").unwrap_or_default().to_string();
+            let dir = id.get_str("direction").unwrap_or_default().to_string();
+            let n = d.get_i64("n").unwrap_or(0).max(0) as u64;
+            let entry = buckets.entry(date.clone()).or_insert_with(|| AuditMessagesByDayBucket {
+                date,
+                inbound: 0,
+                outbound: 0,
+            });
+            match dir.as_str() {
+                "in" => entry.inbound += n,
+                "out" => entry.outbound += n,
+                _ => {}
+            }
+        }
+        let mut out: Vec<_> = buckets.into_values().collect();
+        out.sort_by(|a, b| a.date.cmp(&b.date));
+        Ok(out)
+    }
+
+    async fn audit_messages_by_agent(
+        &self,
+        filter: &AuditMetricsFilter<'_>,
+    ) -> Result<Vec<AuditMessagesByAgentBucket>, String> {
+        let mut match_stage = build_messages_match(filter);
+        match_stage.insert("direction", "out");
+        match_stage.insert("sent_by", doc! { "$ne": null, "$exists": true });
+
+        let pipeline = vec![
+            doc! { "$match": match_stage },
+            doc! {
+                "$group": {
+                    "_id": "$sent_by",
+                    "messages_sent": { "$sum": 1_i64 },
+                    "convs": { "$addToSet": "$conversation_id" },
+                }
+            },
+            doc! {
+                "$project": {
+                    "_id": 1,
+                    "messages_sent": 1,
+                    "conversations_handled": { "$size": "$convs" }
+                }
+            },
+            doc! { "$sort": { "messages_sent": -1 } },
+        ];
+
+        let mut cursor = self.wa_messages()
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut out = Vec::new();
+        while let Some(d) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            out.push(AuditMessagesByAgentBucket {
+                agent_id: d.get_str("_id").unwrap_or_default().to_string(),
+                messages_sent: d.get_i64("messages_sent").unwrap_or(0).max(0) as u64,
+                conversations_handled: d.get_i32("conversations_handled").unwrap_or(0).max(0) as u64,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn audit_messages_by_type(
+        &self,
+        filter: &AuditMetricsFilter<'_>,
+    ) -> Result<Vec<AuditMessagesByTypeBucket>, String> {
+        let match_stage = build_messages_match(filter);
+        let pipeline = vec![
+            doc! { "$match": match_stage },
+            doc! { "$group": { "_id": "$msg_type", "n": { "$sum": 1_i64 } } },
+            doc! { "$sort": { "n": -1 } },
+        ];
+
+        let mut cursor = self.wa_messages()
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut out = Vec::new();
+        while let Some(d) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            out.push(AuditMessagesByTypeBucket {
+                msg_type: d.get_str("_id").unwrap_or_default().to_string(),
+                count: d.get_i64("n").unwrap_or(0).max(0) as u64,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn audit_first_responses(
+        &self,
+        filter: &AuditMetricsFilter<'_>,
+    ) -> Result<Vec<AuditFirstResponse>, String> {
+        // Estrategia: por cada conversación con tráfico en el rango, calcular
+        // (primer_out_después_del_primer_in - primer_in). Se hace en dos pasos
+        // para evitar lookups o $cond complejos sobre nulls:
+        //
+        // 1. Aggregate: agrupar por (conversation_id, direction), tomar el
+        //    primer timestamp + (sólo para `out`) el primer `sent_by`.
+        // 2. En Rust: unir los dos lados por conversation_id, descartar las
+        //    que no tienen ambos o donde first_out <= first_in.
+        let match_stage = build_messages_match(filter);
+        let pipeline = vec![
+            doc! { "$match": match_stage },
+            doc! { "$sort": { "conversation_id": 1, "timestamp": 1 } },
+            doc! {
+                "$group": {
+                    "_id": { "conv": "$conversation_id", "dir": "$direction" },
+                    "ts": { "$first": "$timestamp" },
+                    "agent": { "$first": "$sent_by" },
+                }
+            },
+        ];
+
+        let mut cursor = self.wa_messages()
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // (conv_id, "in"|"out") → (ts_millis, agent_id)
+        let mut firsts: HashMap<(ObjectId, String), (i64, Option<String>)> = HashMap::new();
+        while let Some(d) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            let id = match d.get_document("_id") {
+                Ok(doc) => doc,
+                Err(_) => continue,
+            };
+            let conv_id = match id.get_object_id("conv") {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+            let dir = id.get_str("dir").unwrap_or("").to_string();
+            let ts_millis = match d.get_datetime("ts") {
+                Ok(ts) => ts.timestamp_millis(),
+                Err(_) => continue,
+            };
+            let agent = d.get_str("agent").ok().map(str::to_string);
+            firsts.insert((conv_id, dir), (ts_millis, agent));
+        }
+
+        let mut out = Vec::new();
+        // Recorrer las claves "in" y buscar la "out" hermana.
+        let in_keys: Vec<ObjectId> = firsts
+            .keys()
+            .filter(|(_, d)| d == "in")
+            .map(|(c, _)| *c)
+            .collect();
+        for conv_id in in_keys {
+            let (in_ts, _) = match firsts.get(&(conv_id, "in".into())) {
+                Some(v) => v.clone(),
+                None => continue,
+            };
+            let (out_ts, agent) = match firsts.get(&(conv_id, "out".into())) {
+                Some(v) => v.clone(),
+                None => continue,
+            };
+            if out_ts <= in_ts {
+                continue;
+            }
+            out.push(AuditFirstResponse {
+                agent_id: agent,
+                delta_seconds: (out_ts - in_ts) / 1000,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn audit_lifecycle_by_day(
+        &self,
+        from: DateTime,
+        to: DateTime,
+        business_phone: Option<&str>,
+        granularity: &str,
+    ) -> Result<Vec<AuditLifecycleByDayBucket>, String> {
+        let date_format = granularity_to_date_format(granularity);
+        let mut match_stage = doc! {
+            "created_at": { "$gte": from, "$lte": to },
+            "event_type": { "$in": ["created", "closed"] },
+        };
+        if let Some(b) = business_phone {
+            match_stage.insert("business_phone", b);
+        }
+
+        let pipeline = vec![
+            doc! { "$match": match_stage },
+            doc! {
+                "$group": {
+                    "_id": {
+                        "date": { "$dateToString": { "format": date_format, "date": "$created_at" } },
+                        "type": "$event_type",
+                    },
+                    "n": { "$sum": 1_i64 }
+                }
+            },
+            doc! { "$sort": { "_id.date": 1 } },
+        ];
+
+        let mut cursor = self.wa_conversation_events()
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut buckets: HashMap<String, AuditLifecycleByDayBucket> = HashMap::new();
+        while let Some(d) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            let id = d.get_document("_id").map_err(|e| e.to_string())?;
+            let date = id.get_str("date").unwrap_or_default().to_string();
+            let etype = id.get_str("type").unwrap_or_default().to_string();
+            let n = d.get_i64("n").unwrap_or(0).max(0) as u64;
+            let entry = buckets.entry(date.clone()).or_insert_with(|| AuditLifecycleByDayBucket {
+                date,
+                new_conversations: 0,
+                closed_conversations: 0,
+            });
+            match etype.as_str() {
+                "created" => entry.new_conversations += n,
+                "closed" => entry.closed_conversations += n,
+                _ => {}
+            }
+        }
+        let mut out: Vec<_> = buckets.into_values().collect();
+        out.sort_by(|a, b| a.date.cmp(&b.date));
+        Ok(out)
+    }
+
+    async fn audit_resolution_times(
+        &self,
+        from: DateTime,
+        to: DateTime,
+        business_phone: Option<&str>,
+    ) -> Result<Vec<i64>, String> {
+        // 1. Conversaciones cerradas en el rango (un evento `closed`).
+        let mut match_closed = doc! {
+            "event_type": "closed",
+            "created_at": { "$gte": from, "$lte": to },
+        };
+        if let Some(b) = business_phone {
+            match_closed.insert("business_phone", b);
+        }
+
+        let pipeline = vec![
+            doc! { "$match": match_closed },
+            doc! { "$sort": { "created_at": 1 } },
+            // El último closed por conversación dentro del rango.
+            doc! {
+                "$group": {
+                    "_id": "$conversation_id",
+                    "closed_at": { "$last": "$created_at" }
+                }
+            },
+        ];
+
+        let mut cursor = self.wa_conversation_events()
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut closed_by_conv: HashMap<ObjectId, i64> = HashMap::new();
+        while let Some(d) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            let conv_id = match d.get_object_id("_id") {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+            if let Ok(ts) = d.get_datetime("closed_at") {
+                closed_by_conv.insert(conv_id, ts.timestamp_millis());
+            }
+        }
+
+        if closed_by_conv.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 2. Para esas conversaciones, levantar `created_at` desde WaConversations.
+        let conv_ids: Vec<ObjectId> = closed_by_conv.keys().copied().collect();
+        let convs = self.find_conversations_by_ids(&conv_ids).await?;
+
+        let mut deltas = Vec::with_capacity(closed_by_conv.len());
+        for (conv_id, closed_ms) in closed_by_conv {
+            if let Some(c) = convs.get(&conv_id) {
+                let created_ms = c.created_at.timestamp_millis();
+                if closed_ms > created_ms {
+                    deltas.push((closed_ms - created_ms) / 1000);
+                }
+            }
+        }
+        Ok(deltas)
+    }
+
     async fn backfill_conversation_events(&self) -> Result<u64, String> {
         // Recorre WaConversations y, para cada una sin eventos previos,
         // siembra: created (con created_at) y, si tiene assigned_to, taken
@@ -1402,6 +1769,28 @@ fn decode_cursor(cursor: &str) -> Option<(DateTime, ObjectId)> {
     let millis: i64 = millis_str.parse().ok()?;
     let oid = ObjectId::parse_str(oid_str).ok()?;
     Some((DateTime::from_millis(millis), oid))
+}
+
+/// Construye el `$match` común para los aggregates de `/audit/metrics` sobre
+/// `WaMessages`: rango temporal + (opcional) `conversation_id ∈ ids`.
+fn build_messages_match(filter: &AuditMetricsFilter<'_>) -> Document {
+    let mut q = doc! {
+        "timestamp": { "$gte": filter.from_date, "$lte": filter.to_date },
+    };
+    if let Some(ids) = filter.conversation_ids {
+        q.insert("conversation_id", doc! { "$in": ids });
+    }
+    q
+}
+
+/// Mapea `granularity` (`day`/`week`/`month`) al formato `$dateToString` de Mongo.
+/// `week` usa el ISO week (`%G-W%V`); `month` `%Y-%m`; default `day` `%Y-%m-%d`.
+fn granularity_to_date_format(g: &str) -> &'static str {
+    match g {
+        "week" => "%G-W%V",
+        "month" => "%Y-%m",
+        _ => "%Y-%m-%d",
+    }
 }
 
 // ============================================
