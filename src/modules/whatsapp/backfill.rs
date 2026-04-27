@@ -20,6 +20,20 @@ pub async fn run_last_inbound_backfill(state: Arc<AppState>) {
     }
 }
 
+/// Backfill one-shot al arrancar: por cada `WaConversation` que no tenga
+/// eventos en `WaConversationEvents`, siembra `created` (con `created_at`
+/// de la conv) y, si `assigned_to` está seteado, `taken` (con `last_message_at`
+/// como mejor proxy disponible). Sirve para que el dashboard de auditoría
+/// muestre algo coherente sobre conversaciones previas al deploy de Feature 1.
+/// Idempotente: skipea conversaciones que ya tengan al menos un evento.
+pub async fn run_conversation_events_backfill(state: Arc<AppState>) {
+    match state.db.backfill_conversation_events().await {
+        Ok(0) => tracing::info!("conv-events-backfill: nada que hacer"),
+        Ok(n) => tracing::info!("conv-events-backfill: {} eventos sembrados", n),
+        Err(e) => tracing::warn!("conv-events-backfill: {}", e),
+    }
+}
+
 /// Backfill one-shot al arrancar: por cada `WaSettings` sin
 /// `whatsapp_business_account_id`, consulta a Meta con el access_token propio
 /// del workspace y persiste el WABA ID. Best-effort: un fallo por número no

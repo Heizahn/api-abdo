@@ -83,6 +83,55 @@ pub struct WaConversationOpen {
     pub last_opened_at: DateTime,
 }
 
+/// Evento de ciclo de vida de una conversación (colección `WaConversationEvents`).
+///
+/// Cada vez que un agente toma, transfiere, cierra o reabre una conversación
+/// se persiste un documento con la acción + actor + target + nota. Sirve para:
+/// - Reconstruir el timeline auditable de la conversación.
+/// - Métricas históricas (quién atendió qué, cuántos transfers, etc.).
+///
+/// `business_phone` se desnormaliza al insertar para que el dashboard de
+/// auditoría pueda filtrar por número de negocio sin un `$lookup`.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WaConversationEvent {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    pub conversation_id: ObjectId,
+    pub business_phone: String,
+    /// "created" | "taken" | "transferred" | "closed" | "reopened"
+    pub event_type: String,
+    /// UUID del agente que ejecutó la acción. `None` cuando el evento lo
+    /// genera el sistema (p.ej. `created` por webhook entrante o seed de backfill).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_name: Option<String>,
+    /// UUID del agente destino en `transferred`, o del nuevo dueño en `taken`
+    /// cuando difiere del actor (caso staff que toma un chat ya asignado).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_name: Option<String>,
+    /// Nota libre del agente al ejecutar la acción (p.ej. motivo del transfer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub created_at: DateTime,
+}
+
+/// Input para insertar un evento de ciclo de vida. Mantiene el shape
+/// independiente del documento Mongo (sin `id`, `created_at` lo pone el repo).
+#[derive(Debug, Clone)]
+pub struct WaConversationEventInput<'a> {
+    pub conversation_id: &'a ObjectId,
+    pub business_phone: &'a str,
+    pub event_type: &'a str,
+    pub actor_id: Option<&'a str>,
+    pub actor_name: Option<&'a str>,
+    pub target_id: Option<&'a str>,
+    pub target_name: Option<&'a str>,
+    pub note: Option<&'a str>,
+}
+
 /// Mensaje individual de WhatsApp (colección `wa_messages`)
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WaMessage {

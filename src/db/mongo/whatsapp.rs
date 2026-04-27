@@ -13,7 +13,7 @@ use crate::db::{
     WaTemplateRepository, WaTemplateUpdatePatch, WhatsAppRepository,
 };
 use crate::db::mongo::MongoDB;
-use crate::models::whatsapp::{ConversationStats, UrlPreview, WaConversation, WaConversationOpen, WaMessage, WaPurposesPatch, WaQuickReply, WaSettings, WaTemplate, WaTemplateStatus, WaPurposeUsage};
+use crate::models::whatsapp::{ConversationStats, UrlPreview, WaConversation, WaConversationEvent, WaConversationEventInput, WaConversationOpen, WaMessage, WaPurposesPatch, WaQuickReply, WaSettings, WaTemplate, WaTemplateStatus, WaPurposeUsage};
 
 impl MongoDB {
     pub(crate) fn wa_conversations(&self) -> mongodb::Collection<WaConversation> {
@@ -30,6 +30,10 @@ impl MongoDB {
 
     pub(crate) fn wa_conversation_opens(&self) -> mongodb::Collection<WaConversationOpen> {
         self.db.collection::<WaConversationOpen>("WaConversationOpens")
+    }
+
+    pub(crate) fn wa_conversation_events(&self) -> mongodb::Collection<WaConversationEvent> {
+        self.db.collection::<WaConversationEvent>("WaConversationEvents")
     }
 
     pub(crate) fn wa_quick_replies(&self) -> mongodb::Collection<WaQuickReply> {
@@ -1130,6 +1134,117 @@ impl WhatsAppRepository for MongoDB {
             .await
             .map_err(|e| e.to_string())?;
         Ok(res.deleted_count > 0)
+    }
+
+    async fn record_conversation_event(
+        &self,
+        input: WaConversationEventInput<'_>,
+    ) -> Result<(), String> {
+        let doc = WaConversationEvent {
+            id: None,
+            conversation_id: *input.conversation_id,
+            business_phone: input.business_phone.to_string(),
+            event_type: input.event_type.to_string(),
+            actor_id: input.actor_id.map(str::to_string),
+            actor_name: input.actor_name.map(str::to_string),
+            target_id: input.target_id.map(str::to_string),
+            target_name: input.target_name.map(str::to_string),
+            note: input.note.map(str::to_string),
+            created_at: DateTime::now(),
+        };
+        self.wa_conversation_events()
+            .insert_one(doc)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn list_conversation_events(
+        &self,
+        conversation_id: &ObjectId,
+    ) -> Result<Vec<WaConversationEvent>, String> {
+        let opts = FindOptions::builder()
+            .sort(doc! { "created_at": 1, "_id": 1 })
+            .build();
+        self.wa_conversation_events()
+            .find(doc! { "conversation_id": conversation_id })
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn backfill_conversation_events(&self) -> Result<u64, String> {
+        // Recorre WaConversations y, para cada una sin eventos previos,
+        // siembra: created (con created_at) y, si tiene assigned_to, taken
+        // (con last_message_at como mejor proxy de cuándo fue asignada).
+        // Idempotente vía chequeo de existencia previa.
+        let convs_col = self.wa_conversations();
+        let events_col = self.wa_conversation_events();
+
+        let mut cursor = convs_col
+            .find(doc! {})
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut inserted: u64 = 0;
+        while let Some(conv) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            let conv_id = match conv.id {
+                Some(id) => id,
+                None => continue,
+            };
+
+            let already = events_col
+                .count_documents(doc! { "conversation_id": &conv_id })
+                .limit(1)
+                .await
+                .map_err(|e| e.to_string())?;
+            if already > 0 {
+                continue;
+            }
+
+            let created_doc = WaConversationEvent {
+                id: None,
+                conversation_id: conv_id,
+                business_phone: conv.business_phone.clone(),
+                event_type: "created".to_string(),
+                actor_id: None,
+                actor_name: None,
+                target_id: None,
+                target_name: None,
+                note: Some("backfill".to_string()),
+                created_at: conv.created_at,
+            };
+            events_col
+                .insert_one(created_doc)
+                .await
+                .map_err(|e| e.to_string())?;
+            inserted += 1;
+
+            if let Some(assignee) = conv.assigned_to.as_deref() {
+                let taken_doc = WaConversationEvent {
+                    id: None,
+                    conversation_id: conv_id,
+                    business_phone: conv.business_phone.clone(),
+                    event_type: "taken".to_string(),
+                    actor_id: Some(assignee.to_string()),
+                    actor_name: None,
+                    target_id: None,
+                    target_name: None,
+                    note: Some("backfill".to_string()),
+                    created_at: conv.last_message_at,
+                };
+                events_col
+                    .insert_one(taken_doc)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                inserted += 1;
+            }
+        }
+
+        Ok(inserted)
     }
 }
 

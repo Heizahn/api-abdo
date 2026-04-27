@@ -46,6 +46,15 @@ use super::ws::{
 /// quedarse pegado en perpetuidad si el inbound del cliente nunca llega.
 const META_THROTTLE_COOLDOWN_MS: i64 = 6 * 60 * 60 * 1000;
 
+/// Persiste un evento de ciclo de vida de conversación. Best-effort:
+/// si la inserción falla se loggea pero NO se propaga el error — la
+/// auditoría no debe bloquear la respuesta HTTP del agente.
+async fn record_conv_event(state: &AppState, input: WaConversationEventInput<'_>) {
+    if let Err(e) = state.db.record_conversation_event(input).await {
+        tracing::warn!("record_conversation_event failed: {}", e);
+    }
+}
+
 // ============================================
 // WEBHOOK (público)
 // ============================================
@@ -325,6 +334,21 @@ pub async fn receive_webhook(
                         None => continue,
                     };
 
+                    // Conversación nueva → registrar `created` (actor=None: lo
+                    // disparó un inbound, no un agente humano).
+                    if conv_created {
+                        record_conv_event(&state, WaConversationEventInput {
+                            conversation_id: &conv_id,
+                            business_phone: &conv.business_phone,
+                            event_type: "created",
+                            actor_id: None,
+                            actor_name: None,
+                            target_id: None,
+                            target_name: None,
+                            note: Some("inbound"),
+                        }).await;
+                    }
+
                     // Si la conversación estaba cerrada, reabrirla en pending (sin dueño).
                     // El auto-assign de abajo la reasignará al agente con menos carga.
                     let was_reopened = if conv.status == "closed" {
@@ -338,6 +362,19 @@ pub async fn receive_webhook(
                     } else {
                         false
                     };
+
+                    if was_reopened {
+                        record_conv_event(&state, WaConversationEventInput {
+                            conversation_id: &conv_id,
+                            business_phone: &conv.business_phone,
+                            event_type: "reopened",
+                            actor_id: None,
+                            actor_name: None,
+                            target_id: None,
+                            target_name: None,
+                            note: Some("inbound"),
+                        }).await;
+                    }
 
                     // Extraer contenido según tipo (body, media_id, mime, filename)
                     let extract_media = |m: Option<&InboundMedia>| m
@@ -1811,6 +1848,16 @@ pub async fn take_conversation_handler(
             previous_status: "closed".to_string(),
         };
         broadcast_all(&state.ws_registry, &ev).await;
+        record_conv_event(&state, WaConversationEventInput {
+            conversation_id: &oid,
+            business_phone: &conv.business_phone,
+            event_type: "taken",
+            actor_id: Some(claims.id.as_str()),
+            actor_name: Some(claims.name.as_str()),
+            target_id: Some(claims.id.as_str()),
+            target_name: Some(claims.name.as_str()),
+            note: Some("after_reopen"),
+        }).await;
     } else if !was_already_mine {
         let conv_item = conv_to_item(
             conv.clone(),
@@ -1820,21 +1867,33 @@ pub async fn take_conversation_handler(
             resolved.clone(),
             agent_name.clone(),
         );
-        let ev = match prev_owner.as_deref() {
-            Some(prev) if prev != claims.id => WsServerEvent::ChatTransferido {
+        let is_takeover = matches!(prev_owner.as_deref(), Some(prev) if prev != claims.id);
+        let ev = if is_takeover {
+            WsServerEvent::ChatTransferido {
                 conversation_id: id.clone(),
-                from_user_id: Some(prev.to_string()),
+                from_user_id: prev_owner.clone(),
                 to_user_id: claims.id.clone(),
                 conversation: conv_item,
-            },
-            _ => WsServerEvent::ChatTomado {
+            }
+        } else {
+            WsServerEvent::ChatTomado {
                 conversation_id: id.clone(),
                 taken_by: claims.id.clone(),
                 status: conv.status.clone(),
                 previous_status: "pending".to_string(),
-            },
+            }
         };
         broadcast_except(&state.ws_registry, &claims.id, &ev).await;
+        record_conv_event(&state, WaConversationEventInput {
+            conversation_id: &oid,
+            business_phone: &conv.business_phone,
+            event_type: if is_takeover { "transferred" } else { "taken" },
+            actor_id: Some(claims.id.as_str()),
+            actor_name: Some(claims.name.as_str()),
+            target_id: Some(claims.id.as_str()),
+            target_name: Some(claims.name.as_str()),
+            note: None,
+        }).await;
     }
 
     Ok(Json(TakeConversationResponse {
@@ -1872,7 +1931,7 @@ pub async fn transfer_conversation_handler(
 
     // Validar que el usuario destino exista.
     use crate::db::UserRepository;
-    let _target = state.db
+    let target = state.db
         .find_user_by_id(&payload.user_id)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
@@ -1917,11 +1976,22 @@ pub async fn transfer_conversation_handler(
     // Emitir tras tener el item listo — incluye el estado actualizado con workspace_name y assigned_to nuevo.
     let ev = WsServerEvent::ChatTransferido {
         conversation_id: id.clone(),
-        from_user_id: from_agent,
+        from_user_id: from_agent.clone(),
         to_user_id: payload.user_id.clone(),
         conversation: conv_item.clone(),
     };
     broadcast_all(&state.ws_registry, &ev).await;
+
+    record_conv_event(&state, WaConversationEventInput {
+        conversation_id: &oid,
+        business_phone: &conv.business_phone,
+        event_type: "transferred",
+        actor_id: Some(claims.id.as_str()),
+        actor_name: Some(claims.name.as_str()),
+        target_id: Some(payload.user_id.as_str()),
+        target_name: Some(target.name.as_str()),
+        note: payload.note.as_deref(),
+    }).await;
 
     Ok(Json(ConversationDetailResponse {
         ok: true,
@@ -1967,6 +2037,17 @@ pub async fn close_conversation_handler(
 
     let ev = WsServerEvent::ChatCerrado { conversation_id: id.clone() };
     broadcast_all(&state.ws_registry, &ev).await;
+
+    record_conv_event(&state, WaConversationEventInput {
+        conversation_id: &oid,
+        business_phone: &conv.business_phone,
+        event_type: "closed",
+        actor_id: Some(claims.id.as_str()),
+        actor_name: Some(claims.name.as_str()),
+        target_id: None,
+        target_name: None,
+        note: None,
+    }).await;
 
     let conv_after = state.db
         .find_conversation_by_id(&oid)
@@ -2039,6 +2120,7 @@ pub async fn reopen_conversation_handler(
     let workspace_name = resolve_workspace_name(&state, &conv_after.business_phone).await;
     let resolved = resolve_customer_name(&state, &conv_after).await;
     let agent_name = resolve_last_message_agent_name_one(&state, &conv_after).await;
+    let business_phone_for_audit = conv_after.business_phone.clone();
     let conversation_item = conv_to_item(
         conv_after, true, last_opened, workspace_name, resolved, agent_name,
     );
@@ -2052,6 +2134,17 @@ pub async fn reopen_conversation_handler(
             conversation: conversation_item.clone(),
         };
         broadcast_all(&state.ws_registry, &ev).await;
+
+        record_conv_event(&state, WaConversationEventInput {
+            conversation_id: &oid,
+            business_phone: &business_phone_for_audit,
+            event_type: "reopened",
+            actor_id: Some(claims.id.as_str()),
+            actor_name: Some(claims.name.as_str()),
+            target_id: None,
+            target_name: None,
+            note: None,
+        }).await;
     }
 
     Ok(Json(ConversationDetailResponse {
@@ -2146,6 +2239,20 @@ pub async fn initiate_conversation_handler(
         .map_err(ApiError::DatabaseError)?;
     let conv_id = conv.id
         .ok_or_else(|| ApiError::Internal("conversación sin _id tras upsert".into()))?;
+
+    // Outbound first → registrar `created` con el agente como actor.
+    if conv_created {
+        record_conv_event(&state, WaConversationEventInput {
+            conversation_id: &conv_id,
+            business_phone: &conv.business_phone,
+            event_type: "created",
+            actor_id: Some(claims.id.as_str()),
+            actor_name: Some(claims.name.as_str()),
+            target_id: None,
+            target_name: None,
+            note: Some("outbound_initiate"),
+        }).await;
+    }
 
     // Engagement throttle (Meta error 131049): si la conversación ya está en
     // cooldown, no llamamos a la Cloud API — Meta rechazaría igual y gastaríamos

@@ -253,6 +253,55 @@ print("  ✅ WaTemplates.phone_number_id + created_at desc");
 print("");
 
 // ============================================
+// COLECCIÓN: WaConversationEvents
+// ============================================
+print("📦 Colección: WaConversationEvents");
+
+// Timeline por conversación: lookup ordenado ASC por (conversation_id, created_at).
+db.WaConversationEvents.createIndex(
+  { "conversation_id": 1, "created_at": 1 },
+  { name: "idx_waconvevents_conv_created", background: true }
+);
+print("  ✅ WaConversationEvents.conversation_id + created_at");
+
+// Auditoría cross-conversation: filtra por business_phone y rango de fechas.
+db.WaConversationEvents.createIndex(
+  { "business_phone": 1, "created_at": -1 },
+  { name: "idx_waconvevents_biz_created_desc", background: true }
+);
+print("  ✅ WaConversationEvents.business_phone + created_at desc");
+
+// Métricas por agente: cuántos transfers/closes hizo cada uno.
+db.WaConversationEvents.createIndex(
+  { "actor_id": 1, "event_type": 1, "created_at": -1 },
+  { name: "idx_waconvevents_actor_type_created", background: true, sparse: true }
+);
+print("  ✅ WaConversationEvents.actor_id + event_type + created_at desc (sparse)");
+
+print("");
+
+// ============================================
+// COLECCIÓN: WaMessages — auditoría cross-conversation
+// ============================================
+print("📦 Colección: WaMessages (auditoría)");
+
+// Filtros típicos de auditoría: rango de fechas + agente.
+db.WaMessages.createIndex(
+  { "timestamp": -1, "sent_by": 1 },
+  { name: "idx_wamsgs_timestamp_sentby", background: true }
+);
+print("  ✅ WaMessages.timestamp desc + sent_by");
+
+// Filtro por dirección + tipo (ej. "todos los inbound de tipo image").
+db.WaMessages.createIndex(
+  { "direction": 1, "msg_type": 1, "timestamp": -1 },
+  { name: "idx_wamsgs_dir_type_timestamp", background: true }
+);
+print("  ✅ WaMessages.direction + msg_type + timestamp desc");
+
+print("");
+
+// ============================================
 // VERIFICAR ÍNDICES CREADOS
 // ============================================
 print("=".repeat(60));
@@ -260,7 +309,7 @@ print("📋 VERIFICACIÓN DE ÍNDICES");
 print("=".repeat(60));
 print("");
 
-const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes", "WaTemplates", "wa_template_media.files"];
+const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes", "WaTemplates", "wa_template_media.files", "WaConversationEvents", "WaMessages"];
 toVerify.forEach(col => {
   print(col + ":");
   db.getCollection(col).getIndexes().forEach(idx => {

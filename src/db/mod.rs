@@ -2,8 +2,8 @@ pub mod mongo;
 use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
 use crate::models::whatsapp::{
     ConversationStats, QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyList,
-    UrlPreview, WaConversation, WaMessage, WaQuickReply, WaSettings,
-    WaTemplate, WaTemplateCategory, WaTemplateStatus,
+    UrlPreview, WaConversation, WaConversationEvent, WaConversationEventInput, WaMessage,
+    WaQuickReply, WaSettings, WaTemplate, WaTemplateCategory, WaTemplateStatus,
 };
 use std::collections::HashMap;
 
@@ -510,6 +510,31 @@ pub trait WhatsAppRepository {
     /// `$inc use_count` + `$set last_used_at = now`. Se llama tras un envío exitoso.
     async fn increment_quick_reply_use(&self, id: &ObjectId) -> Result<(), String>;
     async fn delete_quick_reply(&self, id: &ObjectId) -> Result<bool, String>;
+
+    // Conversation lifecycle events (auditoría)
+    /// Persiste un evento de ciclo de vida (`created`/`taken`/`transferred`/
+    /// `closed`/`reopened`). Los handlers que ejecutan la acción son los que
+    /// llaman este método después del UPDATE exitoso de `WaConversations`.
+    /// Best-effort: el caller debe loggear-y-seguir si retorna error (no
+    /// bloquear la respuesta HTTP por una falla de auditoría).
+    async fn record_conversation_event(
+        &self,
+        input: WaConversationEventInput<'_>,
+    ) -> Result<(), String>;
+
+    /// Lista los eventos de una conversación ordenados por `created_at` ASC.
+    /// Usado por el endpoint de timeline.
+    async fn list_conversation_events(
+        &self,
+        conversation_id: &ObjectId,
+    ) -> Result<Vec<WaConversationEvent>, String>;
+
+    /// Backfill one-shot: para cada `WaConversation` que no tenga ningún evento,
+    /// siembra `created` con `created_at` y, si `assigned_to.is_some()`, un
+    /// `taken` con `updated_at` (o `last_message_at` como mejor proxy disponible).
+    /// Idempotente: skipea conversaciones que ya tengan al menos un evento.
+    /// Retorna la cantidad de eventos insertados.
+    async fn backfill_conversation_events(&self) -> Result<u64, String>;
 }
 
 // ============================================
