@@ -591,6 +591,7 @@ pub async fn receive_webhook(
                     let reply_to = resolve_reply_to_for_one(&state, &saved).await;
                     let saved_oid = saved.id;
                     let preview_text = saved.body.clone();
+                    let dispatch_text = preview_text.clone();
                     let message_item = msg_to_item(saved, None, reply_to);
                     let agent_count = state.ws_registry.read().await.len();
                     tracing::info!(
@@ -637,6 +638,21 @@ pub async fn receive_webhook(
                         tokio::spawn(async move {
                             assign_conversation(state_clone, conv_id, agents).await;
                         });
+                    }
+
+                    // Dispatch IA (shadow/live). Corre en background — si hay
+                    // agente activo para este workspace, procesa el turno y
+                    // persiste `AiInteraction`. En shadow no envía nada al
+                    // cliente; en live envía vía Meta (TODO pendiente).
+                    if let Some(ws_id) = settings.id {
+                        crate::modules::ai_agent::dispatch::dispatch_inbound_async(
+                            state.clone(),
+                            conv_id,
+                            saved_oid,
+                            dispatch_text,
+                            ws_id,
+                            conv_now.business_phone.clone(),
+                        );
                     }
                 }
             }

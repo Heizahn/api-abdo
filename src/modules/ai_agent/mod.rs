@@ -4,6 +4,7 @@
 //! tools, limits) y atiende a 0+ workspaces. Sin recepcionista todavía: cada
 //! agente sirve directo. La recepcionista llega en una vuelta posterior.
 
+pub mod dispatch;
 pub mod gemini;
 pub mod handler;
 pub mod runner;

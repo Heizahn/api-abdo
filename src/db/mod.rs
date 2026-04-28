@@ -1,5 +1,5 @@
 pub mod mongo;
-use crate::models::ai_agent::{AiAgent, AiAgentFaq, AiClientLookup};
+use crate::models::ai_agent::{AiAgent, AiAgentFaq, AiClientLookup, AiInteraction};
 use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
 use crate::models::whatsapp::{
     ConversationStats, QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyList,
@@ -1018,6 +1018,14 @@ pub trait AiAgentRepository {
         workspace_id: Option<&ObjectId>,
     ) -> Result<Vec<AiAgent>, String>;
 
+    /// Devuelve el agente activo (`enabled=true`) más viejo que atiende ese
+    /// workspace. Opción A para selección hasta que llegue el routing
+    /// (recepcionista). `None` si no hay agente disponible.
+    async fn find_active_agent_for_workspace(
+        &self,
+        workspace_id: &ObjectId,
+    ) -> Result<Option<AiAgent>, String>;
+
     async fn find_ai_agent_by_id(&self, id: &ObjectId) -> Result<Option<AiAgent>, String>;
 
     async fn create_ai_agent(&self, agent: AiAgent) -> Result<AiAgent, String>;
@@ -1049,6 +1057,18 @@ pub trait AiAgentRepository {
     ) -> Result<Option<AiAgentFaq>, String>;
 
     async fn delete_ai_agent_faq(&self, id: &ObjectId) -> Result<bool, String>;
+
+    /// Persiste un turno IA. Usado por `dispatch.rs` (shadow + live).
+    async fn create_ai_interaction(&self, interaction: AiInteraction) -> Result<(), String>;
+
+    /// Lee los últimos N mensajes de una conversación, ordenados por
+    /// `timestamp` ASC (cronológico). Usado por el dispatch para armar el
+    /// history que va al runner.
+    async fn list_recent_messages_for_conversation(
+        &self,
+        conversation_id: &ObjectId,
+        limit: i64,
+    ) -> Result<Vec<crate::models::whatsapp::WaMessage>, String>;
 }
 
 // ============================================

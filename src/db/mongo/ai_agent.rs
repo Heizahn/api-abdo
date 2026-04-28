@@ -7,12 +7,13 @@
 use async_trait::async_trait;
 use futures::stream::TryStreamExt;
 use mongodb::bson::{doc, oid::ObjectId, Document};
-use mongodb::options::{FindOneAndReplaceOptions, ReturnDocument};
+use mongodb::options::{FindOneAndReplaceOptions, FindOptions, ReturnDocument};
 use mongodb::Collection;
 
 use super::MongoDB;
 use crate::db::AiAgentRepository;
-use crate::models::ai_agent::{AiAgent, AiAgentFaq};
+use crate::models::ai_agent::{AiAgent, AiAgentFaq, AiInteraction};
+use crate::models::whatsapp::WaMessage;
 
 impl MongoDB {
     fn ai_agents(&self) -> Collection<AiAgent> {
@@ -21,6 +22,14 @@ impl MongoDB {
 
     fn ai_agent_faqs(&self) -> Collection<AiAgentFaq> {
         self.db.collection::<AiAgentFaq>("AiAgentFaqs")
+    }
+
+    fn ai_interactions(&self) -> Collection<AiInteraction> {
+        self.db.collection::<AiInteraction>("AiInteractions")
+    }
+
+    fn wa_messages_for_history(&self) -> Collection<WaMessage> {
+        self.db.collection::<WaMessage>("WaMessages")
     }
 }
 
@@ -47,6 +56,17 @@ impl AiAgentRepository for MongoDB {
     async fn find_ai_agent_by_id(&self, id: &ObjectId) -> Result<Option<AiAgent>, String> {
         self.ai_agents()
             .find_one(doc! { "_id": id })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn find_active_agent_for_workspace(
+        &self,
+        workspace_id: &ObjectId,
+    ) -> Result<Option<AiAgent>, String> {
+        self.ai_agents()
+            .find_one(doc! { "workspace_ids": workspace_id, "enabled": true })
+            .sort(doc! { "created_at": 1 })
             .await
             .map_err(|e| e.to_string())
     }
@@ -166,5 +186,38 @@ impl AiAgentRepository for MongoDB {
             .await
             .map_err(|e| e.to_string())?;
         Ok(res.deleted_count > 0)
+    }
+
+    async fn create_ai_interaction(&self, interaction: AiInteraction) -> Result<(), String> {
+        self.ai_interactions()
+            .insert_one(&interaction)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn list_recent_messages_for_conversation(
+        &self,
+        conversation_id: &ObjectId,
+        limit: i64,
+    ) -> Result<Vec<WaMessage>, String> {
+        // Sort desc + limit → últimos N. El caller los invierte si necesita
+        // orden cronológico. Hace falta el orden desc para no leer toda la
+        // conv si tiene cientos de mensajes.
+        let opts = FindOptions::builder()
+            .sort(doc! { "timestamp": -1 })
+            .limit(limit.max(1))
+            .build();
+        let mut items: Vec<WaMessage> = self
+            .wa_messages_for_history()
+            .find(doc! { "conversation_id": conversation_id })
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect()
+            .await
+            .map_err(|e| e.to_string())?;
+        items.reverse();
+        Ok(items)
     }
 }
