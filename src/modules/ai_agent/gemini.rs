@@ -231,6 +231,11 @@ pub struct UsageMetadata {
 /// directo a `generativelanguage.googleapis.com`. La api_key viaja como header
 /// `x-goog-api-key` en ambos casos (no como query param) — más seguro y
 /// transparente para el worker, que solo la pasa upstream.
+///
+/// **Retry**: ante errores transitorios (5xx upstream, 429 rate-limit, fallo
+/// de conexión) reintenta hasta `RETRY_MAX_ATTEMPTS` veces con backoff
+/// exponencial (1s, 2s). 4xx no transitorios (400, 401, 403, 404) no se
+/// reintentan — fallan rápido.
 pub async fn generate_content(
     http: &reqwest::Client,
     api_key: &str,
@@ -248,40 +253,64 @@ pub async fn generate_content(
     }
     let target_url = format!("{}/models/{}:generateContent", GEMINI_BASE, model_id);
 
-    let req = match relay {
-        Some(r) => http
-            .post(&r.url)
-            .query(&[("url", target_url.as_str())])
-            .header("x-relay-secret", &r.secret)
-            .header("x-goog-api-key", api_key),
-        None => http
-            .post(&target_url)
-            .header("x-goog-api-key", api_key),
-    };
+    let mut last_err: Option<ApiError> = None;
+    for attempt in 0..RETRY_MAX_ATTEMPTS {
+        if attempt > 0 {
+            let idx = (attempt as usize - 1).min(RETRY_BACKOFF_MS.len() - 1);
+            let backoff_ms = RETRY_BACKOFF_MS[idx];
+            tracing::warn!(
+                "[gemini] retry {}/{} tras {}ms",
+                attempt + 1,
+                RETRY_MAX_ATTEMPTS,
+                backoff_ms
+            );
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+        }
 
-    let resp = req
-        .json(body)
-        .timeout(Duration::from_secs(timeout_seconds.max(1) as u64))
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!("[gemini] request failed: {}", e);
-            ApiError::domain_simple(
-                axum::http::StatusCode::BAD_GATEWAY,
-                "ai_upstream_unreachable",
-                "No se pudo contactar a Gemini",
-            )
-        })?;
+        let req = match relay {
+            Some(r) => http
+                .post(&r.url)
+                .query(&[("url", target_url.as_str())])
+                .header("x-relay-secret", &r.secret)
+                .header("x-goog-api-key", api_key),
+            None => http
+                .post(&target_url)
+                .header("x-goog-api-key", api_key),
+        };
 
-    let status = resp.status();
-    if !status.is_success() {
+        let resp = match req
+            .json(body)
+            .timeout(Duration::from_secs(timeout_seconds.max(1) as u64))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("[gemini] request failed: {}", e);
+                // Errores de red son transitorios — reintentamos.
+                last_err = Some(ApiError::domain_simple(
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    "ai_upstream_unreachable",
+                    "No se pudo contactar a Gemini",
+                ));
+                continue;
+            }
+        };
+
+        let status = resp.status();
+        if status.is_success() {
+            return resp.json::<GenerateContentResponse>().await.map_err(|e| {
+                tracing::error!("[gemini] decode response: {}", e);
+                ApiError::domain_simple(
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    "ai_decode_error",
+                    "Respuesta de Gemini no decodificable",
+                )
+            });
+        }
+
         let body_text = resp.text().await.unwrap_or_default();
         tracing::error!("[gemini] non-2xx {}: {}", status, body_text);
-        // Errores de Gemini típicos:
-        // - 400 INVALID_ARGUMENT (body mal formado)
-        // - 403 PERMISSION_DENIED (api_key inválida o sin permisos)
-        // - 429 RESOURCE_EXHAUSTED (rate limit)
-        // - 500/503 (transitorios upstream)
         let code = match status.as_u16() {
             400 => "ai_invalid_request",
             401 | 403 => "ai_auth_failed",
@@ -289,22 +318,37 @@ pub async fn generate_content(
             500..=599 => "ai_upstream_error",
             _ => "ai_unexpected",
         };
-        return Err(ApiError::domain_with_details(
+        let err = ApiError::domain_with_details(
             axum::http::StatusCode::BAD_GATEWAY,
             code,
             format!("Gemini respondió {}", status.as_u16()),
             serde_json::json!({ "upstream_status": status.as_u16(), "body": body_text }),
-        ));
+        );
+
+        // Solo reintentamos transitorios (429 + 5xx). 4xx no recoverable.
+        if !is_retryable_status(status.as_u16()) {
+            return Err(err);
+        }
+        last_err = Some(err);
     }
 
-    resp.json::<GenerateContentResponse>().await.map_err(|e| {
-        tracing::error!("[gemini] decode response: {}", e);
+    Err(last_err.unwrap_or_else(|| {
         ApiError::domain_simple(
             axum::http::StatusCode::BAD_GATEWAY,
-            "ai_decode_error",
-            "Respuesta de Gemini no decodificable",
+            "ai_upstream_unreachable",
+            "Gemini falló tras varios intentos",
         )
-    })
+    }))
+}
+
+/// Total de intentos (incluye el primero). 3 = original + 2 retries.
+const RETRY_MAX_ATTEMPTS: u32 = 3;
+
+/// Backoff entre intentos (ms). Index 0 = espera antes del 2do intento, etc.
+const RETRY_BACKOFF_MS: &[u64] = &[1_000, 2_500];
+
+fn is_retryable_status(s: u16) -> bool {
+    matches!(s, 408 | 429 | 500 | 502 | 503 | 504)
 }
 
 // ─── Test de conexión ───────────────────────────────────────────────────────

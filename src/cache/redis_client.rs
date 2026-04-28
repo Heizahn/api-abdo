@@ -294,6 +294,41 @@ impl RedisClient {
         }
     }
 
+    // ============================================
+    // AI Agent — lock por conversación para evitar dispatchs concurrentes
+    // ============================================
+
+    /// Intenta adquirir el lock de dispatch IA para `conv_id`. Devuelve `true`
+    /// si el caller debe procesar; `false` si ya hay otro dispatch en curso.
+    /// TTL 60s (un turno IA con tools rara vez supera 30s; 60s es margen).
+    pub async fn try_lock_ai_dispatch(&self, conv_id: &str) -> bool {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return true, // Si Redis falla, no bloqueamos.
+        };
+        let key = format!("ai_agent:dispatch_lock:{}", conv_id);
+        let result: Option<String> = redis::cmd("SET")
+            .arg(&key)
+            .arg("1")
+            .arg("NX")
+            .arg("EX")
+            .arg(60u64)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(None);
+        result.is_some()
+    }
+
+    /// Libera el lock de dispatch IA. Idempotente; ignora errores.
+    pub async fn release_ai_dispatch_lock(&self, conv_id: &str) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let key = format!("ai_agent:dispatch_lock:{}", conv_id);
+        let _: Result<(), _> = conn.del(key).await;
+    }
+
     /// Intenta adquirir un lock de asignación para una conversación.
     /// Retorna true si el lock fue adquirido (esta instancia debe proceder).
     /// TTL de 15 segundos para evitar locks eternos.

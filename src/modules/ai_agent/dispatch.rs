@@ -44,13 +44,28 @@ fn ai_agent_secret() -> String {
 /// Spawnea el dispatch en background. Llamada desde el webhook tras
 /// persistir el inbound. No bloquea — el webhook ya respondió 200 al
 /// momento que esta función retorna.
+///
+/// Lock por conversación (Redis SETNX, TTL 60s) para evitar dispatchs
+/// concurrentes sobre la misma conv. Si el cliente manda 2 mensajes en
+/// 1s, el segundo skipea — su contenido entra al `history` del próximo
+/// turno cuando el cliente hable otra vez.
 pub fn dispatch_inbound_async(
     state: Arc<AppState>,
     inbound: WaMessage,
     workspace_id: ObjectId,
 ) {
     tokio::spawn(async move {
-        if let Err(e) = run_dispatch(state, inbound, workspace_id).await {
+        let conv_hex = inbound.conversation_id.to_hex();
+        if !state.redis.try_lock_ai_dispatch(&conv_hex).await {
+            tracing::info!(
+                "[ai_agent.dispatch] otro dispatch en curso para conv={}; skip",
+                conv_hex
+            );
+            return;
+        }
+        let result = run_dispatch(state.clone(), inbound, workspace_id).await;
+        state.redis.release_ai_dispatch_lock(&conv_hex).await;
+        if let Err(e) = result {
             tracing::warn!("[ai_agent.dispatch] error: {}", e);
         }
     });
