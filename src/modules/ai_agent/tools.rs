@@ -34,9 +34,9 @@ use super::gemini::FunctionDeclaration;
 
 /// Contexto compartido para la ejecución de tools dentro de un turno.
 ///
-/// `workspace_id` y `business_phone` no se leen en PR 2 (sandbox no necesita
-/// emitir WS ni resolver workspace por phone), pero el dispatch real de PR 3
-/// los va a usar para audit events y para enrutar mensajes outbound.
+/// `workspace_id` y `business_phone` los va a usar el dispatch real de PR 3
+/// para audit events y para enrutar mensajes outbound. `agent_id` queda para
+/// poder etiquetar `AiInteraction` cuando el persist real arranque.
 #[derive(Clone)]
 pub struct ToolContext {
     pub state: Arc<AppState>,
@@ -44,6 +44,8 @@ pub struct ToolContext {
     pub workspace_id: ObjectId,
     #[allow(dead_code)]
     pub business_phone: String,
+    #[allow(dead_code)]
+    pub agent_id: ObjectId,
     /// Conversación origen del turno. `None` cuando estamos en sandbox sin
     /// conv asociada — `create_ticket` devuelve fake en ese caso.
     pub conversation_id: Option<ObjectId>,

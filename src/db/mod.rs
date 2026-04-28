@@ -1,5 +1,5 @@
 pub mod mongo;
-use crate::models::ai_agent::{AiAgentFaq, AiAgentSetting, AiClientLookup};
+use crate::models::ai_agent::{AiAgent, AiAgentFaq, AiClientLookup};
 use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
 use crate::models::whatsapp::{
     ConversationStats, QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyList,
@@ -1005,46 +1005,41 @@ pub trait WaTicketRepository {
 }
 
 // ============================================
-// 11. AiAgentRepository: Configuración y FAQs del Asistente Virtual
+// 11. AiAgentRepository: agentes IA y FAQs por agente
 // ============================================
 
 #[async_trait::async_trait]
 #[allow(dead_code)]
 pub trait AiAgentRepository {
-    /// Devuelve el setting de un workspace, o `None` si no existe.
-    async fn find_ai_agent_setting_by_workspace(
+    /// Lista agentes. Si `workspace_id` viene, filtra por agentes que tengan
+    /// ese id dentro de `workspace_ids`.
+    async fn list_ai_agents(
         &self,
-        workspace_id: &ObjectId,
-    ) -> Result<Option<AiAgentSetting>, String>;
+        workspace_id: Option<&ObjectId>,
+    ) -> Result<Vec<AiAgent>, String>;
 
-    /// Lista todos los settings (uno por workspace).
-    async fn list_ai_agent_settings(&self) -> Result<Vec<AiAgentSetting>, String>;
+    async fn find_ai_agent_by_id(&self, id: &ObjectId) -> Result<Option<AiAgent>, String>;
 
-    /// Inserta un setting nuevo. El caller ya validó que no haya uno previo
-    /// para el `workspace_id`. Falla con `"workspace_id_already_exists"` si
-    /// existe colisión por unicidad.
-    async fn create_ai_agent_setting(
-        &self,
-        setting: AiAgentSetting,
-    ) -> Result<AiAgentSetting, String>;
+    async fn create_ai_agent(&self, agent: AiAgent) -> Result<AiAgent, String>;
 
-    /// Update completo del setting (full document replace excepto `_id` y
-    /// `created_at`). El caller debe pasar el doc con `updated_at` ya seteado.
-    /// Devuelve el doc actualizado o `None` si no existe.
-    async fn replace_ai_agent_setting(
+    /// Replace full-doc. Caller pasa el doc con `_id`, `created_at` y
+    /// `updated_at` ya seteados. Devuelve `None` si no existe.
+    async fn replace_ai_agent(
         &self,
         id: &ObjectId,
-        setting: AiAgentSetting,
-    ) -> Result<Option<AiAgentSetting>, String>;
+        agent: AiAgent,
+    ) -> Result<Option<AiAgent>, String>;
 
-    /// Lista FAQs de un workspace, ordenadas por `created_at` descendente.
-    async fn list_ai_agent_faqs(&self, workspace_id: &ObjectId) -> Result<Vec<AiAgentFaq>, String>;
+    /// `true` si el agent existía. También borra todas sus FAQs (cascada).
+    async fn delete_ai_agent(&self, id: &ObjectId) -> Result<bool, String>;
+
+    /// FAQs de un agente, ordenadas por `created_at` desc.
+    async fn list_ai_agent_faqs(&self, agent_id: &ObjectId) -> Result<Vec<AiAgentFaq>, String>;
 
     async fn find_ai_agent_faq_by_id(&self, id: &ObjectId) -> Result<Option<AiAgentFaq>, String>;
 
     async fn create_ai_agent_faq(&self, faq: AiAgentFaq) -> Result<AiAgentFaq, String>;
 
-    /// Patch parcial. Si el doc no existe devuelve `None`.
     async fn update_ai_agent_faq(
         &self,
         id: &ObjectId,
@@ -1053,7 +1048,6 @@ pub trait AiAgentRepository {
         tags: Option<Vec<String>>,
     ) -> Result<Option<AiAgentFaq>, String>;
 
-    /// `true` si el FAQ existía.
     async fn delete_ai_agent_faq(&self, id: &ObjectId) -> Result<bool, String>;
 }
 

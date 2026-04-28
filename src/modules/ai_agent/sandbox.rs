@@ -1,15 +1,17 @@
 //! Endpoint sandbox del AI Agent.
 //!
-//! `POST /v1/auth-user/whatsapp/ai-agent/sandbox/:workspace_id`
+//! `POST /v1/auth-user/whatsapp/ai-agent/agents/:agent_id/sandbox`
 //!
-//! Ejecuta un turno completo del runner con tools reales, pero con
+//! Ejecuta un turno completo del runner con tools reales pero con
 //! `is_sandbox=true` — no persiste `AiInteraction`, no crea tickets reales,
 //! no toca conversaciones. Sirve para que el SUPERADMIN valide que el
-//! system prompt + tools + api_key + relay funcionan extremo a extremo
-//! antes de pasar a `mode = live`.
+//! system prompt + tools + api_key + relay del agente funcionan extremo a
+//! extremo antes de pasar a `mode = live`.
 //!
-//! El test-connection del front (config formato `api_key`) no llega acá;
-//! se mantiene como validación FE-only por ahora (per plan §8 PR 1 FE).
+//! El body lleva `workspace_id` para que los tools tengan contexto del
+//! número simulado (`business_phone`). Si el workspace no está en
+//! `agent.workspace_ids` igualmente lo aceptamos — el sandbox es una
+//! herramienta de testing, no quiero bloquearlo por config.
 
 use axum::{
     extract::{Path, State},
@@ -24,10 +26,7 @@ use utoipa::ToSchema;
 use crate::{
     db::{AiAgentRepository, WhatsAppRepository},
     error::ApiError,
-    models::{
-        ai_agent::AiToolCallLog,
-        users::User,
-    },
+    models::{ai_agent::AiToolCallLog, users::User},
     state::AppState,
 };
 
@@ -66,17 +65,17 @@ fn ai_agent_secret() -> String {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SandboxRequest {
+    /// Workspace donde simular el turno — saca el `business_phone` que
+    /// queda en `ToolContext`. Requerido.
+    pub workspace_id: String,
     /// Mensaje "del cliente" simulado.
     pub message: String,
-    /// Historial opcional de turnos previos. El front lo arma desde el chat
-    /// del sandbox (ej. múltiples idas y vueltas en la misma sesión).
     #[serde(default)]
     pub history: Vec<SandboxHistoryEntry>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SandboxHistoryEntry {
-    /// `"user"` (cliente) o `"assistant"` (IA o humano outbound).
     pub role: String,
     pub text: String,
 }
@@ -89,9 +88,6 @@ pub struct SandboxResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SandboxData {
-    /// Respuesta de la IA en texto. `None` solo en escenarios degenerados
-    /// (sin candidates, max_iterations sin converger) — el runner ya genera
-    /// un fallback en español.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_text: Option<String>,
     pub tool_calls: Vec<SandboxToolCall>,
@@ -142,16 +138,16 @@ pub struct SandboxUsage {
 
 #[utoipa::path(
     post,
-    path = "/v1/auth-user/whatsapp/ai-agent/sandbox/{workspace_id}",
+    path = "/v1/auth-user/whatsapp/ai-agent/agents/{agent_id}/sandbox",
     tag = "WhatsApp — AI Agent",
     security(("bearerAuth" = [])),
-    params(("workspace_id" = String, Path, description = "ObjectId hex del WaSettings")),
+    params(("agent_id" = String, Path, description = "ObjectId hex del AiAgent")),
     request_body = SandboxRequest,
     responses(
-        (status = 200, description = "Turno IA ejecutado en modo sandbox", body = SandboxResponse),
+        (status = 200, description = "Turno IA ejecutado en sandbox", body = SandboxResponse),
         (status = 401, description = "No autorizado"),
         (status = 403, description = "Requiere rol SUPERADMIN"),
-        (status = 404, description = "workspace_not_found / ai_agent_setting_not_found"),
+        (status = 404, description = "agent_not_found / workspace_not_found"),
         (status = 422, description = "Validación: invalid_id / missing_field / field_too_long"),
         (status = 502, description = "ai_upstream_unreachable / ai_invalid_request / ai_auth_failed / ai_rate_limited"),
         (status = 503, description = "ai_api_key_missing"),
@@ -160,13 +156,13 @@ pub struct SandboxUsage {
 pub async fn sandbox_handler(
     State(state): State<Arc<AppState>>,
     Extension(current_user): Extension<User>,
-    Path(workspace_id): Path<String>,
+    Path(agent_id): Path<String>,
     Json(body): Json<SandboxRequest>,
 ) -> Result<Json<SandboxResponse>, ApiError> {
     require_superadmin(&current_user)?;
-    let workspace_oid = parse_oid(&workspace_id, "workspace_id")?;
+    let agent_oid = parse_oid(&agent_id, "agent_id")?;
+    let workspace_oid = parse_oid(&body.workspace_id, "workspace_id")?;
 
-    // Validaciones del body antes de pegar a Gemini.
     let message = body.message.trim().to_string();
     if message.is_empty() {
         return Err(ApiError::ValidationError {
@@ -200,12 +196,22 @@ pub async fn sandbox_handler(
                 _ => return None,
             };
             let text = h.text.trim().to_string();
-            if text.is_empty() { return None; }
+            if text.is_empty() {
+                return None;
+            }
             Some(ConvTurn { role, text })
         })
         .collect();
 
-    // Workspace tiene que existir.
+    let agent = state
+        .db
+        .find_ai_agent_by_id(&agent_oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| {
+            ApiError::domain_simple(StatusCode::NOT_FOUND, "agent_not_found", "Agente no encontrado")
+        })?;
+
     let wa_setting = state
         .db
         .find_wa_settings_by_id(&workspace_oid)
@@ -219,28 +225,11 @@ pub async fn sandbox_handler(
             )
         })?;
 
-    // Setting IA del workspace tiene que existir.
-    let setting = state
-        .db
-        .find_ai_agent_setting_by_workspace(&workspace_oid)
-        .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or_else(|| {
-            ApiError::domain_simple(
-                StatusCode::NOT_FOUND,
-                "ai_agent_setting_not_found",
-                "Configuración de Asistente Virtual no encontrada",
-            )
-        })?;
+    let api_key = super::runner::decrypt_api_key(&agent, &ai_agent_secret())?;
 
-    // Descifrar api_key. Falla con 503 ai_api_key_missing si no hay.
-    let api_key = super::runner::decrypt_api_key(&setting, &ai_agent_secret())?;
-
-    // FAQs inline (formato `Q: ... A: ...`). Sandbox SIEMPRE las inyecta para
-    // que el SUPERADMIN valide cómo respondés con knowledge real.
     let faqs = state
         .db
-        .list_ai_agent_faqs(&workspace_oid)
+        .list_ai_agent_faqs(&agent_oid)
         .await
         .map_err(ApiError::DatabaseError)?;
     let faqs_inline = if faqs.is_empty() {
@@ -264,17 +253,16 @@ pub async fn sandbox_handler(
         state: state.clone(),
         workspace_id: workspace_oid,
         business_phone: wa_setting.phone.clone(),
-        // Sandbox no tiene conv real — los tools de escritura cortan por
-        // `is_sandbox=true` antes de necesitar conv_id.
+        agent_id: agent_oid,
         conversation_id: None,
-        ai_user_id: setting.ai_user_id.clone(),
-        ai_user_name: setting.personality.assistant_name.clone(),
+        ai_user_id: agent.ai_user_id.clone(),
+        ai_user_name: agent.personality.assistant_name.clone(),
         is_sandbox: true,
     };
 
     let output = run_turn(
         &state.reqwest_client,
-        &setting,
+        &agent,
         &api_key,
         relay,
         &history,

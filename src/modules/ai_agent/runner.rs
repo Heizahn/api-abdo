@@ -27,7 +27,7 @@ use std::time::Instant;
 use crate::{
     crypto::aes::decrypt_payload,
     error::ApiError,
-    models::ai_agent::{AiAgentSetting, AiInteraction, AiToolCallLog},
+    models::ai_agent::{AiAgent, AiInteraction, AiToolCallLog},
 };
 
 use super::{
@@ -86,6 +86,7 @@ impl RunnerOutput {
         conversation_id: mongodb::bson::oid::ObjectId,
         message_id: mongodb::bson::oid::ObjectId,
         workspace_id: mongodb::bson::oid::ObjectId,
+        agent_id: mongodb::bson::oid::ObjectId,
         turn_index: u32,
         model_id: &str,
     ) -> AiInteraction {
@@ -95,6 +96,7 @@ impl RunnerOutput {
             conversation_id,
             message_id,
             workspace_id,
+            agent_id,
             turn_index,
             model_id: model_id.to_string(),
             input_tokens: self.input_tokens,
@@ -114,19 +116,19 @@ impl RunnerOutput {
 // Build prompt + payload
 // ============================================
 
-fn build_system_instruction(setting: &AiAgentSetting, faqs_inline: Option<&str>) -> SystemInstruction {
+fn build_system_instruction(agent: &AiAgent, faqs_inline: Option<&str>) -> SystemInstruction {
     // Composición ordenada: el system_prompt del SUPERADMIN va primero;
     // FAQs y reglas mínimas se appendean para que la IA las tenga "frescas".
     let mut chunks: Vec<String> = Vec::new();
 
-    if !setting.system_prompt.trim().is_empty() {
-        chunks.push(setting.system_prompt.trim().to_string());
+    if !agent.system_prompt.trim().is_empty() {
+        chunks.push(agent.system_prompt.trim().to_string());
     }
 
     // Mini-bloque de personalidad (asistente_name + tono). El SUPERADMIN ya
     // suele incluirlo en el system_prompt, pero lo reforzamos por si falta.
     let mut personality_lines = Vec::new();
-    let p = &setting.personality;
+    let p = &agent.personality;
     if !p.assistant_name.is_empty() {
         personality_lines.push(format!("Tu nombre: {}.", p.assistant_name));
     }
@@ -183,7 +185,7 @@ fn convert_history(history: &[ConvTurn]) -> Vec<Content> {
 /// caller lo trae de `AiAgentRepository::list_ai_agent_faqs` si quiere.
 pub async fn run_turn(
     http: &reqwest::Client,
-    setting: &AiAgentSetting,
+    agent: &AiAgent,
     api_key_decrypted: &str,
     relay: Option<&AiRelay>,
     history: &[ConvTurn],
@@ -192,7 +194,7 @@ pub async fn run_turn(
     tool_ctx: &ToolContext,
 ) -> Result<RunnerOutput, ApiError> {
     let started = Instant::now();
-    let system_instruction = build_system_instruction(setting, faqs_inline);
+    let system_instruction = build_system_instruction(agent, faqs_inline);
 
     let mut contents = convert_history(history);
     // Mensaje nuevo del cliente.
@@ -201,7 +203,7 @@ pub async fn run_turn(
         parts: vec![Part::text(user_message)],
     });
 
-    let function_declarations = build_function_declarations(&setting.tools);
+    let function_declarations = build_function_declarations(&agent.tools);
     let tools_block = if function_declarations.is_empty() {
         None
     } else {
@@ -211,8 +213,8 @@ pub async fn run_turn(
     };
 
     let gen_config = GenerationConfig {
-        temperature: Some(setting.model.temperature),
-        max_output_tokens: Some(setting.model.max_tokens),
+        temperature: Some(agent.model.temperature),
+        max_output_tokens: Some(agent.model.max_tokens),
     };
 
     let mut total_in: u32 = 0;
@@ -243,8 +245,8 @@ pub async fn run_turn(
         let resp = gemini::generate_content(
             http,
             api_key_decrypted,
-            &setting.model.model_id,
-            setting.model.timeout_seconds,
+            &agent.model.model_id,
+            agent.model.timeout_seconds,
             &body,
             relay,
         )
@@ -360,7 +362,7 @@ pub async fn run_turn(
     }
 
     let cost_usd_estimate =
-        gemini::estimate_cost_usd(&setting.model.model_id, total_in, total_out);
+        gemini::estimate_cost_usd(&agent.model.model_id, total_in, total_out);
     let latency_ms = started.elapsed().as_millis() as u32;
 
     Ok(RunnerOutput {
@@ -393,13 +395,13 @@ fn truncate_summary(value: &serde_json::Value) -> String {
 // ============================================
 
 /// Descifra `model.api_key_encrypted` o devuelve un error 503 si no hay key.
-pub fn decrypt_api_key(setting: &AiAgentSetting, secret: &str) -> Result<String, ApiError> {
-    let enc = &setting.model.api_key_encrypted;
+pub fn decrypt_api_key(agent: &AiAgent, secret: &str) -> Result<String, ApiError> {
+    let enc = &agent.model.api_key_encrypted;
     if enc.is_empty() {
         return Err(ApiError::domain_simple(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "ai_api_key_missing",
-            "El workspace no tiene api_key de Gemini configurada",
+            "El agente no tiene api_key de Gemini configurada",
         ));
     }
     decrypt_payload(secret, enc).ok_or_else(|| {

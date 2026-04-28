@@ -281,31 +281,38 @@ print("  ✅ WaConversationEvents.actor_id + event_type + created_at desc (spars
 print("");
 
 // ============================================
-// COLECCIÓN: AiAgentSettings — config IA por workspace
+// COLECCIÓN: AiAgents — agentes IA (modelo agent-centric)
 // ============================================
-print("📦 Colección: AiAgentSettings");
+print("📦 Colección: AiAgents");
 
-// Unicidad: un setting por workspace. El back se apoya en este índice para
-// servir 409 `workspace_id_already_exists` cuando un PATCH crea uno nuevo.
-db.AiAgentSettings.createIndex(
-  { "workspace_id": 1 },
-  { name: "idx_ai_agent_settings_workspace", unique: true, background: true }
+// Listado filtrable por workspace: el array `workspace_ids` se indexa multikey
+// para acelerar `find({ workspace_ids: <oid> })`.
+db.AiAgents.createIndex(
+  { "workspace_ids": 1 },
+  { name: "idx_ai_agents_workspace_ids", background: true }
 );
-print("  ✅ AiAgentSettings.workspace_id (unique)");
+print("  ✅ AiAgents.workspace_ids (multikey)");
+
+// Listado general ordenado por created_at desc.
+db.AiAgents.createIndex(
+  { "created_at": -1 },
+  { name: "idx_ai_agents_created", background: true }
+);
+print("  ✅ AiAgents.created_at desc");
 
 print("");
 
 // ============================================
-// COLECCIÓN: AiAgentFaqs — knowledge base por workspace
+// COLECCIÓN: AiAgentFaqs — knowledge base por agente
 // ============================================
 print("📦 Colección: AiAgentFaqs");
 
-// Listado por workspace ordenado por `created_at` desc.
+// Listado por agente ordenado por `created_at` desc.
 db.AiAgentFaqs.createIndex(
-  { "workspace_id": 1, "created_at": -1 },
-  { name: "idx_ai_agent_faqs_workspace_created", background: true }
+  { "agent_id": 1, "created_at": -1 },
+  { name: "idx_ai_agent_faqs_agent_created", background: true }
 );
-print("  ✅ AiAgentFaqs.workspace_id + created_at desc");
+print("  ✅ AiAgentFaqs.agent_id + created_at desc");
 
 print("");
 
@@ -338,7 +345,7 @@ print("📋 VERIFICACIÓN DE ÍNDICES");
 print("=".repeat(60));
 print("");
 
-const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes", "WaTemplates", "wa_template_media.files", "WaConversationEvents", "WaMessages", "AiAgentSettings", "AiAgentFaqs"];
+const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes", "WaTemplates", "wa_template_media.files", "WaConversationEvents", "WaMessages", "AiAgents", "AiAgentFaqs"];
 toVerify.forEach(col => {
   print(col + ":");
   db.getCollection(col).getIndexes().forEach(idx => {

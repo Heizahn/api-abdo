@@ -1,8 +1,8 @@
 //! Implementación MongoDB de `AiAgentRepository`.
 //!
 //! Colecciones:
-//! - `AiAgentSettings` — única por `workspace_id` (índice unique).
-//! - `AiAgentFaqs` — varias por workspace.
+//! - `AiAgents` — un doc por agente. `workspace_ids` es array multikey.
+//! - `AiAgentFaqs` — FAQs por `agent_id`.
 
 use async_trait::async_trait;
 use futures::stream::TryStreamExt;
@@ -12,11 +12,11 @@ use mongodb::Collection;
 
 use super::MongoDB;
 use crate::db::AiAgentRepository;
-use crate::models::ai_agent::{AiAgentFaq, AiAgentSetting};
+use crate::models::ai_agent::{AiAgent, AiAgentFaq};
 
 impl MongoDB {
-    fn ai_agent_settings(&self) -> Collection<AiAgentSetting> {
-        self.db.collection::<AiAgentSetting>("AiAgentSettings")
+    fn ai_agents(&self) -> Collection<AiAgent> {
+        self.db.collection::<AiAgent>("AiAgents")
     }
 
     fn ai_agent_faqs(&self) -> Collection<AiAgentFaq> {
@@ -26,19 +26,16 @@ impl MongoDB {
 
 #[async_trait]
 impl AiAgentRepository for MongoDB {
-    async fn find_ai_agent_setting_by_workspace(
+    async fn list_ai_agents(
         &self,
-        workspace_id: &ObjectId,
-    ) -> Result<Option<AiAgentSetting>, String> {
-        self.ai_agent_settings()
-            .find_one(doc! { "workspace_id": workspace_id })
-            .await
-            .map_err(|e| e.to_string())
-    }
-
-    async fn list_ai_agent_settings(&self) -> Result<Vec<AiAgentSetting>, String> {
-        self.ai_agent_settings()
-            .find(doc! {})
+        workspace_id: Option<&ObjectId>,
+    ) -> Result<Vec<AiAgent>, String> {
+        let filter = match workspace_id {
+            Some(oid) => doc! { "workspace_ids": oid },
+            None => doc! {},
+        };
+        self.ai_agents()
+            .find(filter)
             .sort(doc! { "created_at": -1 })
             .await
             .map_err(|e| e.to_string())?
@@ -47,54 +44,62 @@ impl AiAgentRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
-    async fn create_ai_agent_setting(
-        &self,
-        mut setting: AiAgentSetting,
-    ) -> Result<AiAgentSetting, String> {
-        let res = self
-            .ai_agent_settings()
-            .insert_one(&setting)
+    async fn find_ai_agent_by_id(&self, id: &ObjectId) -> Result<Option<AiAgent>, String> {
+        self.ai_agents()
+            .find_one(doc! { "_id": id })
             .await
-            .map_err(|e| {
-                // El índice único `workspace_id` puede disparar duplicate-key
-                // (E11000). Lo mapeamos a un código estable para que el
-                // handler pueda servir 409 sin parsear el mensaje.
-                if e.to_string().contains("E11000") {
-                    "workspace_id_already_exists".to_string()
-                } else {
-                    e.to_string()
-                }
-            })?;
-        if let Some(oid) = res.inserted_id.as_object_id() {
-            setting.id = Some(oid);
-        }
-        Ok(setting)
+            .map_err(|e| e.to_string())
     }
 
-    async fn replace_ai_agent_setting(
+    async fn create_ai_agent(&self, mut agent: AiAgent) -> Result<AiAgent, String> {
+        let res = self
+            .ai_agents()
+            .insert_one(&agent)
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(oid) = res.inserted_id.as_object_id() {
+            agent.id = Some(oid);
+        }
+        Ok(agent)
+    }
+
+    async fn replace_ai_agent(
         &self,
         id: &ObjectId,
-        mut setting: AiAgentSetting,
-    ) -> Result<Option<AiAgentSetting>, String> {
-        // El replace preserva `_id` y debe respetar `created_at` original.
-        // El caller pasa el doc con `created_at` ya intacto.
-        setting.id = Some(*id);
+        mut agent: AiAgent,
+    ) -> Result<Option<AiAgent>, String> {
+        agent.id = Some(*id);
         let opts = FindOneAndReplaceOptions::builder()
             .return_document(ReturnDocument::After)
             .build();
-        self.ai_agent_settings()
-            .find_one_and_replace(doc! { "_id": id }, setting)
+        self.ai_agents()
+            .find_one_and_replace(doc! { "_id": id }, agent)
             .with_options(opts)
             .await
             .map_err(|e| e.to_string())
     }
 
+    async fn delete_ai_agent(&self, id: &ObjectId) -> Result<bool, String> {
+        // Cascada: borramos FAQs del agente antes para no dejar huérfanas.
+        // Best-effort — si falla, no bloqueamos el delete del agente.
+        let _ = self
+            .ai_agent_faqs()
+            .delete_many(doc! { "agent_id": id })
+            .await;
+        let res = self
+            .ai_agents()
+            .delete_one(doc! { "_id": id })
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(res.deleted_count > 0)
+    }
+
     async fn list_ai_agent_faqs(
         &self,
-        workspace_id: &ObjectId,
+        agent_id: &ObjectId,
     ) -> Result<Vec<AiAgentFaq>, String> {
         self.ai_agent_faqs()
-            .find(doc! { "workspace_id": workspace_id })
+            .find(doc! { "agent_id": agent_id })
             .sort(doc! { "created_at": -1 })
             .await
             .map_err(|e| e.to_string())?
@@ -142,8 +147,6 @@ impl AiAgentRepository for MongoDB {
         if let Some(t) = tags {
             set.insert("tags", t);
         }
-        // `updated_at` se toca siempre, aún si el patch viene vacío
-        // (mantiene la regla "el doc fue tocado por última vez ahora").
         set.insert("updated_at", mongodb::bson::DateTime::now());
 
         let opts = mongodb::options::FindOneAndUpdateOptions::builder()
