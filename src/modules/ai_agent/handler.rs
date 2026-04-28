@@ -13,11 +13,12 @@
 //! reusando `JWT_SECRET` (mismo patrón que `WaSettings.access_token_cipher`).
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Extension, Json,
 };
 use mongodb::bson::{oid::ObjectId, DateTime as BsonDateTime};
+use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::{
@@ -27,12 +28,12 @@ use crate::{
     models::{
         ai_agent::{
             AiAgentDeleteResponse, AiAgentFaq, AiAgentFaqItem, AiAgentFaqListResponse,
-            AiAgentFaqResponse, AiAgentMode, AiAgentSetting, AiAgentSettingItem,
-            AiAgentSettingResponse, AiAgentSettingsListResponse, AiEscalationRules,
-            AiLimits, AiModelConfig, AiPersonality, AiSchedule, AiToolConfig,
-            CreateAiAgentFaqRequest, TestConnectionData, TestConnectionRequest,
-            TestConnectionResponse, TestConnectionSource, UpdateAiAgentFaqRequest,
-            UpdateAiAgentSettingsRequest,
+            AiAgentFaqResponse, AiAgentMode, AiAgentModelItem, AiAgentModelsListResponse,
+            AiAgentSetting, AiAgentSettingItem, AiAgentSettingResponse,
+            AiAgentSettingsListResponse, AiEscalationRules, AiLimits, AiModelConfig,
+            AiPersonality, AiSchedule, AiToolConfig, CreateAiAgentFaqRequest,
+            TestConnectionData, TestConnectionRequest, TestConnectionResponse,
+            TestConnectionSource, UpdateAiAgentFaqRequest, UpdateAiAgentSettingsRequest,
         },
         users::User,
     },
@@ -418,6 +419,16 @@ pub async fn update_ai_agent_settings_handler(
         validate_string_len(p, "system_prompt", PROMPT_MAX_LEN)?;
     }
 
+    // ¿El patch trae una api_key nueva non-empty? Lo decidimos antes de
+    // consumir `payload` en `apply_patch`. Lo usamos al final para invalidar
+    // el cache de modelos (la key vieja ya no debería servir lookups).
+    let api_key_rotated = payload
+        .model
+        .as_ref()
+        .and_then(|m| m.api_key.as_deref())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+
     let now = BsonDateTime::now();
     let existing = state
         .db
@@ -459,6 +470,12 @@ pub async fn update_ai_agent_settings_handler(
                 .ok_or_else(setting_not_found)?
         }
     };
+
+    if api_key_rotated {
+        // Best-effort: borra todas las entradas de cache de modelos del
+        // workspace (independiente del hash de la key vieja).
+        state.redis.invalidate_ai_models_cache(&oid.to_hex()).await;
+    }
 
     Ok(Json(AiAgentSettingResponse {
         ok: true,
@@ -805,6 +822,174 @@ pub async fn test_connection_handler(
             source,
         },
     }))
+}
+
+// ============================================
+// LIST MODELS handler
+// ============================================
+
+/// Cache TTL del listado. La lista de modelos cambia con poca frecuencia
+/// (~semanas), así que 10 min es conservador. El SUPERADMIN puede forzar
+/// refresh rotando la api_key (invalida cache implícitamente).
+const MODELS_CACHE_TTL_SECS: u64 = 600;
+const MODELS_FETCH_TIMEOUT: u32 = 15;
+
+#[derive(Debug, Deserialize)]
+pub struct ListModelsQuery {
+    /// Override de api_key — útil para ver qué modelos ofrece una key antes
+    /// de guardarla. Si vino vacío o no vino, se usa la guardada.
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/ai-agent/models/{workspace_id}",
+    tag = "WhatsApp — AI Agent",
+    security(("bearerAuth" = [])),
+    params(
+        ("workspace_id" = String, Path, description = "ObjectId hex del WaSettings"),
+        ("api_key" = Option<String>, Query, description = "Override de api_key (preview antes de guardar)"),
+    ),
+    responses(
+        (status = 200, description = "Listado de modelos Gemini disponibles para la key", body = AiAgentModelsListResponse),
+        (status = 400, description = "missing_api_key — no hay key guardada y no vino por query"),
+        (status = 401, description = "invalid_api_key — Gemini rechazó la key"),
+        (status = 403, description = "Requiere rol SUPERADMIN"),
+        (status = 404, description = "workspace_not_found"),
+        (status = 429, description = "gemini_rate_limited"),
+        (status = 502, description = "gemini_unreachable"),
+    )
+)]
+pub async fn list_ai_agent_models_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user): Extension<User>,
+    Path(workspace_id): Path<String>,
+    Query(q): Query<ListModelsQuery>,
+) -> Result<Json<AiAgentModelsListResponse>, ApiError> {
+    require_superadmin(&current_user)?;
+    let oid = parse_oid(&workspace_id, "workspace_id")?;
+
+    if state
+        .db
+        .find_wa_settings_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .is_none()
+    {
+        return Err(workspace_not_found());
+    }
+
+    // Resolver api_key: query > stored. Si nada → 400 missing_api_key.
+    let query_key = q
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let api_key = if let Some(k) = query_key {
+        k.to_string()
+    } else {
+        let setting = state
+            .db
+            .find_ai_agent_setting_by_workspace(&oid)
+            .await
+            .map_err(ApiError::DatabaseError)?
+            .ok_or_else(missing_api_key)?;
+        if setting.model.api_key_encrypted.is_empty() {
+            return Err(missing_api_key());
+        }
+        decrypt_api_key(&setting, &ai_agent_secret())?
+    };
+
+    // Cache hit → devolver tal cual.
+    let ws_hex = oid.to_hex();
+    if let Some(cached) = state
+        .redis
+        .get_ai_models_cache(&ws_hex, &api_key)
+        .await
+    {
+        if let Ok(items) = serde_json::from_str::<Vec<AiAgentModelItem>>(&cached) {
+            return Ok(Json(AiAgentModelsListResponse {
+                ok: true,
+                data: items,
+            }));
+        }
+        // Si no parsea, ignoramos el cache y refetcheamos.
+    }
+
+    let relay = AiRelay::from_config(&state.config);
+    let raw_models = super::gemini::list_models(
+        &state.reqwest_client,
+        &api_key,
+        MODELS_FETCH_TIMEOUT,
+        relay.as_ref(),
+    )
+    .await?;
+
+    let items = filter_and_map_models(raw_models);
+
+    // Cachear (best-effort).
+    if let Ok(json) = serde_json::to_string(&items) {
+        state
+            .redis
+            .set_ai_models_cache(&ws_hex, &api_key, &json, MODELS_CACHE_TTL_SECS)
+            .await;
+    }
+
+    Ok(Json(AiAgentModelsListResponse {
+        ok: true,
+        data: items,
+    }))
+}
+
+/// Modelos sugeridos por default — se marcan con `recommended: true`.
+const RECOMMENDED_MODEL_IDS: &[&str] = &[
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-pro-latest",
+];
+
+fn filter_and_map_models(
+    raw: Vec<super::gemini::GeminiModelEntry>,
+) -> Vec<AiAgentModelItem> {
+    raw.into_iter()
+        .filter_map(|m| {
+            // Filtrar por familia gemini-* y por soporte de generateContent.
+            let id = m.name.strip_prefix("models/").unwrap_or(&m.name);
+            if !id.starts_with("gemini-") {
+                return None;
+            }
+            if !m
+                .supported_generation_methods
+                .iter()
+                .any(|s| s == "generateContent")
+            {
+                return None;
+            }
+            let methods = &m.supported_generation_methods;
+            let supports_function_calling = methods.iter().any(|s| s == "generateContent");
+            let supports_system_instruction = supports_function_calling;
+            let recommended = RECOMMENDED_MODEL_IDS.iter().any(|r| *r == id);
+            Some(AiAgentModelItem {
+                id: id.to_string(),
+                display_name: m.display_name.unwrap_or_default(),
+                description: m.description.unwrap_or_default(),
+                input_token_limit: m.input_token_limit.unwrap_or(0),
+                output_token_limit: m.output_token_limit.unwrap_or(0),
+                supports_function_calling,
+                supports_system_instruction,
+                version: m.version.unwrap_or_default(),
+                recommended,
+            })
+        })
+        .collect()
+}
+
+fn missing_api_key() -> ApiError {
+    ApiError::domain_simple(
+        StatusCode::BAD_REQUEST,
+        "missing_api_key",
+        "Pasá `api_key` por query o configurá la del workspace antes",
+    )
 }
 
 #[utoipa::path(

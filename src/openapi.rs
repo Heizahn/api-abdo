@@ -3,11 +3,12 @@ use utoipa::OpenApi;
 use crate::db::mongo::{PaymentDetails, ResultGroupedByDate};
 use crate::models::ai_agent::{
     AiAgentDeleteResponse, AiAgentFaqItem, AiAgentFaqListResponse, AiAgentFaqResponse,
-    AiAgentMode, AiAgentSettingItem, AiAgentSettingResponse, AiAgentSettingsListResponse,
-    AiEscalationRulesDto, AiEscalationRulesInput, AiLimitsDto, AiLimitsInput, AiModelConfigDto,
-    AiModelConfigInput, AiPersonalityDto, AiPersonalityInput, AiScheduleDto, AiScheduleInput,
-    AiToolConfigDto, AiToolConfigInput, CreateAiAgentFaqRequest, TestConnectionData,
-    TestConnectionRequest, TestConnectionResponse, TestConnectionSource, UpdateAiAgentFaqRequest,
+    AiAgentMode, AiAgentModelItem, AiAgentModelsListResponse, AiAgentSettingItem,
+    AiAgentSettingResponse, AiAgentSettingsListResponse, AiEscalationRulesDto,
+    AiEscalationRulesInput, AiLimitsDto, AiLimitsInput, AiModelConfigDto, AiModelConfigInput,
+    AiPersonalityDto, AiPersonalityInput, AiScheduleDto, AiScheduleInput, AiToolConfigDto,
+    AiToolConfigInput, CreateAiAgentFaqRequest, TestConnectionData, TestConnectionRequest,
+    TestConnectionResponse, TestConnectionSource, UpdateAiAgentFaqRequest,
     UpdateAiAgentSettingsRequest,
 };
 use crate::modules::ai_agent::sandbox::{
@@ -175,6 +176,7 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
         crate::modules::ai_agent::handler::delete_ai_agent_faq_handler,
         crate::modules::ai_agent::sandbox::sandbox_handler,
         crate::modules::ai_agent::handler::test_connection_handler,
+        crate::modules::ai_agent::handler::list_ai_agent_models_handler,
         // Users — CRUD
         crate::modules::users::handler::list_users_handler,
         crate::modules::users::handler::create_user_handler,
@@ -279,6 +281,8 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
             // AI Agent — Test connection
             TestConnectionRequest, TestConnectionResponse, TestConnectionData,
             TestConnectionSource,
+            // AI Agent — List models
+            AiAgentModelItem, AiAgentModelsListResponse,
         )
     ),
     tags(

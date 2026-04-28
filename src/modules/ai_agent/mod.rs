@@ -64,4 +64,11 @@ pub fn user_routes() -> Router<Arc<AppState>> {
             "/v1/auth-user/whatsapp/ai-agent/test-connection",
             post(handler::test_connection_handler),
         )
+        // Listado de modelos Gemini para una api_key — usado por la UI
+        // para que el SUPERADMIN elija qué modelo guardar. Cacheado en
+        // Redis 10 min por (workspace, hash de api_key).
+        .route(
+            "/v1/auth-user/whatsapp/ai-agent/models/:workspace_id",
+            get(handler::list_ai_agent_models_handler),
+        )
 }

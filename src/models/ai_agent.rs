@@ -594,3 +594,29 @@ pub struct TestConnectionResponse {
     pub ok: bool,
     pub data: TestConnectionData,
 }
+
+// ─── List models ────────────────────────────────────────────────────────────
+
+/// Item del listado devuelto por `GET /ai-agent/models/:workspace_id`.
+/// `id` viene sin el prefijo `models/` que devuelve Gemini — se strippea
+/// en el handler para que el FE pueda guardarlo tal cual en `model.model_id`.
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+pub struct AiAgentModelItem {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    pub input_token_limit: u32,
+    pub output_token_limit: u32,
+    pub supports_function_calling: bool,
+    pub supports_system_instruction: bool,
+    pub version: String,
+    /// `true` cuando el id matchea uno de los modelos sugeridos por default
+    /// (`gemini-1.5-flash-latest`, `gemini-1.5-pro-latest`).
+    pub recommended: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiAgentModelsListResponse {
+    pub ok: bool,
+    pub data: Vec<AiAgentModelItem>,
+}

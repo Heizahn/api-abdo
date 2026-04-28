@@ -357,6 +357,108 @@ pub async fn test_connection(
     ))
 }
 
+// ─── Listar modelos disponibles ─────────────────────────────────────────────
+
+/// Item crudo del response de `GET /v1beta/models`. Sólo deserializamos los
+/// campos que consumimos — Gemini agrega cosas (input_modalities, etc.) que
+/// hoy no usamos.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiModelEntry {
+    pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub input_token_limit: Option<u32>,
+    #[serde(default)]
+    pub output_token_limit: Option<u32>,
+    #[serde(default)]
+    pub supported_generation_methods: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListModelsResponse {
+    #[serde(default)]
+    models: Vec<GeminiModelEntry>,
+}
+
+/// `GET /v1beta/models` — devuelve TODOS los modelos visibles para la api_key
+/// (sin filtrar). El handler los filtra por familia `gemini-*` y por
+/// `generateContent` antes de devolver al FE.
+pub async fn list_models(
+    http: &reqwest::Client,
+    api_key: &str,
+    timeout_seconds: u32,
+    relay: Option<&AiRelay>,
+) -> Result<Vec<GeminiModelEntry>, ApiError> {
+    if api_key.is_empty() {
+        return Err(ApiError::domain_simple(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "ai_api_key_missing",
+            "api_key requerida",
+        ));
+    }
+
+    let target_url = format!("{}/models", GEMINI_BASE);
+
+    let req = match relay {
+        Some(r) => http
+            .get(&r.url)
+            .query(&[("url", target_url.as_str())])
+            .header("x-relay-secret", &r.secret)
+            .header("x-goog-api-key", api_key),
+        None => http
+            .get(&target_url)
+            .header("x-goog-api-key", api_key),
+    };
+
+    let resp = req
+        .timeout(Duration::from_secs(timeout_seconds.max(1) as u64))
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::error!("[gemini] list_models request failed: {}", e);
+            ApiError::domain_simple(
+                axum::http::StatusCode::BAD_GATEWAY,
+                "gemini_unreachable",
+                "No se pudo contactar a Gemini",
+            )
+        })?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body_text = resp.text().await.unwrap_or_default();
+        tracing::warn!("[gemini] list_models non-2xx {}: {}", status, body_text);
+        let (http_status, code) = match status.as_u16() {
+            400 => (axum::http::StatusCode::BAD_GATEWAY, "ai_invalid_request"),
+            401 | 403 => (axum::http::StatusCode::UNAUTHORIZED, "invalid_api_key"),
+            429 => (axum::http::StatusCode::TOO_MANY_REQUESTS, "gemini_rate_limited"),
+            500..=599 => (axum::http::StatusCode::BAD_GATEWAY, "gemini_unreachable"),
+            _ => (axum::http::StatusCode::BAD_GATEWAY, "ai_unexpected"),
+        };
+        return Err(ApiError::domain_with_details(
+            http_status,
+            code,
+            format!("Gemini respondió {}", status.as_u16()),
+            serde_json::json!({ "upstream_status": status.as_u16(), "body": body_text }),
+        ));
+    }
+
+    let parsed = resp.json::<ListModelsResponse>().await.map_err(|e| {
+        tracing::error!("[gemini] list_models decode response: {}", e);
+        ApiError::domain_simple(
+            axum::http::StatusCode::BAD_GATEWAY,
+            "ai_decode_error",
+            "Respuesta de Gemini no decodificable",
+        )
+    })?;
+    Ok(parsed.models)
+}
+
 // ─── Helpers de costos (estimación) ─────────────────────────────────────────
 
 /// Estimación grosera de costo USD basada en tarifas Gemini 1.5 Flash (2025-Q1):

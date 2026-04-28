@@ -218,6 +218,82 @@ impl RedisClient {
         let _: Result<(), _> = pipe.query_async(&mut conn).await;
     }
 
+    // ============================================
+    // AI Agent — cache de listado de modelos por workspace+api_key
+    // ============================================
+
+    /// Lee el cache del listado de modelos. Devuelve el JSON serializado tal
+    /// cual fue guardado (el handler lo deserializa al DTO).
+    ///
+    /// El key incluye el hash de la api_key para que rotar la key invalide
+    /// implícitamente el cache (key vieja queda huérfana hasta que expire).
+    pub async fn get_ai_models_cache(
+        &self,
+        workspace_id: &str,
+        api_key: &str,
+    ) -> Option<String> {
+        let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;
+        let key = ai_models_cache_key(workspace_id, api_key);
+        conn.get(key).await.ok().flatten()
+    }
+
+    /// Cachea el listado serializado a JSON. TTL en segundos.
+    pub async fn set_ai_models_cache(
+        &self,
+        workspace_id: &str,
+        api_key: &str,
+        payload: &str,
+        ttl_secs: u64,
+    ) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let key = ai_models_cache_key(workspace_id, api_key);
+        let _: Result<(), _> = conn.set_ex(key, payload, ttl_secs).await;
+    }
+
+    /// Borra TODAS las entradas de cache de modelos para el workspace
+    /// (independientemente del hash de api_key). Se usa al rotar la api_key
+    /// del workspace en el PATCH /settings.
+    ///
+    /// Implementación: SCAN + DEL — Redis no permite borrar por prefijo
+    /// directamente. Es best-effort; si SCAN falla, no rompemos el flow del
+    /// PATCH (la cache vieja queda hasta que expire por TTL).
+    pub async fn invalidate_ai_models_cache(&self, workspace_id: &str) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let pattern = format!("ai_agent:models:{}:*", workspace_id);
+        // SCAN con MATCH — itera todas las keys y junta las que matchean.
+        let mut cursor: u64 = 0;
+        let mut to_delete: Vec<String> = Vec::new();
+        loop {
+            let res: Result<(u64, Vec<String>), _> = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(100)
+                .query_async(&mut conn)
+                .await;
+            match res {
+                Ok((next, keys)) => {
+                    to_delete.extend(keys);
+                    if next == 0 {
+                        break;
+                    }
+                    cursor = next;
+                }
+                Err(_) => return,
+            }
+        }
+        for k in to_delete {
+            let _: Result<(), _> = conn.del(k).await;
+        }
+    }
+
     /// Intenta adquirir un lock de asignación para una conversación.
     /// Retorna true si el lock fue adquirido (esta instancia debe proceder).
     /// TTL de 15 segundos para evitar locks eternos.
@@ -261,6 +337,18 @@ fn url_preview_key(url: &str) -> String {
 
 fn media_cache_key(media_id: &str) -> String {
     format!("wa:media:{}", media_id)
+}
+
+/// Hash corto (8 bytes hex) de la api_key. No es para verificar la key —
+/// sólo para que dos workspaces con la misma key y dos workspaces con keys
+/// distintas usen entradas de cache separadas.
+fn ai_models_cache_key(workspace_id: &str, api_key: &str) -> String {
+    let digest = Sha256::digest(api_key.as_bytes());
+    let mut hex = String::with_capacity(16);
+    for b in digest.iter().take(8) {
+        hex.push_str(&format!("{:02x}", b));
+    }
+    format!("ai_agent:models:{}:{}", workspace_id, hex)
 }
 
 fn exchange_rate_key() -> String {
