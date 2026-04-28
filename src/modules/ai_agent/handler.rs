@@ -68,8 +68,23 @@ const DEFAULT_TEST_MODEL: &str = "gemini-1.5-flash-latest";
 
 const RECOMMENDED_MODEL_IDS: &[&str] = &[
     "gemini-1.5-flash-latest",
-    "gemini-1.5-pro-latest",
+    "gemini-1.5-flash-8b-latest",
+    "gemini-2.0-flash-exp",
 ];
+
+/// Patrones de modelos que están en el free tier de Google AI Studio
+/// (a 2026-04). Match por substring contra el id devuelto por Gemini.
+/// Cuando Google ajuste los tiers, actualizar acá.
+const FREE_TIER_PATTERNS: &[&str] = &[
+    "gemini-1.5-flash",      // 1.5-flash y 1.5-flash-8b (todas variantes)
+    "gemini-2.0-flash-exp",  // experimental free tier
+    "gemini-2.0-flash-thinking-exp",
+    "gemini-2.5-flash-lite", // 2.5 flash lite — free tier confirmado
+];
+
+fn is_free_tier(id: &str) -> bool {
+    FREE_TIER_PATTERNS.iter().any(|p| id.contains(p))
+}
 
 fn require_superadmin(u: &User) -> Result<(), ApiError> {
     if u.role != SUPERADMIN_ROLE {
@@ -1014,6 +1029,10 @@ pub async fn test_connection_for_agent_handler(
 #[derive(Debug, Deserialize)]
 pub struct ListModelsRawQuery {
     pub api_key: String,
+    /// Por default solo devolvemos modelos del free tier de Google AI Studio.
+    /// Pasar `true` incluye los que requieren billing.
+    #[serde(default)]
+    pub include_paid: Option<bool>,
 }
 
 #[utoipa::path(
@@ -1050,9 +1069,10 @@ pub async fn list_models_raw_handler(
         relay.as_ref(),
     )
     .await?;
+    let include_paid = q.include_paid.unwrap_or(false);
     Ok(Json(AiAgentModelsListResponse {
         ok: true,
-        data: filter_and_map_models(raw),
+        data: filter_and_map_models(raw, include_paid),
     }))
 }
 
@@ -1065,6 +1085,10 @@ pub struct ListModelsForAgentQuery {
     /// Override de api_key. Si no viene, se usa la guardada del agente.
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Por default solo devolvemos modelos del free tier de Google AI Studio.
+    /// Pasar `true` incluye los que requieren billing.
+    #[serde(default)]
+    pub include_paid: Option<bool>,
 }
 
 #[utoipa::path(
@@ -1111,10 +1135,19 @@ pub async fn list_models_for_agent_handler(
         }
     };
 
+    let include_paid = q.include_paid.unwrap_or(false);
     let agent_hex = oid.to_hex();
+    // Cacheamos SIEMPRE todos los modelos (con `free_tier` flag por item) y
+    // filtramos al servir según `include_paid`. Un solo cache para los dos
+    // modos.
     if let Some(cached) = state.redis.get_ai_models_cache(&agent_hex, &api_key).await {
         if let Ok(items) = serde_json::from_str::<Vec<AiAgentModelItem>>(&cached) {
-            return Ok(Json(AiAgentModelsListResponse { ok: true, data: items }));
+            let filtered = if include_paid {
+                items
+            } else {
+                items.into_iter().filter(|m| m.free_tier).collect()
+            };
+            return Ok(Json(AiAgentModelsListResponse { ok: true, data: filtered }));
         }
     }
 
@@ -1126,13 +1159,19 @@ pub async fn list_models_for_agent_handler(
         relay.as_ref(),
     )
     .await?;
-    let items = filter_and_map_models(raw);
-    if let Ok(json) = serde_json::to_string(&items) {
+    // Cacheamos todos (include_paid=true para no filtrar en cache).
+    let all_items = filter_and_map_models(raw, true);
+    if let Ok(json) = serde_json::to_string(&all_items) {
         state
             .redis
             .set_ai_models_cache(&agent_hex, &api_key, &json, MODELS_CACHE_TTL_SECS)
             .await;
     }
+    let items = if include_paid {
+        all_items
+    } else {
+        all_items.into_iter().filter(|m| m.free_tier).collect()
+    };
     Ok(Json(AiAgentModelsListResponse {
         ok: true,
         data: items,
@@ -1141,6 +1180,7 @@ pub async fn list_models_for_agent_handler(
 
 fn filter_and_map_models(
     raw: Vec<super::gemini::GeminiModelEntry>,
+    include_paid: bool,
 ) -> Vec<AiAgentModelItem> {
     raw.into_iter()
         .filter_map(|m| {
@@ -1155,6 +1195,12 @@ fn filter_and_map_models(
             {
                 return None;
             }
+            let free_tier = is_free_tier(id);
+            // Por default solo devolvemos los free; con ?include_paid=true
+            // el FE también recibe los que requieren billing.
+            if !include_paid && !free_tier {
+                return None;
+            }
             let supports = true;
             let recommended = RECOMMENDED_MODEL_IDS.iter().any(|r| *r == id);
             Some(AiAgentModelItem {
@@ -1167,6 +1213,7 @@ fn filter_and_map_models(
                 supports_system_instruction: supports,
                 version: m.version.unwrap_or_default(),
                 recommended,
+                free_tier,
             })
         })
         .collect()
