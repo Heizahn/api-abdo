@@ -130,52 +130,44 @@ fn build_system_instruction(
     faqs_inline: Option<&str>,
     customer_context: Option<&str>,
 ) -> SystemInstruction {
-    // Composición ordenada: el system_prompt del SUPERADMIN va primero;
-    // personality, FAQs, customer_context y reglas mínimas se appendean.
+    // El back solo pasa DATOS etiquetados — el SUPERADMIN decide el
+    // comportamiento desde `system_prompt` en el front. No metemos
+    // instrucciones imperativas ("NO pidas cédula", "úsalo cuando…").
     let mut chunks: Vec<String> = Vec::new();
 
     if !agent.system_prompt.trim().is_empty() {
         chunks.push(agent.system_prompt.trim().to_string());
     }
 
-    // Bloque de personalidad: nombre, tono, idioma, frases prohibidas,
-    // saludo inicial, despedida.
+    // Datos de personalidad como etiquetas neutras. El system_prompt los
+    // referencia como prefiera ("usá el saludo configurado", etc).
     let mut personality_lines = Vec::new();
     let p = &agent.personality;
     if !p.assistant_name.is_empty() {
-        personality_lines.push(format!("Tu nombre: {}.", p.assistant_name));
+        personality_lines.push(format!("assistant_name: {}", p.assistant_name));
     }
     if !p.tone.is_empty() {
-        personality_lines.push(format!("Tono: {}.", p.tone));
+        personality_lines.push(format!("tone: {}", p.tone));
     }
     if !p.locale.is_empty() {
-        personality_lines.push(format!("Idioma/dialecto: {}.", p.locale));
+        personality_lines.push(format!("locale: {}", p.locale));
     }
     if !p.greeting.trim().is_empty() {
-        personality_lines.push(format!(
-            "Saludo inicial (úsalo cuando empieces la conversación o el cliente te salude por primera vez): «{}»",
-            p.greeting.trim()
-        ));
+        personality_lines.push(format!("greeting: {}", p.greeting.trim()));
     }
     if !p.farewell.trim().is_empty() {
-        personality_lines.push(format!(
-            "Despedida (úsala cuando cierres la conversación): «{}»",
-            p.farewell.trim()
-        ));
+        personality_lines.push(format!("farewell: {}", p.farewell.trim()));
     }
     if !p.forbidden_phrases.is_empty() {
         personality_lines.push(format!(
-            "Frases prohibidas (NO usarlas): {}.",
+            "forbidden_phrases: {}",
             p.forbidden_phrases.join(", ")
         ));
     }
     if !personality_lines.is_empty() {
-        chunks.push(personality_lines.join("\n"));
+        chunks.push(format!("[personality]\n{}", personality_lines.join("\n")));
     }
 
-    // Contexto del cliente — se inyecta cuando el dispatch logra identificarlo
-    // por su número de teléfono. La IA debe usar estos datos directo y NO
-    // pedir cédula salvo que se le indique explícitamente.
     if let Some(ctx) = customer_context {
         if !ctx.trim().is_empty() {
             chunks.push(ctx.trim().to_string());
@@ -184,7 +176,7 @@ fn build_system_instruction(
 
     if let Some(faqs) = faqs_inline {
         if !faqs.trim().is_empty() {
-            chunks.push(format!("Conocimiento interno (FAQs):\n{}", faqs.trim()));
+            chunks.push(format!("[faqs]\n{}", faqs.trim()));
         }
     }
 

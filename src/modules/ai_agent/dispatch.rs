@@ -284,17 +284,11 @@ async fn run_dispatch(
         is_sandbox,
     };
 
-    // Si no hay texto y solo hay media, mandamos un placeholder breve para
-    // que la IA tenga un pivot conversacional.
+    // Si no hay texto y solo hay media, mandamos un placeholder MUY neutro
+    // (solo el tipo) para que la IA tenga un pivot. El comportamiento ante
+    // adjuntos lo decide el SUPERADMIN en el system_prompt.
     let effective_user_message = if user_text.trim().is_empty() {
-        match inbound.msg_type.as_str() {
-            "audio" => "(el cliente envió un mensaje de audio — escuchalo y respondé)",
-            "image" => "(el cliente envió una imagen — describila/analizala y respondé)",
-            "video" => "(el cliente envió un video — analizalo y respondé)",
-            "document" => "(el cliente envió un documento — leélo y respondé)",
-            _ => "(adjunto sin texto)",
-        }
-        .to_string()
+        format!("[attachment type={}]", inbound.msg_type)
     } else {
         user_text
     };
@@ -556,9 +550,10 @@ async fn send_live_response(
     Ok(())
 }
 
-/// Identificación automática del cliente por su número de WhatsApp. Devuelve
-/// un bloque de texto listo para meter al `system_instruction`. Si no
-/// encuentra match o hay varios, se devuelve `None`/lista — la IA decide.
+/// Pre-lookup automático del cliente por su número de WhatsApp. Devuelve
+/// un bloque etiquetado con los DATOS encontrados (o un flag de "no match").
+/// El back NO le dice a la IA qué hacer con eso — el SUPERADMIN configura
+/// el comportamiento desde `system_prompt` en el front.
 async fn build_customer_context(state: &Arc<AppState>, customer_phone: &str) -> Option<String> {
     if customer_phone.trim().is_empty() {
         return None;
@@ -574,41 +569,21 @@ async fn build_customer_context(state: &Arc<AppState>, customer_phone: &str) -> 
             return None;
         }
     };
-    if matches.is_empty() {
-        return Some(format!(
-            "Identificación del cliente: el número de WhatsApp {} NO está registrado en \
-             nuestra base de clientes. Si necesitás verificar identidad, pedí la cédula \
-             (V-XXXXXXXX) o RIF y usá el tool `lookup_customer` con el id encontrado.",
-            customer_phone
-        ));
-    }
 
-    // Si hay un único match, lo presentamos como "cliente identificado". Si
-    // hay varios (cliente con varios servicios), la IA debe preguntar cuál.
     let mut buf = String::new();
-    if matches.len() == 1 {
-        buf.push_str(&format!(
-            "Cliente identificado por su número de WhatsApp ({}). NO le pidas cédula ni \
-             RIF — ya sabés quién es. Si te pide algo de su servicio, podés usar directamente \
-             estos datos:\n",
-            customer_phone
-        ));
-    } else {
-        buf.push_str(&format!(
-            "Por su número de WhatsApp ({}) encontramos {} servicios asociados. Preguntá \
-             al cliente cuál de los siguientes quiere consultar (preferí mostrar el nombre o \
-             la última identificación). Datos:\n",
-            customer_phone,
-            matches.len()
-        ));
+    buf.push_str(&format!("[customer_lookup_by_phone]\nphone: {}\n", customer_phone));
+    if matches.is_empty() {
+        buf.push_str("matches: 0\n");
+        return Some(buf);
     }
+    buf.push_str(&format!("matches: {}\n", matches.len()));
     for (i, m) in matches.iter().enumerate() {
         buf.push_str(&format!(
-            "  {}. client_id={} | nombre={} | identificación={} | estado={} | saldo={:.2}\n",
+            "  - [{}] client_id: {} | name: {} | identification: {} | status: {} | balance: {:.2}\n",
             i + 1,
             m.client_id,
-            m.name.as_deref().unwrap_or("(sin nombre)"),
-            m.identification.as_deref().unwrap_or("(sin id)"),
+            m.name.as_deref().unwrap_or(""),
+            m.identification.as_deref().unwrap_or(""),
             m.status,
             m.balance,
         ));
