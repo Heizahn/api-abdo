@@ -231,6 +231,7 @@ fn default_agent(label: String, description: String, ai_user_id: String, now: Bs
             default_ticket_category_id: Some("soporte_primer_segundo_nivel".into()),
         },
         limits: AiLimits::defaults(),
+        debounce_seconds: 10,
         created_at: now,
         updated_at: now,
     }
@@ -265,6 +266,7 @@ fn agent_to_item(a: AiAgent) -> AiAgentItem {
         tools: a.tools.into_iter().map(Into::into).collect(),
         escalation: a.escalation.into(),
         limits: a.limits.into(),
+        debounce_seconds: a.debounce_seconds,
         created_at: iso8601(a.created_at),
         updated_at: iso8601(a.updated_at),
     }
@@ -482,6 +484,9 @@ pub async fn create_ai_agent_handler(
     }
     apply_escalation(&mut agent.escalation, body.escalation);
     apply_limits(&mut agent.limits, body.limits);
+    if let Some(d) = body.debounce_seconds {
+        agent.debounce_seconds = d;
+    }
 
     let saved = state
         .db
@@ -573,6 +578,9 @@ pub async fn update_ai_agent_handler(
     }
     apply_escalation(&mut agent.escalation, body.escalation);
     apply_limits(&mut agent.limits, body.limits);
+    if let Some(d) = body.debounce_seconds {
+        agent.debounce_seconds = d;
+    }
     agent.updated_at = BsonDateTime::now();
 
     let saved = state

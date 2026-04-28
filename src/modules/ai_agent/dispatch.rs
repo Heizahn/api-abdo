@@ -22,9 +22,9 @@ use mongodb::bson::{oid::ObjectId, DateTime as BsonDateTime};
 
 use crate::{
     crypto::aes::decrypt_payload,
-    db::{AiAgentRepository, ConversationTouch, WhatsAppRepository},
+    db::{AiAgentRepository, ConversationTouch, ProfileRepository, WhatsAppRepository},
     models::{
-        ai_agent::AiAgentMode,
+        ai_agent::{AiAgent, AiAgentMode},
         whatsapp::WaMessage,
     },
     state::AppState,
@@ -39,10 +39,9 @@ use super::{
 /// Cuántos mensajes leemos hacia atrás para armar history + ráfaga.
 const RECENT_WINDOW: i64 = 40;
 
-/// Debounce: cuántos segundos esperamos desde el último inbound antes de
-/// procesar la ráfaga. Si llega otro mensaje en ese intervalo, el spawn
-/// nuevo lo extiende y este aborta.
-const DEBOUNCE_SECONDS: u64 = 4;
+/// Fallback cuando el agente no tiene `debounce_seconds` (compat con docs
+/// viejos antes del campo). El default real es 10s y vive en el agente.
+const DEBOUNCE_FALLBACK_SECONDS: u64 = 10;
 
 fn ai_agent_secret() -> String {
     std::env::var("JWT_SECRET").unwrap_or_default()
@@ -69,12 +68,33 @@ pub fn dispatch_inbound_async(
     let now_ms = chrono::Utc::now().timestamp_millis();
 
     tokio::spawn(async move {
-        // Marcar como "actividad reciente". El próximo inbound va a sobreescribir.
+        // Marcar como "actividad reciente". El próximo inbound sobreescribe.
         state.redis.set_ai_debounce_ts(&conv_hex, now_ms).await;
 
-        // Esperar debounce. Si llega otro mensaje en este intervalo, ese
-        // spawn va a actualizar el timestamp.
-        tokio::time::sleep(Duration::from_secs(DEBOUNCE_SECONDS)).await;
+        // Cargar agente para conocer su `debounce_seconds`. Si no hay agente
+        // activo, salimos silencioso.
+        let agent = match state.db.find_active_agent_for_workspace(&workspace_id).await {
+            Ok(Some(a)) => a,
+            Ok(None) => {
+                tracing::debug!(
+                    "[ai_agent.dispatch] sin agente activo para workspace={}",
+                    workspace_id.to_hex()
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("[ai_agent.dispatch] error buscando agente: {}", e);
+                return;
+            }
+        };
+        let debounce_secs = if agent.debounce_seconds == 0 {
+            DEBOUNCE_FALLBACK_SECONDS
+        } else {
+            agent.debounce_seconds as u64
+        };
+
+        // Esperar el debounce.
+        tokio::time::sleep(Duration::from_secs(debounce_secs)).await;
 
         // ¿Sigo siendo el último? Si no, otro spawn procesará la ráfaga.
         match state.redis.get_ai_debounce_ts(&conv_hex).await {
@@ -97,7 +117,7 @@ pub fn dispatch_inbound_async(
             return;
         }
 
-        let result = run_dispatch(state.clone(), inbound, workspace_id).await;
+        let result = run_dispatch(state.clone(), agent, inbound, workspace_id).await;
         state.redis.release_ai_dispatch_lock(&conv_hex).await;
         if let Err(e) = result {
             tracing::warn!("[ai_agent.dispatch] error: {}", e);
@@ -107,23 +127,10 @@ pub fn dispatch_inbound_async(
 
 async fn run_dispatch(
     state: Arc<AppState>,
+    agent: AiAgent,
     inbound: WaMessage,
     workspace_id: ObjectId,
 ) -> Result<(), String> {
-    let agent = match state
-        .db
-        .find_active_agent_for_workspace(&workspace_id)
-        .await?
-    {
-        Some(a) => a,
-        None => {
-            tracing::debug!(
-                "[ai_agent.dispatch] sin agente activo para workspace={}",
-                workspace_id.to_hex()
-            );
-            return Ok(());
-        }
-    };
     let agent_id = agent.id.ok_or_else(|| "agent sin _id".to_string())?;
 
     tracing::info!(
@@ -152,21 +159,31 @@ async fn run_dispatch(
     let is_sandbox = !is_live;
 
     // ── Releer mensajes recientes y armar la "ráfaga" ───────────────────
-    // Todo `in` después del último `out` (o desde el principio si no hay
-    // outbound previo) es la ráfaga del cliente — la respondemos en un
-    // único turno.
+    // `recent` viene ordenado por `_id` ascendente (orden de inserción real
+    // en el back, no `timestamp` de Meta). Ráfaga = todos los inbounds con
+    // `_id >= inbound.id` — el inbound original que disparó este dispatch
+    // y cualquiera que llegó después (incluso si su timestamp es anterior
+    // al último outbound persistido).
+    let inbound_oid = match inbound.id {
+        Some(o) => o,
+        None => return Err("inbound sin _id".into()),
+    };
     let recent = state
         .db
         .list_recent_messages_for_conversation(&inbound.conversation_id, RECENT_WINDOW)
         .await?;
-    let last_out_idx = recent.iter().rposition(|m| m.direction == "out");
-    let burst_start = last_out_idx.map(|i| i + 1).unwrap_or(0);
-    let history_msgs: &[WaMessage] = &recent[..burst_start];
-    let burst: &[WaMessage] = &recent[burst_start..];
 
-    // History = todo antes de la ráfaga, traducido a roles.
-    let history: Vec<ConvTurn> = history_msgs
+    // History: todo lo que NO está en la ráfaga. Esto incluye outbounds
+    // posteriores al inbound_oid (porque el bot pudo haber respondido a
+    // un turno previo mientras este mensaje quedaba pendiente). Los
+    // mantenemos para que la IA tenga el contexto cronológico correcto.
+    let history: Vec<ConvTurn> = recent
         .iter()
+        .filter(|m| {
+            // Excluir los que van a la ráfaga (inbounds con _id >= inbound_oid).
+            !(m.direction == "in"
+                && m.id.map(|i| i >= inbound_oid).unwrap_or(false))
+        })
         .filter_map(|m| {
             let text = m.body.as_deref()?.trim().to_string();
             if text.is_empty() {
@@ -181,8 +198,16 @@ async fn run_dispatch(
         })
         .collect();
 
-    // Texto unificado de la ráfaga (4 mensajes consecutivos del cliente
-    // se ven como un solo input multilínea para la IA).
+    // Burst: inbounds con `_id >= inbound_oid` en orden de _id ascendente.
+    let burst: Vec<&WaMessage> = recent
+        .iter()
+        .filter(|m| {
+            m.direction == "in" && m.id.map(|i| i >= inbound_oid).unwrap_or(false)
+        })
+        .collect();
+
+    // Texto unificado de la ráfaga (4 mensajes seguidos del cliente se ven
+    // como un solo input multilínea para la IA).
     let burst_texts: Vec<String> = burst
         .iter()
         .filter_map(|m| {
@@ -198,12 +223,11 @@ async fn run_dispatch(
     // Multimedia inline: descargamos el media de cada mensaje de la ráfaga
     // que tenga uno (Gemini soporta múltiples partes inline en un turno).
     let mut user_media: Vec<MediaInput> = Vec::new();
-    for m in burst {
+    for m in &burst {
         let mut chunks = build_media_inputs(&state, &wa_settings, m).await;
         user_media.append(&mut chunks);
     }
 
-    // Si no hay nada que mandar (ej. solo location/contacts/sticker), skip.
     if burst_texts.is_empty() && user_media.is_empty() {
         tracing::info!(
             "[ai_agent.dispatch] ráfaga sin contenido procesable (último msg_type={}); skip",
@@ -212,6 +236,12 @@ async fn run_dispatch(
         return Ok(());
     }
     let user_text = burst_texts.join("\n");
+
+    // ── Pre-lookup del cliente por su número de teléfono ────────────────
+    // Si el `conv.phone` matchea con un Cliente, inyectamos sus datos al
+    // system_instruction. Así la IA sabe quién es sin pedir cédula y solo
+    // la pide si NO se pudo identificar.
+    let customer_context = build_customer_context(&state, &conv.phone).await;
 
     let api_key = match decrypt_api_key(&agent, &ai_agent_secret()) {
         Ok(k) => k,
@@ -278,6 +308,7 @@ async fn run_dispatch(
         &effective_user_message,
         &user_media,
         faqs_inline.as_deref(),
+        customer_context.as_deref(),
         &tool_ctx,
     )
     .await
@@ -523,6 +554,66 @@ async fn send_live_response(
     };
     crate::modules::whatsapp::ws::broadcast_all(&state.ws_registry, &ev).await;
     Ok(())
+}
+
+/// Identificación automática del cliente por su número de WhatsApp. Devuelve
+/// un bloque de texto listo para meter al `system_instruction`. Si no
+/// encuentra match o hay varios, se devuelve `None`/lista — la IA decide.
+async fn build_customer_context(state: &Arc<AppState>, customer_phone: &str) -> Option<String> {
+    if customer_phone.trim().is_empty() {
+        return None;
+    }
+    let matches = match state
+        .db
+        .find_clients_for_ai_lookup(Some(customer_phone), None)
+        .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!("[ai_agent.dispatch] lookup por phone falló: {}", e);
+            return None;
+        }
+    };
+    if matches.is_empty() {
+        return Some(format!(
+            "Identificación del cliente: el número de WhatsApp {} NO está registrado en \
+             nuestra base de clientes. Si necesitás verificar identidad, pedí la cédula \
+             (V-XXXXXXXX) o RIF y usá el tool `lookup_customer` con el id encontrado.",
+            customer_phone
+        ));
+    }
+
+    // Si hay un único match, lo presentamos como "cliente identificado". Si
+    // hay varios (cliente con varios servicios), la IA debe preguntar cuál.
+    let mut buf = String::new();
+    if matches.len() == 1 {
+        buf.push_str(&format!(
+            "Cliente identificado por su número de WhatsApp ({}). NO le pidas cédula ni \
+             RIF — ya sabés quién es. Si te pide algo de su servicio, podés usar directamente \
+             estos datos:\n",
+            customer_phone
+        ));
+    } else {
+        buf.push_str(&format!(
+            "Por su número de WhatsApp ({}) encontramos {} servicios asociados. Preguntá \
+             al cliente cuál de los siguientes quiere consultar (preferí mostrar el nombre o \
+             la última identificación). Datos:\n",
+            customer_phone,
+            matches.len()
+        ));
+    }
+    for (i, m) in matches.iter().enumerate() {
+        buf.push_str(&format!(
+            "  {}. client_id={} | nombre={} | identificación={} | estado={} | saldo={:.2}\n",
+            i + 1,
+            m.client_id,
+            m.name.as_deref().unwrap_or("(sin nombre)"),
+            m.identification.as_deref().unwrap_or("(sin id)"),
+            m.status,
+            m.balance,
+        ));
+    }
+    Some(buf)
 }
 
 fn truncate(s: &str, n: usize) -> String {

@@ -201,11 +201,14 @@ impl AiAgentRepository for MongoDB {
         conversation_id: &ObjectId,
         limit: i64,
     ) -> Result<Vec<WaMessage>, String> {
-        // Sort desc + limit → últimos N. El caller los invierte si necesita
-        // orden cronológico. Hace falta el orden desc para no leer toda la
-        // conv si tiene cientos de mensajes.
+        // Sort por `_id` (ObjectId) — refleja el orden de inserción en el
+        // back, no el `timestamp` de Meta. Necesario porque inbounds de Meta
+        // pueden tener timestamp menor que el outbound persistido un instante
+        // después (cuando el cliente manda un mensaje mientras el bot
+        // responde). El caller dispatch usa este orden para identificar
+        // ráfagas pendientes correctamente.
         let opts = FindOptions::builder()
-            .sort(doc! { "timestamp": -1 })
+            .sort(doc! { "_id": -1 })
             .limit(limit.max(1))
             .build();
         let mut items: Vec<WaMessage> = self

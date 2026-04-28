@@ -125,17 +125,21 @@ impl RunnerOutput {
 // Build prompt + payload
 // ============================================
 
-fn build_system_instruction(agent: &AiAgent, faqs_inline: Option<&str>) -> SystemInstruction {
+fn build_system_instruction(
+    agent: &AiAgent,
+    faqs_inline: Option<&str>,
+    customer_context: Option<&str>,
+) -> SystemInstruction {
     // Composición ordenada: el system_prompt del SUPERADMIN va primero;
-    // FAQs y reglas mínimas se appendean para que la IA las tenga "frescas".
+    // personality, FAQs, customer_context y reglas mínimas se appendean.
     let mut chunks: Vec<String> = Vec::new();
 
     if !agent.system_prompt.trim().is_empty() {
         chunks.push(agent.system_prompt.trim().to_string());
     }
 
-    // Mini-bloque de personalidad (asistente_name + tono). El SUPERADMIN ya
-    // suele incluirlo en el system_prompt, pero lo reforzamos por si falta.
+    // Bloque de personalidad: nombre, tono, idioma, frases prohibidas,
+    // saludo inicial, despedida.
     let mut personality_lines = Vec::new();
     let p = &agent.personality;
     if !p.assistant_name.is_empty() {
@@ -147,6 +151,18 @@ fn build_system_instruction(agent: &AiAgent, faqs_inline: Option<&str>) -> Syste
     if !p.locale.is_empty() {
         personality_lines.push(format!("Idioma/dialecto: {}.", p.locale));
     }
+    if !p.greeting.trim().is_empty() {
+        personality_lines.push(format!(
+            "Saludo inicial (úsalo cuando empieces la conversación o el cliente te salude por primera vez): «{}»",
+            p.greeting.trim()
+        ));
+    }
+    if !p.farewell.trim().is_empty() {
+        personality_lines.push(format!(
+            "Despedida (úsala cuando cierres la conversación): «{}»",
+            p.farewell.trim()
+        ));
+    }
     if !p.forbidden_phrases.is_empty() {
         personality_lines.push(format!(
             "Frases prohibidas (NO usarlas): {}.",
@@ -155,6 +171,15 @@ fn build_system_instruction(agent: &AiAgent, faqs_inline: Option<&str>) -> Syste
     }
     if !personality_lines.is_empty() {
         chunks.push(personality_lines.join("\n"));
+    }
+
+    // Contexto del cliente — se inyecta cuando el dispatch logra identificarlo
+    // por su número de teléfono. La IA debe usar estos datos directo y NO
+    // pedir cédula salvo que se le indique explícitamente.
+    if let Some(ctx) = customer_context {
+        if !ctx.trim().is_empty() {
+            chunks.push(ctx.trim().to_string());
+        }
     }
 
     if let Some(faqs) = faqs_inline {
@@ -201,10 +226,11 @@ pub async fn run_turn(
     user_message: &str,
     user_media: &[MediaInput],
     faqs_inline: Option<&str>,
+    customer_context: Option<&str>,
     tool_ctx: &ToolContext,
 ) -> Result<RunnerOutput, ApiError> {
     let started = Instant::now();
-    let system_instruction = build_system_instruction(agent, faqs_inline);
+    let system_instruction = build_system_instruction(agent, faqs_inline, customer_context);
 
     let mut contents = convert_history(history);
     // Mensaje nuevo del cliente: texto + cualquier multimedia adjunta.

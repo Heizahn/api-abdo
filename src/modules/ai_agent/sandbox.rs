@@ -269,6 +269,7 @@ pub async fn sandbox_handler(
         &message,
         &[],
         faqs_inline.as_deref(),
+        None,
         &tool_ctx,
     )
     .await?;

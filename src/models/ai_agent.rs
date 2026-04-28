@@ -51,8 +51,18 @@ pub struct AiAgent {
     pub tools: Vec<AiToolConfig>,
     pub escalation: AiEscalationRules,
     pub limits: AiLimits,
+    /// Segundos a esperar desde el último inbound antes de procesar la ráfaga
+    /// (debounce). Si el cliente manda 4 mensajes en sucesión rápida, el bot
+    /// espera `debounce_seconds` desde el último para responder UNA vez con
+    /// todo el contexto. Default 10. 0 = procesar inmediato (no recomendado).
+    #[serde(default = "default_debounce_seconds")]
+    pub debounce_seconds: u32,
     pub created_at: DateTime,
     pub updated_at: DateTime,
+}
+
+fn default_debounce_seconds() -> u32 {
+    10
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, ToSchema)]
@@ -241,6 +251,7 @@ pub struct AiAgentItem {
     pub tools: Vec<AiToolConfigDto>,
     pub escalation: AiEscalationRulesDto,
     pub limits: AiLimitsDto,
+    pub debounce_seconds: u32,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -392,6 +403,8 @@ pub struct CreateAiAgentRequest {
     pub escalation: Option<AiEscalationRulesInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<AiLimitsInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debounce_seconds: Option<u32>,
 }
 
 /// Body de `PATCH /ai-agent/agents/:id`. Todo opcional; merge campo a campo
@@ -425,6 +438,8 @@ pub struct UpdateAiAgentRequest {
     pub escalation: Option<AiEscalationRulesInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<AiLimitsInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debounce_seconds: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, ToSchema, Default)]
