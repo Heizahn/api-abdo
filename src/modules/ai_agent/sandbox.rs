@@ -267,6 +267,7 @@ pub async fn sandbox_handler(
         relay,
         &history,
         &message,
+        &[],
         faqs_inline.as_deref(),
         &tool_ctx,
     )

@@ -38,6 +38,15 @@ use super::{
     tools::{build_function_declarations, execute_tool, ToolContext},
 };
 
+/// Adjunto multimedia que viene junto al texto del usuario en el primer
+/// turno. El runner lo inyecta como `Part::inline` en `contents[0]`.
+#[derive(Debug, Clone)]
+pub struct MediaInput {
+    pub mime_type: String,
+    /// Base64 estándar (NO url-safe). El caller hace `STANDARD.encode(bytes)`.
+    pub data_base64: String,
+}
+
 /// Cap defensivo para evitar loops infinitos. Si la IA gira pidiendo tools sin
 /// converger, escalamos por `max_iterations_reached`.
 const MAX_ITERATIONS: u32 = 5;
@@ -190,6 +199,7 @@ pub async fn run_turn(
     relay: Option<&AiRelay>,
     history: &[ConvTurn],
     user_message: &str,
+    user_media: &[MediaInput],
     faqs_inline: Option<&str>,
     tool_ctx: &ToolContext,
 ) -> Result<RunnerOutput, ApiError> {
@@ -197,10 +207,21 @@ pub async fn run_turn(
     let system_instruction = build_system_instruction(agent, faqs_inline);
 
     let mut contents = convert_history(history);
-    // Mensaje nuevo del cliente.
+    // Mensaje nuevo del cliente: texto + cualquier multimedia adjunta.
+    let mut user_parts: Vec<Part> = Vec::with_capacity(1 + user_media.len());
+    if !user_message.trim().is_empty() {
+        user_parts.push(Part::text(user_message));
+    }
+    for m in user_media {
+        user_parts.push(Part::inline(&m.mime_type, &m.data_base64));
+    }
+    if user_parts.is_empty() {
+        // No hay nada que mandar. Defensivo.
+        user_parts.push(Part::text(""));
+    }
     contents.push(Content {
         role: "user".into(),
-        parts: vec![Part::text(user_message)],
+        parts: user_parts,
     });
 
     let function_declarations = build_function_declarations(&agent.tools);
@@ -232,6 +253,7 @@ pub async fn run_turn(
                     text: p.text.clone(),
                     function_call: None,
                     function_response: None,
+                    inline_data: None,
                 }).collect(),
             }),
             contents: contents.clone(),
@@ -343,6 +365,7 @@ pub async fn run_turn(
                         name: call.name,
                         response: payload,
                     }),
+                    inline_data: None,
                 }],
             });
         }

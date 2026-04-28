@@ -202,7 +202,9 @@ fn default_agent(label: String, description: String, ai_user_id: String, now: Bs
             model_id: "gemini-1.5-flash-latest".into(),
             temperature: 0.7,
             max_tokens: 500,
-            timeout_seconds: 10,
+            // 20s default — los modelos con function calling tardan 5-15s
+            // en armar la respuesta. 10s era insuficiente.
+            timeout_seconds: 20,
             api_key_encrypted: String::new(),
         },
         personality: AiPersonality {

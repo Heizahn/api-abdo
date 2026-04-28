@@ -93,6 +93,20 @@ pub struct Part {
     pub function_call: Option<FunctionCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function_response: Option<FunctionResponse>,
+    /// Multimedia inline (imagen, audio, etc). Gemini 1.5+ procesa nativo.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_data: Option<InlineData>,
+}
+
+/// Adjunto multimedia (imagen, audio, video, PDF). El `data` va en base64
+/// estándar (no URL-safe). `mime_type` debe ser uno que Gemini soporte:
+/// image/jpeg, image/png, image/webp, audio/mp3, audio/wav, audio/ogg,
+/// video/mp4, application/pdf, text/plain.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct InlineData {
+    pub mime_type: String,
+    pub data: String,
 }
 
 impl Part {
@@ -101,6 +115,19 @@ impl Part {
             text: Some(s.into()),
             function_call: None,
             function_response: None,
+            inline_data: None,
+        }
+    }
+
+    pub fn inline(mime_type: impl Into<String>, data_base64: impl Into<String>) -> Self {
+        Part {
+            text: None,
+            function_call: None,
+            function_response: None,
+            inline_data: Some(InlineData {
+                mime_type: mime_type.into(),
+                data: data_base64.into(),
+            }),
         }
     }
 
@@ -113,6 +140,7 @@ impl Part {
                 name: name.into(),
                 response,
             }),
+            inline_data: None,
         }
     }
 }

@@ -591,7 +591,8 @@ pub async fn receive_webhook(
                     let reply_to = resolve_reply_to_for_one(&state, &saved).await;
                     let saved_oid = saved.id;
                     let preview_text = saved.body.clone();
-                    let dispatch_text = preview_text.clone();
+                    // Clon para el dispatch IA (corre en tokio::spawn más abajo).
+                    let saved_for_dispatch = saved.clone();
                     let message_item = msg_to_item(saved, None, reply_to);
                     let agent_count = state.ws_registry.read().await.len();
                     tracing::info!(
@@ -642,16 +643,14 @@ pub async fn receive_webhook(
 
                     // Dispatch IA (shadow/live). Corre en background — si hay
                     // agente activo para este workspace, procesa el turno y
-                    // persiste `AiInteraction`. En shadow no envía nada al
-                    // cliente; en live envía vía Meta (TODO pendiente).
+                    // persiste `AiInteraction`. En shadow loguea qué habría
+                    // contestado; en live envía la respuesta vía Meta y
+                    // emite `MENSAJE_NUEVO` para los agentes humanos.
                     if let Some(ws_id) = settings.id {
                         crate::modules::ai_agent::dispatch::dispatch_inbound_async(
                             state.clone(),
-                            conv_id,
-                            saved_oid,
-                            dispatch_text,
+                            saved_for_dispatch,
                             ws_id,
-                            conv_now.business_phone.clone(),
                         );
                     }
                 }
@@ -3913,10 +3912,11 @@ fn msg_to_item(
     }
 }
 
-/// Atajo usado por jobs async (`url_preview`) para armar un `MessageItem`
-/// completo a partir de un `WaMessage` recién releído: resuelve `sent_by_name`
-/// y `reply_to` en un solo call. Costo: 1-2 queries a `Users` / `WaMessages`.
-pub(super) async fn build_message_item(state: &Arc<AppState>, m: WaMessage) -> MessageItem {
+/// Atajo usado por jobs async (`url_preview`, `ai_agent::dispatch`) para armar
+/// un `MessageItem` completo a partir de un `WaMessage` recién releído:
+/// resuelve `sent_by_name` y `reply_to` en un solo call. Costo: 1-2 queries
+/// a `Users` / `WaMessages`.
+pub async fn build_message_item(state: &Arc<AppState>, m: WaMessage) -> MessageItem {
     use crate::db::UserRepository;
     let name = match m.sent_by.as_deref() {
         Some(id) => state.db.find_user_by_id(id).await.ok().flatten().map(|u| u.name),
