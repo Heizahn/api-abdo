@@ -1071,7 +1071,9 @@ pub async fn list_models_raw_handler(
         relay.as_ref(),
     )
     .await?;
-    let include_paid = q.include_paid.unwrap_or(false);
+    // Por default devolvemos TODOS los modelos (free + paid). El flag
+    // `free_tier` viene en cada item para que el FE muestre badge si quiere.
+    let include_paid = q.include_paid.unwrap_or(true);
     Ok(Json(AiAgentModelsListResponse {
         ok: true,
         data: filter_and_map_models(raw, include_paid),
@@ -1137,7 +1139,9 @@ pub async fn list_models_for_agent_handler(
         }
     };
 
-    let include_paid = q.include_paid.unwrap_or(false);
+    // Por default devolvemos TODOS los modelos (free + paid). El flag
+    // `free_tier` viene en cada item para que el FE muestre badge si quiere.
+    let include_paid = q.include_paid.unwrap_or(true);
     let agent_hex = oid.to_hex();
     // Cacheamos SIEMPRE todos los modelos (con `free_tier` flag por item) y
     // filtramos al servir según `include_paid`. Un solo cache para los dos

@@ -15,6 +15,7 @@
 //! Corre en `tokio::spawn` para no bloquear el webhook.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use mongodb::bson::{oid::ObjectId, DateTime as BsonDateTime};
@@ -35,7 +36,13 @@ use super::{
     tools::ToolContext,
 };
 
-const HISTORY_MAX_TURNS: i64 = 20;
+/// Cuántos mensajes leemos hacia atrás para armar history + ráfaga.
+const RECENT_WINDOW: i64 = 40;
+
+/// Debounce: cuántos segundos esperamos desde el último inbound antes de
+/// procesar la ráfaga. Si llega otro mensaje en ese intervalo, el spawn
+/// nuevo lo extiende y este aborta.
+const DEBOUNCE_SECONDS: u64 = 4;
 
 fn ai_agent_secret() -> String {
     std::env::var("JWT_SECRET").unwrap_or_default()
@@ -45,17 +52,43 @@ fn ai_agent_secret() -> String {
 /// persistir el inbound. No bloquea — el webhook ya respondió 200 al
 /// momento que esta función retorna.
 ///
-/// Lock por conversación (Redis SETNX, TTL 60s) para evitar dispatchs
-/// concurrentes sobre la misma conv. Si el cliente manda 2 mensajes en
-/// 1s, el segundo skipea — su contenido entra al `history` del próximo
-/// turno cuando el cliente hable otra vez.
+/// **Debounce**: cuando llega un inbound, marca timestamp en Redis y
+/// duerme N segundos. Al despertar, si su timestamp sigue siendo el
+/// último → procesa toda la ráfaga ("Hola", "como estas?", "tengo duda")
+/// como un único turno. Si llegó otro mensaje después → ese spawn lo
+/// procesará, este sale.
+///
+/// **Lock anti-concurrencia**: red de seguridad además del debounce
+/// (TTL 60s). Releído al final.
 pub fn dispatch_inbound_async(
     state: Arc<AppState>,
     inbound: WaMessage,
     workspace_id: ObjectId,
 ) {
+    let conv_hex = inbound.conversation_id.to_hex();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
     tokio::spawn(async move {
-        let conv_hex = inbound.conversation_id.to_hex();
+        // Marcar como "actividad reciente". El próximo inbound va a sobreescribir.
+        state.redis.set_ai_debounce_ts(&conv_hex, now_ms).await;
+
+        // Esperar debounce. Si llega otro mensaje en este intervalo, ese
+        // spawn va a actualizar el timestamp.
+        tokio::time::sleep(Duration::from_secs(DEBOUNCE_SECONDS)).await;
+
+        // ¿Sigo siendo el último? Si no, otro spawn procesará la ráfaga.
+        match state.redis.get_ai_debounce_ts(&conv_hex).await {
+            Some(latest) if latest == now_ms => {}
+            _ => {
+                tracing::debug!(
+                    "[ai_agent.dispatch] debounce: llegó otro mensaje, skip (conv={})",
+                    conv_hex
+                );
+                return;
+            }
+        }
+
+        // Red de seguridad: nadie más procesando esta conv ahora.
         if !state.redis.try_lock_ai_dispatch(&conv_hex).await {
             tracing::info!(
                 "[ai_agent.dispatch] otro dispatch en curso para conv={}; skip",
@@ -63,6 +96,7 @@ pub fn dispatch_inbound_async(
             );
             return;
         }
+
         let result = run_dispatch(state.clone(), inbound, workspace_id).await;
         state.redis.release_ai_dispatch_lock(&conv_hex).await;
         if let Err(e) = result {
@@ -117,41 +151,24 @@ async fn run_dispatch(
     let is_live = matches!(agent.mode, AiAgentMode::Live);
     let is_sandbox = !is_live;
 
-    // Texto que va al modelo: body del inbound (caption en media, body en texto).
-    let user_text = inbound.body.clone().unwrap_or_default();
-
-    // Multimedia inline para Gemini. Solo procesamos lo que Gemini sabe leer
-    // (image/audio/video/pdf). Sticker/document genéricos van como "el cliente
-    // envió un archivo: <filename>" en texto.
-    let user_media = build_media_inputs(&state, &wa_settings, &inbound).await;
-
-    // Si no hay nada que mandar, salimos. Evita roundtrip a Gemini para
-    // tipos no soportados (location, contacts, button reply legacy, etc).
-    if user_text.trim().is_empty() && user_media.is_empty() {
-        tracing::info!(
-            "[ai_agent.dispatch] inbound sin contenido procesable (msg_type={}); skip",
-            inbound.msg_type
-        );
-        return Ok(());
-    }
-
-    // History: últimos N textos en orden cronológico (excluido el inbound
-    // recién insertado, que va por separado).
-    let raw_history = state
+    // ── Releer mensajes recientes y armar la "ráfaga" ───────────────────
+    // Todo `in` después del último `out` (o desde el principio si no hay
+    // outbound previo) es la ráfaga del cliente — la respondemos en un
+    // único turno.
+    let recent = state
         .db
-        .list_recent_messages_for_conversation(&inbound.conversation_id, HISTORY_MAX_TURNS)
+        .list_recent_messages_for_conversation(&inbound.conversation_id, RECENT_WINDOW)
         .await?;
-    let history: Vec<ConvTurn> = raw_history
-        .into_iter()
-        .filter(|m| {
-            // Excluir el inbound actual.
-            match (inbound.id, m.id) {
-                (Some(target), Some(this)) => this != target,
-                _ => true,
-            }
-        })
+    let last_out_idx = recent.iter().rposition(|m| m.direction == "out");
+    let burst_start = last_out_idx.map(|i| i + 1).unwrap_or(0);
+    let history_msgs: &[WaMessage] = &recent[..burst_start];
+    let burst: &[WaMessage] = &recent[burst_start..];
+
+    // History = todo antes de la ráfaga, traducido a roles.
+    let history: Vec<ConvTurn> = history_msgs
+        .iter()
         .filter_map(|m| {
-            let text = m.body?.trim().to_string();
+            let text = m.body.as_deref()?.trim().to_string();
             if text.is_empty() {
                 return None;
             }
@@ -163,6 +180,38 @@ async fn run_dispatch(
             Some(ConvTurn { role, text })
         })
         .collect();
+
+    // Texto unificado de la ráfaga (4 mensajes consecutivos del cliente
+    // se ven como un solo input multilínea para la IA).
+    let burst_texts: Vec<String> = burst
+        .iter()
+        .filter_map(|m| {
+            let t = m.body.as_deref()?.trim().to_string();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t)
+            }
+        })
+        .collect();
+
+    // Multimedia inline: descargamos el media de cada mensaje de la ráfaga
+    // que tenga uno (Gemini soporta múltiples partes inline en un turno).
+    let mut user_media: Vec<MediaInput> = Vec::new();
+    for m in burst {
+        let mut chunks = build_media_inputs(&state, &wa_settings, m).await;
+        user_media.append(&mut chunks);
+    }
+
+    // Si no hay nada que mandar (ej. solo location/contacts/sticker), skip.
+    if burst_texts.is_empty() && user_media.is_empty() {
+        tracing::info!(
+            "[ai_agent.dispatch] ráfaga sin contenido procesable (último msg_type={}); skip",
+            inbound.msg_type
+        );
+        return Ok(());
+    }
+    let user_text = burst_texts.join("\n");
 
     let api_key = match decrypt_api_key(&agent, &ai_agent_secret()) {
         Ok(k) => k,

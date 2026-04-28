@@ -295,16 +295,38 @@ impl RedisClient {
     }
 
     // ============================================
-    // AI Agent — lock por conversación para evitar dispatchs concurrentes
+    // AI Agent — debounce de inbounds + lock anti-concurrencia
     // ============================================
 
-    /// Intenta adquirir el lock de dispatch IA para `conv_id`. Devuelve `true`
-    /// si el caller debe procesar; `false` si ya hay otro dispatch en curso.
-    /// TTL 60s (un turno IA con tools rara vez supera 30s; 60s es margen).
+    /// Marca el timestamp del último inbound recibido para `conv_id`. El
+    /// dispatch lo usa para implementar debounce: tras dormir N segundos,
+    /// compara el timestamp guardado con el suyo. Si coincide → es el último,
+    /// procesa. Si cambió → llegó otro mensaje después, abort (otro spawn
+    /// procesará la ráfaga completa). TTL 5 min.
+    pub async fn set_ai_debounce_ts(&self, conv_id: &str, ts_ms: i64) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let key = format!("ai_agent:debounce:{}", conv_id);
+        let _: Result<(), _> = conn.set_ex(key, ts_ms, 300u64).await;
+    }
+
+    /// Lee el timestamp de la última actividad inbound. `None` si Redis está
+    /// caído o la key expiró.
+    pub async fn get_ai_debounce_ts(&self, conv_id: &str) -> Option<i64> {
+        let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;
+        let key = format!("ai_agent:debounce:{}", conv_id);
+        conn.get(key).await.ok().flatten()
+    }
+
+    /// Intenta adquirir el lock de dispatch IA para `conv_id`. Red de
+    /// seguridad además del debounce — evita que dos spawns con timestamps
+    /// muy cercanos terminen ejecutando el runner en paralelo. TTL 60s.
     pub async fn try_lock_ai_dispatch(&self, conv_id: &str) -> bool {
         let mut conn = match self.client.get_multiplexed_async_connection().await {
             Ok(c) => c,
-            Err(_) => return true, // Si Redis falla, no bloqueamos.
+            Err(_) => return true,
         };
         let key = format!("ai_agent:dispatch_lock:{}", conv_id);
         let result: Option<String> = redis::cmd("SET")
