@@ -22,7 +22,10 @@ use mongodb::bson::{oid::ObjectId, DateTime as BsonDateTime};
 
 use crate::{
     crypto::aes::decrypt_payload,
-    db::{AiAgentRepository, ConversationTouch, ProfileRepository, WhatsAppRepository},
+    db::{
+        AiAgentRepository, ConversationAiPatch, ConversationTouch, ProfileRepository,
+        WhatsAppRepository,
+    },
     models::{
         ai_agent::{AiAgent, AiAgentMode},
         whatsapp::WaMessage,
@@ -32,7 +35,7 @@ use crate::{
 
 use super::{
     gemini::AiRelay,
-    runner::{decrypt_api_key, run_turn, ConvRole, ConvTurn, MediaInput},
+    runner::{decrypt_api_key, run_turn, ConvRole, ConvTurn, MediaInput, PromptVariables},
     tools::{extract_allowed_transfer_targets, ToolContext},
 };
 
@@ -286,7 +289,15 @@ async fn run_dispatch(
     // Si el `conv.phone` matchea con un Cliente, inyectamos sus datos al
     // system_instruction. Así la IA sabe quién es sin pedir cédula y solo
     // la pide si NO se pudo identificar.
-    let customer_context = build_customer_context(&state, &conv.phone).await;
+    let (customer_context, customer_first_name) =
+        build_customer_context(&state, &conv.phone).await;
+
+    let prompt_vars = build_prompt_variables(
+        &agent,
+        &wa_settings,
+        &conv,
+        customer_first_name.as_deref(),
+    );
 
     let api_key = match decrypt_api_key(&agent, &ai_agent_secret()) {
         Ok(k) => k,
@@ -340,6 +351,7 @@ async fn run_dispatch(
         user_text
     };
 
+    let transfer_context_owned = conv.ai_transfer_context.clone();
     let output = match run_turn(
         &state.reqwest_client,
         &agent,
@@ -350,6 +362,8 @@ async fn run_dispatch(
         &user_media,
         faqs_inline.as_deref(),
         customer_context.as_deref(),
+        transfer_context_owned.as_deref(),
+        Some(&prompt_vars),
         &tool_ctx,
     )
     .await
@@ -376,6 +390,23 @@ async fn run_dispatch(
         output.output_tokens,
         output.latency_ms
     );
+
+    // Si consumimos transfer_context en este turno, limpiarlo para que no se
+    // arrastre a turnos siguientes del mismo agente destino.
+    if transfer_context_owned.is_some() {
+        let clear = ConversationAiPatch {
+            ai_active_agent_id: None,
+            ai_disabled: None,
+            ai_transfer_context: Some(None),
+        };
+        if let Err(e) = state
+            .db
+            .update_conversation_ai_state(&inbound.conversation_id, clear)
+            .await
+        {
+            tracing::warn!("[ai_agent.dispatch] limpiar transfer_context: {}", e);
+        }
+    }
 
     // Persistimos el turno como AiInteraction.
     let interaction = output.to_interaction(
@@ -598,12 +629,17 @@ async fn send_live_response(
 }
 
 /// Pre-lookup automático del cliente por su número de WhatsApp. Devuelve
-/// un bloque etiquetado con los DATOS encontrados (o un flag de "no match").
-/// El back NO le dice a la IA qué hacer con eso — el SUPERADMIN configura
-/// el comportamiento desde `system_prompt` en el front.
-async fn build_customer_context(state: &Arc<AppState>, customer_phone: &str) -> Option<String> {
+/// `(bloque_etiquetado, first_match_name)` — el bloque va al system_instruction;
+/// el name lo usa la sustitución de placeholders (`{customer_name}`).
+///
+/// El back NO le dice a la IA qué hacer con los datos — el SUPERADMIN
+/// configura el comportamiento desde `system_prompt` en el front.
+async fn build_customer_context(
+    state: &Arc<AppState>,
+    customer_phone: &str,
+) -> (Option<String>, Option<String>) {
     if customer_phone.trim().is_empty() {
-        return None;
+        return (None, None);
     }
     let matches = match state
         .db
@@ -613,7 +649,7 @@ async fn build_customer_context(state: &Arc<AppState>, customer_phone: &str) -> 
         Ok(m) => m,
         Err(e) => {
             tracing::warn!("[ai_agent.dispatch] lookup por phone falló: {}", e);
-            return None;
+            return (None, None);
         }
     };
 
@@ -621,7 +657,7 @@ async fn build_customer_context(state: &Arc<AppState>, customer_phone: &str) -> 
     buf.push_str(&format!("[customer_lookup_by_phone]\nphone: {}\n", customer_phone));
     if matches.is_empty() {
         buf.push_str("matches: 0\n");
-        return Some(buf);
+        return (Some(buf), None);
     }
     buf.push_str(&format!("matches: {}\n", matches.len()));
     for (i, m) in matches.iter().enumerate() {
@@ -635,7 +671,42 @@ async fn build_customer_context(state: &Arc<AppState>, customer_phone: &str) -> 
             m.balance,
         ));
     }
-    Some(buf)
+    let first_name = matches
+        .first()
+        .and_then(|m| m.name.as_ref())
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty());
+    (Some(buf), first_name)
+}
+
+/// Construye los valores que sustituyen `{placeholders}` del `system_prompt`.
+fn build_prompt_variables(
+    agent: &AiAgent,
+    wa_settings: &crate::models::whatsapp::WaSettings,
+    conv: &crate::models::whatsapp::WaConversation,
+    customer_first_name: Option<&str>,
+) -> PromptVariables {
+    use chrono::Datelike;
+    let now = crate::utils::timezone::VenezuelaDateTime::now();
+    let in_vz = now.in_venezuela();
+    let weekday = match in_vz.weekday() {
+        chrono::Weekday::Mon => "lunes",
+        chrono::Weekday::Tue => "martes",
+        chrono::Weekday::Wed => "miércoles",
+        chrono::Weekday::Thu => "jueves",
+        chrono::Weekday::Fri => "viernes",
+        chrono::Weekday::Sat => "sábado",
+        chrono::Weekday::Sun => "domingo",
+    };
+    PromptVariables {
+        assistant_name: agent.personality.assistant_name.clone(),
+        workspace_name: wa_settings.workspace_name.clone(),
+        customer_name: customer_first_name.unwrap_or("").to_string(),
+        customer_phone: conv.phone.clone(),
+        business_phone: conv.business_phone.clone(),
+        today: now.date_string_venezuela(),
+        weekday: weekday.to_string(),
+    }
 }
 
 /// Resuelve el agente IA que debería procesar este turno:

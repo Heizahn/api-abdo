@@ -222,6 +222,8 @@ fn default_agent(label: String, description: String, ai_user_id: String, now: Bs
             AiToolConfig { name: "request_human".into(),     enabled: true,  description_override: None, config: None },
             AiToolConfig { name: "create_ticket".into(),     enabled: true,  description_override: None, config: None },
             AiToolConfig { name: "transfer_to_agent".into(), enabled: false, description_override: None, config: None },
+            AiToolConfig { name: "list_plans".into(),        enabled: false, description_override: None, config: None },
+            AiToolConfig { name: "check_coverage".into(),    enabled: false, description_override: None, config: None },
         ],
         escalation: AiEscalationRules {
             keywords: vec!["humano".into(), "operador".into(), "queja".into(), "reclamo".into()],

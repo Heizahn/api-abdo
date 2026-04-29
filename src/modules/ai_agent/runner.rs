@@ -30,6 +30,33 @@ use crate::{
     models::ai_agent::{AiAgent, AiInteraction, AiToolCallLog},
 };
 
+/// Valores que el back inyecta en `system_prompt` reemplazando los
+/// placeholders `{snake_case}` que el SUPERADMIN escribe desde el front.
+/// Valores vacíos generan substring `""` (no rompen el prompt — quedan visibles
+/// como espacios en blanco si el SUPERADMIN testea en sandbox).
+#[derive(Debug, Default, Clone)]
+pub struct PromptVariables {
+    pub assistant_name: String,
+    pub workspace_name: String,
+    pub customer_name: String,
+    pub customer_phone: String,
+    pub business_phone: String,
+    /// Fecha en formato `YYYY-MM-DD` en TZ Caracas.
+    pub today: String,
+    /// Día de la semana en español (`lunes`, `martes`, …).
+    pub weekday: String,
+}
+
+fn substitute_prompt(text: &str, vars: &PromptVariables) -> String {
+    text.replace("{assistant_name}", &vars.assistant_name)
+        .replace("{workspace_name}", &vars.workspace_name)
+        .replace("{customer_name}", &vars.customer_name)
+        .replace("{customer_phone}", &vars.customer_phone)
+        .replace("{business_phone}", &vars.business_phone)
+        .replace("{today}", &vars.today)
+        .replace("{weekday}", &vars.weekday)
+}
+
 use super::{
     gemini::{
         self, AiRelay, Content, FunctionCall, FunctionResponse, GenerateContentRequest,
@@ -129,14 +156,27 @@ fn build_system_instruction(
     agent: &AiAgent,
     faqs_inline: Option<&str>,
     customer_context: Option<&str>,
+    transfer_context: Option<&str>,
+    vars: Option<&PromptVariables>,
 ) -> SystemInstruction {
     // El back solo pasa DATOS etiquetados — el SUPERADMIN decide el
     // comportamiento desde `system_prompt` en el front. No metemos
     // instrucciones imperativas ("NO pidas cédula", "úsalo cuando…").
     let mut chunks: Vec<String> = Vec::new();
 
-    if !agent.system_prompt.trim().is_empty() {
-        chunks.push(agent.system_prompt.trim().to_string());
+    let prompt_owned;
+    let prompt_str: &str = if !agent.system_prompt.trim().is_empty() {
+        if let Some(v) = vars {
+            prompt_owned = substitute_prompt(agent.system_prompt.trim(), v);
+            &prompt_owned
+        } else {
+            agent.system_prompt.trim()
+        }
+    } else {
+        ""
+    };
+    if !prompt_str.is_empty() {
+        chunks.push(prompt_str.to_string());
     }
 
     // Datos de personalidad como etiquetas neutras. El system_prompt los
@@ -171,6 +211,12 @@ fn build_system_instruction(
     if let Some(ctx) = customer_context {
         if !ctx.trim().is_empty() {
             chunks.push(ctx.trim().to_string());
+        }
+    }
+
+    if let Some(tc) = transfer_context {
+        if !tc.trim().is_empty() {
+            chunks.push(format!("[transfer_context]\n{}", tc.trim()));
         }
     }
 
@@ -219,10 +265,18 @@ pub async fn run_turn(
     user_media: &[MediaInput],
     faqs_inline: Option<&str>,
     customer_context: Option<&str>,
+    transfer_context: Option<&str>,
+    prompt_vars: Option<&PromptVariables>,
     tool_ctx: &ToolContext,
 ) -> Result<RunnerOutput, ApiError> {
     let started = Instant::now();
-    let system_instruction = build_system_instruction(agent, faqs_inline, customer_context);
+    let system_instruction = build_system_instruction(
+        agent,
+        faqs_inline,
+        customer_context,
+        transfer_context,
+        prompt_vars,
+    );
 
     let mut contents = convert_history(history);
     // Mensaje nuevo del cliente: texto + cualquier multimedia adjunta.

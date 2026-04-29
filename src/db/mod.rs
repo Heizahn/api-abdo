@@ -305,6 +305,8 @@ pub struct UpdateQuickReplyPatch {
 pub struct ConversationAiPatch<'a> {
     pub ai_active_agent_id: Option<Option<&'a ObjectId>>,
     pub ai_disabled: Option<bool>,
+    /// Tri-state: `Some(Some(s))` setea, `Some(None)` limpia, `None` no toca.
+    pub ai_transfer_context: Option<Option<&'a str>>,
 }
 
 /// Payload para `touch_conversation`: agrupa todos los campos denormalizados

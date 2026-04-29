@@ -100,6 +100,91 @@ pub const T_GET_INVOICES: &str = "get_invoices";
 pub const T_REQUEST_HUMAN: &str = "request_human";
 pub const T_CREATE_TICKET: &str = "create_ticket";
 pub const T_TRANSFER_AGENT: &str = "transfer_to_agent";
+pub const T_LIST_PLANS: &str = "list_plans";
+pub const T_CHECK_COVERAGE: &str = "check_coverage";
+
+// ============================================
+// Datos estáticos: planes y zonas de cobertura
+// ============================================
+//
+// Fuente: https://abdo77.com.ve/planes/ y https://abdo77.com.ve/cobertura/
+// (snapshot 2026-04). Si la oferta cambia, actualizar acá. La IA NUNCA expone
+// precio — la página real dice "Consultar precio" para todos los planes.
+
+struct AbdoPlan {
+    name: &'static str,
+    mbps: u32,
+    devices_recommendation: &'static str,
+    benefits: &'static [&'static str],
+}
+
+const ABDO_PLANS: &[AbdoPlan] = &[
+    AbdoPlan {
+        name: "Conexión Esencial",
+        mbps: 80,
+        devices_recommendation: "1 a 3 dispositivos",
+        benefits: &["Internet ilimitado", "Router Wi-Fi incluido", "IPv6 público"],
+    },
+    AbdoPlan {
+        name: "Conexión Avanzada",
+        mbps: 100,
+        devices_recommendation: "6 a 8 dispositivos",
+        benefits: &["Internet ilimitado", "Router Wi-Fi incluido", "IPv6 público"],
+    },
+    AbdoPlan {
+        name: "Conexión Élite 120",
+        mbps: 120,
+        devices_recommendation: "Más de 10 dispositivos",
+        benefits: &["Internet ilimitado", "Router Wi-Fi incluido", "IPv6 público"],
+    },
+    AbdoPlan {
+        name: "Conexión Élite 250",
+        mbps: 250,
+        devices_recommendation: "Más de 10 dispositivos",
+        benefits: &["Internet ilimitado", "Router Wi-Fi incluido", "IPv6 público"],
+    },
+    AbdoPlan {
+        name: "Conexión Élite 500",
+        mbps: 500,
+        devices_recommendation: "Más de 10 dispositivos",
+        benefits: &["Internet ilimitado", "Router Wi-Fi incluido", "IPv6 público"],
+    },
+    AbdoPlan {
+        name: "Conexión Élite 1000",
+        mbps: 1000,
+        devices_recommendation: "Más de 10 dispositivos",
+        benefits: &["Internet ilimitado", "Router Wi-Fi incluido", "IPv6 público"],
+    },
+];
+
+/// Zonas con cobertura activa. Todas en Carabobo (Venezuela).
+const ABDO_COVERAGE_ZONES: &[&str] = &[
+    "Carlos Arvelo",
+    "Guacara",
+    "Los Guayos",
+    "Valencia",
+    "San Diego",
+    "Libertador",
+];
+
+const ABDO_COVERAGE_REGION: &str = "Carabobo";
+
+/// Normaliza un string para matchear zonas: lowercase, sin tildes, trim.
+fn normalize_zone(s: &str) -> String {
+    s.trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'á' | 'à' | 'ä' | 'â' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            other => other,
+        })
+        .collect()
+}
 
 /// Lista de los 4 tools de PR 2 con descriptions default y schemas. El SUPERADMIN
 /// puede sobreescribir el `description` desde el front (`description_override`),
@@ -158,6 +243,28 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                     "summary": { "type": "string", "description": "Contexto adicional del caso para el agente humano." }
                 },
                 "required": ["category_id", "reason"]
+            }),
+        )),
+        T_LIST_PLANS => Some((
+            "Lista los planes de internet residenciales disponibles (nombre, velocidad, dispositivos recomendados, beneficios). \
+             NO incluye precios — el back filtra esa info. Si el cliente pregunta el costo, decirle que el precio se confirma con el equipo comercial.",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+        )),
+        T_CHECK_COVERAGE => Some((
+            "Verifica si una zona/sector/municipio tiene cobertura. Llamar SIEMPRE cuando el cliente menciona dónde vive, antes de recomendar plan. \
+             La verificación es por nombre de municipio o sector — pasá el texto que mencionó el cliente tal cual.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "zone": {
+                        "type": "string",
+                        "description": "Nombre de la zona, municipio o sector mencionado por el cliente. Ej: 'Valencia', 'San Diego', 'los guayos'."
+                    }
+                },
+                "required": ["zone"]
             }),
         )),
         T_TRANSFER_AGENT => Some((
@@ -268,6 +375,8 @@ pub async fn execute_tool(name: &str, args: Value, ctx: &ToolContext) -> ToolRes
         T_REQUEST_HUMAN => exec_request_human(args, ctx, started).await,
         T_CREATE_TICKET => exec_create_ticket(args, ctx, started).await,
         T_TRANSFER_AGENT => exec_transfer_to_agent(args, ctx, started).await,
+        T_LIST_PLANS => exec_list_plans(args, ctx, started).await,
+        T_CHECK_COVERAGE => exec_check_coverage(args, ctx, started).await,
         other => ToolResult::err(format!("unknown_tool:{}", other), started),
     }
 }
@@ -388,6 +497,7 @@ async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) ->
     let patch = ConversationAiPatch {
         ai_active_agent_id: Some(None),
         ai_disabled: Some(true),
+        ai_transfer_context: Some(None),
     };
     if let Err(e) = ctx.state.db.update_conversation_ai_state(&conv_id, patch).await {
         return ToolResult::err(format!("db_error:{}", e), started);
@@ -395,6 +505,31 @@ async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) ->
     if let Err(e) = ctx.state.db.assign_conversation(&conv_id, None).await {
         // No es crítico — la IA ya quedó pausada. Loggeamos y seguimos.
         tracing::warn!("[ai_agent.request_human] release assignment falló: {}", e);
+    }
+
+    // Persistir el motivo como evento de timeline visible al humano que
+    // vaya a tomar la conv. Best-effort — si falla, no bloqueamos.
+    let trimmed_reason = reason.trim();
+    let note_for_event = if trimmed_reason.is_empty() {
+        None
+    } else {
+        Some(trimmed_reason)
+    };
+    let conv_for_event = ctx.state.db.find_conversation_by_id(&conv_id).await.ok().flatten();
+    if let Some(conv) = conv_for_event {
+        let input = crate::models::whatsapp::WaConversationEventInput {
+            conversation_id: &conv_id,
+            business_phone: &conv.business_phone,
+            event_type: "ai_handoff",
+            actor_id: Some(ctx.ai_user_id.as_str()),
+            actor_name: Some(ctx.ai_user_name.as_str()),
+            target_id: None,
+            target_name: None,
+            note: note_for_event,
+        };
+        if let Err(e) = ctx.state.db.record_conversation_event(input).await {
+            tracing::warn!("[ai_agent.request_human] timeline event falló: {}", e);
+        }
     }
 
     // Broadcast del estado para que el front actualice el indicador en vivo.
@@ -411,6 +546,71 @@ async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) ->
             "mode": "live",
             "reason": reason,
             "ai_disabled": true,
+        }),
+        started,
+    )
+}
+
+// ============================================
+// Tool: list_plans
+// ============================================
+
+async fn exec_list_plans(_args: Value, _ctx: &ToolContext, started: Instant) -> ToolResult {
+    let items: Vec<Value> = ABDO_PLANS
+        .iter()
+        .map(|p| {
+            json!({
+                "name": p.name,
+                "mbps": p.mbps,
+                "devices_recommendation": p.devices_recommendation,
+                "benefits": p.benefits,
+            })
+        })
+        .collect();
+    ToolResult::ok(
+        json!({
+            "items": items,
+            "price_note": "Los precios no se exponen al asistente. Si el cliente pide costo, indicar que el equipo comercial confirma el monto al cerrar la instalación.",
+        }),
+        started,
+    )
+}
+
+// ============================================
+// Tool: check_coverage
+// ============================================
+
+#[derive(Deserialize)]
+struct CheckCoverageArgs {
+    zone: String,
+}
+
+async fn exec_check_coverage(args: Value, _ctx: &ToolContext, started: Instant) -> ToolResult {
+    let parsed: CheckCoverageArgs = match serde_json::from_value(args) {
+        Ok(v) => v,
+        Err(e) => return ToolResult::err(format!("invalid_args:{}", e), started),
+    };
+    let raw = parsed.zone.trim();
+    if raw.is_empty() {
+        return ToolResult::err("missing_zone", started);
+    }
+    let normalized = normalize_zone(raw);
+    let matched = ABDO_COVERAGE_ZONES
+        .iter()
+        .find(|z| {
+            let nz = normalize_zone(z);
+            normalized == nz || normalized.contains(&nz) || nz.contains(&normalized)
+        })
+        .copied();
+
+    let covered = matched.is_some();
+    ToolResult::ok(
+        json!({
+            "covered": covered,
+            "matched_zone": matched,
+            "queried_zone": raw,
+            "region": ABDO_COVERAGE_REGION,
+            "available_zones": ABDO_COVERAGE_ZONES,
         }),
         started,
     )
@@ -471,11 +671,19 @@ async fn exec_transfer_to_agent(args: Value, ctx: &ToolContext, started: Instant
 
     let conv_id = ctx.conversation_id.unwrap();
 
-    // Set del agente destino. `ai_disabled=false` por si venía pausada (caso
-    // raro: la IA se reactivó y al primer turno decidió delegar).
+    // Set del agente destino + persistir contexto del transfer para que el
+    // próximo turno del agente destino arranque sabiendo qué detectó el
+    // origen. `ai_disabled=false` por si venía pausada.
+    let trimmed_reason = reason.trim();
+    let ctx_to_persist: Option<&str> = if trimmed_reason.is_empty() {
+        None
+    } else {
+        Some(trimmed_reason)
+    };
     let patch = ConversationAiPatch {
         ai_active_agent_id: Some(Some(&target_oid)),
         ai_disabled: Some(false),
+        ai_transfer_context: Some(ctx_to_persist),
     };
     if let Err(e) = ctx.state.db.update_conversation_ai_state(&conv_id, patch).await {
         return ToolResult::err(format!("db_error:{}", e), started);

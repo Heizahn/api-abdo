@@ -82,6 +82,12 @@ pub struct WaConversation {
     /// cerrar/reabrir o cuando el front reactive la IA explícitamente.
     #[serde(default)]
     pub ai_disabled: bool,
+    /// Contexto que el agente origen escribe cuando llama `transfer_to_agent`.
+    /// El próximo turno del agente destino lo recibe inyectado como bloque
+    /// `[transfer_context]` en `system_instruction`. Se limpia tras consumirlo
+    /// para no arrastrarlo turnos siguientes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_transfer_context: Option<String>,
 }
 
 /// Registro "conversación abierta por agente X en fecha Y" (colección `WaConversationOpens`).

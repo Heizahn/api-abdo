@@ -32,7 +32,7 @@ use crate::{
 
 use super::{
     gemini::AiRelay,
-    runner::{run_turn, ConvRole, ConvTurn},
+    runner::{run_turn, ConvRole, ConvTurn, PromptVariables},
     tools::{extract_allowed_transfer_targets, ToolContext},
 };
 
@@ -262,6 +262,27 @@ pub async fn sandbox_handler(
         allowed_transfer_targets,
     };
 
+    use chrono::Datelike;
+    let now = crate::utils::timezone::VenezuelaDateTime::now();
+    let weekday = match now.in_venezuela().weekday() {
+        chrono::Weekday::Mon => "lunes",
+        chrono::Weekday::Tue => "martes",
+        chrono::Weekday::Wed => "miércoles",
+        chrono::Weekday::Thu => "jueves",
+        chrono::Weekday::Fri => "viernes",
+        chrono::Weekday::Sat => "sábado",
+        chrono::Weekday::Sun => "domingo",
+    };
+    let prompt_vars = PromptVariables {
+        assistant_name: agent.personality.assistant_name.clone(),
+        workspace_name: wa_setting.workspace_name.clone(),
+        customer_name: String::new(),
+        customer_phone: String::new(),
+        business_phone: wa_setting.phone.clone(),
+        today: now.date_string_venezuela(),
+        weekday: weekday.to_string(),
+    };
+
     let output = run_turn(
         &state.reqwest_client,
         &agent,
@@ -272,6 +293,8 @@ pub async fn sandbox_handler(
         &[],
         faqs_inline.as_deref(),
         None,
+        None,
+        Some(&prompt_vars),
         &tool_ctx,
     )
     .await?;

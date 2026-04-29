@@ -452,7 +452,11 @@ impl WhatsAppRepository for MongoDB {
                 doc! { "_id": id },
                 doc! {
                     "$set": { "status": "closed", "ai_disabled": false },
-                    "$unset": { "assigned_to": "", "ai_active_agent_id": "" },
+                    "$unset": {
+                        "assigned_to": "",
+                        "ai_active_agent_id": "",
+                        "ai_transfer_context": "",
+                    },
                 },
             )
             .await
@@ -468,7 +472,11 @@ impl WhatsAppRepository for MongoDB {
                 doc! { "_id": id, "status": "closed" },
                 doc! {
                     "$set": { "status": "pending", "ai_disabled": false },
-                    "$unset": { "assigned_to": "", "ai_active_agent_id": "" },
+                    "$unset": {
+                        "assigned_to": "",
+                        "ai_active_agent_id": "",
+                        "ai_transfer_context": "",
+                    },
                 },
             )
             .await
@@ -491,6 +499,12 @@ impl WhatsAppRepository for MongoDB {
         }
         if let Some(d) = patch.ai_disabled {
             set.insert("ai_disabled", d);
+        }
+        if let Some(ctx) = patch.ai_transfer_context {
+            match ctx {
+                Some(s) => { set.insert("ai_transfer_context", s); }
+                None => { unset.insert("ai_transfer_context", ""); }
+            }
         }
         if set.is_empty() && unset.is_empty() {
             return Ok(true);
