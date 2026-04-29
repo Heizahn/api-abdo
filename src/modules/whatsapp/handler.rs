@@ -2057,6 +2057,9 @@ pub async fn close_conversation_handler(
         state.redis.decr_agent_load(agent).await;
     }
 
+    // Limpieza de counters AI por conversación al cerrar.
+    state.redis.clear_ai_conv_counters(&id).await;
+
     let ev = WsServerEvent::ChatCerrado { conversation_id: id.clone() };
     broadcast_all(&state.ws_registry, &ev).await;
 
@@ -2151,6 +2154,9 @@ pub async fn reopen_conversation_handler(
     // Si era una llamada idempotente sobre una conv ya abierta, no disparamos
     // nada para no confundir a los otros clientes conectados.
     if reopened {
+        // Reopen = arranque limpio: limpiamos counters AI por conv.
+        state.redis.clear_ai_conv_counters(&id).await;
+
         let ev = WsServerEvent::ChatReabierto {
             conversation_id: id.clone(),
             conversation: conversation_item.clone(),

@@ -404,6 +404,178 @@ impl RedisClient {
         let _: Result<(), _> = conn.del(key).await;
     }
 
+    // ============================================
+    // AI Agent — counters de límites + escalación
+    // ============================================
+    //
+    // Diseño:
+    // - Counters per-conv (TTL 7 días — auto-cleanup si la conv queda inactiva).
+    //   Reset explícito en close/reopen y al auto-escalar.
+    // - Counters per-agent diarios. La key incluye `YYYY-MM-DD` en TZ Caracas
+    //   para que cada día tenga su key fresca; TTL 36h cubre el rollover sin
+    //   borrar mientras el día está corriendo.
+
+    fn ai_today_str() -> String {
+        VenezuelaDateTime::now().date_string_venezuela()
+    }
+
+    /// Segundos hasta el final del día actual en Caracas (ttl seguro para
+    /// counters diarios — al rollover la siguiente key se crea fresca y la
+    /// vieja expira sola).
+    fn ai_seconds_to_eod_caracas() -> u64 {
+        use chrono::{Duration, NaiveTime, TimeZone};
+        let now_vz = VenezuelaDateTime::now().in_venezuela();
+        let tomorrow = now_vz.date_naive() + Duration::days(1);
+        let midnight_naive = tomorrow.and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap());
+        let tz = chrono_tz::America::Caracas;
+        let midnight = match tz.from_local_datetime(&midnight_naive) {
+            chrono::LocalResult::Single(dt) => dt,
+            chrono::LocalResult::Ambiguous(dt, _) => dt,
+            chrono::LocalResult::None => return 86_400,
+        };
+        let secs = (midnight.timestamp() - now_vz.timestamp()).max(60) as u64;
+        // Cap defensivo: si por algún motivo algo sale mal, no más de 36h.
+        secs.min(36 * 3600)
+    }
+
+    // ── Per-conv: turns total ───────────────────────────────────────────────
+
+    pub async fn incr_ai_turns_conv(&self, conv_id: &str) -> i64 {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        let key = format!("ai_agent:turns_conv:{}", conv_id);
+        let new_val: i64 = conn.incr(&key, 1).await.unwrap_or(0);
+        let _: Result<(), _> = conn.expire(&key, 7 * 24 * 3600).await;
+        new_val
+    }
+
+    pub async fn get_ai_turns_conv(&self, conv_id: &str) -> i64 {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        let key = format!("ai_agent:turns_conv:{}", conv_id);
+        conn.get(&key).await.unwrap_or(Some(0)).unwrap_or(0)
+    }
+
+    // ── Per-conv: identification attempts (lookup_customer fallidos) ────────
+
+    pub async fn incr_ai_id_attempts(&self, conv_id: &str) -> i64 {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        let key = format!("ai_agent:id_attempts:{}", conv_id);
+        let new_val: i64 = conn.incr(&key, 1).await.unwrap_or(0);
+        let _: Result<(), _> = conn.expire(&key, 7 * 24 * 3600).await;
+        new_val
+    }
+
+    // ── Per-conv: turnos sin resolución (sin tool de cierre) ────────────────
+
+    pub async fn incr_ai_no_resolution(&self, conv_id: &str) -> i64 {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        let key = format!("ai_agent:no_resolution:{}", conv_id);
+        let new_val: i64 = conn.incr(&key, 1).await.unwrap_or(0);
+        let _: Result<(), _> = conn.expire(&key, 7 * 24 * 3600).await;
+        new_val
+    }
+
+    /// Limpia todos los counters per-conv (turns, id_attempts, no_resolution).
+    /// Se llama desde close/reopen y al auto-escalar.
+    pub async fn clear_ai_conv_counters(&self, conv_id: &str) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let keys = vec![
+            format!("ai_agent:turns_conv:{}", conv_id),
+            format!("ai_agent:id_attempts:{}", conv_id),
+            format!("ai_agent:no_resolution:{}", conv_id),
+        ];
+        for k in keys {
+            let _: Result<(), _> = conn.del(k).await;
+        }
+    }
+
+    // ── Per-agent diario: turnos ────────────────────────────────────────────
+
+    pub async fn incr_ai_turns_agent_daily(&self, agent_id: &str) -> i64 {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        let day = Self::ai_today_str();
+        let key = format!("ai_agent:turns_daily:{}:{}", agent_id, day);
+        let new_val: i64 = conn.incr(&key, 1).await.unwrap_or(0);
+        let ttl = Self::ai_seconds_to_eod_caracas() + 3600;
+        let _: Result<(), _> = conn.expire(&key, ttl as i64).await;
+        new_val
+    }
+
+    pub async fn get_ai_turns_agent_daily(&self, agent_id: &str) -> i64 {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        let day = Self::ai_today_str();
+        let key = format!("ai_agent:turns_daily:{}:{}", agent_id, day);
+        conn.get(&key).await.unwrap_or(Some(0)).unwrap_or(0)
+    }
+
+    // ── Per-agent diario: tokens ────────────────────────────────────────────
+
+    pub async fn add_ai_tokens_agent_daily(&self, agent_id: &str, tokens: u64) -> i64 {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        let day = Self::ai_today_str();
+        let key = format!("ai_agent:tokens_daily:{}:{}", agent_id, day);
+        let new_val: i64 = conn.incr(&key, tokens as i64).await.unwrap_or(0);
+        let ttl = Self::ai_seconds_to_eod_caracas() + 3600;
+        let _: Result<(), _> = conn.expire(&key, ttl as i64).await;
+        new_val
+    }
+
+    pub async fn get_ai_tokens_agent_daily(&self, agent_id: &str) -> i64 {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
+        let day = Self::ai_today_str();
+        let key = format!("ai_agent:tokens_daily:{}:{}", agent_id, day);
+        conn.get(&key).await.unwrap_or(Some(0)).unwrap_or(0)
+    }
+
+    /// Atómicamente setea el flag "alerta de costo ya emitida hoy" para evitar
+    /// inundar logs/WS. Devuelve `true` si era la primera vez (caller emite
+    /// alerta), `false` si ya estaba seteado.
+    pub async fn try_mark_cost_alert_today(&self, agent_id: &str) -> bool {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        let day = Self::ai_today_str();
+        let key = format!("ai_agent:cost_alert:{}:{}", agent_id, day);
+        let ttl = Self::ai_seconds_to_eod_caracas() + 3600;
+        let result: Option<String> = redis::cmd("SET")
+            .arg(&key)
+            .arg("1")
+            .arg("NX")
+            .arg("EX")
+            .arg(ttl)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(None);
+        result.is_some()
+    }
+
     /// Intenta adquirir un lock de asignación para una conversación.
     /// Retorna true si el lock fue adquirido (esta instancia debe proceder).
     /// TTL de 15 segundos para evitar locks eternos.

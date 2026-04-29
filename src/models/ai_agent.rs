@@ -107,6 +107,11 @@ pub struct AiPersonality {
     pub tone: String,
     pub greeting: String,
     pub farewell: String,
+    /// Despedida específica cuando la IA deriva la conv a un humano (limit
+    /// reached, keyword match, etc). El back lo manda al cliente justo antes
+    /// de pausar la IA. Si está vacío, se usa un fallback genérico.
+    #[serde(default)]
+    pub farewell_to_human: String,
     pub forbidden_phrases: Vec<String>,
 }
 
@@ -444,6 +449,7 @@ pub struct AiPersonalityDto {
     pub tone: String,
     pub greeting: String,
     pub farewell: String,
+    pub farewell_to_human: String,
     pub forbidden_phrases: Vec<String>,
 }
 
@@ -455,6 +461,7 @@ impl From<AiPersonality> for AiPersonalityDto {
             tone: p.tone,
             greeting: p.greeting,
             farewell: p.farewell,
+            farewell_to_human: p.farewell_to_human,
             forbidden_phrases: p.forbidden_phrases,
         }
     }
@@ -641,6 +648,8 @@ pub struct AiPersonalityInput {
     pub greeting: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub farewell: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub farewell_to_human: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forbidden_phrases: Option<Vec<String>>,
 }

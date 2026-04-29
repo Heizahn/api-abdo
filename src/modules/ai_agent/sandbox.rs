@@ -250,6 +250,7 @@ pub async fn sandbox_handler(
     let relay = relay_owned.as_ref();
 
     let allowed_transfer_targets = extract_allowed_transfer_targets(&agent.tools);
+    let agent_snapshot = std::sync::Arc::new(agent.clone());
     let tool_ctx = ToolContext {
         state: state.clone(),
         workspace_id: workspace_oid,
@@ -260,6 +261,8 @@ pub async fn sandbox_handler(
         ai_user_name: agent.personality.assistant_name.clone(),
         is_sandbox: true,
         allowed_transfer_targets,
+        agent_snapshot: agent_snapshot.clone(),
+        default_ticket_category_id: agent.escalation.default_ticket_category_id.clone(),
     };
 
     use chrono::Datelike;

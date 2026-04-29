@@ -198,6 +198,9 @@ fn build_system_instruction(
     if !p.farewell.trim().is_empty() {
         personality_lines.push(format!("farewell: {}", p.farewell.trim()));
     }
+    if !p.farewell_to_human.trim().is_empty() {
+        personality_lines.push(format!("farewell_to_human: {}", p.farewell_to_human.trim()));
+    }
     if !p.forbidden_phrases.is_empty() {
         personality_lines.push(format!(
             "forbidden_phrases: {}",

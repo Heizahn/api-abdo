@@ -34,6 +34,7 @@ use crate::{
 };
 
 use super::{
+    escalation,
     gemini::AiRelay,
     runner::{decrypt_api_key, run_turn, ConvRole, ConvTurn, MediaInput, PromptVariables},
     tools::{extract_allowed_transfer_targets, ToolContext},
@@ -108,6 +109,64 @@ pub fn dispatch_inbound_async(
                 return;
             }
         };
+
+        // ── Schedule enforcement ───────────────────────────────────────────
+        if !is_within_schedule(&agent.schedule) {
+            tracing::info!(
+                "[ai_agent.dispatch] fuera de horario (agent={}, tz={}), skip",
+                agent.id.map(|o| o.to_hex()).unwrap_or_default(),
+                agent.schedule.timezone
+            );
+            return;
+        }
+
+        // ── Daily limits per-agent (turns / tokens) ────────────────────────
+        // Si el agente alcanzó su cap diario, esta conv se auto-escala
+        // (cliente recibe farewell_to_human + humano puede tomar). Cada conv
+        // que llegue después del cap escala individualmente — la IA no
+        // responde más hasta el rollover de medianoche en TZ Caracas.
+        if let Some(agent_oid) = agent.id {
+            let agent_hex = agent_oid.to_hex();
+            let used_turns = state.redis.get_ai_turns_agent_daily(&agent_hex).await;
+            if agent.limits.max_turns_per_day > 0
+                && used_turns >= agent.limits.max_turns_per_day as i64
+            {
+                tracing::warn!(
+                    "[ai_agent.dispatch] daily turn limit reached (agent={}, used={}, cap={}); escalate conv={}",
+                    agent_hex, used_turns, agent.limits.max_turns_per_day, conv_hex
+                );
+                escalation::auto_escalate(
+                    &state,
+                    &inbound.conversation_id,
+                    &agent,
+                    escalation::REASON_DAILY_TURN_LIMIT,
+                    Some("Límite diario de turnos del agente alcanzado"),
+                    true,
+                )
+                .await;
+                return;
+            }
+            let used_tokens = state.redis.get_ai_tokens_agent_daily(&agent_hex).await;
+            if agent.limits.max_tokens_per_day > 0
+                && used_tokens >= agent.limits.max_tokens_per_day as i64
+            {
+                tracing::warn!(
+                    "[ai_agent.dispatch] daily token limit reached (agent={}, used={}, cap={}); escalate conv={}",
+                    agent_hex, used_tokens, agent.limits.max_tokens_per_day, conv_hex
+                );
+                escalation::auto_escalate(
+                    &state,
+                    &inbound.conversation_id,
+                    &agent,
+                    escalation::REASON_DAILY_TOKEN_LIMIT,
+                    Some("Límite diario de tokens del agente alcanzado"),
+                    true,
+                )
+                .await;
+                return;
+            }
+        }
+
         let debounce_secs = if agent.debounce_seconds == 0 {
             DEBOUNCE_FALLBACK_SECONDS
         } else {
@@ -285,6 +344,50 @@ async fn run_dispatch(
     }
     let user_text = burst_texts.join("\n");
 
+    // ── Per-conv: chequeo de turn limit ANTES del LLM ──────────────────────
+    let conv_hex = inbound.conversation_id.to_hex();
+    if agent.limits.max_turns_per_conversation > 0 {
+        let turns = state.redis.get_ai_turns_conv(&conv_hex).await;
+        if turns >= agent.limits.max_turns_per_conversation as i64 {
+            tracing::warn!(
+                "[ai_agent.dispatch] turn limit per conv reached (conv={}, turns={}, cap={}); auto-escalate",
+                conv_hex, turns, agent.limits.max_turns_per_conversation
+            );
+            escalation::auto_escalate(
+                &state,
+                &inbound.conversation_id,
+                &agent,
+                escalation::REASON_CONVERSATION_TURN_LIMIT,
+                Some("Límite de turnos por conversación alcanzado"),
+                true,
+            )
+            .await;
+            return Ok(());
+        }
+    }
+
+    // ── Pre-LLM keyword escalation ─────────────────────────────────────────
+    // Si `always_escalate_when_asked=true` y alguna keyword matchea con el
+    // texto del cliente, escalamos sin gastar tokens.
+    if agent.escalation.always_escalate_when_asked
+        && matches_escalation_keyword(&user_text, &agent.escalation.keywords)
+    {
+        tracing::info!(
+            "[ai_agent.dispatch] keyword match (conv={}); auto-escalate sin LLM",
+            conv_hex
+        );
+        escalation::auto_escalate(
+            &state,
+            &inbound.conversation_id,
+            &agent,
+            escalation::REASON_KEYWORD_MATCHED,
+            Some("Cliente pidió hablar con humano (keyword match)"),
+            true,
+        )
+        .await;
+        return Ok(());
+    }
+
     // ── Pre-lookup del cliente por su número de teléfono ────────────────
     // Si el `conv.phone` matchea con un Cliente, inyectamos sus datos al
     // system_instruction. Así la IA sabe quién es sin pedir cédula y solo
@@ -330,6 +433,7 @@ async fn run_dispatch(
     let relay = relay_owned.as_ref();
 
     let allowed_transfer_targets = extract_allowed_transfer_targets(&agent.tools);
+    let agent_snapshot = Arc::new(agent.clone());
     let tool_ctx = ToolContext {
         state: state.clone(),
         workspace_id,
@@ -340,6 +444,8 @@ async fn run_dispatch(
         ai_user_name: agent.personality.assistant_name.clone(),
         is_sandbox,
         allowed_transfer_targets,
+        agent_snapshot: agent_snapshot.clone(),
+        default_ticket_category_id: agent.escalation.default_ticket_category_id.clone(),
     };
 
     // Si no hay texto y solo hay media, mandamos un placeholder MUY neutro
@@ -390,6 +496,115 @@ async fn run_dispatch(
         output.output_tokens,
         output.latency_ms
     );
+
+    // ── Post-turn counters: tokens + turnos diarios y per-conv ────────────
+    let agent_hex = agent_id.to_hex();
+    let total_tokens = output.total_tokens as u64;
+    state.redis.add_ai_tokens_agent_daily(&agent_hex, total_tokens).await;
+    state.redis.incr_ai_turns_agent_daily(&agent_hex).await;
+    state.redis.incr_ai_turns_conv(&conv_hex).await;
+
+    // ── Cost alert threshold (post-turn) ───────────────────────────────────
+    if agent.limits.max_tokens_per_day > 0 && agent.limits.cost_alert_threshold_pct > 0 {
+        let used = state.redis.get_ai_tokens_agent_daily(&agent_hex).await as u64;
+        let cap = agent.limits.max_tokens_per_day;
+        let pct_used = (used as f64 / cap as f64) * 100.0;
+        if pct_used >= agent.limits.cost_alert_threshold_pct as f64 {
+            if state.redis.try_mark_cost_alert_today(&agent_hex).await {
+                tracing::warn!(
+                    "[ai_agent.dispatch] cost alert: agent={} used {}/{} tokens ({:.1}% — threshold {}%)",
+                    agent_hex, used, cap, pct_used, agent.limits.cost_alert_threshold_pct
+                );
+            }
+        }
+    }
+
+    // ── max_identification_attempts: si el LLM llamó lookup_customer y volvió
+    //    sin matches, contamos. Después de N attempts sin éxito, escalamos. ─
+    if agent.escalation.max_identification_attempts > 0 {
+        let had_failed_lookup = output.tool_calls.iter().any(|t| {
+            t.tool_name == "lookup_customer"
+                && t.success
+                && t.result_summary.contains("\"items\":[]")
+        });
+        if had_failed_lookup {
+            let attempts = state.redis.incr_ai_id_attempts(&conv_hex).await;
+            if attempts >= agent.escalation.max_identification_attempts as i64 {
+                tracing::info!(
+                    "[ai_agent.dispatch] max_identification_attempts ({}) reached (conv={})",
+                    attempts, conv_hex
+                );
+                escalation::auto_escalate(
+                    &state,
+                    &inbound.conversation_id,
+                    &agent,
+                    escalation::REASON_MAX_ID_ATTEMPTS,
+                    Some("No fue posible identificar al cliente automáticamente"),
+                    true,
+                )
+                .await;
+                return Ok(());
+            }
+        }
+    }
+
+    // ── max_turns_without_resolution: cuenta turnos donde NO se llamó tool
+    //    de cierre (request_human / create_ticket). Reset implícito porque
+    //    request_human/create_ticket cierran y la conv no recibe más turnos. ─
+    if agent.escalation.max_turns_without_resolution > 0 {
+        let resolved_now = output
+            .tool_calls
+            .iter()
+            .any(|t| (t.tool_name == "request_human" || t.tool_name == "create_ticket") && t.success);
+        if !resolved_now {
+            let nr = state.redis.incr_ai_no_resolution(&conv_hex).await;
+            if nr >= agent.escalation.max_turns_without_resolution as i64 {
+                tracing::info!(
+                    "[ai_agent.dispatch] max_turns_without_resolution ({}) reached (conv={})",
+                    nr, conv_hex
+                );
+                escalation::auto_escalate(
+                    &state,
+                    &inbound.conversation_id,
+                    &agent,
+                    escalation::REASON_NO_RESOLUTION,
+                    Some("Caso sin resolver tras varios turnos"),
+                    true,
+                )
+                .await;
+                return Ok(());
+            }
+        }
+    }
+
+    // ── escalate_on_critical_tool_failure: si alguna tool falló con error
+    //    crítico (db_error, timeout, upstream), escalamos para no dejar al
+    //    cliente sin respuesta calificada. ────────────────────────────────
+    if agent.escalation.escalate_on_critical_tool_failure {
+        let critical_failed = output.tool_calls.iter().any(|t| {
+            !t.success
+                && t.error
+                    .as_deref()
+                    .map(is_critical_tool_error)
+                    .unwrap_or(false)
+        });
+        if critical_failed {
+            tracing::warn!(
+                "[ai_agent.dispatch] critical tool failure (conv={}); auto-escalate",
+                conv_hex
+            );
+            escalation::auto_escalate(
+                &state,
+                &inbound.conversation_id,
+                &agent,
+                escalation::REASON_CRITICAL_TOOL_FAILURE,
+                Some("Falla crítica de herramienta — IA no pudo continuar"),
+                true,
+            )
+            .await;
+            return Ok(());
+        }
+    }
 
     // Si consumimos transfer_context en este turno, limpiarlo para que no se
     // arrastre a turnos siguientes del mismo agente destino.
@@ -744,6 +959,58 @@ async fn select_agent(
         .await
         .ok()
         .flatten()
+}
+
+/// Check de horario configurado en `agent.schedule`. Si `always_on=true`,
+/// pasa siempre. Sino: weekday actual debe estar en `weekdays[]` y hora actual
+/// en `[from_hour, to_hour]` inclusive.
+///
+/// `weekdays` usa convención ISO: 1=lunes, 7=domingo (igual que el front).
+fn is_within_schedule(schedule: &crate::models::ai_agent::AiSchedule) -> bool {
+    if schedule.always_on {
+        return true;
+    }
+    use chrono::{Datelike, Timelike};
+    let tz: chrono_tz::Tz = schedule
+        .timezone
+        .parse()
+        .unwrap_or(chrono_tz::America::Caracas);
+    let now = chrono::Utc::now().with_timezone(&tz);
+    let weekday_iso = now.weekday().number_from_monday() as u8; // 1..=7
+    if !schedule.weekdays.iter().any(|&d| d == weekday_iso) {
+        return false;
+    }
+    let hour = now.hour() as u8;
+    if schedule.from_hour <= schedule.to_hour {
+        hour >= schedule.from_hour && hour <= schedule.to_hour
+    } else {
+        // Caso "horario que cruza medianoche" (ej: 22..=6).
+        hour >= schedule.from_hour || hour <= schedule.to_hour
+    }
+}
+
+/// Normaliza tildes/case y chequea si alguna keyword aparece como substring.
+/// Devuelve `false` cuando `keywords` está vacío.
+fn matches_escalation_keyword(text: &str, keywords: &[String]) -> bool {
+    if keywords.is_empty() {
+        return false;
+    }
+    let normalized = super::tools::normalize_zone(text);
+    keywords.iter().any(|kw| {
+        let nk = super::tools::normalize_zone(kw);
+        !nk.is_empty() && normalized.contains(&nk)
+    })
+}
+
+/// Errores de tool considerados "críticos" para el flag
+/// `escalate_on_critical_tool_failure`. Los errores de validación
+/// (`invalid_args:*`, `missing_*`) no escalan — la IA puede re-prompt y
+/// reintentar.
+fn is_critical_tool_error(err: &str) -> bool {
+    err.starts_with("db_error:")
+        || err.starts_with("timeout")
+        || err.contains("upstream")
+        || err.contains("connection")
 }
 
 fn truncate(s: &str, n: usize) -> String {

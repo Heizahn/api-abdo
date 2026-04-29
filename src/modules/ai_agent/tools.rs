@@ -23,11 +23,13 @@ use crate::{
         WaTicketRepository, WhatsAppRepository,
     },
     models::{
-        ai_agent::{AiAgent, AiInvoice, AiToolConfig},
+        ai_agent::{AiAgent, AiAgentMode, AiInvoice, AiToolConfig},
         whatsapp::{WaTicket, WaTicketTimelineEntry},
     },
     state::AppState,
 };
+
+use super::escalation;
 
 use super::gemini::FunctionDeclaration;
 
@@ -61,6 +63,17 @@ pub struct ToolContext {
     /// de `agent.tools[transfer_to_agent].config.allowed_targets`. Vacío si
     /// el tool está deshabilitado o sin `allowed_targets` configurados.
     pub allowed_transfer_targets: Vec<ObjectId>,
+    /// Snapshot del agente al inicio del turno. Usado por `auto_escalate`
+    /// para decidir si mandar `farewell_to_human` (sólo en `live`).
+    pub agent_snapshot: Arc<AiAgent>,
+    /// Categoría default que `create_ticket` usa cuando la IA no manda
+    /// `category_id`. Sale de `escalation.default_ticket_category_id`.
+    pub default_ticket_category_id: Option<String>,
+}
+
+#[allow(dead_code)]
+fn agent_mode_is_live(ctx: &ToolContext) -> bool {
+    matches!(ctx.agent_snapshot.mode, AiAgentMode::Live)
 }
 
 #[derive(Debug, Clone)]
@@ -412,7 +425,8 @@ struct RequestHumanArgs {
 }
 
 async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
-    let parsed: RequestHumanArgs = serde_json::from_value(args).unwrap_or(RequestHumanArgs { reason: None });
+    let parsed: RequestHumanArgs =
+        serde_json::from_value(args).unwrap_or(RequestHumanArgs { reason: None });
     let reason = parsed.reason.unwrap_or_default();
 
     if ctx.is_sandbox || ctx.conversation_id.is_none() {
@@ -428,55 +442,25 @@ async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) ->
     }
 
     let conv_id = ctx.conversation_id.unwrap();
-
-    // Transición real: marcamos la IA como pausada y soltamos al agente
-    // asignado. La conv pasa a `pending` para que un humano pueda tomarla
-    // (los próximos inbounds NO van a la IA por el filtro de `ai_disabled`).
-    let patch = ConversationAiPatch {
-        ai_active_agent_id: Some(None),
-        ai_disabled: Some(true),
-        ai_transfer_context: Some(None),
-    };
-    if let Err(e) = ctx.state.db.update_conversation_ai_state(&conv_id, patch).await {
-        return ToolResult::err(format!("db_error:{}", e), started);
-    }
-    if let Err(e) = ctx.state.db.assign_conversation(&conv_id, None).await {
-        // No es crítico — la IA ya quedó pausada. Loggeamos y seguimos.
-        tracing::warn!("[ai_agent.request_human] release assignment falló: {}", e);
-    }
-
-    // Persistir el motivo como evento de timeline visible al humano que
-    // vaya a tomar la conv. Best-effort — si falla, no bloqueamos.
     let trimmed_reason = reason.trim();
-    let note_for_event = if trimmed_reason.is_empty() {
+    let note = if trimmed_reason.is_empty() {
         None
     } else {
         Some(trimmed_reason)
     };
-    let conv_for_event = ctx.state.db.find_conversation_by_id(&conv_id).await.ok().flatten();
-    if let Some(conv) = conv_for_event {
-        let input = crate::models::whatsapp::WaConversationEventInput {
-            conversation_id: &conv_id,
-            business_phone: &conv.business_phone,
-            event_type: "ai_handoff",
-            actor_id: Some(ctx.ai_user_id.as_str()),
-            actor_name: Some(ctx.ai_user_name.as_str()),
-            target_id: None,
-            target_name: None,
-            note: note_for_event,
-        };
-        if let Err(e) = ctx.state.db.record_conversation_event(input).await {
-            tracing::warn!("[ai_agent.request_human] timeline event falló: {}", e);
-        }
-    }
 
-    // Broadcast del estado para que el front actualice el indicador en vivo.
-    let event = crate::modules::whatsapp::ws::WsServerEvent::IaPausada {
-        conversation_id: conv_id.to_hex(),
-        reason: "request_human".to_string(),
-        by: "ai_agent".to_string(),
-    };
-    crate::modules::whatsapp::ws::broadcast_all(&ctx.state.ws_registry, &event).await;
+    // El runner enviará el texto final del modelo como respuesta a este turno;
+    // el helper NO manda farewell para no duplicar mensajes (el modelo va a
+    // armar la despedida basado en `farewell_to_human` que ve en personality).
+    escalation::auto_escalate(
+        &ctx.state,
+        &conv_id,
+        &ctx.agent_snapshot,
+        escalation::REASON_REQUEST_HUMAN,
+        note,
+        false,
+    )
+    .await;
 
     ToolResult::ok(
         json!({
@@ -695,7 +679,10 @@ async fn exec_transfer_to_agent(args: Value, ctx: &ToolContext, started: Instant
 
 #[derive(Deserialize)]
 struct CreateTicketArgs {
-    category_id: String,
+    /// Si no viene, se usa `escalation.default_ticket_category_id` del agente.
+    /// Si tampoco hay default, error `invalid_category`.
+    #[serde(default)]
+    category_id: Option<String>,
     reason: String,
     #[serde(default)]
     summary: Option<String>,
@@ -731,9 +718,16 @@ async fn exec_create_ticket(args: Value, ctx: &ToolContext, started: Instant) ->
     if reason.is_empty() {
         return ToolResult::err("reason_required", started);
     }
-    let label = match category_label(&parsed.category_id) {
+    let category_id = match parsed.category_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(c) => c.to_string(),
+        None => match ctx.default_ticket_category_id.as_ref() {
+            Some(d) if !d.trim().is_empty() => d.trim().to_string(),
+            _ => return ToolResult::err("category_id_required", started),
+        },
+    };
+    let label = match category_label(&category_id) {
         Some(l) => l.to_string(),
-        None => return ToolResult::err(format!("invalid_category:{}", parsed.category_id), started),
+        None => return ToolResult::err(format!("invalid_category:{}", category_id), started),
     };
 
     // Sandbox: no persiste, devuelve fake id estable.
@@ -743,7 +737,7 @@ async fn exec_create_ticket(args: Value, ctx: &ToolContext, started: Instant) ->
                 "ok": true,
                 "mode": "sandbox",
                 "ticket_id": "sandbox-fake-ticket",
-                "category_id": parsed.category_id,
+                "category_id": category_id,
                 "category_label": label,
                 "summary": parsed.summary,
             }),
@@ -790,7 +784,7 @@ async fn exec_create_ticket(args: Value, ctx: &ToolContext, started: Instant) ->
         created_by_name: ctx.ai_user_name.clone(),
         assigned_to_id: None,
         assigned_to_name: None,
-        category_id: Some(parsed.category_id.clone()),
+        category_id: Some(category_id.clone()),
         category_label: Some(label.clone()),
         reason,
         status: "open".into(),
@@ -824,7 +818,7 @@ async fn exec_create_ticket(args: Value, ctx: &ToolContext, started: Instant) ->
             "ok": true,
             "mode": "live",
             "ticket_id": saved.id.map(|o| o.to_hex()).unwrap_or_default(),
-            "category_id": parsed.category_id,
+            "category_id": category_id,
             "category_label": label,
         }),
         started,

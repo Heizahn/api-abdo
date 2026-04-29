@@ -213,6 +213,7 @@ fn default_agent(label: String, description: String, ai_user_id: String, now: Bs
             tone: "warm-coloquial".into(),
             greeting: String::new(),
             farewell: String::new(),
+            farewell_to_human: String::new(),
             forbidden_phrases: Vec::new(),
         },
         system_prompt: String::new(),
@@ -772,6 +773,7 @@ fn apply_personality(
     if let Some(v) = p.tone { cur.tone = v; }
     if let Some(v) = p.greeting { cur.greeting = v; }
     if let Some(v) = p.farewell { cur.farewell = v; }
+    if let Some(v) = p.farewell_to_human { cur.farewell_to_human = v; }
     if let Some(v) = p.forbidden_phrases { cur.forbidden_phrases = v; }
 }
 
