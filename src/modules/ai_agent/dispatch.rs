@@ -322,10 +322,14 @@ async fn run_dispatch(
 
     let history: Vec<ConvTurn> = if is_ai_first_turn_with_prior_history {
         tracing::info!(
-            "[ai_agent.dispatch] fresh-start detectado (conv={}, prior_messages={}); history recortado",
+            "[ai_agent.dispatch] fresh-start detectado (conv={}, prior_messages={}); history recortado + counters reseteados",
             inbound.conversation_id.to_hex(),
             prior_history_count
         );
+        // Reset counters per-conv: si la IA no había respondido todavía,
+        // cualquier contador per-conv proviene de tests previos o estado
+        // residual. La IA arranca limpia.
+        state.redis.clear_ai_conv_counters(&inbound.conversation_id.to_hex()).await;
         Vec::new()
     } else {
         full_history
@@ -584,32 +588,59 @@ async fn run_dispatch(
         }
     }
 
-    // ── max_turns_without_resolution: cuenta turnos donde NO se llamó tool
-    //    de cierre (request_human / create_ticket). Reset implícito porque
-    //    request_human/create_ticket cierran y la conv no recibe más turnos. ─
-    if agent.escalation.max_turns_without_resolution > 0 {
-        let resolved_now = output
+    // ── Resolución del turno ──────────────────────────────────────────────
+    // Tools que cuentan como "resolución" del caso desde la perspectiva del
+    // agente actual:
+    // - request_human / create_ticket: la IA escala a humano (cierra ese path).
+    // - transfer_to_agent: la IA pasa la conv a OTRO agente IA — desde la
+    //   perspectiva del agente origen, este caso ya está resuelto. Además
+    //   reseteamos counters per-conv para que el agente destino arranque
+    //   limpio, no heredando los turns sin resolver del origen.
+    let transfer_succeeded = output
+        .tool_calls
+        .iter()
+        .any(|t| t.tool_name == "transfer_to_agent" && t.success);
+    if transfer_succeeded {
+        state.redis.clear_ai_conv_counters(&conv_hex).await;
+        tracing::info!(
+            "[ai_agent.dispatch] transfer_to_agent OK; counters per-conv reseteados (conv={})",
+            conv_hex
+        );
+    }
+
+    let resolved_now = transfer_succeeded
+        || output
             .tool_calls
             .iter()
-            .any(|t| (t.tool_name == "request_human" || t.tool_name == "create_ticket") && t.success);
-        if !resolved_now {
-            let nr = state.redis.incr_ai_no_resolution(&conv_hex).await;
-            if nr >= agent.escalation.max_turns_without_resolution as i64 {
-                tracing::info!(
-                    "[ai_agent.dispatch] max_turns_without_resolution ({}) reached (conv={})",
-                    nr, conv_hex
-                );
-                escalation::auto_escalate(
-                    &state,
-                    &inbound.conversation_id,
-                    &agent,
-                    escalation::REASON_NO_RESOLUTION,
-                    Some("Caso sin resolver tras varios turnos"),
-                    true,
-                )
-                .await;
-                return Ok(());
-            }
+            .any(|t| {
+                (t.tool_name == "request_human" || t.tool_name == "create_ticket") && t.success
+            });
+
+    // ── max_turns_without_resolution: cuenta turnos donde NO se llamó tool
+    //    de cierre. Las tools de cierre (request_human / create_ticket /
+    //    transfer_to_agent) cuentan como resolución. ─────────────────────
+    if agent.escalation.max_turns_without_resolution > 0 && !resolved_now {
+        let nr = state.redis.incr_ai_no_resolution(&conv_hex).await;
+        let cap = agent.escalation.max_turns_without_resolution as i64;
+        tracing::info!(
+            "[ai_agent.dispatch] no_resolution counter (conv={}, count={}/{}, resolved_now=false)",
+            conv_hex, nr, cap
+        );
+        if nr >= cap {
+            tracing::info!(
+                "[ai_agent.dispatch] max_turns_without_resolution ({}) reached (conv={})",
+                nr, conv_hex
+            );
+            escalation::auto_escalate(
+                &state,
+                &inbound.conversation_id,
+                &agent,
+                escalation::REASON_NO_RESOLUTION,
+                Some("Caso sin resolver tras varios turnos"),
+                true,
+            )
+            .await;
+            return Ok(());
         }
     }
 

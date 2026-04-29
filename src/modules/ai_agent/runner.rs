@@ -454,7 +454,32 @@ pub async fn run_turn(
             // exitoso, el flag queda en `true`; si falla, el LLM decide).
             let is_escalation = call.name == "request_human" || call.name == "create_ticket";
 
+            // Log del tool call ANTES de ejecutar — útil para diagnosticar
+            // cuando una tool se queda colgada (DB lenta, network, etc).
+            tracing::info!(
+                "[ai_agent.runner] tool_call: name={} args={}",
+                call.name,
+                serde_json::to_string(&call.args).unwrap_or_else(|_| "<unserializable>".into())
+            );
+
             let result = execute_tool(&call.name, call.args.clone(), tool_ctx).await;
+
+            // Log del resultado del tool call.
+            if result.success {
+                tracing::info!(
+                    "[ai_agent.runner] tool_result: name={} success=true duration_ms={} summary={}",
+                    call.name,
+                    result.duration_ms,
+                    truncate_summary(&result.data),
+                );
+            } else {
+                tracing::warn!(
+                    "[ai_agent.runner] tool_result: name={} success=false duration_ms={} error={:?}",
+                    call.name,
+                    result.duration_ms,
+                    result.error,
+                );
+            }
 
             tool_call_logs.push(AiToolCallLog {
                 tool_name: call.name.clone(),
