@@ -3788,6 +3788,8 @@ fn conv_to_item(
         freeform_expires_at: expires_iso,
         meta_throttled,
         meta_throttle_until: meta_throttle_until_iso,
+        ai_active_agent_id: c.ai_active_agent_id.map(|o| o.to_hex()),
+        ai_disabled: c.ai_disabled,
     }
 }
 

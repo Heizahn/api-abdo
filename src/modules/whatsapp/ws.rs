@@ -151,6 +151,33 @@ pub enum WsServerEvent {
         changed_by_name: String,
     },
 
+    /// La IA quedó pausada para esta conversación (un humano la atiende).
+    /// Lo dispara la tool `request_human` o, en una iteración futura, un
+    /// "take" manual desde la UI.
+    ///
+    /// `reason` es uno de: `"request_human"`, `"transfer_to_agent_failed"`,
+    /// `"manual"`. `by` es `"ai_agent"` cuando el origen fue una tool del
+    /// loop, o el UUID del usuario que pausó manualmente.
+    #[serde(rename = "IA_PAUSADA")]
+    IaPausada {
+        conversation_id: String,
+        reason: String,
+        by: String,
+    },
+
+    /// La IA volvió a atender esta conversación (transferencia entre
+    /// agentes IA, o reactivación manual). Si la transición la dispara
+    /// `transfer_to_agent`, `to_agent_id` es el agente IA destino. En
+    /// reactivación manual viene `null`.
+    #[serde(rename = "IA_REACTIVADA")]
+    IaReactivada {
+        conversation_id: String,
+        reason: String,
+        by: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        to_agent_id: Option<String>,
+    },
+
     #[serde(rename = "ERROR")]
     Error { error: String },
 

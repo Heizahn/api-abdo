@@ -10,10 +10,10 @@ use std::collections::HashMap;
 use crate::db::{
     AuditFirstResponse, AuditLifecycleByDayBucket, AuditMessageFilter,
     AuditMessagesByAgentBucket, AuditMessagesByDayBucket, AuditMessagesByTypeBucket,
-    AuditMessagesSummary, AuditMetricsFilter, ConversationTouch, StoreTemplateMediaInput,
-    TicketActionUpdate, TicketListFilter, UpdateQuickReplyPatch, WaTemplateListFilter,
-    WaTemplateMediaRepository, WaTemplateMediaRef, WaTemplateRepository, WaTemplateUpdatePatch,
-    WaTicketRepository, WhatsAppRepository,
+    AuditMessagesSummary, AuditMetricsFilter, ConversationAiPatch, ConversationTouch,
+    StoreTemplateMediaInput, TicketActionUpdate, TicketListFilter, UpdateQuickReplyPatch,
+    WaTemplateListFilter, WaTemplateMediaRepository, WaTemplateMediaRef, WaTemplateRepository,
+    WaTemplateUpdatePatch, WaTicketRepository, WhatsAppRepository,
 };
 use crate::db::mongo::MongoDB;
 use crate::models::whatsapp::{ConversationStats, UrlPreview, WaConversation, WaConversationEvent, WaConversationEventInput, WaConversationOpen, WaMessage, WaPurposesPatch, WaQuickReply, WaSettings, WaTemplate, WaTemplateStatus, WaPurposeUsage, WaTicket};
@@ -451,8 +451,8 @@ impl WhatsAppRepository for MongoDB {
             .update_one(
                 doc! { "_id": id },
                 doc! {
-                    "$set": { "status": "closed" },
-                    "$unset": { "assigned_to": "" },
+                    "$set": { "status": "closed", "ai_disabled": false },
+                    "$unset": { "assigned_to": "", "ai_active_agent_id": "" },
                 },
             )
             .await
@@ -461,17 +461,52 @@ impl WhatsAppRepository for MongoDB {
     }
 
     async fn reopen_conversation(&self, id: &ObjectId) -> Result<bool, String> {
+        // Al reabrir limpiamos también el estado IA: el receptionist vuelve a
+        // entrar y reclasifica desde cero.
         let res = self.wa_conversations()
             .update_one(
                 doc! { "_id": id, "status": "closed" },
                 doc! {
-                    "$set": { "status": "pending" },
-                    "$unset": { "assigned_to": "" },
+                    "$set": { "status": "pending", "ai_disabled": false },
+                    "$unset": { "assigned_to": "", "ai_active_agent_id": "" },
                 },
             )
             .await
             .map_err(|e| e.to_string())?;
         Ok(res.modified_count > 0)
+    }
+
+    async fn update_conversation_ai_state(
+        &self,
+        id: &ObjectId,
+        patch: ConversationAiPatch<'_>,
+    ) -> Result<bool, String> {
+        let mut set = Document::new();
+        let mut unset = Document::new();
+        if let Some(active) = patch.ai_active_agent_id {
+            match active {
+                Some(oid) => { set.insert("ai_active_agent_id", *oid); }
+                None => { unset.insert("ai_active_agent_id", ""); }
+            }
+        }
+        if let Some(d) = patch.ai_disabled {
+            set.insert("ai_disabled", d);
+        }
+        if set.is_empty() && unset.is_empty() {
+            return Ok(true);
+        }
+        let mut update = Document::new();
+        if !set.is_empty() {
+            update.insert("$set", set);
+        }
+        if !unset.is_empty() {
+            update.insert("$unset", unset);
+        }
+        let res = self.wa_conversations()
+            .update_one(doc! { "_id": id }, update)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(res.matched_count > 0)
     }
 
     async fn assign_conversation(

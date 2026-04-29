@@ -217,10 +217,11 @@ fn default_agent(label: String, description: String, ai_user_id: String, now: Bs
         },
         system_prompt: String::new(),
         tools: vec![
-            AiToolConfig { name: "lookup_customer".into(), enabled: true, description_override: None },
-            AiToolConfig { name: "get_invoices".into(),    enabled: true, description_override: None },
-            AiToolConfig { name: "request_human".into(),   enabled: true, description_override: None },
-            AiToolConfig { name: "create_ticket".into(),   enabled: true, description_override: None },
+            AiToolConfig { name: "lookup_customer".into(),   enabled: true,  description_override: None, config: None },
+            AiToolConfig { name: "get_invoices".into(),      enabled: true,  description_override: None, config: None },
+            AiToolConfig { name: "request_human".into(),     enabled: true,  description_override: None, config: None },
+            AiToolConfig { name: "create_ticket".into(),     enabled: true,  description_override: None, config: None },
+            AiToolConfig { name: "transfer_to_agent".into(), enabled: false, description_override: None, config: None },
         ],
         escalation: AiEscalationRules {
             keywords: vec!["humano".into(), "operador".into(), "queja".into(), "reclamo".into()],
@@ -323,6 +324,97 @@ async fn ensure_ai_user_for_agent(
 // ============================================
 // Validación de workspace_ids (cada uno existe en WaSettings)
 // ============================================
+
+/// Valida la `config` de cada tool del agente — hoy el único shape custom es
+/// `transfer_to_agent.config = { allowed_targets: [<oid_hex>...] }`.
+///
+/// Reglas para `transfer_to_agent`:
+/// - Si `enabled = true`, `allowed_targets` debe estar y ser array no vacío.
+/// - Cada id válido como ObjectId.
+/// - Cada id ≠ `current_agent_id` (no puede transferirse a sí mismo).
+/// - Cada id existe en `AiAgents`.
+///
+/// `current_agent_id` viene `None` en POST (todavía no existe) — la validación
+/// de "self" se omite en ese caso porque el agente nuevo no tiene id aún.
+async fn validate_tools_config(
+    state: &Arc<AppState>,
+    tools: &[AiToolConfig],
+    current_agent_id: Option<&ObjectId>,
+) -> Result<(), ApiError> {
+    let Some(transfer) = tools.iter().find(|t| t.name == "transfer_to_agent") else {
+        return Ok(());
+    };
+    if !transfer.enabled {
+        return Ok(());
+    }
+
+    let cfg = transfer.config.as_ref().ok_or_else(|| ApiError::ValidationError {
+        code: "transfer_targets_required".into(),
+        field: "tools.transfer_to_agent.config.allowed_targets".into(),
+        message: "Seleccioná al menos un agente destino para habilitar transfer_to_agent".into(),
+    })?;
+    let arr = cfg
+        .get("allowed_targets")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| ApiError::ValidationError {
+            code: "transfer_targets_required".into(),
+            field: "tools.transfer_to_agent.config.allowed_targets".into(),
+            message: "Seleccioná al menos un agente destino para habilitar transfer_to_agent".into(),
+        })?;
+    if arr.is_empty() {
+        return Err(ApiError::ValidationError {
+            code: "transfer_targets_required".into(),
+            field: "tools.transfer_to_agent.config.allowed_targets".into(),
+            message: "Seleccioná al menos un agente destino para habilitar transfer_to_agent".into(),
+        });
+    }
+
+    let mut target_oids = Vec::with_capacity(arr.len());
+    for v in arr {
+        let s = v.as_str().ok_or_else(|| ApiError::ValidationError {
+            code: "invalid_transfer_target".into(),
+            field: "tools.transfer_to_agent.config.allowed_targets".into(),
+            message: "Cada `allowed_target` debe ser un ObjectId hex".into(),
+        })?;
+        let oid = ObjectId::parse_str(s).map_err(|_| ApiError::ValidationError {
+            code: "invalid_transfer_target".into(),
+            field: "tools.transfer_to_agent.config.allowed_targets".into(),
+            message: format!("'{}' no es un ObjectId válido", s),
+        })?;
+        if let Some(cur) = current_agent_id {
+            if &oid == cur {
+                return Err(ApiError::ValidationError {
+                    code: "transfer_target_is_self".into(),
+                    field: "tools.transfer_to_agent.config.allowed_targets".into(),
+                    message: "El agente no puede transferirse a sí mismo".into(),
+                });
+            }
+        }
+        target_oids.push(oid);
+    }
+
+    let found = state
+        .db
+        .find_ai_agents_by_ids(&target_oids)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    if found.len() != target_oids.len() {
+        let found_set: std::collections::HashSet<_> =
+            found.iter().filter_map(|a| a.id).collect();
+        let missing: Vec<String> = target_oids
+            .iter()
+            .filter(|o| !found_set.contains(o))
+            .map(|o| o.to_hex())
+            .collect();
+        return Err(ApiError::ValidationError {
+            code: "transfer_target_not_found".into(),
+            field: "tools.transfer_to_agent.config.allowed_targets".into(),
+            message: format!("Agentes destino inexistentes: {}", missing.join(", ")),
+        });
+    }
+
+    Ok(())
+}
 
 async fn parse_and_validate_workspace_ids(
     state: &Arc<AppState>,
@@ -479,6 +571,7 @@ pub async fn create_ai_agent_handler(
                 name: t.name,
                 enabled: t.enabled,
                 description_override: t.description_override,
+                config: t.config,
             })
             .collect();
     }
@@ -487,6 +580,8 @@ pub async fn create_ai_agent_handler(
     if let Some(d) = body.debounce_seconds {
         agent.debounce_seconds = d;
     }
+
+    validate_tools_config(&state, &agent.tools, None).await?;
 
     let saved = state
         .db
@@ -573,6 +668,7 @@ pub async fn update_ai_agent_handler(
                 name: t.name,
                 enabled: t.enabled,
                 description_override: t.description_override,
+                config: t.config,
             })
             .collect();
     }
@@ -582,6 +678,8 @@ pub async fn update_ai_agent_handler(
         agent.debounce_seconds = d;
     }
     agent.updated_at = BsonDateTime::now();
+
+    validate_tools_config(&state, &agent.tools, Some(&oid)).await?;
 
     let saved = state
         .db

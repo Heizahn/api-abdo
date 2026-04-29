@@ -295,6 +295,18 @@ pub struct UpdateQuickReplyPatch {
     pub cta_url: Option<Option<QuickReplyCtaUrl>>,
 }
 
+/// Patch tri-state para `update_conversation_ai_state`. Cada `Option` externo:
+/// `None` ⇒ no tocar el campo; `Some(...)` ⇒ aplicar el valor.
+///
+/// Para `ai_active_agent_id` se usa anidado:
+/// - `Some(Some(oid))` ⇒ `$set ai_active_agent_id = oid`
+/// - `Some(None)` ⇒ `$unset ai_active_agent_id`
+/// - `None` ⇒ no tocar
+pub struct ConversationAiPatch<'a> {
+    pub ai_active_agent_id: Option<Option<&'a ObjectId>>,
+    pub ai_disabled: Option<bool>,
+}
+
 /// Payload para `touch_conversation`: agrupa todos los campos denormalizados
 /// que viven en `WaConversation` para renderizar el preview del listado
 /// estilo WhatsApp (icono por tipo, checkmarks, "Tú: …", nombre de archivo).
@@ -479,6 +491,14 @@ pub trait WhatsAppRepository {
     /// Reabre una conversación cerrada → pending. No-op si ya no estaba cerrada.
     /// Retorna `true` si efectivamente cambió el estado.
     async fn reopen_conversation(&self, id: &ObjectId) -> Result<bool, String>;
+    /// Actualiza el estado IA de la conversación (`ai_active_agent_id` y/o
+    /// `ai_disabled`). Atómico — no toca status ni assigned_to. Devuelve
+    /// `true` si el doc existía.
+    async fn update_conversation_ai_state(
+        &self,
+        id: &ObjectId,
+        patch: ConversationAiPatch<'_>,
+    ) -> Result<bool, String>;
     async fn assign_conversation(&self, id: &ObjectId, assigned_to: Option<&str>) -> Result<(), String>;
     /// Intenta tomar una conversación pendiente. Retorna `None` si ya estaba asignada a otro
     /// (o no estaba en status `pending`), `Some(conv)` si la toma fue exitosa.
@@ -1027,6 +1047,20 @@ pub trait AiAgentRepository {
     ) -> Result<Option<AiAgent>, String>;
 
     async fn find_ai_agent_by_id(&self, id: &ObjectId) -> Result<Option<AiAgent>, String>;
+
+    /// Batch-lookup por `_id`. Devuelve sólo los que existen. Usado para
+    /// validar `allowed_targets` de `transfer_to_agent` y para resolver el
+    /// agente activo elegido cuando una conv tiene `ai_active_agent_id`.
+    async fn find_ai_agents_by_ids(&self, ids: &[ObjectId]) -> Result<Vec<AiAgent>, String>;
+
+    /// Recepcionista del workspace: agente con `is_receptionist=true`,
+    /// `enabled=true`, que tenga `workspace_id` en su `workspace_ids`. Si hay
+    /// más de uno (config inconsistente), devuelve el más viejo. `None` si no
+    /// hay ninguno marcado como recepcionista.
+    async fn find_receptionist_for_workspace(
+        &self,
+        workspace_id: &ObjectId,
+    ) -> Result<Option<AiAgent>, String>;
 
     async fn create_ai_agent(&self, agent: AiAgent) -> Result<AiAgent, String>;
 

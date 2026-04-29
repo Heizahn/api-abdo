@@ -242,7 +242,7 @@ pub async fn run_turn(
         parts: user_parts,
     });
 
-    let function_declarations = build_function_declarations(&agent.tools);
+    let function_declarations = build_function_declarations(agent);
     let tools_block = if function_declarations.is_empty() {
         None
     } else {

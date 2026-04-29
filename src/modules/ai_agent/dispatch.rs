@@ -33,7 +33,7 @@ use crate::{
 use super::{
     gemini::AiRelay,
     runner::{decrypt_api_key, run_turn, ConvRole, ConvTurn, MediaInput},
-    tools::ToolContext,
+    tools::{extract_allowed_transfer_targets, ToolContext},
 };
 
 /// Cuántos mensajes leemos hacia atrás para armar history + ráfaga.
@@ -71,19 +71,37 @@ pub fn dispatch_inbound_async(
         // Marcar como "actividad reciente". El próximo inbound sobreescribe.
         state.redis.set_ai_debounce_ts(&conv_hex, now_ms).await;
 
-        // Cargar agente para conocer su `debounce_seconds`. Si no hay agente
-        // activo, salimos silencioso.
-        let agent = match state.db.find_active_agent_for_workspace(&workspace_id).await {
-            Ok(Some(a)) => a,
+        // Cargar la conv y resolver agente según su estado IA. Si la conv
+        // tiene `ai_disabled=true`, NO procesamos (un humano la atiende).
+        let conv = match state.db.find_conversation_by_id(&inbound.conversation_id).await {
+            Ok(Some(c)) => c,
             Ok(None) => {
-                tracing::debug!(
-                    "[ai_agent.dispatch] sin agente activo para workspace={}",
-                    workspace_id.to_hex()
+                tracing::warn!(
+                    "[ai_agent.dispatch] conv no encontrada (id={})",
+                    inbound.conversation_id.to_hex()
                 );
                 return;
             }
             Err(e) => {
-                tracing::warn!("[ai_agent.dispatch] error buscando agente: {}", e);
+                tracing::warn!("[ai_agent.dispatch] error buscando conv: {}", e);
+                return;
+            }
+        };
+        if conv.ai_disabled {
+            tracing::debug!(
+                "[ai_agent.dispatch] conv {} con ai_disabled=true, skip",
+                conv_hex
+            );
+            return;
+        }
+
+        let agent = match select_agent(&state, &conv, &workspace_id).await {
+            Some(a) => a,
+            None => {
+                tracing::debug!(
+                    "[ai_agent.dispatch] sin agente activo para workspace={}",
+                    workspace_id.to_hex()
+                );
                 return;
             }
         };
@@ -131,6 +149,39 @@ async fn run_dispatch(
     inbound: WaMessage,
     workspace_id: ObjectId,
 ) -> Result<(), String> {
+    // Re-leemos la conv después del debounce: el estado IA pudo cambiar
+    // (humano tomó, transfer entre agents) durante la espera.
+    let conv = state
+        .db
+        .find_conversation_by_id(&inbound.conversation_id)
+        .await?
+        .ok_or_else(|| "conv no encontrada".to_string())?;
+
+    if conv.ai_disabled {
+        tracing::debug!(
+            "[ai_agent.dispatch] conv {} pasó a ai_disabled durante debounce, skip",
+            inbound.conversation_id.to_hex()
+        );
+        return Ok(());
+    }
+
+    // Si el agente activo registrado en la conv difiere del que pasó por el
+    // debounce (porque hubo transfer durante la espera), re-resolvemos.
+    let agent = match conv.ai_active_agent_id {
+        Some(active) if Some(active) != agent.id => {
+            match state.db.find_ai_agent_by_id(&active).await? {
+                Some(a) if a.enabled => a,
+                _ => {
+                    tracing::debug!(
+                        "[ai_agent.dispatch] ai_active_agent_id obsoleto/deshabilitado, skip"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        _ => agent,
+    };
+
     let agent_id = agent.id.ok_or_else(|| "agent sin _id".to_string())?;
 
     tracing::info!(
@@ -140,12 +191,6 @@ async fn run_dispatch(
         agent.mode,
         inbound.conversation_id.to_hex()
     );
-
-    let conv = state
-        .db
-        .find_conversation_by_id(&inbound.conversation_id)
-        .await?
-        .ok_or_else(|| "conv no encontrada".to_string())?;
 
     let wa_settings = state
         .db
@@ -273,6 +318,7 @@ async fn run_dispatch(
     let relay_owned = AiRelay::from_config(&state.config);
     let relay = relay_owned.as_ref();
 
+    let allowed_transfer_targets = extract_allowed_transfer_targets(&agent.tools);
     let tool_ctx = ToolContext {
         state: state.clone(),
         workspace_id,
@@ -282,6 +328,7 @@ async fn run_dispatch(
         ai_user_id: agent.ai_user_id.clone(),
         ai_user_name: agent.personality.assistant_name.clone(),
         is_sandbox,
+        allowed_transfer_targets,
     };
 
     // Si no hay texto y solo hay media, mandamos un placeholder MUY neutro
@@ -589,6 +636,43 @@ async fn build_customer_context(state: &Arc<AppState>, customer_phone: &str) -> 
         ));
     }
     Some(buf)
+}
+
+/// Resuelve el agente IA que debería procesar este turno:
+///
+/// 1. Si la conv ya tiene `ai_active_agent_id` y ese agente sigue habilitado → ese.
+/// 2. Sino, el `is_receptionist=true` enabled del workspace (si existe).
+/// 3. Sino, el más viejo `enabled` del workspace (fallback compat).
+async fn select_agent(
+    state: &Arc<AppState>,
+    conv: &crate::models::whatsapp::WaConversation,
+    workspace_id: &ObjectId,
+) -> Option<AiAgent> {
+    if let Some(active) = conv.ai_active_agent_id {
+        match state.db.find_ai_agent_by_id(&active).await {
+            Ok(Some(a)) if a.enabled => return Some(a),
+            Ok(_) => {
+                tracing::debug!(
+                    "[ai_agent.dispatch] ai_active_agent_id={} deshabilitado/borrado, fallback",
+                    active.to_hex()
+                );
+            }
+            Err(e) => {
+                tracing::warn!("[ai_agent.dispatch] lookup active agent: {}", e);
+            }
+        }
+    }
+
+    if let Ok(Some(a)) = state.db.find_receptionist_for_workspace(workspace_id).await {
+        return Some(a);
+    }
+
+    state
+        .db
+        .find_active_agent_for_workspace(workspace_id)
+        .await
+        .ok()
+        .flatten()
 }
 
 fn truncate(s: &str, n: usize) -> String {

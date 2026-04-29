@@ -33,7 +33,7 @@ use crate::{
 use super::{
     gemini::AiRelay,
     runner::{run_turn, ConvRole, ConvTurn},
-    tools::ToolContext,
+    tools::{extract_allowed_transfer_targets, ToolContext},
 };
 
 const SUPERADMIN_ROLE: f32 = 0.0;
@@ -249,6 +249,7 @@ pub async fn sandbox_handler(
     let relay_owned = AiRelay::from_config(&state.config);
     let relay = relay_owned.as_ref();
 
+    let allowed_transfer_targets = extract_allowed_transfer_targets(&agent.tools);
     let tool_ctx = ToolContext {
         state: state.clone(),
         workspace_id: workspace_oid,
@@ -258,6 +259,7 @@ pub async fn sandbox_handler(
         ai_user_id: agent.ai_user_id.clone(),
         ai_user_name: agent.personality.assistant_name.clone(),
         is_sandbox: true,
+        allowed_transfer_targets,
     };
 
     let output = run_turn(

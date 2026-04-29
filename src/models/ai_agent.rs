@@ -116,6 +116,12 @@ pub struct AiToolConfig {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description_override: Option<String>,
+    /// Config opaca por tool (shape distinto según el `name`). Para
+    /// `transfer_to_agent`: `{ "allowed_targets": ["<oid_hex>", ...] }`. Para
+    /// `request_human`: hoy no se usa (toggle puro). El validador del back
+    /// chequea el shape sólo cuando importa para esa tool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -316,6 +322,10 @@ pub struct AiToolConfigDto {
     pub enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description_override: Option<String>,
+    /// Config por-tool tipada por el front según `name`. Passthrough opaco.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub config: Option<serde_json::Value>,
 }
 
 impl From<AiToolConfig> for AiToolConfigDto {
@@ -324,6 +334,7 @@ impl From<AiToolConfig> for AiToolConfigDto {
             name: t.name,
             enabled: t.enabled,
             description_override: t.description_override,
+            config: t.config,
         }
     }
 }
@@ -496,6 +507,9 @@ pub struct AiToolConfigInput {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description_override: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, ToSchema, Default)]

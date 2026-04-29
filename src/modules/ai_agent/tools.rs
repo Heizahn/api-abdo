@@ -18,9 +18,12 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{
-    db::{ProfileRepository, SalesRepository, WaTicketRepository, WhatsAppRepository},
+    db::{
+        AiAgentRepository, ConversationAiPatch, ProfileRepository, SalesRepository,
+        WaTicketRepository, WhatsAppRepository,
+    },
     models::{
-        ai_agent::{AiInvoice, AiToolConfig},
+        ai_agent::{AiAgent, AiInvoice, AiToolConfig},
         whatsapp::{WaTicket, WaTicketTimelineEntry},
     },
     state::AppState,
@@ -44,7 +47,6 @@ pub struct ToolContext {
     pub workspace_id: ObjectId,
     #[allow(dead_code)]
     pub business_phone: String,
-    #[allow(dead_code)]
     pub agent_id: ObjectId,
     /// Conversación origen del turno. `None` cuando estamos en sandbox sin
     /// conv asociada — `create_ticket` devuelve fake en ese caso.
@@ -55,6 +57,10 @@ pub struct ToolContext {
     /// Cuando `true`: tools de escritura no persisten ni emiten WS — devuelven
     /// un payload sintético para que el loop pueda continuar.
     pub is_sandbox: bool,
+    /// Lista de agentes IA a los que `transfer_to_agent` puede derivar — sale
+    /// de `agent.tools[transfer_to_agent].config.allowed_targets`. Vacío si
+    /// el tool está deshabilitado o sin `allowed_targets` configurados.
+    pub allowed_transfer_targets: Vec<ObjectId>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,10 +95,11 @@ impl ToolResult {
 // Schemas (JSON parameters) — los manda Gemini en cada call
 // ============================================
 
-const T_LOOKUP_CUSTOMER: &str = "lookup_customer";
-const T_GET_INVOICES: &str = "get_invoices";
-const T_REQUEST_HUMAN: &str = "request_human";
-const T_CREATE_TICKET: &str = "create_ticket";
+pub const T_LOOKUP_CUSTOMER: &str = "lookup_customer";
+pub const T_GET_INVOICES: &str = "get_invoices";
+pub const T_REQUEST_HUMAN: &str = "request_human";
+pub const T_CREATE_TICKET: &str = "create_ticket";
+pub const T_TRANSFER_AGENT: &str = "transfer_to_agent";
 
 /// Lista de los 4 tools de PR 2 con descriptions default y schemas. El SUPERADMIN
 /// puede sobreescribir el `description` desde el front (`description_override`),
@@ -153,27 +160,100 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                 "required": ["category_id", "reason"]
             }),
         )),
+        T_TRANSFER_AGENT => Some((
+            "Deriva la conversación a OTRO agente IA especializado (Soporte, Pagos, etc). \
+             Usar cuando este agente no es el indicado para el caso pero sí lo es alguno de \
+             los listados en `target_agent_id`. No interrumpe la conversación: el cliente sigue \
+             hablando con la IA pero a partir del próximo turno responde el agente destino.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "target_agent_id": {
+                        "type": "string",
+                        "description": "ObjectId hex del agente IA destino. Debe estar en la whitelist configurada (allowed_targets)."
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Por qué se está transfiriendo. El agente destino lo recibe en el próximo turno."
+                    }
+                },
+                "required": ["target_agent_id", "reason"]
+            }),
+        )),
         _ => None,
     }
 }
 
 /// Construye los `FunctionDeclaration` que viajan a Gemini. Filtra por
 /// `enabled = true` y aplica `description_override` cuando esté seteado.
-pub fn build_function_declarations(tools: &[AiToolConfig]) -> Vec<FunctionDeclaration> {
-    tools
+///
+/// Para `transfer_to_agent` además inyecta `allowed_targets` como `enum` en
+/// `target_agent_id` para que Gemini no invente IDs fuera del whitelist.
+pub fn build_function_declarations(agent: &AiAgent) -> Vec<FunctionDeclaration> {
+    let allowed_transfer_targets = extract_allowed_transfer_targets(&agent.tools);
+    agent
+        .tools
         .iter()
         .filter(|t| t.enabled)
         .filter_map(|t| {
-            tool_default(&t.name).map(|(default_desc, params)| FunctionDeclaration {
-                name: t.name.clone(),
-                description: t
-                    .description_override
-                    .clone()
-                    .unwrap_or_else(|| default_desc.to_string()),
-                parameters: params,
+            // `transfer_to_agent` sin `allowed_targets` configurados =
+            // tool inválido, no la mostramos a Gemini (la validación de
+            // back ya bloquea guardar en ese estado, esto es defensivo).
+            if t.name == T_TRANSFER_AGENT && allowed_transfer_targets.is_empty() {
+                return None;
+            }
+            tool_default(&t.name).map(|(default_desc, params)| {
+                let parameters = if t.name == T_TRANSFER_AGENT {
+                    inject_target_enum(params, &allowed_transfer_targets)
+                } else {
+                    params
+                };
+                FunctionDeclaration {
+                    name: t.name.clone(),
+                    description: t
+                        .description_override
+                        .clone()
+                        .unwrap_or_else(|| default_desc.to_string()),
+                    parameters,
+                }
             })
         })
         .collect()
+}
+
+/// Lee `tools[transfer_to_agent].config.allowed_targets` como `Vec<ObjectId>`.
+/// Devuelve vacío cuando el tool no está, no está habilitado, no tiene
+/// `config`, o `allowed_targets` está mal formado.
+pub fn extract_allowed_transfer_targets(tools: &[AiToolConfig]) -> Vec<ObjectId> {
+    let Some(t) = tools.iter().find(|t| t.name == T_TRANSFER_AGENT) else {
+        return Vec::new();
+    };
+    if !t.enabled {
+        return Vec::new();
+    }
+    let Some(cfg) = t.config.as_ref() else {
+        return Vec::new();
+    };
+    let Some(arr) = cfg.get("allowed_targets").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|v| v.as_str())
+        .filter_map(|s| ObjectId::parse_str(s).ok())
+        .collect()
+}
+
+fn inject_target_enum(mut params: Value, allowed_targets: &[ObjectId]) -> Value {
+    let hexes: Vec<Value> = allowed_targets
+        .iter()
+        .map(|o| Value::String(o.to_hex()))
+        .collect();
+    if let Some(props) = params.get_mut("properties").and_then(|v| v.as_object_mut()) {
+        if let Some(target) = props.get_mut("target_agent_id").and_then(|v| v.as_object_mut()) {
+            target.insert("enum".to_string(), Value::Array(hexes));
+        }
+    }
+    params
 }
 
 // ============================================
@@ -187,6 +267,7 @@ pub async fn execute_tool(name: &str, args: Value, ctx: &ToolContext) -> ToolRes
         T_GET_INVOICES => exec_get_invoices(args, ctx, started).await,
         T_REQUEST_HUMAN => exec_request_human(args, ctx, started).await,
         T_CREATE_TICKET => exec_create_ticket(args, ctx, started).await,
+        T_TRANSFER_AGENT => exec_transfer_to_agent(args, ctx, started).await,
         other => ToolResult::err(format!("unknown_tool:{}", other), started),
     }
 }
@@ -287,11 +368,6 @@ async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) ->
     let parsed: RequestHumanArgs = serde_json::from_value(args).unwrap_or(RequestHumanArgs { reason: None });
     let reason = parsed.reason.unwrap_or_default();
 
-    // En sandbox: respuesta sintética, sin tocar DB.
-    // En real (PR 3): cambiaría status=pending + assigned_to=null + emitiría
-    // CHAT_TRANSFERIDO. PR 2 corre solo desde sandbox, así que no implementamos
-    // el path real todavía — el loop ya marca `escalated=true` igual cuando se
-    // pide este tool.
     if ctx.is_sandbox || ctx.conversation_id.is_none() {
         return ToolResult::ok(
             json!({
@@ -304,13 +380,122 @@ async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) ->
         );
     }
 
-    // PR 3 implementará la transición real. Por ahora no rompemos.
+    let conv_id = ctx.conversation_id.unwrap();
+
+    // Transición real: marcamos la IA como pausada y soltamos al agente
+    // asignado. La conv pasa a `pending` para que un humano pueda tomarla
+    // (los próximos inbounds NO van a la IA por el filtro de `ai_disabled`).
+    let patch = ConversationAiPatch {
+        ai_active_agent_id: Some(None),
+        ai_disabled: Some(true),
+    };
+    if let Err(e) = ctx.state.db.update_conversation_ai_state(&conv_id, patch).await {
+        return ToolResult::err(format!("db_error:{}", e), started);
+    }
+    if let Err(e) = ctx.state.db.assign_conversation(&conv_id, None).await {
+        // No es crítico — la IA ya quedó pausada. Loggeamos y seguimos.
+        tracing::warn!("[ai_agent.request_human] release assignment falló: {}", e);
+    }
+
+    // Broadcast del estado para que el front actualice el indicador en vivo.
+    let event = crate::modules::whatsapp::ws::WsServerEvent::IaPausada {
+        conversation_id: conv_id.to_hex(),
+        reason: "request_human".to_string(),
+        by: "ai_agent".to_string(),
+    };
+    crate::modules::whatsapp::ws::broadcast_all(&ctx.state.ws_registry, &event).await;
+
     ToolResult::ok(
         json!({
             "ok": true,
-            "mode": "live_stub",
+            "mode": "live",
             "reason": reason,
-            "note": "El handoff real llega en PR 3. La IA debe igualmente terminar el turno."
+            "ai_disabled": true,
+        }),
+        started,
+    )
+}
+
+// ============================================
+// Tool: transfer_to_agent
+// ============================================
+
+#[derive(Deserialize)]
+struct TransferAgentArgs {
+    target_agent_id: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+async fn exec_transfer_to_agent(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
+    let parsed: TransferAgentArgs = match serde_json::from_value(args) {
+        Ok(v) => v,
+        Err(e) => return ToolResult::err(format!("invalid_args:{}", e), started),
+    };
+
+    let target_oid = match ObjectId::parse_str(parsed.target_agent_id.trim()) {
+        Ok(o) => o,
+        Err(_) => return ToolResult::err("invalid_target_agent_id", started),
+    };
+
+    if target_oid == ctx.agent_id {
+        return ToolResult::err("target_is_self", started);
+    }
+
+    if !ctx.allowed_transfer_targets.contains(&target_oid) {
+        return ToolResult::err("target_not_in_allowlist", started);
+    }
+
+    // Validar que el agente destino existe (puede haberse borrado entre
+    // configurar y ejecutar). Si no existe, no transferimos.
+    let target = match ctx.state.db.find_ai_agent_by_id(&target_oid).await {
+        Ok(Some(a)) => a,
+        Ok(None) => return ToolResult::err("target_agent_not_found", started),
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    };
+
+    let reason = parsed.reason.unwrap_or_default();
+
+    if ctx.is_sandbox || ctx.conversation_id.is_none() {
+        return ToolResult::ok(
+            json!({
+                "ok": true,
+                "mode": "sandbox",
+                "target_agent_id": target_oid.to_hex(),
+                "target_label": target.label,
+                "reason": reason,
+            }),
+            started,
+        );
+    }
+
+    let conv_id = ctx.conversation_id.unwrap();
+
+    // Set del agente destino. `ai_disabled=false` por si venía pausada (caso
+    // raro: la IA se reactivó y al primer turno decidió delegar).
+    let patch = ConversationAiPatch {
+        ai_active_agent_id: Some(Some(&target_oid)),
+        ai_disabled: Some(false),
+    };
+    if let Err(e) = ctx.state.db.update_conversation_ai_state(&conv_id, patch).await {
+        return ToolResult::err(format!("db_error:{}", e), started);
+    }
+
+    let event = crate::modules::whatsapp::ws::WsServerEvent::IaReactivada {
+        conversation_id: conv_id.to_hex(),
+        reason: "transfer_to_agent".to_string(),
+        by: "ai_agent".to_string(),
+        to_agent_id: Some(target_oid.to_hex()),
+    };
+    crate::modules::whatsapp::ws::broadcast_all(&ctx.state.ws_registry, &event).await;
+
+    ToolResult::ok(
+        json!({
+            "ok": true,
+            "mode": "live",
+            "target_agent_id": target_oid.to_hex(),
+            "target_label": target.label,
+            "reason": reason,
         }),
         started,
     )

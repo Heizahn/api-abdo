@@ -60,6 +60,34 @@ impl AiAgentRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
+    async fn find_ai_agents_by_ids(&self, ids: &[ObjectId]) -> Result<Vec<AiAgent>, String> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.ai_agents()
+            .find(doc! { "_id": { "$in": ids } })
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn find_receptionist_for_workspace(
+        &self,
+        workspace_id: &ObjectId,
+    ) -> Result<Option<AiAgent>, String> {
+        self.ai_agents()
+            .find_one(doc! {
+                "workspace_ids": workspace_id,
+                "enabled": true,
+                "is_receptionist": true,
+            })
+            .sort(doc! { "created_at": 1 })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn find_active_agent_for_workspace(
         &self,
         workspace_id: &ObjectId,

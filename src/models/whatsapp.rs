@@ -70,6 +70,18 @@ pub struct WaConversation {
     /// automáticamente cuando llega un inbound (el cliente respondió).
     #[serde(default)]
     pub meta_throttle_until: Option<DateTime>,
+    /// Agente IA que está atendiendo esta conversación. Lo setea el tool
+    /// `transfer_to_agent` cuando una recepcionista deriva a un agente
+    /// especializado (Soporte, Pagos, etc). Si está `None`, el dispatch
+    /// elige según `is_receptionist`/oldest. Se limpia al cerrar/reabrir.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_active_agent_id: Option<ObjectId>,
+    /// Cuando `true`, el dispatch IA no procesa nuevos inbounds en esta
+    /// conversación — un humano la atiende. Lo setea `request_human` (o un
+    /// take manual desde la UI en una iteración futura). Se limpia al
+    /// cerrar/reabrir o cuando el front reactive la IA explícitamente.
+    #[serde(default)]
+    pub ai_disabled: bool,
 }
 
 /// Registro "conversación abierta por agente X en fecha Y" (colección `WaConversationOpens`).
@@ -641,6 +653,14 @@ pub struct ConversationItem {
     /// ISO-8601 hasta cuándo dura el cooldown de Meta (`131049`). `null` si la
     /// conversación no está throttle-eada. Útil para el countdown de UI.
     pub meta_throttle_until: Option<String>,
+    /// ObjectId hex del agente IA actualmente al frente de la conversación.
+    /// `null` cuando ninguna IA tomó (recepcionista decidirá en el próximo
+    /// turno) o cuando `ai_disabled = true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_active_agent_id: Option<String>,
+    /// `true` si la IA está pausada para esta conversación (un humano la
+    /// atiende). El front muestra el indicador "IA pausada" en el header.
+    pub ai_disabled: bool,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema)]
