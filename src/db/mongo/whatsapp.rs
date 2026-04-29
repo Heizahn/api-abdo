@@ -484,6 +484,31 @@ impl WhatsAppRepository for MongoDB {
         Ok(res.modified_count > 0)
     }
 
+    async fn mark_messages_ai_processed(
+        &self,
+        conversation_id: &ObjectId,
+        message_ids: &[ObjectId],
+        when: DateTime,
+    ) -> Result<(), String> {
+        if !message_ids.is_empty() {
+            self.wa_messages()
+                .update_many(
+                    doc! { "_id": { "$in": message_ids } },
+                    doc! { "$set": { "ai_processed_at": when } },
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        self.wa_conversations()
+            .update_one(
+                doc! { "_id": conversation_id },
+                doc! { "$set": { "ai_last_processed_at": when } },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     async fn update_conversation_ai_state(
         &self,
         id: &ObjectId,

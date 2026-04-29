@@ -503,6 +503,18 @@ pub trait WhatsAppRepository {
         id: &ObjectId,
         patch: ConversationAiPatch<'_>,
     ) -> Result<bool, String>;
+
+    /// Marca varios mensajes inbound como procesados por la IA en `when` y
+    /// actualiza `ai_last_processed_at` de la conv en una sola operación.
+    /// NO toca el campo `status` de los mensajes (no es read receipt de
+    /// Meta), solo el indicador interno `ai_processed_at`. Best-effort:
+    /// loggear y seguir si falla — no debería bloquear el dispatch.
+    async fn mark_messages_ai_processed(
+        &self,
+        conversation_id: &ObjectId,
+        message_ids: &[ObjectId],
+        when: mongodb::bson::DateTime,
+    ) -> Result<(), String>;
     async fn assign_conversation(&self, id: &ObjectId, assigned_to: Option<&str>) -> Result<(), String>;
     /// Intenta tomar una conversación pendiente. Retorna `None` si ya estaba asignada a otro
     /// (o no estaba en status `pending`), `Some(conv)` si la toma fue exitosa.

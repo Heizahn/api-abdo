@@ -203,6 +203,7 @@ async fn send_farewell_message(
         interactive_payload: None,
         contacts_payload: None,
         location: None,
+        ai_processed_at: None,
         timestamp: now,
     };
     let saved = state

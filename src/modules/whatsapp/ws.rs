@@ -178,6 +178,19 @@ pub enum WsServerEvent {
         to_agent_id: Option<String>,
     },
 
+    /// La IA procesó uno o varios inbounds de esta conversación. NO equivale
+    /// a "leído por humano" (`unread_count` no cambia). Permite al front
+    /// pintar un indicador 🤖 en cada mensaje del burst y mostrar
+    /// "IA respondió hace X" en el listado.
+    #[serde(rename = "IA_PROCESO_MENSAJE")]
+    IaProcesoMensaje {
+        conversation_id: String,
+        /// `_id` (hex) de cada inbound del burst que la IA procesó.
+        message_ids: Vec<String>,
+        /// ISO-8601 UTC.
+        ai_processed_at: String,
+    },
+
     #[serde(rename = "ERROR")]
     Error { error: String },
 

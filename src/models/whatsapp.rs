@@ -88,6 +88,12 @@ pub struct WaConversation {
     /// para no arrastrarlo turnos siguientes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_transfer_context: Option<String>,
+    /// Última vez que la IA procesó un inbound de esta conv (cualquier modo:
+    /// shadow o live). El front lo compara contra `last_inbound_at` para
+    /// mostrar "IA respondió hace 2m" sin tocar `unread_count` ni read
+    /// receipts de Meta. `None` cuando la IA nunca atendió esta conv.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_last_processed_at: Option<DateTime>,
 }
 
 /// Registro "conversación abierta por agente X en fecha Y" (colección `WaConversationOpens`).
@@ -199,6 +205,12 @@ pub struct WaMessage {
     /// `context.id` cuando el cliente cita un mensaje del negocio.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_wa_message_id: Option<String>,
+    /// Timestamp en que la IA procesó este mensaje inbound. NO equivale a
+    /// `read` (no se manda mark_as_read a Meta) — solo señala que la IA lo
+    /// vio y respondió/intentó responder. El front lo renderiza como un
+    /// indicador 🤖 sin alterar el `unread_count` del humano.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_processed_at: Option<DateTime>,
     /// Preview de URL (OG/Twitter Card). Se rellena async tras guardar el mensaje:
     /// el handler persiste el mensaje con `None`, dispara un job que fetchea la
     /// primera URL del cuerpo, y cuando termina hace `$set` aquí y emite
@@ -667,6 +679,11 @@ pub struct ConversationItem {
     /// `true` si la IA está pausada para esta conversación (un humano la
     /// atiende). El front muestra el indicador "IA pausada" en el header.
     pub ai_disabled: bool,
+    /// ISO-8601 de cuándo la IA procesó esta conv por última vez (cualquier
+    /// modo). `null` si la IA nunca atendió esta conv. Permite mostrar
+    /// "IA respondió hace X" en el listado sin tocar `unread_count`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_last_processed_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema)]
@@ -731,6 +748,11 @@ pub struct MessageItem {
     /// Datos estructurados de ubicación (sólo cuando `type == "location"`).
     /// El front renderiza el mapa con `latitude`/`longitude`.
     pub location: Option<LocationPayload>,
+    /// ISO-8601 (RFC 3339) UTC. Cuando está seteado, indica que la IA procesó
+    /// este mensaje inbound (cualquier modo). El front lo renderiza con un
+    /// indicador 🤖 sin alterar el `unread_count` del humano.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_processed_at: Option<String>,
     /// ISO-8601 (RFC 3339) UTC
     pub created_at: String,
 }

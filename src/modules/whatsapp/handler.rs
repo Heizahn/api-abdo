@@ -515,6 +515,7 @@ pub async fn receive_webhook(
                         interactive_payload,
                         contacts_payload,
                         location: location_payload,
+                        ai_processed_at: None,
                         timestamp: msg_ts,
                     };
 
@@ -1139,6 +1140,7 @@ pub async fn send_message_handler(
         interactive_payload: sent.interactive_payload,
         contacts_payload: sent.contacts_payload,
         location: sent.location,
+        ai_processed_at: None,
         timestamp: DateTime::now(),
     };
 
@@ -2392,6 +2394,7 @@ pub async fn initiate_conversation_handler(
         interactive_payload: None,
         contacts_payload: None,
         location: None,
+        ai_processed_at: None,
         timestamp: DateTime::now(),
     };
 
@@ -3796,6 +3799,7 @@ fn conv_to_item(
         meta_throttle_until: meta_throttle_until_iso,
         ai_active_agent_id: c.ai_active_agent_id.map(|o| o.to_hex()),
         ai_disabled: c.ai_disabled,
+        ai_last_processed_at: c.ai_last_processed_at.map(iso8601),
     }
 }
 
@@ -3916,6 +3920,7 @@ fn msg_to_item(
         interactive_payload: m.interactive_payload,
         contacts_payload: m.contacts_payload,
         location: m.location,
+        ai_processed_at: m.ai_processed_at.map(iso8601),
         created_at: iso8601(m.timestamp),
     }
 }

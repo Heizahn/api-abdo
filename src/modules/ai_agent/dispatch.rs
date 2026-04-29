@@ -98,6 +98,13 @@ pub fn dispatch_inbound_async(
             );
             return;
         }
+        if conv.status == "in_progress" {
+            tracing::debug!(
+                "[ai_agent.dispatch] conv {} con status=in_progress (humano atendiendo), skip",
+                conv_hex
+            );
+            return;
+        }
 
         let agent = match select_agent(&state, &conv, &workspace_id).await {
             Some(a) => a,
@@ -222,6 +229,13 @@ async fn run_dispatch(
     if conv.ai_disabled {
         tracing::debug!(
             "[ai_agent.dispatch] conv {} pasó a ai_disabled durante debounce, skip",
+            inbound.conversation_id.to_hex()
+        );
+        return Ok(());
+    }
+    if conv.status == "in_progress" {
+        tracing::debug!(
+            "[ai_agent.dispatch] conv {} pasó a in_progress durante debounce (humano la tomó), skip",
             inbound.conversation_id.to_hex()
         );
         return Ok(());
@@ -536,6 +550,31 @@ async fn run_dispatch(
         output.output_tokens,
         output.latency_ms
     );
+
+    // ── Marcar inbounds como procesados por IA ────────────────────────────
+    // No es "read" (no se manda mark_as_read a Meta) — es indicador interno
+    // para que el front pinte 🤖 en cada burst sin tocar `unread_count`.
+    let burst_msg_ids: Vec<ObjectId> = burst.iter().filter_map(|m| m.id).collect();
+    let now_for_ai_processed = BsonDateTime::now();
+    if let Err(e) = state
+        .db
+        .mark_messages_ai_processed(
+            &inbound.conversation_id,
+            &burst_msg_ids,
+            now_for_ai_processed,
+        )
+        .await
+    {
+        tracing::warn!("[ai_agent.dispatch] mark_messages_ai_processed: {}", e);
+    } else {
+        let iso = now_for_ai_processed.try_to_rfc3339_string().unwrap_or_default();
+        let ev = crate::modules::whatsapp::ws::WsServerEvent::IaProcesoMensaje {
+            conversation_id: inbound.conversation_id.to_hex(),
+            message_ids: burst_msg_ids.iter().map(|o| o.to_hex()).collect(),
+            ai_processed_at: iso,
+        };
+        crate::modules::whatsapp::ws::broadcast_all(&state.ws_registry, &ev).await;
+    }
 
     // ── Post-turn counters: tokens + turnos diarios y per-conv ────────────
     let agent_hex = agent_id.to_hex();
@@ -874,6 +913,7 @@ async fn send_live_response(
         interactive_payload: None,
         contacts_payload: None,
         location: None,
+        ai_processed_at: None,
         timestamp: now,
     };
     let saved = state
