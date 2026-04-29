@@ -187,6 +187,7 @@ pub struct GenerationConfig {
 // ─── Response ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GenerateContentResponse {
     #[serde(default)]
     pub candidates: Vec<Candidate>,
@@ -199,6 +200,7 @@ pub struct GenerateContentResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Candidate {
     pub content: Content,
     #[serde(default)]

@@ -281,6 +281,42 @@ pub async fn run_turn(
         prompt_vars,
     );
 
+    // ── Diagnóstico ────────────────────────────────────────────────────────
+    // INFO: stats compactas para producción — confirman que el prompt no
+    // está vacío y cuántas tools van a Gemini sin inflar logs.
+    // DEBUG: dump completo del prompt + decls. Activar con:
+    //   RUST_LOG=api_abdo::modules::ai_agent::runner=debug
+    let system_text_preview: String = system_instruction
+        .parts
+        .iter()
+        .filter_map(|p| p.text.as_deref())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let enabled_tool_names: Vec<&str> = agent
+        .tools
+        .iter()
+        .filter(|t| t.enabled)
+        .map(|t| t.name.as_str())
+        .collect();
+    tracing::info!(
+        "[ai_agent.runner] turno start (agent_id={}, model={}, system_chars={}, tools_enabled={}, history_turns={}, has_customer_ctx={}, has_transfer_ctx={})",
+        agent.id.map(|o| o.to_hex()).unwrap_or_default(),
+        agent.model.model_id,
+        system_text_preview.chars().count(),
+        enabled_tool_names.len(),
+        history.len(),
+        customer_context.is_some(),
+        transfer_context.is_some(),
+    );
+    tracing::debug!(
+        "[ai_agent.runner] system_instruction (final, placeholders sustituidos):\n{}",
+        system_text_preview
+    );
+    tracing::debug!(
+        "[ai_agent.runner] tools enviadas a gemini: {:?}",
+        enabled_tool_names
+    );
+
     let mut contents = convert_history(history);
     // Mensaje nuevo del cliente: texto + cualquier multimedia adjunta.
     let mut user_parts: Vec<Part> = Vec::with_capacity(1 + user_media.len());
