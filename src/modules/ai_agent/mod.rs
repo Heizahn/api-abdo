@@ -4,11 +4,13 @@
 //! tools, limits) y atiende a 0+ workspaces. Sin recepcionista todavía: cada
 //! agente sirve directo. La recepcionista llega en una vuelta posterior.
 
+pub mod business_data;
 pub mod dispatch;
 pub mod gemini;
 pub mod handler;
 pub mod runner;
 pub mod sandbox;
+pub mod seed;
 pub mod tools;
 
 use axum::{
@@ -65,5 +67,31 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/auth-user/whatsapp/ai-agent/models",
             get(handler::list_models_raw_handler),
+        )
+        // Discovery: tools disponibles para que el editor del front no hardcodee
+        .route(
+            "/v1/auth-user/whatsapp/ai-agent/tools",
+            get(business_data::list_tools_handler),
+        )
+        // CRUD planes (datos de negocio que la tool list_plans expone)
+        .route(
+            "/v1/auth-user/whatsapp/ai-agent/plans",
+            get(business_data::list_plans_handler).post(business_data::create_plan_handler),
+        )
+        .route(
+            "/v1/auth-user/whatsapp/ai-agent/plans/:id",
+            patch(business_data::update_plan_handler)
+                .delete(business_data::delete_plan_handler),
+        )
+        // CRUD zonas de cobertura
+        .route(
+            "/v1/auth-user/whatsapp/ai-agent/coverage-zones",
+            get(business_data::list_coverage_zones_handler)
+                .post(business_data::create_coverage_zone_handler),
+        )
+        .route(
+            "/v1/auth-user/whatsapp/ai-agent/coverage-zones/:id",
+            patch(business_data::update_coverage_zone_handler)
+                .delete(business_data::delete_coverage_zone_handler),
         )
 }

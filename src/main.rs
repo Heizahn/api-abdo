@@ -74,6 +74,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         modules::whatsapp::backfill::run_conversation_events_backfill(state_for_conv_events).await;
     });
 
+    // Seed lazy de planes y zonas de cobertura para el AI Agent. Solo
+    // inserta si las colecciones están vacías.
+    let state_for_ai_seed = state.clone();
+    tokio::spawn(async move {
+        modules::ai_agent::seed::run(state_for_ai_seed).await;
+    });
+
     tracing::info!("✅ Conexiones establecidas");
     // 4. Construir router de Axum
     let app = axum_router::build_router(state);

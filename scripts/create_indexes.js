@@ -317,6 +317,32 @@ print("  ✅ AiAgentFaqs.agent_id + created_at desc");
 print("");
 
 // ============================================
+// COLECCIÓN: AiPlans — catálogo de planes que la tool list_plans expone
+// ============================================
+print("📦 Colección: AiPlans");
+
+db.AiPlans.createIndex(
+  { "active": 1, "display_order": 1, "mbps": 1 },
+  { name: "idx_ai_plans_active_order", background: true }
+);
+print("  ✅ AiPlans.active + display_order + mbps");
+
+print("");
+
+// ============================================
+// COLECCIÓN: AiCoverageZones — zonas que la tool check_coverage matchea
+// ============================================
+print("📦 Colección: AiCoverageZones");
+
+db.AiCoverageZones.createIndex(
+  { "active": 1, "name": 1 },
+  { name: "idx_ai_coverage_active_name", background: true }
+);
+print("  ✅ AiCoverageZones.active + name");
+
+print("");
+
+// ============================================
 // COLECCIÓN: WaMessages — auditoría cross-conversation
 // ============================================
 print("📦 Colección: WaMessages (auditoría)");
@@ -345,7 +371,7 @@ print("📋 VERIFICACIÓN DE ÍNDICES");
 print("=".repeat(60));
 print("");
 
-const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes", "WaTemplates", "wa_template_media.files", "WaConversationEvents", "WaMessages", "AiAgents", "AiAgentFaqs"];
+const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes", "WaTemplates", "wa_template_media.files", "WaConversationEvents", "WaMessages", "AiAgents", "AiAgentFaqs", "AiPlans", "AiCoverageZones"];
 toVerify.forEach(col => {
   print(col + ":");
   db.getCollection(col).getIndexes().forEach(idx => {

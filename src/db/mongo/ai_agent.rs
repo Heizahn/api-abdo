@@ -12,7 +12,7 @@ use mongodb::Collection;
 
 use super::MongoDB;
 use crate::db::AiAgentRepository;
-use crate::models::ai_agent::{AiAgent, AiAgentFaq, AiInteraction};
+use crate::models::ai_agent::{AiAgent, AiAgentFaq, AiCoverageZone, AiInteraction, AiPlan};
 use crate::models::whatsapp::WaMessage;
 
 impl MongoDB {
@@ -26,6 +26,14 @@ impl MongoDB {
 
     fn ai_interactions(&self) -> Collection<AiInteraction> {
         self.db.collection::<AiInteraction>("AiInteractions")
+    }
+
+    fn ai_plans(&self) -> Collection<AiPlan> {
+        self.db.collection::<AiPlan>("AiPlans")
+    }
+
+    fn ai_coverage_zones(&self) -> Collection<AiCoverageZone> {
+        self.db.collection::<AiCoverageZone>("AiCoverageZones")
     }
 
     fn wa_messages_for_history(&self) -> Collection<WaMessage> {
@@ -222,6 +230,151 @@ impl AiAgentRepository for MongoDB {
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    // ─── AiPlans ────────────────────────────────────────────────────────────
+
+    async fn list_ai_plans(&self, only_active: bool) -> Result<Vec<AiPlan>, String> {
+        let filter = if only_active { doc! { "active": true } } else { doc! {} };
+        self.ai_plans()
+            .find(filter)
+            .sort(doc! { "display_order": 1, "mbps": 1 })
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn find_ai_plan_by_id(&self, id: &ObjectId) -> Result<Option<AiPlan>, String> {
+        self.ai_plans()
+            .find_one(doc! { "_id": id })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn create_ai_plan(&self, mut plan: AiPlan) -> Result<AiPlan, String> {
+        let res = self
+            .ai_plans()
+            .insert_one(&plan)
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(oid) = res.inserted_id.as_object_id() {
+            plan.id = Some(oid);
+        }
+        Ok(plan)
+    }
+
+    async fn replace_ai_plan(
+        &self,
+        id: &ObjectId,
+        mut plan: AiPlan,
+    ) -> Result<Option<AiPlan>, String> {
+        plan.id = Some(*id);
+        let opts = FindOneAndReplaceOptions::builder()
+            .return_document(ReturnDocument::After)
+            .build();
+        self.ai_plans()
+            .find_one_and_replace(doc! { "_id": id }, plan)
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn delete_ai_plan(&self, id: &ObjectId) -> Result<bool, String> {
+        let res = self
+            .ai_plans()
+            .delete_one(doc! { "_id": id })
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(res.deleted_count > 0)
+    }
+
+    async fn ai_plans_is_empty(&self) -> Result<bool, String> {
+        let count = self
+            .ai_plans()
+            .count_documents(doc! {})
+            .limit(1)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(count == 0)
+    }
+
+    // ─── AiCoverageZones ────────────────────────────────────────────────────
+
+    async fn list_ai_coverage_zones(
+        &self,
+        only_active: bool,
+    ) -> Result<Vec<AiCoverageZone>, String> {
+        let filter = if only_active { doc! { "active": true } } else { doc! {} };
+        self.ai_coverage_zones()
+            .find(filter)
+            .sort(doc! { "name": 1 })
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn find_ai_coverage_zone_by_id(
+        &self,
+        id: &ObjectId,
+    ) -> Result<Option<AiCoverageZone>, String> {
+        self.ai_coverage_zones()
+            .find_one(doc! { "_id": id })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn create_ai_coverage_zone(
+        &self,
+        mut zone: AiCoverageZone,
+    ) -> Result<AiCoverageZone, String> {
+        let res = self
+            .ai_coverage_zones()
+            .insert_one(&zone)
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(oid) = res.inserted_id.as_object_id() {
+            zone.id = Some(oid);
+        }
+        Ok(zone)
+    }
+
+    async fn replace_ai_coverage_zone(
+        &self,
+        id: &ObjectId,
+        mut zone: AiCoverageZone,
+    ) -> Result<Option<AiCoverageZone>, String> {
+        zone.id = Some(*id);
+        let opts = FindOneAndReplaceOptions::builder()
+            .return_document(ReturnDocument::After)
+            .build();
+        self.ai_coverage_zones()
+            .find_one_and_replace(doc! { "_id": id }, zone)
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn delete_ai_coverage_zone(&self, id: &ObjectId) -> Result<bool, String> {
+        let res = self
+            .ai_coverage_zones()
+            .delete_one(doc! { "_id": id })
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(res.deleted_count > 0)
+    }
+
+    async fn ai_coverage_zones_is_empty(&self) -> Result<bool, String> {
+        let count = self
+            .ai_coverage_zones()
+            .count_documents(doc! {})
+            .limit(1)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(count == 0)
     }
 
     async fn list_recent_messages_for_conversation(

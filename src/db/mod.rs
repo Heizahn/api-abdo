@@ -1,5 +1,7 @@
 pub mod mongo;
-use crate::models::ai_agent::{AiAgent, AiAgentFaq, AiClientLookup, AiInteraction};
+use crate::models::ai_agent::{
+    AiAgent, AiAgentFaq, AiClientLookup, AiCoverageZone, AiInteraction, AiPlan,
+};
 use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
 use crate::models::whatsapp::{
     ConversationStats, QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyList,
@@ -1105,6 +1107,39 @@ pub trait AiAgentRepository {
         conversation_id: &ObjectId,
         limit: i64,
     ) -> Result<Vec<crate::models::whatsapp::WaMessage>, String>;
+
+    // ─── AiPlans (datos de negocio editables) ──────────────────────────────
+    /// Lista planes. `only_active=true` recorta a `active=true`. Sort
+    /// ascendente por `display_order` y `mbps` como tiebreaker.
+    async fn list_ai_plans(&self, only_active: bool) -> Result<Vec<AiPlan>, String>;
+    async fn find_ai_plan_by_id(&self, id: &ObjectId) -> Result<Option<AiPlan>, String>;
+    async fn create_ai_plan(&self, plan: AiPlan) -> Result<AiPlan, String>;
+    async fn replace_ai_plan(&self, id: &ObjectId, plan: AiPlan)
+        -> Result<Option<AiPlan>, String>;
+    async fn delete_ai_plan(&self, id: &ObjectId) -> Result<bool, String>;
+    /// `true` si la colección está vacía. Usado por el seed lazy al arrancar.
+    async fn ai_plans_is_empty(&self) -> Result<bool, String>;
+
+    // ─── AiCoverageZones ────────────────────────────────────────────────────
+    async fn list_ai_coverage_zones(
+        &self,
+        only_active: bool,
+    ) -> Result<Vec<AiCoverageZone>, String>;
+    async fn find_ai_coverage_zone_by_id(
+        &self,
+        id: &ObjectId,
+    ) -> Result<Option<AiCoverageZone>, String>;
+    async fn create_ai_coverage_zone(
+        &self,
+        zone: AiCoverageZone,
+    ) -> Result<AiCoverageZone, String>;
+    async fn replace_ai_coverage_zone(
+        &self,
+        id: &ObjectId,
+        zone: AiCoverageZone,
+    ) -> Result<Option<AiCoverageZone>, String>;
+    async fn delete_ai_coverage_zone(&self, id: &ObjectId) -> Result<bool, String>;
+    async fn ai_coverage_zones_is_empty(&self) -> Result<bool, String>;
 }
 
 // ============================================

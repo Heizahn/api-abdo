@@ -237,6 +237,150 @@ pub struct AiToolCallLog {
 }
 
 // ============================================
+// AiPlan — datos de plan que la tool `list_plans` expone
+// ============================================
+
+/// Documento de la colección `AiPlans`.
+///
+/// Expuesto sólo en español (lo que la IA va a leer literal). NO incluye
+/// precio: la página pública dice "consultar" y el equipo comercial cierra el
+/// monto al instalar — la IA nunca debe inventarlo.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AiPlan {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    pub name: String,
+    pub mbps: u32,
+    pub devices_recommendation: String,
+    #[serde(default)]
+    pub benefits: Vec<String>,
+    /// `false` lo oculta de `list_plans` sin borrar el doc.
+    pub active: bool,
+    /// Orden ascendente para `list_plans`. Default 0 — los nuevos van al final.
+    #[serde(default)]
+    pub display_order: i32,
+    pub created_at: DateTime,
+    pub updated_at: DateTime,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiPlanItem {
+    pub id: String,
+    pub name: String,
+    pub mbps: u32,
+    pub devices_recommendation: String,
+    pub benefits: Vec<String>,
+    pub active: bool,
+    pub display_order: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiPlanResponse {
+    pub ok: bool,
+    pub data: AiPlanItem,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiPlansListResponse {
+    pub ok: bool,
+    pub data: Vec<AiPlanItem>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateAiPlanRequest {
+    pub name: String,
+    pub mbps: u32,
+    pub devices_recommendation: String,
+    #[serde(default)]
+    pub benefits: Vec<String>,
+    #[serde(default)]
+    pub active: Option<bool>,
+    #[serde(default)]
+    pub display_order: Option<i32>,
+}
+
+#[derive(Debug, Deserialize, ToSchema, Default)]
+pub struct UpdateAiPlanRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mbps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices_recommendation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benefits: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_order: Option<i32>,
+}
+
+// ============================================
+// AiCoverageZone — la tool `check_coverage` matchea contra esto
+// ============================================
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AiCoverageZone {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    /// Display name canónico (ej: "Valencia", "San Diego"). El matching
+    /// normaliza tildes/case en runtime.
+    pub name: String,
+    /// Estado/región para contexto (ej: "Carabobo"). No participa del match.
+    pub region: String,
+    pub active: bool,
+    pub created_at: DateTime,
+    pub updated_at: DateTime,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiCoverageZoneItem {
+    pub id: String,
+    pub name: String,
+    pub region: String,
+    pub active: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiCoverageZoneResponse {
+    pub ok: bool,
+    pub data: AiCoverageZoneItem,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiCoverageZonesListResponse {
+    pub ok: bool,
+    pub data: Vec<AiCoverageZoneItem>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateAiCoverageZoneRequest {
+    pub name: String,
+    pub region: String,
+    #[serde(default)]
+    pub active: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, ToSchema, Default)]
+pub struct UpdateAiCoverageZoneRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiBusinessDataDeleteResponse {
+    pub ok: bool,
+}
+
+// ============================================
 // API DTOs (response)
 // ============================================
 

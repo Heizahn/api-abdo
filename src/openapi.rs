@@ -4,12 +4,17 @@ use crate::db::mongo::{PaymentDetails, ResultGroupedByDate};
 use crate::models::ai_agent::{
     AiAgentDeleteResponse, AiAgentFaqItem, AiAgentFaqListResponse, AiAgentFaqResponse,
     AiAgentItem, AiAgentMode, AiAgentModelItem, AiAgentModelsListResponse, AiAgentResponse,
-    AiAgentsListResponse, AiEscalationRulesDto, AiEscalationRulesInput, AiLimitsDto, AiLimitsInput,
-    AiModelConfigDto, AiModelConfigInput, AiPersonalityDto, AiPersonalityInput, AiScheduleDto,
-    AiScheduleInput, AiToolConfigDto, AiToolConfigInput, CreateAiAgentFaqRequest,
-    CreateAiAgentRequest, TestConnectionData, TestConnectionRequest, TestConnectionResponse,
+    AiAgentsListResponse, AiBusinessDataDeleteResponse, AiCoverageZoneItem,
+    AiCoverageZoneResponse, AiCoverageZonesListResponse, AiEscalationRulesDto,
+    AiEscalationRulesInput, AiLimitsDto, AiLimitsInput, AiModelConfigDto, AiModelConfigInput,
+    AiPersonalityDto, AiPersonalityInput, AiPlanItem, AiPlanResponse, AiPlansListResponse,
+    AiScheduleDto, AiScheduleInput, AiToolConfigDto, AiToolConfigInput,
+    CreateAiAgentFaqRequest, CreateAiAgentRequest, CreateAiCoverageZoneRequest,
+    CreateAiPlanRequest, TestConnectionData, TestConnectionRequest, TestConnectionResponse,
     TestConnectionSource, UpdateAiAgentFaqRequest, UpdateAiAgentRequest,
+    UpdateAiCoverageZoneRequest, UpdateAiPlanRequest,
 };
+use crate::modules::ai_agent::business_data::{AiToolMetaItem, AiToolsListResponse};
 use crate::modules::ai_agent::sandbox::{
     SandboxData, SandboxHistoryEntry, SandboxRequest, SandboxResponse, SandboxToolCall,
     SandboxUsage,
@@ -180,6 +185,16 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
         crate::modules::ai_agent::handler::test_connection_for_agent_handler,
         crate::modules::ai_agent::handler::list_models_raw_handler,
         crate::modules::ai_agent::handler::list_models_for_agent_handler,
+        // AI Agent — datos de negocio (planes, cobertura) + discovery de tools
+        crate::modules::ai_agent::business_data::list_plans_handler,
+        crate::modules::ai_agent::business_data::create_plan_handler,
+        crate::modules::ai_agent::business_data::update_plan_handler,
+        crate::modules::ai_agent::business_data::delete_plan_handler,
+        crate::modules::ai_agent::business_data::list_coverage_zones_handler,
+        crate::modules::ai_agent::business_data::create_coverage_zone_handler,
+        crate::modules::ai_agent::business_data::update_coverage_zone_handler,
+        crate::modules::ai_agent::business_data::delete_coverage_zone_handler,
+        crate::modules::ai_agent::business_data::list_tools_handler,
         // Users — CRUD
         crate::modules::users::handler::list_users_handler,
         crate::modules::users::handler::create_user_handler,
@@ -286,6 +301,14 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
             TestConnectionSource,
             // AI Agent — List models
             AiAgentModelItem, AiAgentModelsListResponse,
+            // AI Agent — datos de negocio
+            AiPlanItem, CreateAiPlanRequest, UpdateAiPlanRequest,
+            AiPlanResponse, AiPlansListResponse,
+            AiCoverageZoneItem, CreateAiCoverageZoneRequest, UpdateAiCoverageZoneRequest,
+            AiCoverageZoneResponse, AiCoverageZonesListResponse,
+            AiBusinessDataDeleteResponse,
+            // AI Agent — discovery
+            AiToolMetaItem, AiToolsListResponse,
         )
     ),
     tags(

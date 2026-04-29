@@ -295,6 +295,59 @@ impl RedisClient {
     }
 
     // ============================================
+    // AI Agent — cache de planes y zonas de cobertura
+    // ============================================
+    //
+    // Las tools `list_plans` y `check_coverage` leen estos blobs en cada turno.
+    // Cache TTL 5 min — los admins editan poco; cualquier write desde el CRUD
+    // invalida la key y se repuebla en el siguiente tool call.
+
+    const AI_PLANS_KEY: &str = "ai_agent:plans:list_active";
+    const AI_COVERAGE_KEY: &str = "ai_agent:coverage:list_active";
+
+    pub async fn get_ai_plans_cache(&self) -> Option<String> {
+        let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;
+        conn.get(Self::AI_PLANS_KEY).await.ok().flatten()
+    }
+
+    pub async fn set_ai_plans_cache(&self, payload: &str, ttl_secs: u64) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let _: Result<(), _> = conn.set_ex(Self::AI_PLANS_KEY, payload, ttl_secs).await;
+    }
+
+    pub async fn invalidate_ai_plans_cache(&self) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let _: Result<(), _> = conn.del(Self::AI_PLANS_KEY).await;
+    }
+
+    pub async fn get_ai_coverage_cache(&self) -> Option<String> {
+        let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;
+        conn.get(Self::AI_COVERAGE_KEY).await.ok().flatten()
+    }
+
+    pub async fn set_ai_coverage_cache(&self, payload: &str, ttl_secs: u64) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let _: Result<(), _> = conn.set_ex(Self::AI_COVERAGE_KEY, payload, ttl_secs).await;
+    }
+
+    pub async fn invalidate_ai_coverage_cache(&self) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let _: Result<(), _> = conn.del(Self::AI_COVERAGE_KEY).await;
+    }
+
+    // ============================================
     // AI Agent — debounce de inbounds + lock anti-concurrencia
     // ============================================
 

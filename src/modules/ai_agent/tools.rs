@@ -103,74 +103,12 @@ pub const T_TRANSFER_AGENT: &str = "transfer_to_agent";
 pub const T_LIST_PLANS: &str = "list_plans";
 pub const T_CHECK_COVERAGE: &str = "check_coverage";
 
-// ============================================
-// Datos estáticos: planes y zonas de cobertura
-// ============================================
-//
-// Fuente: https://abdo77.com.ve/planes/ y https://abdo77.com.ve/cobertura/
-// (snapshot 2026-04). Si la oferta cambia, actualizar acá. La IA NUNCA expone
-// precio — la página real dice "Consultar precio" para todos los planes.
-
-struct AbdoPlan {
-    name: &'static str,
-    mbps: u32,
-    devices_recommendation: &'static str,
-    benefits: &'static [&'static str],
-}
-
-const ABDO_PLANS: &[AbdoPlan] = &[
-    AbdoPlan {
-        name: "Conexión Esencial",
-        mbps: 80,
-        devices_recommendation: "1 a 3 dispositivos",
-        benefits: &["Internet ilimitado", "Router Wi-Fi incluido", "IPv6 público"],
-    },
-    AbdoPlan {
-        name: "Conexión Avanzada",
-        mbps: 100,
-        devices_recommendation: "6 a 8 dispositivos",
-        benefits: &["Internet ilimitado", "Router Wi-Fi incluido", "IPv6 público"],
-    },
-    AbdoPlan {
-        name: "Conexión Élite 120",
-        mbps: 120,
-        devices_recommendation: "Más de 10 dispositivos",
-        benefits: &["Internet ilimitado", "Router Wi-Fi incluido", "IPv6 público"],
-    },
-    AbdoPlan {
-        name: "Conexión Élite 250",
-        mbps: 250,
-        devices_recommendation: "Más de 10 dispositivos",
-        benefits: &["Internet ilimitado", "Router Wi-Fi incluido", "IPv6 público"],
-    },
-    AbdoPlan {
-        name: "Conexión Élite 500",
-        mbps: 500,
-        devices_recommendation: "Más de 10 dispositivos",
-        benefits: &["Internet ilimitado", "Router Wi-Fi incluido", "IPv6 público"],
-    },
-    AbdoPlan {
-        name: "Conexión Élite 1000",
-        mbps: 1000,
-        devices_recommendation: "Más de 10 dispositivos",
-        benefits: &["Internet ilimitado", "Router Wi-Fi incluido", "IPv6 público"],
-    },
-];
-
-/// Zonas con cobertura activa. Todas en Carabobo (Venezuela).
-const ABDO_COVERAGE_ZONES: &[&str] = &[
-    "Carlos Arvelo",
-    "Guacara",
-    "Los Guayos",
-    "Valencia",
-    "San Diego",
-    "Libertador",
-];
-
-const ABDO_COVERAGE_REGION: &str = "Carabobo";
+/// Cache TTL para `list_plans` y `check_coverage`. Admins editan poco; en cada
+/// write se invalida explícitamente.
+const AI_BUSINESS_CACHE_TTL_SECS: u64 = 300;
 
 /// Normaliza un string para matchear zonas: lowercase, sin tildes, trim.
-fn normalize_zone(s: &str) -> String {
+pub(crate) fn normalize_zone(s: &str) -> String {
     s.trim()
         .to_lowercase()
         .chars()
@@ -555,8 +493,18 @@ async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) ->
 // Tool: list_plans
 // ============================================
 
-async fn exec_list_plans(_args: Value, _ctx: &ToolContext, started: Instant) -> ToolResult {
-    let items: Vec<Value> = ABDO_PLANS
+async fn exec_list_plans(_args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
+    if let Some(cached) = ctx.state.redis.get_ai_plans_cache().await {
+        if let Ok(parsed) = serde_json::from_str::<Value>(&cached) {
+            return ToolResult::ok(parsed, started);
+        }
+    }
+
+    let plans = match ctx.state.db.list_ai_plans(true).await {
+        Ok(p) => p,
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    };
+    let items: Vec<Value> = plans
         .iter()
         .map(|p| {
             json!({
@@ -567,13 +515,14 @@ async fn exec_list_plans(_args: Value, _ctx: &ToolContext, started: Instant) -> 
             })
         })
         .collect();
-    ToolResult::ok(
-        json!({
-            "items": items,
-            "price_note": "Los precios no se exponen al asistente. Si el cliente pide costo, indicar que el equipo comercial confirma el monto al cerrar la instalación.",
-        }),
-        started,
-    )
+    let response = json!({
+        "items": items,
+        "price_note": "Los precios no se exponen al asistente. Si el cliente pide costo, indicar que el equipo comercial confirma el monto al cerrar la instalación.",
+    });
+    if let Ok(s) = serde_json::to_string(&response) {
+        ctx.state.redis.set_ai_plans_cache(&s, AI_BUSINESS_CACHE_TTL_SECS).await;
+    }
+    ToolResult::ok(response, started)
 }
 
 // ============================================
@@ -585,7 +534,30 @@ struct CheckCoverageArgs {
     zone: String,
 }
 
-async fn exec_check_coverage(args: Value, _ctx: &ToolContext, started: Instant) -> ToolResult {
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct CachedZone {
+    name: String,
+    region: String,
+}
+
+async fn load_active_zones(ctx: &ToolContext) -> Result<Vec<CachedZone>, String> {
+    if let Some(cached) = ctx.state.redis.get_ai_coverage_cache().await {
+        if let Ok(parsed) = serde_json::from_str::<Vec<CachedZone>>(&cached) {
+            return Ok(parsed);
+        }
+    }
+    let zones = ctx.state.db.list_ai_coverage_zones(true).await?;
+    let cached: Vec<CachedZone> = zones
+        .into_iter()
+        .map(|z| CachedZone { name: z.name, region: z.region })
+        .collect();
+    if let Ok(s) = serde_json::to_string(&cached) {
+        ctx.state.redis.set_ai_coverage_cache(&s, AI_BUSINESS_CACHE_TTL_SECS).await;
+    }
+    Ok(cached)
+}
+
+async fn exec_check_coverage(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
     let parsed: CheckCoverageArgs = match serde_json::from_value(args) {
         Ok(v) => v,
         Err(e) => return ToolResult::err(format!("invalid_args:{}", e), started),
@@ -594,23 +566,31 @@ async fn exec_check_coverage(args: Value, _ctx: &ToolContext, started: Instant) 
     if raw.is_empty() {
         return ToolResult::err("missing_zone", started);
     }
-    let normalized = normalize_zone(raw);
-    let matched = ABDO_COVERAGE_ZONES
-        .iter()
-        .find(|z| {
-            let nz = normalize_zone(z);
-            normalized == nz || normalized.contains(&nz) || nz.contains(&normalized)
-        })
-        .copied();
 
-    let covered = matched.is_some();
+    let zones = match load_active_zones(ctx).await {
+        Ok(z) => z,
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    };
+
+    let normalized = normalize_zone(raw);
+    let matched = zones.iter().find(|z| {
+        let nz = normalize_zone(&z.name);
+        normalized == nz || normalized.contains(&nz) || nz.contains(&normalized)
+    });
+
+    let (matched_zone, region) = match matched {
+        Some(z) => (Some(z.name.clone()), Some(z.region.clone())),
+        None => (None, None),
+    };
+    let available_zones: Vec<&str> = zones.iter().map(|z| z.name.as_str()).collect();
+
     ToolResult::ok(
         json!({
-            "covered": covered,
-            "matched_zone": matched,
+            "covered": matched.is_some(),
+            "matched_zone": matched_zone,
             "queried_zone": raw,
-            "region": ABDO_COVERAGE_REGION,
-            "available_zones": ABDO_COVERAGE_ZONES,
+            "region": region,
+            "available_zones": available_zones,
         }),
         started,
     )
