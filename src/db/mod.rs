@@ -1099,6 +1099,16 @@ pub trait AiAgentRepository {
     /// Persiste un turno IA. Usado por `dispatch.rs` (shadow + live).
     async fn create_ai_interaction(&self, interaction: AiInteraction) -> Result<(), String>;
 
+    /// Cuenta `AiInteractions` para una conversación. Usado por el dispatch
+    /// para detectar "fresh start" — cuando un agente IA entra por primera vez
+    /// a una conv que ya tenía mensajes humanos previos, conviene recortar el
+    /// history para que el modelo no copie el patrón conversacional anterior.
+    /// Cero = la IA todavía no respondió en esta conv.
+    async fn count_ai_interactions_for_conversation(
+        &self,
+        conversation_id: &ObjectId,
+    ) -> Result<u64, String>;
+
     /// Lee los últimos N mensajes de una conversación, ordenados por
     /// `timestamp` ASC (cronológico). Usado por el dispatch para armar el
     /// history que va al runner.

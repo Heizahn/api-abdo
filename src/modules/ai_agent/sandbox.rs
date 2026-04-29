@@ -297,6 +297,7 @@ pub async fn sandbox_handler(
         faqs_inline.as_deref(),
         None,
         None,
+        None,
         Some(&prompt_vars),
         &tool_ctx,
     )

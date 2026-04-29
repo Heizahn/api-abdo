@@ -157,6 +157,7 @@ fn build_system_instruction(
     faqs_inline: Option<&str>,
     customer_context: Option<&str>,
     transfer_context: Option<&str>,
+    first_turn_note: Option<&str>,
     vars: Option<&PromptVariables>,
 ) -> SystemInstruction {
     // El back solo pasa DATOS etiquetados — el SUPERADMIN decide el
@@ -223,6 +224,12 @@ fn build_system_instruction(
         }
     }
 
+    if let Some(note) = first_turn_note {
+        if !note.trim().is_empty() {
+            chunks.push(format!("[ai_first_turn]\n{}", note.trim()));
+        }
+    }
+
     if let Some(faqs) = faqs_inline {
         if !faqs.trim().is_empty() {
             chunks.push(format!("[faqs]\n{}", faqs.trim()));
@@ -269,6 +276,7 @@ pub async fn run_turn(
     faqs_inline: Option<&str>,
     customer_context: Option<&str>,
     transfer_context: Option<&str>,
+    first_turn_note: Option<&str>,
     prompt_vars: Option<&PromptVariables>,
     tool_ctx: &ToolContext,
 ) -> Result<RunnerOutput, ApiError> {
@@ -278,6 +286,7 @@ pub async fn run_turn(
         faqs_inline,
         customer_context,
         transfer_context,
+        first_turn_note,
         prompt_vars,
     );
 
@@ -299,7 +308,7 @@ pub async fn run_turn(
         .map(|t| t.name.as_str())
         .collect();
     tracing::info!(
-        "[ai_agent.runner] turno start (agent_id={}, model={}, system_chars={}, tools_enabled={}, history_turns={}, has_customer_ctx={}, has_transfer_ctx={})",
+        "[ai_agent.runner] turno start (agent_id={}, model={}, system_chars={}, tools_enabled={}, history_turns={}, has_customer_ctx={}, has_transfer_ctx={}, has_first_turn_note={})",
         agent.id.map(|o| o.to_hex()).unwrap_or_default(),
         agent.model.model_id,
         system_text_preview.chars().count(),
@@ -307,6 +316,7 @@ pub async fn run_turn(
         history.len(),
         customer_context.is_some(),
         transfer_context.is_some(),
+        first_turn_note.is_some(),
     );
     tracing::debug!(
         "[ai_agent.runner] system_instruction (final, placeholders sustituidos):\n{}",

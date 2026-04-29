@@ -284,7 +284,7 @@ async fn run_dispatch(
     // posteriores al inbound_oid (porque el bot pudo haber respondido a
     // un turno previo mientras este mensaje quedaba pendiente). Los
     // mantenemos para que la IA tenga el contexto cronológico correcto.
-    let history: Vec<ConvTurn> = recent
+    let full_history: Vec<ConvTurn> = recent
         .iter()
         .filter(|m| {
             // Excluir los que van a la ráfaga (inbounds con _id >= inbound_oid).
@@ -304,6 +304,41 @@ async fn run_dispatch(
             Some(ConvTurn { role, text })
         })
         .collect();
+
+    // ── Fresh-start detection ──────────────────────────────────────────────
+    // Si la IA NUNCA respondió en esta conv y hay history previo (mensajes
+    // de humanos / canales anteriores), recortamos el history para que el
+    // modelo no copie el patrón conversacional que venía. Inyectamos un
+    // bloque etiquetado `[ai_first_turn]` con el conteo previo — el
+    // SUPERADMIN decide desde el system_prompt cómo reaccionar a ese flag.
+    let prior_ai_turns = state
+        .db
+        .count_ai_interactions_for_conversation(&inbound.conversation_id)
+        .await
+        .unwrap_or(0);
+    let prior_history_count = full_history.len();
+    let is_ai_first_turn_with_prior_history =
+        prior_ai_turns == 0 && prior_history_count > 0;
+
+    let history: Vec<ConvTurn> = if is_ai_first_turn_with_prior_history {
+        tracing::info!(
+            "[ai_agent.dispatch] fresh-start detectado (conv={}, prior_messages={}); history recortado",
+            inbound.conversation_id.to_hex(),
+            prior_history_count
+        );
+        Vec::new()
+    } else {
+        full_history
+    };
+
+    let first_turn_note_owned: Option<String> = if is_ai_first_turn_with_prior_history {
+        Some(format!(
+            "prior_messages_count: {}\nprior_handlers: humans_or_other_channels\nnote: Esta es la primera vez que un agente IA responde en esta conversación. Los mensajes previos no se incluyen en el history de este turno.",
+            prior_history_count
+        ))
+    } else {
+        None
+    };
 
     // Burst: inbounds con `_id >= inbound_oid` en orden de _id ascendente.
     let burst: Vec<&WaMessage> = recent
@@ -469,6 +504,7 @@ async fn run_dispatch(
         faqs_inline.as_deref(),
         customer_context.as_deref(),
         transfer_context_owned.as_deref(),
+        first_turn_note_owned.as_deref(),
         Some(&prompt_vars),
         &tool_ctx,
     )
