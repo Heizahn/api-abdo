@@ -754,6 +754,17 @@ async fn exec_transfer_to_agent(args: Value, ctx: &ToolContext, started: Instant
         return ToolResult::err(format!("db_error:{}", e), started);
     }
 
+    // Reset de counters per-conv: el agente destino debe arrancar limpio,
+    // sin heredar `no_resolution`, `id_attempts`, `turns_conv` del origen.
+    // Lo hacemos acá (en el tool) en vez del dispatch para que el reset
+    // ocurra SIEMPRE que se persiste el handoff — incluso si el chain en
+    // memoria falla a mitad por error transient de Gemini, el target ya
+    // tiene counters limpios cuando el cliente reescriba.
+    ctx.state
+        .redis
+        .clear_ai_conv_counters(&conv_id.to_hex())
+        .await;
+
     let event = crate::modules::whatsapp::ws::WsServerEvent::IaReactivada {
         conversation_id: conv_id.to_hex(),
         reason: "transfer_to_agent".to_string(),

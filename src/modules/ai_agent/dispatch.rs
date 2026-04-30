@@ -796,17 +796,11 @@ async fn run_dispatch(
     }
 
     // ── Per-conv counter (1 por dispatch, no por iteración del chain) ─────
+    // Nota: el reset de counters al transferir lo hace el tool
+    // `transfer_to_agent` directamente cuando persiste el handoff. Acá solo
+    // incrementamos el turn counter del último agente.
     state.redis.incr_ai_turns_conv(&conv_hex).await;
-
-    // ── Si hubo transfers en el chain, reset counters per-conv ────────────
     let had_chain_transfer = chain_count > 0;
-    if had_chain_transfer {
-        state.redis.clear_ai_conv_counters(&conv_hex).await;
-        tracing::info!(
-            "[ai_agent.dispatch] chain de transfers en mismo workspace; counters per-conv reseteados (conv={})",
-            conv_hex
-        );
-    }
 
     // ── max_identification_attempts (sobre el último turno) ────────────────
     if last_agent.escalation.max_identification_attempts > 0 {
