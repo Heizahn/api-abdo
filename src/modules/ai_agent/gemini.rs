@@ -295,11 +295,16 @@ pub async fn generate_content(
     // Vertex Express: /publishers/google/models es la base, así que la
     // concatenación queda /publishers/google/models/{id}:generateContent.
     // Detectamos si el override ya tiene `/models` al final.
-    let target_url = if base.ends_with("/models") {
+    let target_path = if base.ends_with("/models") {
         format!("{}/{}:generateContent", base, model_id)
     } else {
         format!("{}/models/{}:generateContent", base, model_id)
     };
+    // Mandamos la api_key como query param (`?key=`) ADEMÁS del header
+    // `x-goog-api-key`. AI Studio acepta cualquiera; Vertex AI Express
+    // documenta query param. Dejar ambos cubre los dos productos sin
+    // ambigüedad — si uno falla, el otro pasa.
+    let target_url = format!("{}?key={}", target_path, api_key);
 
     let mut last_err: Option<ApiError> = None;
     for attempt in 0..RETRY_MAX_ATTEMPTS {
@@ -460,11 +465,12 @@ pub async fn test_connection(
     }
 
     let base = resolve_base_url(base_url_override);
-    let target_url = if base.ends_with("/models") {
+    let target_path = if base.ends_with("/models") {
         format!("{}/{}", base, model_id)
     } else {
         format!("{}/models/{}", base, model_id)
     };
+    let target_url = format!("{}?key={}", target_path, api_key);
 
     let req = match relay {
         Some(r) => http
@@ -564,11 +570,12 @@ pub async fn list_models(
     // Para Vertex Express, listar modelos no aplica del mismo modo —
     // el endpoint termina en `/publishers/google/models` directamente,
     // que SÍ devuelve la lista. Para AI Studio le agregamos `/models`.
-    let target_url = if base.ends_with("/models") {
+    let target_path = if base.ends_with("/models") {
         base.to_string()
     } else {
         format!("{}/models", base)
     };
+    let target_url = format!("{}?key={}", target_path, api_key);
 
     let req = match relay {
         Some(r) => http
