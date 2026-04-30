@@ -666,7 +666,12 @@ async fn exec_transfer_to_agent(args: Value, ctx: &ToolContext, started: Instant
 
     let reason = parsed.reason.unwrap_or_default();
 
-    if ctx.is_sandbox || ctx.conversation_id.is_none() {
+    // Sin conv asociada (endpoint sandbox de prueba "en frío") devolvemos
+    // respuesta sintética. En agente Shadow CON conv real SÍ persistimos el
+    // routing — transfer es decisión de routing pura, no genera outbound al
+    // cliente. Esto permite simular el handoff a Carla/Gabriel/Andrea en
+    // Shadow y ver el siguiente turno atendido por el target.
+    if ctx.conversation_id.is_none() {
         return ToolResult::ok(
             json!({
                 "ok": true,

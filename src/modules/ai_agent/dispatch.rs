@@ -762,6 +762,18 @@ async fn run_dispatch(
         );
     }
 
+    // Transferencia entre agentes IA = handoff silencioso. El cliente NO
+    // recibe ningún mensaje de la IA origen — el próximo turno lo agarra el
+    // agente destino y ahí saluda. Esto vale tanto en live (descartamos el
+    // outbound a Meta) como en shadow (no logueamos como "habría respondido").
+    if transfer_succeeded {
+        tracing::info!(
+            "[ai_agent.dispatch] transfer silencioso — no envío response_text al cliente (conv={})",
+            conv_hex
+        );
+        return Ok(());
+    }
+
     let response_text = match output.response_text.as_deref() {
         Some(t) if !t.trim().is_empty() => t.to_string(),
         _ => {
