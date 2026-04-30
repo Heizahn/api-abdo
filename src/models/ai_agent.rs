@@ -98,6 +98,13 @@ pub struct AiModelConfig {
     /// front; el response usa `api_key_set: bool`.
     #[serde(default)]
     pub api_key_encrypted: String,
+    /// Override del endpoint base. Si está seteado, prevalece sobre la env
+    /// `GEMINI_BASE_URL`. Útil para tener un agente en Vertex y otro en AI
+    /// Studio en el mismo deploy. Ejemplos:
+    /// - `https://generativelanguage.googleapis.com/v1beta` (AI Studio default)
+    /// - `https://aiplatform.googleapis.com/v1/publishers/google/models` (Vertex Express)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_override: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -440,6 +447,9 @@ pub struct AiModelConfigDto {
     pub max_tokens: u32,
     pub timeout_seconds: u32,
     pub api_key_set: bool,
+    /// Endpoint base si el SUPERADMIN lo customizó. `None` = usa env / default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint_override: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -634,6 +644,12 @@ pub struct AiModelConfigInput {
     /// guardada.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// Override del endpoint base. Tri-state:
+    /// - `None`: no tocar el valor guardado.
+    /// - `Some("")`: limpiar (volver a usar env / default).
+    /// - `Some("<url>")`: setear ese endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_override: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema, Default)]

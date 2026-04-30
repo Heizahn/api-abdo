@@ -591,12 +591,19 @@ async fn run_dispatch(
             None
         };
 
+        // Endpoint override: prevalece el del agente sobre el global del .env.
+        let endpoint_override = active_agent
+            .model
+            .endpoint_override
+            .as_deref()
+            .or(state.config.gemini_base_url.as_deref());
+
         let output = match run_turn(
             &state.reqwest_client,
             &active_agent,
             &active_api_key,
             relay,
-            state.config.gemini_base_url.as_deref(),
+            endpoint_override,
             &history,
             &effective_user_message,
             &user_media,

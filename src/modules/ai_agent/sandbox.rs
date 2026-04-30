@@ -298,12 +298,18 @@ pub async fn sandbox_handler(
         weekday: weekday.to_string(),
     };
 
+    let endpoint_override = agent
+        .model
+        .endpoint_override
+        .as_deref()
+        .or(state.config.gemini_base_url.as_deref());
+
     let output = run_turn(
         &state.reqwest_client,
         &agent,
         &api_key,
         relay,
-        state.config.gemini_base_url.as_deref(),
+        endpoint_override,
         &history,
         &message,
         &[],
