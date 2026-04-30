@@ -80,8 +80,17 @@ pub struct SystemInstruction {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Content {
     /// `user` o `model`. Las function responses van con `role: user` (semántica de Gemini).
+    /// Modelos "thinking" (gemini-3-*) a veces devuelven `content: {}` cuando
+    /// gastan tokens razonando sin emitir texto/parts (handoff silencioso post
+    /// tool_call, por ejemplo). Default a "model" para que decode no falle.
+    #[serde(default = "default_content_role")]
     pub role: String,
+    #[serde(default)]
     pub parts: Vec<Part>,
+}
+
+fn default_content_role() -> String {
+    "model".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
