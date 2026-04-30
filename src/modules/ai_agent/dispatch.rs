@@ -467,56 +467,11 @@ async fn run_dispatch(
         }
     };
 
-    let faqs = state.db.list_ai_agent_faqs(&agent_id).await?;
-    let faqs_inline = if faqs.is_empty() {
-        None
-    } else {
-        let mut buf = String::new();
-        for f in &faqs {
-            buf.push_str("Q: ");
-            buf.push_str(&f.question);
-            buf.push_str("\nA: ");
-            buf.push_str(&f.answer);
-            buf.push_str("\n\n");
-        }
-        Some(buf)
-    };
+    // FAQs y faqs_inline se cargan dentro del loop por iteración (cada agente
+    // tiene sus FAQs propias). No las pre-computamos acá.
 
     let relay_owned = AiRelay::from_config(&state.config);
     let relay = relay_owned.as_ref();
-
-    let allowed_transfer_targets = extract_allowed_transfer_targets(&agent.tools);
-    let transfer_target_labels: Vec<(ObjectId, String)> = if allowed_transfer_targets.is_empty() {
-        Vec::new()
-    } else {
-        match state.db.find_ai_agents_by_ids(&allowed_transfer_targets).await {
-            Ok(agents) => agents.into_iter()
-                .filter_map(|a| a.id.map(|id| (id, a.label)))
-                .collect(),
-            Err(e) => {
-                tracing::warn!(
-                    "[ai_agent.dispatch] no pude resolver labels de transfer_targets: {} — la IA recibe enum sin mapeo",
-                    e
-                );
-                Vec::new()
-            }
-        }
-    };
-    let agent_snapshot = Arc::new(agent.clone());
-    let tool_ctx = ToolContext {
-        state: state.clone(),
-        workspace_id,
-        business_phone: conv.business_phone.clone(),
-        agent_id,
-        conversation_id: Some(inbound.conversation_id),
-        ai_user_id: agent.ai_user_id.clone(),
-        ai_user_name: agent.personality.assistant_name.clone(),
-        is_sandbox,
-        allowed_transfer_targets,
-        transfer_target_labels,
-        agent_snapshot: agent_snapshot.clone(),
-        default_ticket_category_id: agent.escalation.default_ticket_category_id.clone(),
-    };
 
     // Si no hay texto y solo hay media, mandamos un placeholder MUY neutro
     // (solo el tipo) para que la IA tenga un pivot. El comportamiento ante
@@ -527,50 +482,297 @@ async fn run_dispatch(
         user_text
     };
 
-    let transfer_context_owned = conv.ai_transfer_context.clone();
-    let output = match run_turn(
-        &state.reqwest_client,
-        &agent,
-        &api_key,
-        relay,
-        &history,
-        &effective_user_message,
-        &user_media,
-        faqs_inline.as_deref(),
-        customer_context.as_deref(),
-        transfer_context_owned.as_deref(),
-        first_turn_note_owned.as_deref(),
-        Some(&prompt_vars),
-        &tool_ctx,
-    )
-    .await
-    {
-        Ok(o) => o,
-        Err(e) => {
+    // ── Loop de dispatch con chain de transfers ─────────────────────────────
+    // Cuando un agente del MISMO workspace llama `transfer_to_agent`, el
+    // handoff es silencioso: el dispatch re-corre `run_turn` con el target
+    // sobre el mismo mensaje del cliente, y el cliente recibe SOLO la
+    // respuesta del agente final. Cap a `MAX_TRANSFER_CHAIN` para evitar
+    // loops (Sofía → Carla → Gabriel = 2 transfers = chain_count=2 al
+    // hitting). Si se excede, escalamos a humano.
+    //
+    // Cuando el target es de OTRO workspace, NO podemos pasarle la conv
+    // (cliente está chateando contra otro número). El tool genera un
+    // `client_message` ("escribí al +58 YYY") que se envía al cliente como
+    // respuesta visible y el chain termina.
+    const MAX_TRANSFER_CHAIN: u32 = 2;
+    let initial_transfer_context_owned = conv.ai_transfer_context.clone();
+
+    let mut active_agent: AiAgent = agent;
+    let mut active_api_key: String = api_key;
+    let mut active_transfer_context: Option<String> = initial_transfer_context_owned.clone();
+    let mut chain_count: u32 = 0;
+    let last_output: Option<crate::modules::ai_agent::runner::RunnerOutput>;
+    let last_agent: Option<AiAgent>;
+    let mut cross_workspace_message: Option<String> = None;
+
+    loop {
+        let active_agent_id = active_agent
+            .id
+            .ok_or_else(|| "agent sin _id".to_string())?;
+
+        if chain_count > 0 {
+            tracing::info!(
+                "[ai_agent.dispatch] chain step {}: agent={} (label={}, mode={:?}) procesando conv={}",
+                chain_count,
+                active_agent_id.to_hex(),
+                active_agent.label,
+                active_agent.mode,
+                inbound.conversation_id.to_hex()
+            );
+        }
+
+        // Tools del agente activo (cada agente tiene su propia config).
+        let allowed_transfer_targets = extract_allowed_transfer_targets(&active_agent.tools);
+        let transfer_target_labels: Vec<(ObjectId, String)> = if allowed_transfer_targets.is_empty() {
+            Vec::new()
+        } else {
+            match state.db.find_ai_agents_by_ids(&allowed_transfer_targets).await {
+                Ok(agents) => agents
+                    .into_iter()
+                    .filter_map(|a| a.id.map(|id| (id, a.label)))
+                    .collect(),
+                Err(e) => {
+                    tracing::warn!(
+                        "[ai_agent.dispatch] no pude resolver labels de transfer_targets: {} — la IA recibe enum sin mapeo",
+                        e
+                    );
+                    Vec::new()
+                }
+            }
+        };
+        let agent_snapshot = Arc::new(active_agent.clone());
+        let tool_ctx = ToolContext {
+            state: state.clone(),
+            workspace_id,
+            business_phone: conv.business_phone.clone(),
+            agent_id: active_agent_id,
+            conversation_id: Some(inbound.conversation_id),
+            ai_user_id: active_agent.ai_user_id.clone(),
+            ai_user_name: active_agent.personality.assistant_name.clone(),
+            is_sandbox,
+            allowed_transfer_targets,
+            transfer_target_labels,
+            agent_snapshot: agent_snapshot.clone(),
+            default_ticket_category_id: active_agent.escalation.default_ticket_category_id.clone(),
+        };
+
+        // FAQs y prompt_vars del agente activo (assistant_name cambia entre
+        // Sofía y Carla, por ejemplo).
+        let active_faqs = state
+            .db
+            .list_ai_agent_faqs(&active_agent_id)
+            .await
+            .unwrap_or_default();
+        let active_faqs_inline = if active_faqs.is_empty() {
+            None
+        } else {
+            let mut buf = String::new();
+            for f in &active_faqs {
+                buf.push_str("Q: ");
+                buf.push_str(&f.question);
+                buf.push_str("\nA: ");
+                buf.push_str(&f.answer);
+                buf.push_str("\n\n");
+            }
+            Some(buf)
+        };
+        let active_prompt_vars = if chain_count == 0 {
+            prompt_vars.clone()
+        } else {
+            let mut p = prompt_vars.clone();
+            p.assistant_name = active_agent.personality.assistant_name.clone();
+            p
+        };
+
+        // first_turn_note solo en el primer turno del chain.
+        let ftn_for_iter = if chain_count == 0 {
+            first_turn_note_owned.as_deref()
+        } else {
+            None
+        };
+
+        let output = match run_turn(
+            &state.reqwest_client,
+            &active_agent,
+            &active_api_key,
+            relay,
+            &history,
+            &effective_user_message,
+            &user_media,
+            active_faqs_inline.as_deref(),
+            customer_context.as_deref(),
+            active_transfer_context.as_deref(),
+            ftn_for_iter,
+            Some(&active_prompt_vars),
+            &tool_ctx,
+        )
+        .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(
+                    "[ai_agent.dispatch] runner error (agent={}, conv={}): {:?}",
+                    active_agent_id.to_hex(),
+                    inbound.conversation_id.to_hex(),
+                    e
+                );
+                return Ok(());
+            }
+        };
+
+        tracing::info!(
+            "[ai_agent.dispatch] turno OK (agent={}, conv={}, mode={:?}, escalated={}, in_tokens={}, out_tokens={}, latency={}ms, chain_step={})",
+            active_agent_id.to_hex(),
+            inbound.conversation_id.to_hex(),
+            active_agent.mode,
+            output.escalated,
+            output.input_tokens,
+            output.output_tokens,
+            output.latency_ms,
+            chain_count
+        );
+
+        // Persistir AiInteraction de esta iteración (auditoría completa por
+        // turno — cada agente queda con su propio registro).
+        let interaction = output.to_interaction(
+            inbound.conversation_id,
+            inbound.id.unwrap_or_else(ObjectId::new),
+            workspace_id,
+            active_agent_id,
+            chain_count,
+            &active_agent.model.model_id,
+        );
+        if let Err(e) = state.db.create_ai_interaction(interaction).await {
             tracing::warn!(
-                "[ai_agent.dispatch] runner error (agent={}, conv={}): {:?}",
-                agent_id.to_hex(),
-                inbound.conversation_id.to_hex(),
+                "[ai_agent.dispatch] persistir AiInteraction falló: {}",
                 e
             );
-            return Ok(());
         }
-    };
 
-    tracing::info!(
-        "[ai_agent.dispatch] turno OK (agent={}, conv={}, mode={:?}, escalated={}, in_tokens={}, out_tokens={}, latency={}ms)",
-        agent_id.to_hex(),
-        inbound.conversation_id.to_hex(),
-        agent.mode,
-        output.escalated,
-        output.input_tokens,
-        output.output_tokens,
-        output.latency_ms
-    );
+        // Tokens daily + turns daily del agente activo.
+        let active_agent_hex = active_agent_id.to_hex();
+        let total_tokens = output.total_tokens as u64;
+        state
+            .redis
+            .add_ai_tokens_agent_daily(&active_agent_hex, total_tokens)
+            .await;
+        state.redis.incr_ai_turns_agent_daily(&active_agent_hex).await;
+
+        // Cost alert por agente.
+        if active_agent.limits.max_tokens_per_day > 0
+            && active_agent.limits.cost_alert_threshold_pct > 0
+        {
+            let used = state.redis.get_ai_tokens_agent_daily(&active_agent_hex).await as u64;
+            let cap = active_agent.limits.max_tokens_per_day;
+            let pct_used = (used as f64 / cap as f64) * 100.0;
+            if pct_used >= active_agent.limits.cost_alert_threshold_pct as f64 {
+                if state.redis.try_mark_cost_alert_today(&active_agent_hex).await {
+                    tracing::warn!(
+                        "[ai_agent.dispatch] cost alert: agent={} used {}/{} tokens ({:.1}% — threshold {}%)",
+                        active_agent_hex, used, cap, pct_used,
+                        active_agent.limits.cost_alert_threshold_pct
+                    );
+                }
+            }
+        }
+
+        // ¿Hubo transfer? Decidir si seguimos en chain o salimos.
+        if let Some(transfer) = output.transfer.clone() {
+            if transfer.cross_workspace {
+                tracing::info!(
+                    "[ai_agent.dispatch] transfer cross-workspace (target={}); enviaré client_message al cliente",
+                    transfer.target_agent_id.to_hex()
+                );
+                cross_workspace_message = transfer.client_message.clone();
+                last_output = Some(output);
+                last_agent = Some(active_agent);
+                break;
+            }
+
+            // Same workspace: re-correr con el target.
+            chain_count += 1;
+            if chain_count >= MAX_TRANSFER_CHAIN {
+                tracing::warn!(
+                    "[ai_agent.dispatch] MAX_TRANSFER_CHAIN ({}) alcanzado (conv={}); escalando a humano",
+                    MAX_TRANSFER_CHAIN, conv_hex
+                );
+                escalation::auto_escalate(
+                    &state,
+                    &inbound.conversation_id,
+                    &active_agent,
+                    escalation::REASON_NO_RESOLUTION,
+                    Some("Cadena de transfers superó el cap — derivar a humano"),
+                    true,
+                )
+                .await;
+                return Ok(());
+            }
+
+            let target = match state.db.find_ai_agent_by_id(&transfer.target_agent_id).await {
+                Ok(Some(a)) if a.enabled => a,
+                _ => {
+                    tracing::warn!(
+                        "[ai_agent.dispatch] target_agent {} no disponible (deshabilitado o no existe); escalando a humano",
+                        transfer.target_agent_id.to_hex()
+                    );
+                    escalation::auto_escalate(
+                        &state,
+                        &inbound.conversation_id,
+                        &active_agent,
+                        escalation::REASON_CRITICAL_TOOL_FAILURE,
+                        Some("Agente destino del transfer no está disponible"),
+                        true,
+                    )
+                    .await;
+                    return Ok(());
+                }
+            };
+
+            // api_key del target (puede ser distinta — cada agente tiene la
+            // suya). Si falla descifrar, escalamos.
+            let target_api_key = match decrypt_api_key(&target, &ai_agent_secret()) {
+                Ok(k) => k,
+                Err(e) => {
+                    tracing::warn!(
+                        "[ai_agent.dispatch] api_key del target {} indisponible: {:?}; escalando a humano",
+                        transfer.target_agent_id.to_hex(),
+                        e
+                    );
+                    escalation::auto_escalate(
+                        &state,
+                        &inbound.conversation_id,
+                        &active_agent,
+                        escalation::REASON_CRITICAL_TOOL_FAILURE,
+                        Some("Agente destino del transfer sin api_key válida"),
+                        true,
+                    )
+                    .await;
+                    return Ok(());
+                }
+            };
+
+            active_transfer_context = if transfer.reason.trim().is_empty() {
+                None
+            } else {
+                Some(transfer.reason)
+            };
+            active_agent = target;
+            active_api_key = target_api_key;
+            // continue
+        } else {
+            last_output = Some(output);
+            last_agent = Some(active_agent);
+            break;
+        }
+    }
+
+    let last_output = last_output.expect("loop debe setear last_output antes de break");
+    let last_agent = last_agent.expect("loop debe setear last_agent antes de break");
+    let last_agent_id = last_agent
+        .id
+        .ok_or_else(|| "last_agent sin _id".to_string())?;
 
     // ── Marcar inbounds como procesados por IA ────────────────────────────
-    // No es "read" (no se manda mark_as_read a Meta) — es indicador interno
-    // para que el front pinte 🤖 en cada burst sin tocar `unread_count`.
     let burst_msg_ids: Vec<ObjectId> = burst.iter().filter_map(|m| m.id).collect();
     let now_for_ai_processed = BsonDateTime::now();
     if let Err(e) = state
@@ -593,39 +795,29 @@ async fn run_dispatch(
         crate::modules::whatsapp::ws::broadcast_all(&state.ws_registry, &ev).await;
     }
 
-    // ── Post-turn counters: tokens + turnos diarios y per-conv ────────────
-    let agent_hex = agent_id.to_hex();
-    let total_tokens = output.total_tokens as u64;
-    state.redis.add_ai_tokens_agent_daily(&agent_hex, total_tokens).await;
-    state.redis.incr_ai_turns_agent_daily(&agent_hex).await;
+    // ── Per-conv counter (1 por dispatch, no por iteración del chain) ─────
     state.redis.incr_ai_turns_conv(&conv_hex).await;
 
-    // ── Cost alert threshold (post-turn) ───────────────────────────────────
-    if agent.limits.max_tokens_per_day > 0 && agent.limits.cost_alert_threshold_pct > 0 {
-        let used = state.redis.get_ai_tokens_agent_daily(&agent_hex).await as u64;
-        let cap = agent.limits.max_tokens_per_day;
-        let pct_used = (used as f64 / cap as f64) * 100.0;
-        if pct_used >= agent.limits.cost_alert_threshold_pct as f64 {
-            if state.redis.try_mark_cost_alert_today(&agent_hex).await {
-                tracing::warn!(
-                    "[ai_agent.dispatch] cost alert: agent={} used {}/{} tokens ({:.1}% — threshold {}%)",
-                    agent_hex, used, cap, pct_used, agent.limits.cost_alert_threshold_pct
-                );
-            }
-        }
+    // ── Si hubo transfers en el chain, reset counters per-conv ────────────
+    let had_chain_transfer = chain_count > 0;
+    if had_chain_transfer {
+        state.redis.clear_ai_conv_counters(&conv_hex).await;
+        tracing::info!(
+            "[ai_agent.dispatch] chain de transfers en mismo workspace; counters per-conv reseteados (conv={})",
+            conv_hex
+        );
     }
 
-    // ── max_identification_attempts: si el LLM llamó lookup_customer y volvió
-    //    sin matches, contamos. Después de N attempts sin éxito, escalamos. ─
-    if agent.escalation.max_identification_attempts > 0 {
-        let had_failed_lookup = output.tool_calls.iter().any(|t| {
+    // ── max_identification_attempts (sobre el último turno) ────────────────
+    if last_agent.escalation.max_identification_attempts > 0 {
+        let had_failed_lookup = last_output.tool_calls.iter().any(|t| {
             t.tool_name == "lookup_customer"
                 && t.success
                 && t.result_summary.contains("\"items\":[]")
         });
         if had_failed_lookup {
             let attempts = state.redis.incr_ai_id_attempts(&conv_hex).await;
-            if attempts >= agent.escalation.max_identification_attempts as i64 {
+            if attempts >= last_agent.escalation.max_identification_attempts as i64 {
                 tracing::info!(
                     "[ai_agent.dispatch] max_identification_attempts ({}) reached (conv={})",
                     attempts, conv_hex
@@ -633,7 +825,7 @@ async fn run_dispatch(
                 escalation::auto_escalate(
                     &state,
                     &inbound.conversation_id,
-                    &agent,
+                    &last_agent,
                     escalation::REASON_MAX_ID_ATTEMPTS,
                     Some("No fue posible identificar al cliente automáticamente"),
                     true,
@@ -644,40 +836,18 @@ async fn run_dispatch(
         }
     }
 
-    // ── Resolución del turno ──────────────────────────────────────────────
-    // Tools que cuentan como "resolución" del caso desde la perspectiva del
-    // agente actual:
-    // - request_human / create_ticket: la IA escala a humano (cierra ese path).
-    // - transfer_to_agent: la IA pasa la conv a OTRO agente IA — desde la
-    //   perspectiva del agente origen, este caso ya está resuelto. Además
-    //   reseteamos counters per-conv para que el agente destino arranque
-    //   limpio, no heredando los turns sin resolver del origen.
-    let transfer_succeeded = output
-        .tool_calls
-        .iter()
-        .any(|t| t.tool_name == "transfer_to_agent" && t.success);
-    if transfer_succeeded {
-        state.redis.clear_ai_conv_counters(&conv_hex).await;
-        tracing::info!(
-            "[ai_agent.dispatch] transfer_to_agent OK; counters per-conv reseteados (conv={})",
-            conv_hex
-        );
-    }
-
-    let resolved_now = transfer_succeeded
-        || output
-            .tool_calls
-            .iter()
-            .any(|t| {
-                (t.tool_name == "request_human" || t.tool_name == "create_ticket") && t.success
-            });
-
-    // ── max_turns_without_resolution: cuenta turnos donde NO se llamó tool
-    //    de cierre. Las tools de cierre (request_human / create_ticket /
-    //    transfer_to_agent) cuentan como resolución. ─────────────────────
-    if agent.escalation.max_turns_without_resolution > 0 && !resolved_now {
+    // ── max_turns_without_resolution ───────────────────────────────────────
+    // Resolución cuenta si:
+    //  - hubo transfer en el chain (same_workspace o cross_workspace), o
+    //  - el último turno llamó request_human / create_ticket exitoso.
+    let last_resolved_via_tool = last_output.tool_calls.iter().any(|t| {
+        (t.tool_name == "request_human" || t.tool_name == "create_ticket") && t.success
+    });
+    let resolved_now =
+        had_chain_transfer || cross_workspace_message.is_some() || last_resolved_via_tool;
+    if last_agent.escalation.max_turns_without_resolution > 0 && !resolved_now {
         let nr = state.redis.incr_ai_no_resolution(&conv_hex).await;
-        let cap = agent.escalation.max_turns_without_resolution as i64;
+        let cap = last_agent.escalation.max_turns_without_resolution as i64;
         tracing::info!(
             "[ai_agent.dispatch] no_resolution counter (conv={}, count={}/{}, resolved_now=false)",
             conv_hex, nr, cap
@@ -690,7 +860,7 @@ async fn run_dispatch(
             escalation::auto_escalate(
                 &state,
                 &inbound.conversation_id,
-                &agent,
+                &last_agent,
                 escalation::REASON_NO_RESOLUTION,
                 Some("Caso sin resolver tras varios turnos"),
                 true,
@@ -700,11 +870,9 @@ async fn run_dispatch(
         }
     }
 
-    // ── escalate_on_critical_tool_failure: si alguna tool falló con error
-    //    crítico (db_error, timeout, upstream), escalamos para no dejar al
-    //    cliente sin respuesta calificada. ────────────────────────────────
-    if agent.escalation.escalate_on_critical_tool_failure {
-        let critical_failed = output.tool_calls.iter().any(|t| {
+    // ── escalate_on_critical_tool_failure (sobre el último turno) ──────────
+    if last_agent.escalation.escalate_on_critical_tool_failure {
+        let critical_failed = last_output.tool_calls.iter().any(|t| {
             !t.success
                 && t.error
                     .as_deref()
@@ -719,7 +887,7 @@ async fn run_dispatch(
             escalation::auto_escalate(
                 &state,
                 &inbound.conversation_id,
-                &agent,
+                &last_agent,
                 escalation::REASON_CRITICAL_TOOL_FAILURE,
                 Some("Falla crítica de herramienta — IA no pudo continuar"),
                 true,
@@ -729,9 +897,9 @@ async fn run_dispatch(
         }
     }
 
-    // Si consumimos transfer_context en este turno, limpiarlo para que no se
-    // arrastre a turnos siguientes del mismo agente destino.
-    if transfer_context_owned.is_some() {
+    // Si arrancamos con transfer_context (consumido por el primer turno),
+    // limpiarlo para que no se arrastre.
+    if initial_transfer_context_owned.is_some() {
         let clear = ConversationAiPatch {
             ai_active_agent_id: None,
             ai_disabled: None,
@@ -746,35 +914,22 @@ async fn run_dispatch(
         }
     }
 
-    // Persistimos el turno como AiInteraction.
-    let interaction = output.to_interaction(
-        inbound.conversation_id,
-        inbound.id.unwrap_or_else(ObjectId::new),
-        workspace_id,
-        agent_id,
-        0,
-        &agent.model.model_id,
-    );
-    if let Err(e) = state.db.create_ai_interaction(interaction).await {
-        tracing::warn!(
-            "[ai_agent.dispatch] persistir AiInteraction falló: {}",
-            e
-        );
-    }
+    // ── Decidir response_text ──────────────────────────────────────────────
+    // Cross-workspace: usamos el `client_message` del tool ("escribí al
+    // +58 YYY"). Caso normal: la response del último agente del chain
+    // (si fue chain de mismo workspace, esa es la respuesta de Carla/Gabriel;
+    // si no hubo chain, es la respuesta del agente original).
+    let response_text_owned: Option<String> = if let Some(msg) = cross_workspace_message {
+        if msg.trim().is_empty() {
+            None
+        } else {
+            Some(msg)
+        }
+    } else {
+        last_output.response_text.clone()
+    };
 
-    // Transferencia entre agentes IA = handoff silencioso. El cliente NO
-    // recibe ningún mensaje de la IA origen — el próximo turno lo agarra el
-    // agente destino y ahí saluda. Esto vale tanto en live (descartamos el
-    // outbound a Meta) como en shadow (no logueamos como "habría respondido").
-    if transfer_succeeded {
-        tracing::info!(
-            "[ai_agent.dispatch] transfer silencioso — no envío response_text al cliente (conv={})",
-            conv_hex
-        );
-        return Ok(());
-    }
-
-    let response_text = match output.response_text.as_deref() {
+    let response_text = match response_text_owned.as_deref() {
         Some(t) if !t.trim().is_empty() => t.to_string(),
         _ => {
             tracing::info!("[ai_agent.dispatch] runner no produjo texto, no envío");
@@ -782,22 +937,21 @@ async fn run_dispatch(
         }
     };
 
-    // En shadow: solo logueamos qué habría contestado.
-    if !is_live {
+    let last_is_live = matches!(last_agent.mode, AiAgentMode::Live);
+    if !last_is_live {
         tracing::info!(
-            "[ai_agent.dispatch] shadow → habría respondido: {}",
+            "[ai_agent.dispatch] shadow → habría respondido (agent={}): {}",
+            last_agent_id.to_hex(),
             truncate(&response_text, 300)
         );
         return Ok(());
     }
 
-    // Live: descifrar access_token, construir WhatsAppService, enviar y
-    // persistir el outbound + WS.
     if let Err(e) = send_live_response(
         &state,
         &wa_settings,
         &conv.phone,
-        &agent.ai_user_id,
+        &last_agent.ai_user_id,
         inbound.conversation_id,
         &response_text,
     )
@@ -805,7 +959,7 @@ async fn run_dispatch(
     {
         tracing::error!(
             "[ai_agent.dispatch] envío live falló (agent={}, conv={}): {}",
-            agent_id.to_hex(),
+            last_agent_id.to_hex(),
             inbound.conversation_id.to_hex(),
             e
         );

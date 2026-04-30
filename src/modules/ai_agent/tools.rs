@@ -686,9 +686,59 @@ async fn exec_transfer_to_agent(args: Value, ctx: &ToolContext, started: Instant
 
     let conv_id = ctx.conversation_id.unwrap();
 
-    // Set del agente destino + persistir contexto del transfer para que el
-    // próximo turno del agente destino arranque sabiendo qué detectó el
-    // origen. `ai_disabled=false` por si venía pausada.
+    // Distinguir mismo vs otro workspace. Si el target atiende este mismo
+    // workspace, es un handoff interno (silencioso) — el siguiente turno lo
+    // genera el target en la misma conv. Si NO atiende este workspace, NO se
+    // puede transferir la conv (cliente está chateando contra otro número de
+    // WhatsApp): le decimos al cliente que escriba al número del target.
+    let same_workspace = target.workspace_ids.contains(&ctx.workspace_id);
+
+    if !same_workspace {
+        // Cross-workspace: NO tocamos `ai_active_agent_id` de esta conv. El
+        // cliente sigue acá hasta que decida moverse. Buscamos el wa_settings
+        // del primer workspace del target para devolver el número.
+        let target_workspace = target.workspace_ids.first().copied();
+        let (target_phone, target_workspace_name) = match target_workspace {
+            Some(wid) => match ctx.state.db.find_wa_settings_by_id(&wid).await {
+                Ok(Some(s)) => (Some(s.phone), Some(s.workspace_name)),
+                _ => (None, None),
+            },
+            None => (None, None),
+        };
+
+        let phone_pretty = target_phone
+            .as_deref()
+            .map(format_phone_pretty)
+            .unwrap_or_else(|| "(número no disponible)".to_string());
+        let area = if !target.label.trim().is_empty() {
+            target.label.clone()
+        } else {
+            "el área correspondiente".to_string()
+        };
+        let client_message = format!(
+            "Por temas de {} te atienden mejor desde nuestro número {}. Escribinos por allá y te respondemos enseguida.",
+            area, phone_pretty
+        );
+
+        return ToolResult::ok(
+            json!({
+                "ok": true,
+                "mode": "cross_workspace",
+                "target_agent_id": target_oid.to_hex(),
+                "target_label": target.label,
+                "target_workspace_name": target_workspace_name,
+                "target_phone": target_phone,
+                "client_message": client_message,
+                "reason": reason,
+            }),
+            started,
+        );
+    }
+
+    // Mismo workspace: persistir routing para que el próximo turno (en la
+    // misma conv) lo atienda el target. El dispatch además re-corre el turno
+    // EN MEMORIA con el target para que el cliente reciba directo la respuesta
+    // del agente destino sin tener que enviar otro mensaje.
     let trimmed_reason = reason.trim();
     let ctx_to_persist: Option<&str> = if trimmed_reason.is_empty() {
         None
@@ -722,6 +772,22 @@ async fn exec_transfer_to_agent(args: Value, ctx: &ToolContext, started: Instant
         }),
         started,
     )
+}
+
+/// "584125403745" → "+58 412 540 3745". Defensivo: si el formato no matchea
+/// devolvemos el original.
+fn format_phone_pretty(raw: &str) -> String {
+    let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() == 12 && digits.starts_with("58") {
+        format!(
+            "+58 {} {} {}",
+            &digits[2..5],
+            &digits[5..8],
+            &digits[8..12]
+        )
+    } else {
+        format!("+{}", digits)
+    }
 }
 
 // ============================================

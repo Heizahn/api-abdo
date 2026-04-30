@@ -94,6 +94,20 @@ pub enum ConvRole {
     Assistant,
 }
 
+/// Info estructurada del último `transfer_to_agent` exitoso del turno. El
+/// dispatch la lee para decidir si re-correr el ciclo con el agente destino
+/// (mismo workspace) o enviar `client_message` al cliente (otro workspace).
+#[derive(Debug, Clone)]
+pub struct TransferInfo {
+    pub target_agent_id: mongodb::bson::oid::ObjectId,
+    /// `true` cuando el target NO atiende el workspace de la conv actual y
+    /// hay que avisarle al cliente que escriba a otro número.
+    pub cross_workspace: bool,
+    /// Texto sugerido para enviar al cliente. Solo presente en cross-workspace.
+    pub client_message: Option<String>,
+    pub reason: String,
+}
+
 /// Salida del runner. El caller decide si persiste como `AiInteraction`.
 #[derive(Debug, Clone)]
 pub struct RunnerOutput {
@@ -111,6 +125,10 @@ pub struct RunnerOutput {
     /// Eco del último `finishReason` de Gemini (`STOP`, `MAX_TOKENS`,
     /// `SAFETY`, `OTHER`, ...). Útil para diagnosticar respuestas truncadas.
     pub finish_reason: Option<String>,
+    /// Set cuando el turno terminó con un `transfer_to_agent` exitoso. El
+    /// dispatch lo usa para decidir si re-correr en memoria con el target o
+    /// enviar el mensaje cross-workspace al cliente.
+    pub transfer: Option<TransferInfo>,
 }
 
 impl RunnerOutput {
@@ -538,6 +556,35 @@ pub async fn run_turn(
         gemini::estimate_cost_usd(&agent.model.model_id, total_in, total_out);
     let latency_ms = started.elapsed().as_millis() as u32;
 
+    // Extraer info del último transfer_to_agent exitoso (si lo hubo). El
+    // result_summary está truncado a 500 chars pero los campos relevantes
+    // (target_agent_id, mode, client_message corto) caben holgado.
+    let transfer = tool_call_logs.iter().rev().find_map(|t| {
+        if t.tool_name != "transfer_to_agent" || !t.success {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_str(&t.result_summary).ok()?;
+        let target_hex = v.get("target_agent_id")?.as_str()?;
+        let target_oid = mongodb::bson::oid::ObjectId::parse_str(target_hex).ok()?;
+        let mode = v.get("mode").and_then(|m| m.as_str()).unwrap_or("");
+        let cross_workspace = mode == "cross_workspace";
+        let client_message = v
+            .get("client_message")
+            .and_then(|m| m.as_str())
+            .map(|s| s.to_string());
+        let reason = v
+            .get("reason")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
+        Some(TransferInfo {
+            target_agent_id: target_oid,
+            cross_workspace,
+            client_message,
+            reason,
+        })
+    });
+
     Ok(RunnerOutput {
         response_text,
         tool_calls: tool_call_logs,
@@ -549,6 +596,7 @@ pub async fn run_turn(
         escalated,
         escalation_reason,
         finish_reason,
+        transfer,
     })
 }
 
