@@ -218,6 +218,21 @@ pub struct GenerationConfig {
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+    /// Control del "thinking budget" para modelos thinking (gemini-2.5-flash,
+    /// gemini-2.5-pro, gemini-3-*). Valor `0` = desactiva el razonamiento
+    /// interno; todos los `max_output_tokens` van al texto visible. Modelos
+    /// no-thinking (gemini-2.5-flash-lite, gemini-2.0-flash-001) ignoran el
+    /// campo. Sin esto, gemini-2.5-flash típico gasta 400+ tokens en thoughts
+    /// y deja al cliente con `out_tokens=0` (silencio).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_config: Option<ThinkingConfig>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ThinkingConfig {
+    /// `0` = thinking disabled. `-1` = dinámico (modelo decide). `N>0` = cap.
+    pub thinking_budget: i32,
 }
 
 // ─── Response ───────────────────────────────────────────────────────────────

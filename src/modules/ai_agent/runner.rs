@@ -376,6 +376,11 @@ pub async fn run_turn(
     let gen_config = GenerationConfig {
         temperature: Some(agent.model.temperature),
         max_output_tokens: Some(agent.model.max_tokens),
+        // Desactivamos el thinking para garantizar que todos los tokens del
+        // budget vayan al output visible. Sin esto, gemini-2.5-flash y los
+        // demás thinking models pueden gastar 100% del cap en thoughts y
+        // dejar la respuesta vacía. Los modelos no-thinking ignoran el campo.
+        thinking_config: Some(super::gemini::ThinkingConfig { thinking_budget: 0 }),
     };
 
     let mut total_in: u32 = 0;
@@ -403,6 +408,7 @@ pub async fn run_turn(
             generation_config: Some(GenerationConfig {
                 temperature: gen_config.temperature,
                 max_output_tokens: gen_config.max_output_tokens,
+                thinking_config: gen_config.thinking_config.clone(),
             }),
         };
 
