@@ -317,14 +317,44 @@ pub async fn generate_content(
 
         let status = resp.status();
         if status.is_success() {
-            return resp.json::<GenerateContentResponse>().await.map_err(|e| {
-                tracing::error!("[gemini] decode response: {}", e);
-                ApiError::domain_simple(
-                    axum::http::StatusCode::BAD_GATEWAY,
-                    "ai_decode_error",
-                    "Respuesta de Gemini no decodificable",
-                )
-            });
+            // Leemos el body como texto primero — así si el decode falla
+            // tenemos el cuerpo crudo para diagnosticar (Gemini a veces
+            // devuelve 200 con JSON truncado o un shape inesperado).
+            let body_text = match resp.text().await {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::error!("[gemini] read body failed: {}", e);
+                    last_err = Some(ApiError::domain_simple(
+                        axum::http::StatusCode::BAD_GATEWAY,
+                        "ai_decode_error",
+                        "No se pudo leer respuesta de Gemini",
+                    ));
+                    continue;
+                }
+            };
+            match serde_json::from_str::<GenerateContentResponse>(&body_text) {
+                Ok(r) => return Ok(r),
+                Err(e) => {
+                    let preview = if body_text.len() > 1000 {
+                        format!("{}…(truncated, total {} chars)", &body_text[..1000], body_text.len())
+                    } else {
+                        body_text.clone()
+                    };
+                    tracing::error!(
+                        "[gemini] decode response failed: {} | body: {}",
+                        e, preview
+                    );
+                    // Decode error de un 200 OK suele ser body truncado en
+                    // transit o un response degradado de Google. Lo tratamos
+                    // como transient y reintentamos.
+                    last_err = Some(ApiError::domain_simple(
+                        axum::http::StatusCode::BAD_GATEWAY,
+                        "ai_decode_error",
+                        "Respuesta de Gemini no decodificable",
+                    ));
+                    continue;
+                }
+            }
         }
 
         let body_text = resp.text().await.unwrap_or_default();
