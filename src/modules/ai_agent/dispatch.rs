@@ -899,9 +899,16 @@ async fn run_dispatch(
         }
     }
 
-    // Si arrancamos con transfer_context (consumido por el primer turno),
-    // limpiarlo para que no se arrastre.
-    if initial_transfer_context_owned.is_some() {
+    // Limpieza del transfer_context. Dos caminos lo dejan poblado:
+    //   (a) la conv venía con transfer_context al inicio de este dispatch
+    //       (initial_transfer_context_owned). Lo consumió el primer agente.
+    //   (b) durante el chain, el tool transfer_to_agent persistió uno nuevo
+    //       (chain_count > 0). El target del chain ya lo consumió en su turno
+    //       (active_transfer_context se le pasa fresh).
+    // En ambos casos hay que limpiarlo en DB, sino el siguiente dispatch lo
+    // re-inyecta a un agente que ya no tiene contexto compartido con el
+    // mensaje nuevo del cliente, y la IA contesta sobre el tema viejo.
+    if initial_transfer_context_owned.is_some() || had_chain_transfer {
         let clear = ConversationAiPatch {
             ai_active_agent_id: None,
             ai_disabled: None,
@@ -913,6 +920,11 @@ async fn run_dispatch(
             .await
         {
             tracing::warn!("[ai_agent.dispatch] limpiar transfer_context: {}", e);
+        } else {
+            tracing::debug!(
+                "[ai_agent.dispatch] transfer_context limpiado post-dispatch (conv={})",
+                conv_hex
+            );
         }
     }
 
