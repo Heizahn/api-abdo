@@ -66,10 +66,22 @@ pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents
     // Incrementar carga del agente
     state.redis.incr_agent_load(&chosen_agent).await;
 
+    // Resolver el nombre del agente para que el front pueda patchear la
+    // sidebar sin necesitar refetch.
+    use crate::db::UserRepository;
+    let taken_by_name = state
+        .db
+        .find_user_by_id(&chosen_agent)
+        .await
+        .ok()
+        .flatten()
+        .map(|u| u.name);
+
     // Broadcast: conversación tomada (auto-asignada). El front filtra por `taken_by`.
     let event = WsServerEvent::ChatTomado {
         conversation_id: conv_id_str,
         taken_by: chosen_agent,
+        taken_by_name,
         status: "in_progress".to_string(),
         previous_status: "pending".to_string(),
     };

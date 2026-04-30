@@ -615,6 +615,12 @@ pub struct ConversationItem {
     /// "pending" | "in_progress" | "closed"
     pub status: String,
     pub assigned_to: Option<String>,
+    /// Nombre del agente asignado (best-effort, resuelto contra `Users.sName`).
+    /// `null` cuando `assigned_to == null` o el usuario fue borrado. El front
+    /// lo necesita para patchear la lista en realtime al recibir CHAT_TOMADO /
+    /// CHAT_TRANSFERIDO sin pedir un GET.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assigned_to_name: Option<String>,
     /// ISO-8601 (RFC 3339) UTC, ej: "2026-04-21T14:32:10.123Z"
     pub last_message_at: String,
     pub last_message_preview: Option<String>,

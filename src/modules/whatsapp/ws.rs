@@ -54,6 +54,12 @@ pub enum WsServerEvent {
     ChatTomado {
         conversation_id: String,
         taken_by: String,
+        /// Nombre del agente que tomó la conv (resuelto contra `Users.sName`).
+        /// `null` solo si el usuario fue borrado entre el take y el broadcast
+        /// (caso rarísimo). Sin este campo el front no puede patchear la
+        /// sidebar y la lista muestra el nombre del agente anterior.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        taken_by_name: Option<String>,
         status: String,
         /// Estado previo al take: `"pending"` (toma normal) o `"closed"` (reopen+take vía template).
         previous_status: String,

@@ -575,8 +575,9 @@ pub async fn receive_webhook(
                         let ws_name = Some(settings.workspace_name.clone())
                             .filter(|w| !w.is_empty());
                         let resolved = resolve_customer_name(&state, &conv_now).await;
+                        // Conv recién creada → assigned_to siempre null acá.
                         let new_ev = WsServerEvent::ConversacionNueva {
-                            conversation: conv_to_item(conv_now.clone(), false, None, ws_name, resolved, None),
+                            conversation: conv_to_item(conv_now.clone(), false, None, ws_name, resolved, None, None),
                         };
                         broadcast_all(&state.ws_registry, &new_ev).await;
                     } else if was_reopened {
@@ -799,8 +800,9 @@ pub async fn list_conversations_handler(
         )
     };
 
-    // Batch-resolve nombres de agentes (autor del último mensaje outbound).
+    // Batch-resolve nombres de agentes (autor del último mensaje outbound + asignado).
     let agent_names = resolve_last_message_agent_names(&state, &convs).await;
+    let assigned_names = resolve_assigned_agent_names(&state, &convs).await;
 
     let data = convs
         .into_iter()
@@ -813,7 +815,10 @@ pub async fn list_conversations_handler(
             let agent_name = c.last_message_from_user_id
                 .as_ref()
                 .and_then(|id| agent_names.get(id).cloned());
-            conv_to_item(c, false, last_opened, ws, resolved, agent_name)
+            let assigned_name = c.assigned_to
+                .as_ref()
+                .and_then(|id| assigned_names.get(id).cloned());
+            conv_to_item(c, false, last_opened, ws, resolved, agent_name, assigned_name)
         })
         .collect();
 
@@ -852,10 +857,11 @@ pub async fn get_conversation_handler(
     let workspace_name = resolve_workspace_name(&state, &conv.business_phone).await;
     let resolved = resolve_customer_name(&state, &conv).await;
     let agent_name = resolve_last_message_agent_name_one(&state, &conv).await;
+    let assigned_name = resolve_assigned_agent_name_one(&state, &conv).await;
 
     Ok(Json(ConversationDetailResponse {
         ok: true,
-        data: conv_to_item(conv, true, last_opened, workspace_name, resolved, agent_name),
+        data: conv_to_item(conv, true, last_opened, workspace_name, resolved, agent_name, assigned_name),
     }))
 }
 
@@ -1000,9 +1006,11 @@ pub async fn send_message_handler(
                 };
 
                 // CHAT_TOMADO antes de enviar el template a Meta.
+                let taken_by_name = resolve_user_name_by_id(&state, &claims.id).await;
                 let ev = WsServerEvent::ChatTomado {
                     conversation_id: id.clone(),
                     taken_by: claims.id.clone(),
+                    taken_by_name,
                     status: reopened_conv.status.clone(),
                     previous_status: "closed".to_string(),
                 };
@@ -1858,6 +1866,9 @@ pub async fn take_conversation_handler(
     let workspace_name = resolve_workspace_name(&state, &conv.business_phone).await;
     let resolved = resolve_customer_name(&state, &conv).await;
     let agent_name = resolve_last_message_agent_name_one(&state, &conv).await;
+    // Acabamos de asignar la conv al `claims.id`, así que el `assigned_to_name`
+    // es directamente el `claims.name` que ya tenemos del JWT (sin DB lookup).
+    let assigned_name = Some(claims.name.clone());
 
     // Broadcast a los demás agentes según el estado previo y el dueño previo:
     // - `closed` → siempre CHAT_TOMADO con broadcast_all (el chat vuelve al mundo).
@@ -1868,6 +1879,7 @@ pub async fn take_conversation_handler(
         let ev = WsServerEvent::ChatTomado {
             conversation_id: id.clone(),
             taken_by: claims.id.clone(),
+            taken_by_name: assigned_name.clone(),
             status: conv.status.clone(),
             previous_status: "closed".to_string(),
         };
@@ -1890,6 +1902,7 @@ pub async fn take_conversation_handler(
             workspace_name.clone(),
             resolved.clone(),
             agent_name.clone(),
+            assigned_name.clone(),
         );
         let is_takeover = matches!(prev_owner.as_deref(), Some(prev) if prev != claims.id);
         let ev = if is_takeover {
@@ -1903,6 +1916,7 @@ pub async fn take_conversation_handler(
             WsServerEvent::ChatTomado {
                 conversation_id: id.clone(),
                 taken_by: claims.id.clone(),
+                taken_by_name: assigned_name.clone(),
                 status: conv.status.clone(),
                 previous_status: "pending".to_string(),
             }
@@ -1922,7 +1936,7 @@ pub async fn take_conversation_handler(
 
     Ok(Json(TakeConversationResponse {
         ok: true,
-        data: conv_to_item(conv, true, last_opened, workspace_name, resolved, agent_name),
+        data: conv_to_item(conv, true, last_opened, workspace_name, resolved, agent_name, assigned_name),
     }))
 }
 
@@ -1995,7 +2009,8 @@ pub async fn transfer_conversation_handler(
     let workspace_name = resolve_workspace_name(&state, &conv_after.business_phone).await;
     let resolved = resolve_customer_name(&state, &conv_after).await;
     let agent_name = resolve_last_message_agent_name_one(&state, &conv_after).await;
-    let conv_item = conv_to_item(conv_after, true, last_opened, workspace_name, resolved, agent_name);
+    let assigned_name = resolve_assigned_agent_name_one(&state, &conv_after).await;
+    let conv_item = conv_to_item(conv_after, true, last_opened, workspace_name, resolved, agent_name, assigned_name);
 
     // Emitir tras tener el item listo — incluye el estado actualizado con workspace_name y assigned_to nuevo.
     let ev = WsServerEvent::ChatTransferido {
@@ -2090,10 +2105,11 @@ pub async fn close_conversation_handler(
     let workspace_name = resolve_workspace_name(&state, &conv_after.business_phone).await;
     let resolved = resolve_customer_name(&state, &conv_after).await;
     let agent_name = resolve_last_message_agent_name_one(&state, &conv_after).await;
+    let assigned_name = resolve_assigned_agent_name_one(&state, &conv_after).await;
 
     Ok(Json(ConversationDetailResponse {
         ok: true,
-        data: conv_to_item(conv_after, true, last_opened, workspace_name, resolved, agent_name),
+        data: conv_to_item(conv_after, true, last_opened, workspace_name, resolved, agent_name, assigned_name),
     }))
 }
 
@@ -2147,9 +2163,10 @@ pub async fn reopen_conversation_handler(
     let workspace_name = resolve_workspace_name(&state, &conv_after.business_phone).await;
     let resolved = resolve_customer_name(&state, &conv_after).await;
     let agent_name = resolve_last_message_agent_name_one(&state, &conv_after).await;
+    let assigned_name = resolve_assigned_agent_name_one(&state, &conv_after).await;
     let business_phone_for_audit = conv_after.business_phone.clone();
     let conversation_item = conv_to_item(
-        conv_after, true, last_opened, workspace_name, resolved, agent_name,
+        conv_after, true, last_opened, workspace_name, resolved, agent_name, assigned_name,
     );
 
     // Sólo emitimos el evento si realmente se reabrió (transición real).
@@ -2431,8 +2448,10 @@ pub async fn initiate_conversation_handler(
         // El último mensaje es el template recién enviado por `claims`, así que
         // el nombre del agente sale del token — evitamos un round-trip a Users.
         let agent_name = Some(claims.name.clone());
+        // assigned_to acá es claims.id (template envía con el agente como dueño).
+        let assigned_name = conv_now.assigned_to.as_ref().map(|_| claims.name.clone());
         let new_ev = WsServerEvent::ConversacionNueva {
-            conversation: conv_to_item(conv_now, false, None, ws_name, resolved, agent_name),
+            conversation: conv_to_item(conv_now, false, None, ws_name, resolved, agent_name, assigned_name),
         };
         broadcast_all(&state.ws_registry, &new_ev).await;
     }
@@ -3764,6 +3783,7 @@ fn conv_to_item(
     workspace_name: Option<String>,
     resolved_name: Option<String>,
     last_message_from_user_name: Option<String>,
+    assigned_to_name: Option<String>,
 ) -> ConversationItem {
     let (can_send_freeform, expires_iso) = compute_freeform_state(c.last_inbound_at);
     let (meta_throttled, meta_throttle_until_iso) =
@@ -3780,6 +3800,7 @@ fn conv_to_item(
         workspace_name,
         status: c.status,
         assigned_to: c.assigned_to,
+        assigned_to_name,
         last_message_at: iso8601(c.last_message_at),
         last_message_preview: c.last_message_preview,
         last_message_type: c.last_message_type,
@@ -4090,6 +4111,54 @@ async fn resolve_last_message_agent_name_one(
     state.db.find_user_by_id(id).await.ok().flatten().map(|u| u.name)
 }
 
+/// Batch-resolución de nombres de agentes asignados (`assigned_to`) para
+/// listados. Mismo patrón que `resolve_last_message_agent_names`.
+async fn resolve_assigned_agent_names(
+    state: &Arc<AppState>,
+    convs: &[WaConversation],
+) -> std::collections::HashMap<String, String> {
+    use crate::db::UserRepository;
+
+    let mut ids: Vec<String> = convs
+        .iter()
+        .filter_map(|c| c.assigned_to.clone())
+        .collect();
+    ids.sort();
+    ids.dedup();
+
+    let mut out = std::collections::HashMap::new();
+    for id in ids {
+        if let Ok(Some(u)) = state.db.find_user_by_id(&id).await {
+            out.insert(id, u.name);
+        }
+    }
+    out
+}
+
+/// Resuelve el nombre del agente asignado de una conversación puntual.
+/// Devuelve `None` si no hay asignado o el usuario no existe.
+async fn resolve_assigned_agent_name_one(
+    state: &Arc<AppState>,
+    conv: &WaConversation,
+) -> Option<String> {
+    use crate::db::UserRepository;
+    let id = conv.assigned_to.as_deref()?;
+    state.db.find_user_by_id(id).await.ok().flatten().map(|u| u.name)
+}
+
+/// Resuelve el nombre de un único user_id (UUID). Útil para los eventos WS
+/// que necesitan inyectar el nombre del actor (CHAT_TOMADO -> taken_by_name).
+async fn resolve_user_name_by_id(
+    state: &Arc<AppState>,
+    user_id: &str,
+) -> Option<String> {
+    use crate::db::UserRepository;
+    if user_id.trim().is_empty() {
+        return None;
+    }
+    state.db.find_user_by_id(user_id).await.ok().flatten().map(|u| u.name)
+}
+
 // ============================================
 // HELPERS — QUICK REPLIES
 // ============================================
@@ -4136,7 +4205,8 @@ pub(super) async fn build_conversation_item(
     let workspace_name = resolve_workspace_name(state, &conv.business_phone).await;
     let resolved = resolve_customer_name(state, &conv).await;
     let agent_name = resolve_last_message_agent_name_one(state, &conv).await;
-    Ok(conv_to_item(conv, true, last_opened, workspace_name, resolved, agent_name))
+    let assigned_name = resolve_assigned_agent_name_one(state, &conv).await;
+    Ok(conv_to_item(conv, true, last_opened, workspace_name, resolved, agent_name, assigned_name))
 }
 
 pub(super) fn iso8601_pub(dt: DateTime) -> String { iso8601(dt) }
