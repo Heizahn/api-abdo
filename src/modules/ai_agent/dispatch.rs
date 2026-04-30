@@ -596,6 +596,7 @@ async fn run_dispatch(
             &active_agent,
             &active_api_key,
             relay,
+            state.config.gemini_base_url.as_deref(),
             &history,
             &effective_user_message,
             &user_media,

@@ -64,6 +64,12 @@ pub struct Config {
     // ambos hosts en la whitelist.
     pub ai_relay_url: Option<String>,
     pub ai_relay_secret: Option<String>,
+    /// Override del endpoint de Gemini. Por default usamos AI Studio
+    /// (`generativelanguage.googleapis.com/v1beta`). Para Vertex AI Express
+    /// (con la misma API key compatible), poner:
+    /// `https://aiplatform.googleapis.com/v1/publishers/google/models`
+    /// El cliente le agrega `/{model}:generateContent` al final.
+    pub gemini_base_url: Option<String>,
 }
 
 impl Config {
@@ -146,6 +152,7 @@ impl Config {
             // bloqueo del ISP, igual que WA).
             ai_relay_url: env::var("AI_RELAY_URL").ok().filter(|s| !s.is_empty()),
             ai_relay_secret: env::var("AI_RELAY_SECRET").ok().filter(|s| !s.is_empty()),
+            gemini_base_url: env::var("GEMINI_BASE_URL").ok().filter(|s| !s.is_empty()),
         }
     }
 

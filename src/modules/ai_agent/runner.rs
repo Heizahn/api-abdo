@@ -288,6 +288,7 @@ pub async fn run_turn(
     agent: &AiAgent,
     api_key_decrypted: &str,
     relay: Option<&AiRelay>,
+    base_url_override: Option<&str>,
     history: &[ConvTurn],
     user_message: &str,
     user_media: &[MediaInput],
@@ -412,6 +413,7 @@ pub async fn run_turn(
             agent.model.timeout_seconds,
             &body,
             relay,
+            base_url_override,
         )
         .await?;
 

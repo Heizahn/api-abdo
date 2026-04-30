@@ -21,11 +21,22 @@ use std::time::Duration;
 
 use crate::error::ApiError;
 
-/// Base URL de la Generative Language API. Usamos `v1beta` porque ahí viven
-/// las familias `gemini-1.5-*` y `gemini-2.x-*`. La `v1` "stable" sólo
-/// expone modelos legacy (`gemini-pro` 1.0) — si el SUPERADMIN configurara
-/// uno de esos, Gemini igual responde porque ambos endpoints coexisten.
-const GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
+/// Base URL default — Google AI Studio (`generativelanguage.googleapis.com/v1beta`).
+/// Soporta familias `gemini-1.5-*`, `gemini-2.x-*`, `gemini-3-*` (preview).
+/// Para Vertex AI Express (mismo shape de request/response, otro endpoint),
+/// el SUPERADMIN setea `GEMINI_BASE_URL` en `.env` con:
+///   https://aiplatform.googleapis.com/v1/publishers/google/models
+/// El cliente le concatena `/{model}:generateContent` (o `/{model}` para
+/// `test_connection` / `list_models`).
+const GEMINI_BASE_DEFAULT: &str = "https://generativelanguage.googleapis.com/v1beta";
+
+/// Devuelve la base URL a usar — override del env si está, default si no.
+pub fn resolve_base_url<'a>(override_url: Option<&'a str>) -> &'a str {
+    override_url
+        .map(|s| s.trim_end_matches('/'))
+        .filter(|s| !s.is_empty())
+        .unwrap_or(GEMINI_BASE_DEFAULT)
+}
 
 /// Configuración del relay AI (Cloudflare Worker). Cuando ambos campos
 /// están presentes, `generate_content` enruta el POST por el worker:
@@ -270,6 +281,7 @@ pub async fn generate_content(
     timeout_seconds: u32,
     body: &GenerateContentRequest,
     relay: Option<&AiRelay>,
+    base_url_override: Option<&str>,
 ) -> Result<GenerateContentResponse, ApiError> {
     if api_key.is_empty() {
         return Err(ApiError::domain_simple(
@@ -278,7 +290,16 @@ pub async fn generate_content(
             "El workspace no tiene api_key de Gemini configurada",
         ));
     }
-    let target_url = format!("{}/models/{}:generateContent", GEMINI_BASE, model_id);
+    let base = resolve_base_url(base_url_override);
+    // AI Studio: /models/{id}:generateContent
+    // Vertex Express: /publishers/google/models es la base, así que la
+    // concatenación queda /publishers/google/models/{id}:generateContent.
+    // Detectamos si el override ya tiene `/models` al final.
+    let target_url = if base.ends_with("/models") {
+        format!("{}/{}:generateContent", base, model_id)
+    } else {
+        format!("{}/models/{}:generateContent", base, model_id)
+    };
 
     let mut last_err: Option<ApiError> = None;
     for attempt in 0..RETRY_MAX_ATTEMPTS {
@@ -421,6 +442,7 @@ pub async fn test_connection(
     model_id: &str,
     timeout_seconds: u32,
     relay: Option<&AiRelay>,
+    base_url_override: Option<&str>,
 ) -> Result<(), ApiError> {
     if api_key.is_empty() {
         return Err(ApiError::domain_simple(
@@ -437,7 +459,12 @@ pub async fn test_connection(
         ));
     }
 
-    let target_url = format!("{}/models/{}", GEMINI_BASE, model_id);
+    let base = resolve_base_url(base_url_override);
+    let target_url = if base.ends_with("/models") {
+        format!("{}/{}", base, model_id)
+    } else {
+        format!("{}/models/{}", base, model_id)
+    };
 
     let req = match relay {
         Some(r) => http
@@ -523,6 +550,7 @@ pub async fn list_models(
     api_key: &str,
     timeout_seconds: u32,
     relay: Option<&AiRelay>,
+    base_url_override: Option<&str>,
 ) -> Result<Vec<GeminiModelEntry>, ApiError> {
     if api_key.is_empty() {
         return Err(ApiError::domain_simple(
@@ -532,7 +560,15 @@ pub async fn list_models(
         ));
     }
 
-    let target_url = format!("{}/models", GEMINI_BASE);
+    let base = resolve_base_url(base_url_override);
+    // Para Vertex Express, listar modelos no aplica del mismo modo —
+    // el endpoint termina en `/publishers/google/models` directamente,
+    // que SÍ devuelve la lista. Para AI Studio le agregamos `/models`.
+    let target_url = if base.ends_with("/models") {
+        base.to_string()
+    } else {
+        format!("{}/models", base)
+    };
 
     let req = match relay {
         Some(r) => http

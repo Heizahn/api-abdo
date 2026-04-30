@@ -303,6 +303,7 @@ pub async fn sandbox_handler(
         &agent,
         &api_key,
         relay,
+        state.config.gemini_base_url.as_deref(),
         &history,
         &message,
         &[],

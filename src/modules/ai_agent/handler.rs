@@ -1046,6 +1046,7 @@ pub async fn test_connection_raw_handler(
         &model_id,
         timeout,
         relay.as_ref(),
+        state.config.gemini_base_url.as_deref(),
     )
     .await?;
 
@@ -1121,6 +1122,7 @@ pub async fn test_connection_for_agent_handler(
         &model_id,
         timeout,
         relay.as_ref(),
+        state.config.gemini_base_url.as_deref(),
     )
     .await?;
 
@@ -1179,6 +1181,7 @@ pub async fn list_models_raw_handler(
         &api_key,
         MODELS_FETCH_TIMEOUT,
         relay.as_ref(),
+        state.config.gemini_base_url.as_deref(),
     )
     .await?;
     // Por default devolvemos TODOS los modelos (free + paid). El flag
@@ -1273,6 +1276,7 @@ pub async fn list_models_for_agent_handler(
         &api_key,
         MODELS_FETCH_TIMEOUT,
         relay.as_ref(),
+        state.config.gemini_base_url.as_deref(),
     )
     .await?;
     // Cacheamos todos (include_paid=true para no filtrar en cache).
