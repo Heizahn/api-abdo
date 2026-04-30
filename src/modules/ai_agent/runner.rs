@@ -115,6 +115,9 @@ pub struct RunnerOutput {
     pub tool_calls: Vec<AiToolCallLog>,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Tokens gastados en reasoning interno por modelos thinking. Separado de
+    /// `output_tokens` (texto visible) para diagnosticar truncamiento.
+    pub thinking_tokens: u32,
     pub total_tokens: u32,
     pub cost_usd_estimate: f64,
     pub latency_ms: u32,
@@ -176,6 +179,7 @@ fn build_system_instruction(
     customer_context: Option<&str>,
     transfer_context: Option<&str>,
     first_turn_note: Option<&str>,
+    agent_state: Option<&str>,
     vars: Option<&PromptVariables>,
 ) -> SystemInstruction {
     // El back solo pasa DATOS etiquetados — el SUPERADMIN decide el
@@ -248,6 +252,12 @@ fn build_system_instruction(
         }
     }
 
+    if let Some(state) = agent_state {
+        if !state.trim().is_empty() {
+            chunks.push(format!("[agent_state]\n{}", state.trim()));
+        }
+    }
+
     if let Some(faqs) = faqs_inline {
         if !faqs.trim().is_empty() {
             chunks.push(format!("[faqs]\n{}", faqs.trim()));
@@ -296,6 +306,7 @@ pub async fn run_turn(
     customer_context: Option<&str>,
     transfer_context: Option<&str>,
     first_turn_note: Option<&str>,
+    agent_state: Option<&str>,
     prompt_vars: Option<&PromptVariables>,
     tool_ctx: &ToolContext,
 ) -> Result<RunnerOutput, ApiError> {
@@ -306,6 +317,7 @@ pub async fn run_turn(
         customer_context,
         transfer_context,
         first_turn_note,
+        agent_state,
         prompt_vars,
     );
 
@@ -327,7 +339,7 @@ pub async fn run_turn(
         .map(|t| t.name.as_str())
         .collect();
     tracing::info!(
-        "[ai_agent.runner] turno start (agent_id={}, model={}, system_chars={}, tools_enabled={}, history_turns={}, has_customer_ctx={}, has_transfer_ctx={}, has_first_turn_note={})",
+        "[ai_agent.runner] turno start (agent_id={}, model={}, system_chars={}, tools_enabled={}, history_turns={}, has_customer_ctx={}, has_transfer_ctx={}, has_first_turn_note={}, has_agent_state={})",
         agent.id.map(|o| o.to_hex()).unwrap_or_default(),
         agent.model.model_id,
         system_text_preview.chars().count(),
@@ -336,6 +348,7 @@ pub async fn run_turn(
         customer_context.is_some(),
         transfer_context.is_some(),
         first_turn_note.is_some(),
+        agent_state.is_some(),
     );
     tracing::debug!(
         "[ai_agent.runner] system_instruction (final, placeholders sustituidos):\n{}",
@@ -385,6 +398,7 @@ pub async fn run_turn(
 
     let mut total_in: u32 = 0;
     let mut total_out: u32 = 0;
+    let mut total_thinking: u32 = 0;
     let mut tool_call_logs: Vec<AiToolCallLog> = Vec::new();
     let mut response_text: Option<String> = None;
     let mut finish_reason: Option<String> = None;
@@ -426,6 +440,7 @@ pub async fn run_turn(
         let usage = resp.usage_metadata.unwrap_or(UsageMetadata::default());
         total_in = total_in.saturating_add(usage.prompt_token_count);
         total_out = total_out.saturating_add(usage.candidates_token_count);
+        total_thinking = total_thinking.saturating_add(usage.thoughts_token_count);
 
         let candidate = match resp.candidates.into_iter().next() {
             Some(c) => c,
@@ -598,6 +613,7 @@ pub async fn run_turn(
         tool_calls: tool_call_logs,
         input_tokens: total_in,
         output_tokens: total_out,
+        thinking_tokens: total_thinking,
         total_tokens: total_in.saturating_add(total_out),
         cost_usd_estimate,
         latency_ms,

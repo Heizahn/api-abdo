@@ -199,9 +199,12 @@ fn default_agent(label: String, description: String, ai_user_id: String, now: Bs
         },
         model: AiModelConfig {
             provider: "gemini".into(),
-            model_id: "gemini-1.5-flash-latest".into(),
+            model_id: "gemini-2.5-flash-lite".into(),
             temperature: 0.7,
-            max_tokens: 500,
+            // 2000 default. Antes era 500 que se quedaba corto cuando el
+            // agente combinaba check_coverage + list_plans + recomendación
+            // + cierre en un solo turno (Carla truncaba a media palabra).
+            max_tokens: 2000,
             // 20s default — los modelos con function calling tardan 5-15s
             // en armar la respuesta. 10s era insuficiente.
             timeout_seconds: 20,

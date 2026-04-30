@@ -40,8 +40,11 @@ use super::{
     tools::{extract_allowed_transfer_targets, ToolContext},
 };
 
-/// Cuántos mensajes leemos hacia atrás para armar history + ráfaga.
-const RECENT_WINDOW: i64 = 40;
+/// Cuántos mensajes leemos hacia atrás para armar history + ráfaga. Más bajo
+/// = menos tokens de input por turno (menor costo) pero menos contexto. 20
+/// turnos cubren bien una conversación típica de WhatsApp; conversaciones
+/// largas ya pasan por handoff/escalación antes de llegar al cap.
+const RECENT_WINDOW: i64 = 20;
 
 /// Fallback cuando el agente no tiene `debounce_seconds` (compat con docs
 /// viejos antes del campo). El default real es 10s y vive en el agente.
@@ -591,6 +594,31 @@ async fn run_dispatch(
             None
         };
 
+        // agent_state: chequeamos si el agente activo ya respondió antes en
+        // esta conv. Si sí, le inyectamos un bloque para que sepa que ya
+        // saludó y no repita "¡Hola! Soy Carla..." en cada turno.
+        // En chain_count > 0 es siempre el primer turno del target → no
+        // aplica (todavía no respondió). Solo computamos para chain_count=0.
+        let agent_state_owned: Option<String> = if chain_count == 0 {
+            match state
+                .db
+                .count_ai_interactions_for_agent_in_conv(
+                    &inbound.conversation_id,
+                    &active_agent_id,
+                )
+                .await
+            {
+                Ok(n) if n > 0 => Some(format!(
+                    "already_greeted: true\nprior_turns_in_this_conv: {}\nnote: Ya respondiste antes en esta conversación. NO repitas el saludo \"¡Hola, soy {}...\" — retomá el hilo desde donde quedó. Si necesitás info que falta, preguntá directo sin presentarte de nuevo.",
+                    n,
+                    active_agent.personality.assistant_name,
+                )),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         // Endpoint override: prevalece el del agente sobre el global del .env.
         let endpoint_override = active_agent
             .model
@@ -611,6 +639,7 @@ async fn run_dispatch(
             customer_context.as_deref(),
             active_transfer_context.as_deref(),
             ftn_for_iter,
+            agent_state_owned.as_deref(),
             Some(&active_prompt_vars),
             &tool_ctx,
         )
@@ -629,13 +658,14 @@ async fn run_dispatch(
         };
 
         tracing::info!(
-            "[ai_agent.dispatch] turno OK (agent={}, conv={}, mode={:?}, escalated={}, in_tokens={}, out_tokens={}, latency={}ms, chain_step={})",
+            "[ai_agent.dispatch] turno OK (agent={}, conv={}, mode={:?}, escalated={}, in_tokens={}, out_tokens={}, thinking_tokens={}, latency={}ms, chain_step={})",
             active_agent_id.to_hex(),
             inbound.conversation_id.to_hex(),
             active_agent.mode,
             output.escalated,
             output.input_tokens,
             output.output_tokens,
+            output.thinking_tokens,
             output.latency_ms,
             chain_count
         );
@@ -839,14 +869,21 @@ async fn run_dispatch(
     }
 
     // ── max_turns_without_resolution ───────────────────────────────────────
-    // Resolución cuenta si:
+    // Cuenta como "progreso" (NO incrementa el counter) cualquier turno donde:
     //  - hubo transfer en el chain (same_workspace o cross_workspace), o
-    //  - el último turno llamó request_human / create_ticket exitoso.
-    let last_resolved_via_tool = last_output.tool_calls.iter().any(|t| {
-        (t.tool_name == "request_human" || t.tool_name == "create_ticket") && t.success
-    });
+    //  - el último turno llamó request_human / create_ticket exitoso, o
+    //  - el último turno usó CUALQUIER tool con éxito (lookup_customer,
+    //    check_coverage, list_plans, get_invoices). Pedir info al cliente
+    //    cuando aún no la tenés ES trabajo legítimo y no debe penalizarse.
+    //
+    // El counter solo sube cuando el turno fue 100% texto SIN ninguna tool
+    // — eso es la señal de que la IA está conversando sin avanzar.
+    let any_tool_success = last_output
+        .tool_calls
+        .iter()
+        .any(|t| t.success);
     let resolved_now =
-        had_chain_transfer || cross_workspace_message.is_some() || last_resolved_via_tool;
+        had_chain_transfer || cross_workspace_message.is_some() || any_tool_success;
     if last_agent.escalation.max_turns_without_resolution > 0 && !resolved_now {
         let nr = state.redis.incr_ai_no_resolution(&conv_hex).await;
         let cap = last_agent.escalation.max_turns_without_resolution as i64;

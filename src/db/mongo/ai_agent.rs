@@ -242,6 +242,20 @@ impl AiAgentRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
+    async fn count_ai_interactions_for_agent_in_conv(
+        &self,
+        conversation_id: &ObjectId,
+        agent_id: &ObjectId,
+    ) -> Result<u64, String> {
+        self.ai_interactions()
+            .count_documents(doc! {
+                "conversation_id": conversation_id,
+                "agent_id": agent_id,
+            })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     // ─── AiPlans ────────────────────────────────────────────────────────────
 
     async fn list_ai_plans(&self, only_active: bool) -> Result<Vec<AiPlan>, String> {

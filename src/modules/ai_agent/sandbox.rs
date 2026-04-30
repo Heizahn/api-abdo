@@ -317,6 +317,7 @@ pub async fn sandbox_handler(
         None,
         None,
         None,
+        None,
         Some(&prompt_vars),
         &tool_ctx,
     )

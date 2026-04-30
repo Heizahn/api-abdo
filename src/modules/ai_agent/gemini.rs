@@ -272,6 +272,13 @@ pub struct UsageMetadata {
     #[serde(default)]
     #[allow(dead_code)]
     pub total_token_count: u32,
+    /// Tokens consumidos por reasoning interno (thinking models). Cero o
+    /// ausente cuando `thinkingBudget=0` o el modelo no soporta thinking.
+    /// Útil para diagnosticar respuestas truncadas: si esto crece y
+    /// `candidates_token_count` queda chico, el thinking se está comiendo
+    /// el budget.
+    #[serde(default)]
+    pub thoughts_token_count: u32,
 }
 
 // ─── Cliente ────────────────────────────────────────────────────────────────

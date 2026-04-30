@@ -1121,6 +1121,16 @@ pub trait AiAgentRepository {
         conversation_id: &ObjectId,
     ) -> Result<u64, String>;
 
+    /// Cuenta cuántas veces ESTE agente (no el global de la conv) respondió en
+    /// esta conv. Usado por el dispatch para inyectar `[agent_state]` y
+    /// avisarle al modelo "ya saludaste antes, no repitas". Cero = primer
+    /// turno del agente en la conv.
+    async fn count_ai_interactions_for_agent_in_conv(
+        &self,
+        conversation_id: &ObjectId,
+        agent_id: &ObjectId,
+    ) -> Result<u64, String>;
+
     /// Lee los últimos N mensajes de una conversación, ordenados por
     /// `timestamp` ASC (cronológico). Usado por el dispatch para armar el
     /// history que va al runner.
