@@ -250,6 +250,17 @@ pub async fn sandbox_handler(
     let relay = relay_owned.as_ref();
 
     let allowed_transfer_targets = extract_allowed_transfer_targets(&agent.tools);
+    let transfer_target_labels: Vec<(mongodb::bson::oid::ObjectId, String)> =
+        if allowed_transfer_targets.is_empty() {
+            Vec::new()
+        } else {
+            match state.db.find_ai_agents_by_ids(&allowed_transfer_targets).await {
+                Ok(agents) => agents.into_iter()
+                    .filter_map(|a| a.id.map(|id| (id, a.label)))
+                    .collect(),
+                Err(_) => Vec::new(),
+            }
+        };
     let agent_snapshot = std::sync::Arc::new(agent.clone());
     let tool_ctx = ToolContext {
         state: state.clone(),
@@ -261,6 +272,7 @@ pub async fn sandbox_handler(
         ai_user_name: agent.personality.assistant_name.clone(),
         is_sandbox: true,
         allowed_transfer_targets,
+        transfer_target_labels,
         agent_snapshot: agent_snapshot.clone(),
         default_ticket_category_id: agent.escalation.default_ticket_category_id.clone(),
     };

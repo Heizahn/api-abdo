@@ -63,6 +63,11 @@ pub struct ToolContext {
     /// de `agent.tools[transfer_to_agent].config.allowed_targets`. Vacío si
     /// el tool está deshabilitado o sin `allowed_targets` configurados.
     pub allowed_transfer_targets: Vec<ObjectId>,
+    /// Mapping `(id, label)` resuelto vía DB para los `allowed_transfer_targets`.
+    /// Se inyecta en la `description` del enum del schema para que el LLM sepa
+    /// qué agente representa cada hex (sin esto el modelo elige IDs al azar y
+    /// el reason no matchea con el target real).
+    pub transfer_target_labels: Vec<(ObjectId, String)>,
     /// Snapshot del agente al inicio del turno. Usado por `auto_escalate`
     /// para decidir si mandar `farewell_to_human` (sólo en `live`).
     pub agent_snapshot: Arc<AiAgent>,
@@ -245,9 +250,16 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
 /// Construye los `FunctionDeclaration` que viajan a Gemini. Filtra por
 /// `enabled = true` y aplica `description_override` cuando esté seteado.
 ///
-/// Para `transfer_to_agent` además inyecta `allowed_targets` como `enum` en
-/// `target_agent_id` para que Gemini no invente IDs fuera del whitelist.
-pub fn build_function_declarations(agent: &AiAgent) -> Vec<FunctionDeclaration> {
+/// Para `transfer_to_agent` además inyecta:
+/// - `enum` con los IDs hex de `allowed_targets` (whitelist de IDs)
+/// - `description` enriquecida con el mapping `id → label` para que el modelo
+///   sepa qué especialidad representa cada hex. Sin esto Gemini elige IDs al
+///   azar (aunque estén en el enum) y la transferencia cae en el agente
+///   equivocado.
+pub fn build_function_declarations(
+    agent: &AiAgent,
+    transfer_target_labels: &[(ObjectId, String)],
+) -> Vec<FunctionDeclaration> {
     let allowed_transfer_targets = extract_allowed_transfer_targets(&agent.tools);
     agent
         .tools
@@ -262,7 +274,7 @@ pub fn build_function_declarations(agent: &AiAgent) -> Vec<FunctionDeclaration> 
             }
             tool_default(&t.name).map(|(default_desc, params)| {
                 let parameters = if t.name == T_TRANSFER_AGENT {
-                    inject_target_enum(params, &allowed_transfer_targets)
+                    inject_target_enum(params, &allowed_transfer_targets, transfer_target_labels)
                 } else {
                     params
                 };
@@ -301,14 +313,48 @@ pub fn extract_allowed_transfer_targets(tools: &[AiToolConfig]) -> Vec<ObjectId>
         .collect()
 }
 
-fn inject_target_enum(mut params: Value, allowed_targets: &[ObjectId]) -> Value {
+fn inject_target_enum(
+    mut params: Value,
+    allowed_targets: &[ObjectId],
+    target_labels: &[(ObjectId, String)],
+) -> Value {
     let hexes: Vec<Value> = allowed_targets
         .iter()
         .map(|o| Value::String(o.to_hex()))
         .collect();
+
+    // Construye el bloque `id → label` que se appendea a la description.
+    // Solo incluye IDs que estén en `allowed_targets` Y tengan label resuelto
+    // (por si la DB perdió alguno entre el config del agente y el dispatch).
+    let mapping_lines: Vec<String> = allowed_targets
+        .iter()
+        .filter_map(|id| {
+            target_labels
+                .iter()
+                .find(|(lid, _)| lid == id)
+                .map(|(_, label)| format!("- {} → {}", id.to_hex(), label))
+        })
+        .collect();
+
     if let Some(props) = params.get_mut("properties").and_then(|v| v.as_object_mut()) {
         if let Some(target) = props.get_mut("target_agent_id").and_then(|v| v.as_object_mut()) {
             target.insert("enum".to_string(), Value::Array(hexes));
+            if !mapping_lines.is_empty() {
+                let base = target
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let enriched = format!(
+                    "{}\nAgentes destino disponibles (elegí el ID que corresponda al área):\n{}",
+                    base.trim_end(),
+                    mapping_lines.join("\n")
+                );
+                target.insert(
+                    "description".to_string(),
+                    Value::String(enriched.trim_start().to_string()),
+                );
+            }
         }
     }
     params

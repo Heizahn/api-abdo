@@ -345,7 +345,7 @@ pub async fn run_turn(
         parts: user_parts,
     });
 
-    let function_declarations = build_function_declarations(agent);
+    let function_declarations = build_function_declarations(agent, &tool_ctx.transfer_target_labels);
     let tools_block = if function_declarations.is_empty() {
         None
     } else {
@@ -375,6 +375,8 @@ pub async fn run_turn(
                     function_call: None,
                     function_response: None,
                     inline_data: None,
+                    thought_signature: None,
+                    thought: None,
                 }).collect(),
             }),
             contents: contents.clone(),
@@ -512,6 +514,8 @@ pub async fn run_turn(
                         response: payload,
                     }),
                     inline_data: None,
+                    thought_signature: None,
+                    thought: None,
                 }],
             });
         }

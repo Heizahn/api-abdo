@@ -96,6 +96,16 @@ pub struct Part {
     /// Multimedia inline (imagen, audio, etc). Gemini 1.5+ procesa nativo.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inline_data: Option<InlineData>,
+    /// Blob opaco que Gemini emite junto a `function_call` en modelos con
+    /// reasoning ("thinking"). DEBE re-enviarse intacto en el siguiente
+    /// roundtrip (cuando devolvemos el `function_response`); de lo contrario
+    /// Gemini rebota 400 INVALID_ARGUMENT con "missing thought_signature".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
+    /// Marca este part como razonamiento interno del modelo (no se renderiza
+    /// como texto al usuario). Lo emiten algunos modelos junto al texto final.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought: Option<bool>,
 }
 
 /// Adjunto multimedia (imagen, audio, video, PDF). El `data` va en base64
@@ -116,6 +126,8 @@ impl Part {
             function_call: None,
             function_response: None,
             inline_data: None,
+            thought_signature: None,
+            thought: None,
         }
     }
 
@@ -128,6 +140,8 @@ impl Part {
                 mime_type: mime_type.into(),
                 data: data_base64.into(),
             }),
+            thought_signature: None,
+            thought: None,
         }
     }
 
@@ -141,6 +155,8 @@ impl Part {
                 response,
             }),
             inline_data: None,
+            thought_signature: None,
+            thought: None,
         }
     }
 }
