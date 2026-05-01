@@ -869,43 +869,82 @@ async fn run_dispatch(
     }
 
     // ── max_turns_without_resolution ───────────────────────────────────────
-    // Cuenta como "progreso" (NO incrementa el counter) cualquier turno donde:
-    //  - hubo transfer en el chain (same_workspace o cross_workspace), o
-    //  - el último turno llamó request_human / create_ticket exitoso, o
-    //  - el último turno usó CUALQUIER tool con éxito (lookup_customer,
-    //    check_coverage, list_plans, get_invoices). Pedir info al cliente
-    //    cuando aún no la tenés ES trabajo legítimo y no debe penalizarse.
+    // Lógica en 5 ramas explícitas (mutuamente exclusivas, fast-return dentro
+    // del bloque `if cap > 0`):
     //
-    // El counter solo sube cuando el turno fue 100% texto SIN ninguna tool
-    // — eso es la señal de que la IA está conversando sin avanzar.
-    let any_tool_success = last_output
-        .tool_calls
-        .iter()
-        .any(|t| t.success);
-    let resolved_now =
-        had_chain_transfer || cross_workspace_message.is_some() || any_tool_success;
-    if last_agent.escalation.max_turns_without_resolution > 0 && !resolved_now {
-        let nr = state.redis.incr_ai_no_resolution(&conv_hex).await;
-        let cap = last_agent.escalation.max_turns_without_resolution as i64;
-        tracing::info!(
-            "[ai_agent.dispatch] no_resolution counter (conv={}, count={}/{}, resolved_now=false)",
-            conv_hex, nr, cap
-        );
-        if nr >= cap {
-            tracing::info!(
-                "[ai_agent.dispatch] max_turns_without_resolution ({}) reached (conv={})",
-                nr, conv_hex
+    //   B1  qualification_window  → prior_ai_turns < window → debug + skip
+    //   B2  Action tool success   → reset_ai_no_resolution + debug
+    //   B3  chain transfer        → had_chain_transfer || cross_workspace → debug + skip
+    //   B4  InfoLookup success    → any tool succeeded (= InfoLookup en este punto) → debug + skip
+    //   B5  no useful tool        → incr + info log + posible auto_escalate
+    //
+    // Orden importa: B1 antes que B2 (evitar reset innecesario en ventana),
+    // B2 antes que B3 (log más específico gana si hay Action + chain_transfer),
+    // B3 antes que B4 (tool fallido + chain transfer → skip, no incr),
+    // B4 antes que B5 (InfoLookup exitoso → skip, no incr).
+    let cap = last_agent.escalation.max_turns_without_resolution as i64;
+    if cap > 0 {
+        // B1: qualification window — skips counter entirely for initial turns
+        let window = last_agent.escalation.qualification_window_turns as u64;
+        if prior_ai_turns < window {
+            tracing::debug!(
+                "[ai_agent.dispatch] no_resolution skipped (conv={}, reason=qualification_window, prior_ai_turns={}/{})",
+                conv_hex, prior_ai_turns, window
             );
-            escalation::auto_escalate(
-                &state,
-                &inbound.conversation_id,
-                &last_agent,
-                escalation::REASON_NO_RESOLUTION,
-                Some("Caso sin resolver tras varios turnos"),
-                true,
-            )
-            .await;
-            return Ok(());
+        } else {
+            // B2: Action tool con success → reset counter
+            let action_success = last_output.tool_calls.iter().find(|t| {
+                t.success
+                    && crate::modules::ai_agent::tools::tool_category(&t.tool_name)
+                        == crate::modules::ai_agent::tools::ToolCategory::Action
+            });
+            if let Some(t) = action_success {
+                state.redis.reset_ai_no_resolution(&conv_hex).await;
+                tracing::debug!(
+                    "[ai_agent.dispatch] no_resolution reset (conv={}, tool={}, category=Action, count=0/{})",
+                    conv_hex, t.tool_name, cap
+                );
+            } else if had_chain_transfer || cross_workspace_message.is_some() {
+                // B3: transfer en chain (cross-workspace o same-workspace via chain)
+                tracing::debug!(
+                    "[ai_agent.dispatch] no_resolution skipped (conv={}, reason=chain_transfer)",
+                    conv_hex
+                );
+            } else {
+                // B4: InfoLookup con success → skip silencioso (sin reset)
+                let any_success = last_output.tool_calls.iter().find(|t| t.success);
+                if let Some(t) = any_success {
+                    // No logueamos `count=N/MAX` aquí porque requeriría un Redis GET extra
+                    // sólo para diagnóstico (el counter NO se modifica en este path).
+                    tracing::debug!(
+                        "[ai_agent.dispatch] no_resolution skipped (conv={}, tool={}, category=InfoLookup, max={})",
+                        conv_hex, t.tool_name, cap
+                    );
+                } else {
+                    // B5: nada útil pasó → incr + posible escalate (path original)
+                    let nr = state.redis.incr_ai_no_resolution(&conv_hex).await;
+                    tracing::info!(
+                        "[ai_agent.dispatch] no_resolution counter (conv={}, count={}/{}, resolved_now=false)",
+                        conv_hex, nr, cap
+                    );
+                    if nr >= cap {
+                        tracing::info!(
+                            "[ai_agent.dispatch] max_turns_without_resolution ({}) reached (conv={})",
+                            nr, conv_hex
+                        );
+                        escalation::auto_escalate(
+                            &state,
+                            &inbound.conversation_id,
+                            &last_agent,
+                            escalation::REASON_NO_RESOLUTION,
+                            Some("Caso sin resolver tras varios turnos"),
+                            true,
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                }
+            }
         }
     }
 
@@ -1360,5 +1399,394 @@ fn truncate(s: &str, n: usize) -> String {
     } else {
         let cut: String = s.chars().take(n).collect();
         format!("{}…", cut)
+    }
+}
+
+// ── Dispatch outcome: pure helper for testability ──────────────────────────
+
+/// Resultado de la evaluación de `max_turns_without_resolution` para un turno.
+/// Mutuamente exclusivo: la evaluación de 5 ramas devuelve exactamente uno.
+/// Extraído como función pura para testabilidad — la lógica real corre inline en
+/// `run_dispatch` por acceso a `state.redis` (efectos con I/O).
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchOutcome {
+    /// B0: max_turns_without_resolution == 0, feature disabled.
+    Disabled,
+    /// B1: prior_ai_turns < qualification_window_turns → skip counter.
+    WindowSkip,
+    /// B2: Action tool succeeded → reset counter.
+    ActionReset { tool_name: String },
+    /// B3: chain transfer (had_chain_transfer || cross_workspace) → skip.
+    ChainSkip,
+    /// B4: InfoLookup tool succeeded → skip counter (no reset).
+    InfoLookupSkip { tool_name: String },
+    /// B5: no useful tool → increment counter (may escalate if >= cap).
+    Increment,
+}
+
+/// Determina el `DispatchOutcome` para el bloque `max_turns_without_resolution`,
+/// a partir de inputs puramente de datos (sin I/O, sin Redis, sin DB).
+///
+/// **IMPORTANT**: This helper is mirrored inline in `run_dispatch` above.
+/// If you change the branching logic here, update both places.
+/// The helper exists for unit testing without Redis dependencies.
+#[allow(dead_code)]
+pub fn categorize_dispatch_outcome(
+    prior_ai_turns: u64,
+    max_turns_without_resolution: u32,
+    qualification_window_turns: u32,
+    tool_calls: &[crate::models::ai_agent::AiToolCallLog],
+    had_chain_transfer: bool,
+    has_cross_workspace: bool,
+) -> DispatchOutcome {
+    use super::tools::{tool_category, ToolCategory};
+
+    // B0: feature disabled
+    if max_turns_without_resolution == 0 {
+        return DispatchOutcome::Disabled;
+    }
+
+    // B1: qualification window
+    if prior_ai_turns < qualification_window_turns as u64 {
+        return DispatchOutcome::WindowSkip;
+    }
+
+    // B2: Action tool success
+    if let Some(t) = tool_calls
+        .iter()
+        .find(|t| t.success && tool_category(&t.tool_name) == ToolCategory::Action)
+    {
+        return DispatchOutcome::ActionReset {
+            tool_name: t.tool_name.clone(),
+        };
+    }
+
+    // B3: chain transfer
+    if had_chain_transfer || has_cross_workspace {
+        return DispatchOutcome::ChainSkip;
+    }
+
+    // B4: InfoLookup success (any successful tool at this point is InfoLookup)
+    if let Some(t) = tool_calls.iter().find(|t| t.success) {
+        return DispatchOutcome::InfoLookupSkip {
+            tool_name: t.tool_name.clone(),
+        };
+    }
+
+    // B5: no useful tool
+    DispatchOutcome::Increment
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::ai_agent::AiToolCallLog;
+    use serde_json::json;
+
+    fn make_tool_call(tool_name: &str, success: bool) -> AiToolCallLog {
+        AiToolCallLog {
+            tool_name: tool_name.to_string(),
+            args: json!({}),
+            result_summary: String::new(),
+            success,
+            error: if success {
+                None
+            } else {
+                Some("err".to_string())
+            },
+            duration_ms: 0,
+        }
+    }
+
+    // ── Scenario A: Carla qualification window (the original bug) ─────────
+    // cap=4, window=4, text-only turns 1-4: counter stays 0; turn 5 increments.
+    #[test]
+    fn scenario_a_carla_qualification_window() {
+        // Turns 1-4: prior_ai_turns = 0, 1, 2, 3 → all WindowSkip (< 4)
+        for prior in 0u64..4 {
+            let outcome = categorize_dispatch_outcome(
+                prior,
+                4,  // max_turns_without_resolution
+                4,  // qualification_window_turns
+                &[], // no tool calls
+                false,
+                false,
+            );
+            assert_eq!(
+                outcome,
+                DispatchOutcome::WindowSkip,
+                "turn {} (prior_ai_turns={}) should be WindowSkip",
+                prior + 1,
+                prior
+            );
+        }
+
+        // Turn 5: prior_ai_turns = 4 (>= window=4) → normal evaluation, no tools → Increment
+        let outcome = categorize_dispatch_outcome(
+            4,  // prior_ai_turns == window, window no longer applies
+            4,  // max_turns_without_resolution
+            4,  // qualification_window_turns
+            &[], // no tool calls
+            false,
+            false,
+        );
+        assert_eq!(
+            outcome,
+            DispatchOutcome::Increment,
+            "turn 5 (prior_ai_turns=4) should be Increment (window no longer applies)"
+        );
+    }
+
+    // ── Scenario D: Sanity — no window, no tools, escalation path ────────
+    // cap=3, window=0, 3 text-only turns → Increment each time.
+    #[test]
+    fn scenario_d_sanity_no_window_increment_path() {
+        for prior in 0u64..3 {
+            let outcome = categorize_dispatch_outcome(
+                prior,
+                3,  // max_turns_without_resolution
+                0,  // qualification_window_turns = 0 (disabled)
+                &[],
+                false,
+                false,
+            );
+            assert_eq!(
+                outcome,
+                DispatchOutcome::Increment,
+                "turn {} should Increment (no window, no tools)",
+                prior + 1
+            );
+        }
+    }
+
+    // ── Scenario C: InfoLookup does NOT reset ─────────────────────────────
+    // cap=4, window=0, list_plans success → InfoLookupSkip (no reset).
+    #[test]
+    fn scenario_c_info_lookup_does_not_reset() {
+        // Turns 1-2: no tools → Increment
+        let outcome1 = categorize_dispatch_outcome(0, 4, 0, &[], false, false);
+        assert_eq!(outcome1, DispatchOutcome::Increment);
+
+        let outcome2 = categorize_dispatch_outcome(1, 4, 0, &[], false, false);
+        assert_eq!(outcome2, DispatchOutcome::Increment);
+
+        // Turn 3: list_plans success → InfoLookupSkip (counter stays at 2, not reset)
+        let tools = vec![make_tool_call("list_plans", true)];
+        let outcome3 = categorize_dispatch_outcome(2, 4, 0, &tools, false, false);
+        assert_eq!(
+            outcome3,
+            DispatchOutcome::InfoLookupSkip { tool_name: "list_plans".to_string() },
+            "list_plans success should be InfoLookupSkip, not ActionReset"
+        );
+
+        // Turns 4-5: no tools → Increment (counter reaches 3, then 4 → escalate)
+        let outcome4 = categorize_dispatch_outcome(3, 4, 0, &[], false, false);
+        assert_eq!(outcome4, DispatchOutcome::Increment);
+        let outcome5 = categorize_dispatch_outcome(4, 4, 0, &[], false, false);
+        assert_eq!(outcome5, DispatchOutcome::Increment);
+    }
+
+    // ── Scenario B: Action tool reset ────────────────────────────────────
+    // cap=4, window=0, transfer_to_agent success → ActionReset.
+    #[test]
+    fn scenario_b_action_tool_reset() {
+        // Turn 1: no tools → Increment (counter = 1)
+        let outcome1 = categorize_dispatch_outcome(0, 4, 0, &[], false, false);
+        assert_eq!(outcome1, DispatchOutcome::Increment);
+
+        // Turn 2: no tools → Increment (counter = 2)
+        let outcome2 = categorize_dispatch_outcome(1, 4, 0, &[], false, false);
+        assert_eq!(outcome2, DispatchOutcome::Increment);
+
+        // Turn 3: transfer_to_agent success → ActionReset (counter → 0)
+        let tools = vec![make_tool_call("transfer_to_agent", true)];
+        let outcome3 = categorize_dispatch_outcome(2, 4, 0, &tools, false, false);
+        assert_eq!(
+            outcome3,
+            DispatchOutcome::ActionReset { tool_name: "transfer_to_agent".to_string() },
+            "transfer_to_agent success should ActionReset"
+        );
+
+        // Turn 4: no tools → Increment (counter = 1 after reset)
+        let outcome4 = categorize_dispatch_outcome(3, 4, 0, &[], false, false);
+        assert_eq!(outcome4, DispatchOutcome::Increment);
+
+        // Turn 5: no tools → Increment (counter = 2)
+        let outcome5 = categorize_dispatch_outcome(4, 4, 0, &[], false, false);
+        assert_eq!(outcome5, DispatchOutcome::Increment);
+    }
+
+    // ── Edge: unknown tool name → treated as InfoLookup (skip) ───────────
+    #[test]
+    fn edge_unknown_tool_name_defaults_to_info_lookup() {
+        let tools = vec![make_tool_call("some_future_tool", true)];
+        let outcome = categorize_dispatch_outcome(0, 4, 0, &tools, false, false);
+        // Unknown tool → InfoLookup default → InfoLookupSkip
+        assert_eq!(
+            outcome,
+            DispatchOutcome::InfoLookupSkip { tool_name: "some_future_tool".to_string() },
+            "unknown tool with success should be InfoLookupSkip (safe default)"
+        );
+    }
+
+    // ── Edge: cap=0 → feature disabled, no branch evaluates ──────────────
+    #[test]
+    fn edge_cap_zero_feature_disabled() {
+        let outcome = categorize_dispatch_outcome(0, 0, 0, &[], false, false);
+        assert_eq!(
+            outcome,
+            DispatchOutcome::Disabled,
+            "max_turns_without_resolution=0 should disable the feature"
+        );
+
+        // Even with tools, still Disabled
+        let tools = vec![make_tool_call("transfer_to_agent", true)];
+        let outcome2 = categorize_dispatch_outcome(5, 0, 3, &tools, false, false);
+        assert_eq!(outcome2, DispatchOutcome::Disabled);
+    }
+
+    // ── Spec 1.5: Action wins over InfoLookup in same turn ───────────────
+    #[test]
+    fn action_wins_over_info_lookup_same_turn() {
+        let tools = vec![
+            make_tool_call("list_plans", true),
+            make_tool_call("create_ticket", true),
+        ];
+        let outcome = categorize_dispatch_outcome(0, 4, 0, &tools, false, false);
+        assert!(
+            matches!(outcome, DispatchOutcome::ActionReset { .. }),
+            "Action tool should win over InfoLookup in same turn"
+        );
+    }
+
+    // ── Spec 1.4: Failed InfoLookup → Increment ───────────────────────────
+    #[test]
+    fn failed_info_lookup_increments() {
+        let tools = vec![make_tool_call("list_plans", false)]; // failed
+        let outcome = categorize_dispatch_outcome(0, 4, 0, &tools, false, false);
+        assert_eq!(
+            outcome,
+            DispatchOutcome::Increment,
+            "failed InfoLookup tool should increment the counter"
+        );
+    }
+
+    // ── Spec 2.2: Turn at window boundary uses normal evaluation ─────────
+    #[test]
+    fn window_boundary_uses_normal_evaluation() {
+        // prior_ai_turns == window → B1 does NOT apply (strict <)
+        let outcome = categorize_dispatch_outcome(
+            4,  // prior_ai_turns == window
+            4,  // max_turns_without_resolution
+            4,  // qualification_window_turns
+            &[], // no tools
+            false,
+            false,
+        );
+        assert_eq!(
+            outcome,
+            DispatchOutcome::Increment,
+            "at window boundary (prior == window) normal evaluation should apply"
+        );
+    }
+}
+
+// ── Validator tests ────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod handler_validator_tests {
+    use crate::{
+        error::ApiError,
+        models::ai_agent::{AiEscalationRules, AiEscalationRulesInput},
+    };
+
+    fn base_escalation() -> AiEscalationRules {
+        AiEscalationRules {
+            keywords: vec![],
+            max_turns_without_resolution: 3,
+            qualification_window_turns: 0,
+            max_identification_attempts: 2,
+            escalate_on_critical_tool_failure: true,
+            always_escalate_when_asked: true,
+            default_ticket_category_id: None,
+        }
+    }
+
+    fn apply_escalation_under_test(
+        cur: &mut AiEscalationRules,
+        patch: Option<AiEscalationRulesInput>,
+    ) -> Result<(), ApiError> {
+        let Some(p) = patch else { return Ok(()); };
+        if let Some(v) = p.keywords { cur.keywords = v; }
+        if let Some(v) = p.max_turns_without_resolution { cur.max_turns_without_resolution = v; }
+        if let Some(v) = p.qualification_window_turns {
+            if v > 10 {
+                return Err(ApiError::domain_simple(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "qualification_window_turns_out_of_range",
+                    format!("qualification_window_turns must be between 0 and 10, got {}", v),
+                ));
+            }
+            cur.qualification_window_turns = v;
+        }
+        if let Some(v) = p.max_identification_attempts { cur.max_identification_attempts = v; }
+        if let Some(v) = p.escalate_on_critical_tool_failure {
+            cur.escalate_on_critical_tool_failure = v;
+        }
+        if let Some(v) = p.always_escalate_when_asked { cur.always_escalate_when_asked = v; }
+        if p.default_ticket_category_id.is_some() {
+            cur.default_ticket_category_id = p.default_ticket_category_id;
+        }
+        Ok(())
+    }
+
+    // Task 4.7: qualification_window_turns = 11 → Err with correct error code
+    #[test]
+    fn validator_rejects_window_above_10() {
+        let mut esc = base_escalation();
+        let patch = Some(AiEscalationRulesInput {
+            qualification_window_turns: Some(11),
+            ..Default::default()
+        });
+        let result = apply_escalation_under_test(&mut esc, patch);
+        assert!(result.is_err(), "value 11 should be rejected");
+        if let Err(ApiError::Domain { code, .. }) = result {
+            assert_eq!(
+                code, "qualification_window_turns_out_of_range",
+                "error code must be qualification_window_turns_out_of_range"
+            );
+        } else {
+            panic!("expected ApiError::Domain variant");
+        }
+        // Value must NOT be applied on error
+        assert_eq!(esc.qualification_window_turns, 0, "value must not be stored on error");
+    }
+
+    // Task 4.8: qualification_window_turns = 10 → Ok, value stored
+    #[test]
+    fn validator_accepts_window_at_upper_boundary() {
+        let mut esc = base_escalation();
+        let patch = Some(AiEscalationRulesInput {
+            qualification_window_turns: Some(10),
+            ..Default::default()
+        });
+        let result = apply_escalation_under_test(&mut esc, patch);
+        assert!(result.is_ok(), "value 10 should be accepted (upper boundary inclusive)");
+        assert_eq!(esc.qualification_window_turns, 10, "value 10 must be stored");
+    }
+
+    // Bonus: value 0 (lower boundary) → Ok
+    #[test]
+    fn validator_accepts_window_at_lower_boundary() {
+        let mut esc = base_escalation();
+        esc.qualification_window_turns = 5; // start at 5
+        let patch = Some(AiEscalationRulesInput {
+            qualification_window_turns: Some(0),
+            ..Default::default()
+        });
+        let result = apply_escalation_under_test(&mut esc, patch);
+        assert!(result.is_ok(), "value 0 should be accepted (lower boundary)");
+        assert_eq!(esc.qualification_window_turns, 0);
     }
 }

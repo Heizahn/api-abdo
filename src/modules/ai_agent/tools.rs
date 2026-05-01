@@ -121,6 +121,49 @@ pub const T_TRANSFER_AGENT: &str = "transfer_to_agent";
 pub const T_LIST_PLANS: &str = "list_plans";
 pub const T_CHECK_COVERAGE: &str = "check_coverage";
 
+/// Categoría operativa de un tool, usada por `dispatch.rs` para decidir si un
+/// turn cuenta como "resolución" (que resetea el counter) o sólo como "trabajo
+/// en progreso" (skip increment, sin reset).
+///
+/// **Action**: el tool cambia estado externo o transfiere al humano. Un turn
+/// con un Action exitoso resetea `no_resolution_count`.
+///
+/// **InfoLookup**: el tool consulta info pública o de catálogo. Un turn con
+/// sólo InfoLookup exitosos no resetea — el agente aún está conversando.
+///
+/// Al agregar una tool nueva, se debe categorizar en `tool_category` en el
+/// mismo PR. El default safe es `InfoLookup`, pero el `tracing::warn!` en el
+/// arm `unknown =>` asegura visibilidad en logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCategory {
+    InfoLookup,
+    Action,
+}
+
+/// Mapea el `tool_name` al ToolCategory. Default safe: `InfoLookup` para
+/// nombres desconocidos (preserva el comportamiento "skip" actual y emite
+/// `warn!` para que el dev categorice la tool nueva explícitamente).
+pub fn tool_category(tool_name: &str) -> ToolCategory {
+    match tool_name {
+        T_LOOKUP_CUSTOMER
+        | T_LIST_PLANS
+        | T_CHECK_COVERAGE
+        | T_GET_INVOICES => ToolCategory::InfoLookup,
+
+        T_CREATE_TICKET
+        | T_REQUEST_HUMAN
+        | T_TRANSFER_AGENT => ToolCategory::Action,
+
+        unknown => {
+            tracing::warn!(
+                "[ai_agent.tools] tool_category: unknown tool name '{}' — defaulting to InfoLookup. Add explicit categorization in tools.rs.",
+                unknown
+            );
+            ToolCategory::InfoLookup
+        }
+    }
+}
+
 /// Cache TTL para `list_plans` y `check_coverage`. Admins editan poco; en cada
 /// write se invalida explícitamente.
 const AI_BUSINESS_CACHE_TTL_SECS: u64 = 300;

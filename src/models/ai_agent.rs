@@ -140,6 +140,15 @@ pub struct AiToolConfig {
 pub struct AiEscalationRules {
     pub keywords: Vec<String>,
     pub max_turns_without_resolution: u32,
+    /// Number of initial AI turns where the `no_resolution_count` counter is bypassed.
+    /// Recommended values:
+    /// - 0: Receptionist/router agents (must classify and transfer fast)
+    /// - 2-3: Payment/billing agents (structured flow)
+    /// - 3-4: Technical support (initial diagnostic questions)
+    /// - 4-5: Sales agents (qualification window: zone, usage, devices, etc.)
+    /// Max: 10.
+    #[serde(default)]
+    pub qualification_window_turns: u32,
     pub max_identification_attempts: u32,
     pub escalate_on_critical_tool_failure: bool,
     pub always_escalate_when_asked: bool,
@@ -504,6 +513,7 @@ impl From<AiToolConfig> for AiToolConfigDto {
 pub struct AiEscalationRulesDto {
     pub keywords: Vec<String>,
     pub max_turns_without_resolution: u32,
+    pub qualification_window_turns: u32,
     pub max_identification_attempts: u32,
     pub escalate_on_critical_tool_failure: bool,
     pub always_escalate_when_asked: bool,
@@ -516,6 +526,7 @@ impl From<AiEscalationRules> for AiEscalationRulesDto {
         AiEscalationRulesDto {
             keywords: e.keywords,
             max_turns_without_resolution: e.max_turns_without_resolution,
+            qualification_window_turns: e.qualification_window_turns,
             max_identification_attempts: e.max_identification_attempts,
             escalate_on_critical_tool_failure: e.escalate_on_critical_tool_failure,
             always_escalate_when_asked: e.always_escalate_when_asked,
@@ -687,6 +698,8 @@ pub struct AiEscalationRulesInput {
     pub keywords: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns_without_resolution: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qualification_window_turns: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_identification_attempts: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

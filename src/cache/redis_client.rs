@@ -486,6 +486,23 @@ impl RedisClient {
         new_val
     }
 
+    /// Reset targeted del counter de no-resolución para una conversación.
+    /// Sólo borra la key `ai_agent:no_resolution:{conv_id}` — NO toca
+    /// `turns_conv` ni `id_attempts` (esos los limpia `clear_ai_conv_counters`
+    /// en eventos terminales como auto_escalate o close/reopen).
+    ///
+    /// Idempotente: DEL sobre key inexistente es no-op silencioso. Failure
+    /// handling: best-effort, igual que `incr_ai_no_resolution` (si Redis
+    /// está caído, el counter "se pierde" pero la conv sigue funcionando).
+    pub async fn reset_ai_no_resolution(&self, conv_id: &str) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let key = format!("ai_agent:no_resolution:{}", conv_id);
+        let _: Result<(), _> = conn.del(&key).await;
+    }
+
     /// Limpia todos los counters per-conv (turns, id_attempts, no_resolution).
     /// Se llama desde close/reopen y al auto-escalar.
     pub async fn clear_ai_conv_counters(&self, conv_id: &str) {

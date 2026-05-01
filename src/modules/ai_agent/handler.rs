@@ -233,6 +233,7 @@ fn default_agent(label: String, description: String, ai_user_id: String, now: Bs
         escalation: AiEscalationRules {
             keywords: vec!["humano".into(), "operador".into(), "queja".into(), "reclamo".into()],
             max_turns_without_resolution: 3,
+            qualification_window_turns: 0,
             max_identification_attempts: 2,
             escalate_on_critical_tool_failure: true,
             always_escalate_when_asked: true,
@@ -537,6 +538,7 @@ pub async fn get_ai_agent_handler(
     request_body = CreateAiAgentRequest,
     responses(
         (status = 201, description = "Agente creado", body = AiAgentResponse),
+        (status = 400, description = "qualification_window_turns_out_of_range"),
         (status = 422, description = "Validación"),
         (status = 404, description = "workspace_not_found"),
     )
@@ -583,7 +585,7 @@ pub async fn create_ai_agent_handler(
             })
             .collect();
     }
-    apply_escalation(&mut agent.escalation, body.escalation);
+    apply_escalation(&mut agent.escalation, body.escalation)?;
     apply_limits(&mut agent.limits, body.limits);
     if let Some(d) = body.debounce_seconds {
         agent.debounce_seconds = d;
@@ -615,6 +617,7 @@ pub async fn create_ai_agent_handler(
     request_body = UpdateAiAgentRequest,
     responses(
         (status = 200, description = "Agente actualizado", body = AiAgentResponse),
+        (status = 400, description = "qualification_window_turns_out_of_range"),
         (status = 404, description = "agent_not_found / workspace_not_found"),
         (status = 422, description = "Validación"),
     )
@@ -680,7 +683,7 @@ pub async fn update_ai_agent_handler(
             })
             .collect();
     }
-    apply_escalation(&mut agent.escalation, body.escalation);
+    apply_escalation(&mut agent.escalation, body.escalation)?;
     apply_limits(&mut agent.limits, body.limits);
     if let Some(d) = body.debounce_seconds {
         agent.debounce_seconds = d;
@@ -802,10 +805,24 @@ fn apply_personality(
 fn apply_escalation(
     cur: &mut AiEscalationRules,
     patch: Option<crate::models::ai_agent::AiEscalationRulesInput>,
-) {
-    let Some(p) = patch else { return };
+) -> Result<(), ApiError> {
+    let Some(p) = patch else { return Ok(()); };
     if let Some(v) = p.keywords { cur.keywords = v; }
     if let Some(v) = p.max_turns_without_resolution { cur.max_turns_without_resolution = v; }
+    if let Some(v) = p.qualification_window_turns {
+        if v > 10 {
+            tracing::warn!(
+                "[ai_agent.handler] qualification_window_turns rejected: value={} is out of range 0..=10",
+                v
+            );
+            return Err(ApiError::domain_simple(
+                axum::http::StatusCode::BAD_REQUEST,
+                "qualification_window_turns_out_of_range",
+                format!("qualification_window_turns must be between 0 and 10, got {}", v),
+            ));
+        }
+        cur.qualification_window_turns = v;
+    }
     if let Some(v) = p.max_identification_attempts { cur.max_identification_attempts = v; }
     if let Some(v) = p.escalate_on_critical_tool_failure {
         cur.escalate_on_critical_tool_failure = v;
@@ -814,6 +831,7 @@ fn apply_escalation(
     if p.default_ticket_category_id.is_some() {
         cur.default_ticket_category_id = p.default_ticket_category_id;
     }
+    Ok(())
 }
 
 fn apply_limits(cur: &mut AiLimits, patch: Option<crate::models::ai_agent::AiLimitsInput>) {
