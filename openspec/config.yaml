@@ -1,0 +1,77 @@
+schema: spec-driven
+
+context: |
+  Stack: Rust + Axum 0.7, MongoDB 3.0, Redis 0.32, tokio 1.39, JWT (cliente + staff)
+  Architecture: feature modules en src/modules/<feature>/ (mod.rs + handler.rs), 4 grupos de auth en axum_router.rs (webhook, ws, public, user_protected, client_protected)
+  DB: traits en src/db/mod.rs (Db master), impls en src/db/mongo/. Sin $lookup grandes — queries paralelas + join en Rust
+  Errors: ApiError → { ok: false, error: "<code>" } via IntoResponse. thiserror tipado + anyhow propaga
+  Docs: utoipa en /docs (Swagger), spec central src/openapi.rs (registrar paths + schemas en cada feature nueva)
+  Naming: PascalCase en colecciones MongoDB, snake_case en JSON responses (claves en inglés)
+  WhatsApp: WhatsAppService usa self.meta_request(...) para Meta API (relay-aware); webhook en PascalCase (WaConversations, WaMessages, WaSettings)
+  Testing: cargo test built-in. Sin layers integration/e2e instaladas.
+  Style: tracing JSON en prod / pretty en dev. Comandos: cargo check (preferir sobre build).
+
+strict_tdd: false
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes (especially DB migrations and auth changes)
+    - Identify affected modules (auth_user, auth_client, payments, whatsapp, network, dashboard, etc.)
+  specs:
+    - Use Given/When/Then format for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+    - Document API contract in spec (paths, request/response shapes)
+  design:
+    - Include sequence diagrams for complex flows (WhatsApp webhook + WS, auto-asignación, AI Agent loop)
+    - Document architecture decisions with rationale
+    - State which auth group the new routes live in
+  tasks:
+    - Group tasks by phase (infrastructure, implementation, openapi registration, testing)
+    - Use hierarchical numbering (1.1, 1.2, etc.)
+    - Keep tasks small enough to complete in one session
+  apply:
+    - Follow existing patterns: feature modules, trait-based DB layer, ApiError envelope
+    - Always register new endpoints in src/openapi.rs (paths + schemas)
+    - JSON response keys in English (snake_case); comments/docs may be in Spanish
+    - WhatsApp Meta API calls go through self.meta_request(...) — never self.client.post/get/delete directly (ISP blocks graph.facebook.com)
+    - Customer name resolution: DB (Clients.sName) first, WA profile as fallback
+  verify:
+    - Run cargo check (NOT cargo build per user preference)
+    - Compare implementation against every spec scenario
+    - Verify openapi.rs was updated for new routes
+  archive:
+    - Warn before merging destructive deltas (large removals or schema changes)
+
+testing:
+  strict_tdd: false
+  detected: 2026-05-01
+  test_runner:
+    command: cargo test
+    framework: cargo-test
+  layers:
+    unit:
+      available: true
+      tool: cargo test
+    integration:
+      available: false
+      tool: null
+    e2e:
+      available: false
+      tool: null
+  coverage:
+    available: false
+    command: null
+  quality_tools:
+    linter:
+      available: true
+      command: cargo clippy
+    type_checker:
+      available: true
+      command: cargo check
+    formatter:
+      available: true
+      command: cargo fmt
+  notes: |
+    Solo 1 archivo con tests (src/modules/whatsapp/url_preview.rs). El proyecto no practica TDD activo;
+    strict_tdd se deja en false para no forzar tests-first en cada sdd-apply. Cambiar a true cuando el
+    proyecto adopte una política formal de testing.
