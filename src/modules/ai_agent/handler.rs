@@ -1394,23 +1394,31 @@ pub async fn get_ai_agent_metrics_handler(
 ) -> Result<Json<AiAgentMetricsResponse>, ApiError> {
     require_superadmin(&current_user)?;
 
-    let agent_id = parse_oid(&agent_id_hex, "id")?;
+    // Spec 30.2: invalid_agent_id (no genérico invalid_id).
+    let agent_id = ObjectId::parse_str(&agent_id_hex).map_err(|_| ApiError::ValidationError {
+        code: "invalid_agent_id".into(),
+        field: "id".into(),
+        message: "El agent_id no es un ObjectId válido".into(),
+    })?;
 
+    // Spec 30.2: invalid_date_range cubre todos los problemas de fechas
+    // (parse fail de from, parse fail de to, o from > to). Front recibe un
+    // único code en vez de tres distintos.
     let from_dt = parse_iso(&params.from)
         .map_err(|_| ApiError::ValidationError {
-            code: "invalid_from".into(),
+            code: "invalid_date_range".into(),
             field: "from".into(),
-            message: "Formato inválido. Usa ISO-8601 UTC (ej. 2026-05-01T00:00:00Z)".into(),
+            message: "'from' inválido — usa ISO-8601 UTC (ej. 2026-05-01T00:00:00Z)".into(),
         })?;
     let to_dt = parse_iso(&params.to)
         .map_err(|_| ApiError::ValidationError {
-            code: "invalid_to".into(),
+            code: "invalid_date_range".into(),
             field: "to".into(),
-            message: "Formato inválido. Usa ISO-8601 UTC (ej. 2026-05-31T23:59:59Z)".into(),
+            message: "'to' inválido — usa ISO-8601 UTC (ej. 2026-05-31T23:59:59Z)".into(),
         })?;
     if to_dt < from_dt {
         return Err(ApiError::ValidationError {
-            code: "range_inverted".into(),
+            code: "invalid_date_range".into(),
             field: "to".into(),
             message: "'to' debe ser mayor o igual que 'from'".into(),
         });
@@ -1486,6 +1494,13 @@ pub async fn get_ai_agent_metrics_handler(
             pre_classified_count: s.pre_classified_count,
             escalated_count: s.escalated_count,
             tool_calls_count: s.tool_calls_count,
+            // Spec 30.3: hit-rate del implicit caching de Gemini.
+            // 0.0 cuando no hay input (rango vacío) para evitar div-by-zero.
+            cache_hit_rate: if s.total_input_tokens == 0 {
+                0.0
+            } else {
+                s.total_cached_tokens as f64 / s.total_input_tokens as f64
+            },
             pre_class_breakdown: breakdown,
             daily,
         },

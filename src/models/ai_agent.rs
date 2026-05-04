@@ -926,6 +926,10 @@ pub struct AiAgentMetricsData {
     pub pre_classified_count: u64,
     pub escalated_count: u64,
     pub tool_calls_count: u64,
+    /// Spec 30.3: `total_cached_tokens / total_input_tokens` (0..1). 0.0 cuando
+    /// no hay input. Mide la efectividad del implicit caching de Gemini —
+    /// idealmente ≥ 0.5 con prompts estables.
+    pub cache_hit_rate: f64,
     pub pre_class_breakdown: AiAgentPreClassBreakdown,
     /// `null` cuando `granularity=summary`.
     #[serde(skip_serializing_if = "Option::is_none")]

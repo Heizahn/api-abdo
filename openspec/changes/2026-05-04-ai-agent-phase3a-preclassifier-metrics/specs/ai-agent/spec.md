@@ -173,8 +173,9 @@ The pre-classifier prompt MUST instruct Gemini to respond with:
 
 ### Requirement 30: Metrics endpoint
 
-`GET /v1/auth-user/ai-agent/agents/:id/metrics?from=&to=&granularity=` MUST exist
-under the `user_jwt_auth_middleware` group.
+`GET /v1/auth-user/whatsapp/ai-agent/agents/:id/metrics?from=&to=&granularity=` MUST
+exist under the `user_jwt_auth_middleware` group (consistent with all other AI Agent
+routes which live under `/v1/auth-user/whatsapp/ai-agent/...`).
 
 Query params: `from` and `to` (RFC3339, required); `granularity` (`summary` default | `daily`).
 
@@ -188,7 +189,7 @@ Query params: `from` and `to` (RFC3339, required); `granularity` (`summary` defa
       "total_turns": <u64>, "total_input_tokens": <u64>,
       "total_output_tokens": <u64>, "total_thinking_tokens": <u64>,
       "total_cached_tokens": <u64>, "total_cost_usd": <f64>,
-      "avg_latency_ms": <u32>, "pre_classified_count": <u64>,
+      "avg_latency_ms": <f64>, "pre_classified_count": <u64>,
       "pre_classified_breakdown": { "Spam": <u64>, "GreetingOnly": <u64>,
         "ClearVentas": <u64>, "ClearPagos": <u64>,
         "ClearSoporte": <u64>, "Ambiguous": <u64> },
