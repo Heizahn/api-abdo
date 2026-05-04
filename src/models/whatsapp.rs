@@ -1089,6 +1089,12 @@ pub struct UpdateSettingsRequest {
     pub active: Option<bool>,
     #[serde(default)]
     pub purposes: Option<WaPurposesPatch>,
+    /// Phase 1. `true` activa los guardrails server-side para este workspace.
+    #[serde(default)]
+    pub enable_guardrails: Option<bool>,
+    /// Phase 2. `true` activa la persistencia de ai_conv_state para este workspace.
+    #[serde(default)]
+    pub enable_conversation_state: Option<bool>,
     /// Phase 3a. `true` activa el pre-clasificador para este workspace.
     #[serde(default)]
     pub pre_classifier_enabled: Option<bool>,

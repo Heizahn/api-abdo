@@ -628,6 +628,10 @@ pub trait WhatsAppRepository {
         agents: Option<Vec<String>>,
         active: Option<bool>,
         purposes: Option<crate::models::whatsapp::WaPurposesPatch>,
+        enable_guardrails: Option<bool>,
+        enable_conversation_state: Option<bool>,
+        pre_classifier_enabled: Option<bool>,
+        trivial_responses: Option<Vec<crate::models::whatsapp::TrivialResponse>>,
     ) -> Result<(), String>;
     async fn delete_wa_settings(&self, id: &ObjectId) -> Result<(), String>;
     /// Busca `WaSettings` activos con el propósito `purpose` configurado.

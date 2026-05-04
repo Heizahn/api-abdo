@@ -2630,6 +2630,10 @@ pub async fn update_settings_handler(
             payload.agents,
             payload.active,
             payload.purposes,
+            payload.enable_guardrails,
+            payload.enable_conversation_state,
+            payload.pre_classifier_enabled,
+            payload.trivial_responses,
         )
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;

@@ -883,6 +883,10 @@ impl WhatsAppRepository for MongoDB {
         agents: Option<Vec<String>>,
         active: Option<bool>,
         purposes: Option<WaPurposesPatch>,
+        enable_guardrails: Option<bool>,
+        enable_conversation_state: Option<bool>,
+        pre_classifier_enabled: Option<bool>,
+        trivial_responses: Option<Vec<crate::models::whatsapp::TrivialResponse>>,
     ) -> Result<(), String> {
         let mut set_doc = doc! { "updated_at": DateTime::now() };
         let mut unset_doc = Document::new();
@@ -944,6 +948,23 @@ impl WhatsAppRepository for MongoDB {
                     );
                 }
             }
+        }
+
+        // AI policy fields (Phase 1/2/3a) — per-workspace toggles.
+        if let Some(v) = enable_guardrails {
+            set_doc.insert("enable_guardrails", v);
+        }
+        if let Some(v) = enable_conversation_state {
+            set_doc.insert("enable_conversation_state", v);
+        }
+        if let Some(v) = pre_classifier_enabled {
+            set_doc.insert("pre_classifier_enabled", v);
+        }
+        if let Some(tr) = trivial_responses {
+            set_doc.insert(
+                "trivial_responses",
+                mongodb::bson::to_bson(&tr).map_err(|e| e.to_string())?,
+            );
         }
 
         let mut update_doc = doc! { "$set": set_doc };
