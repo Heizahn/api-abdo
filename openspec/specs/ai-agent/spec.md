@@ -25,8 +25,9 @@ Categorization table (exhaustive over currently known tools):
 | `create_ticket`          | Action      |
 | `request_human`          | Action      |
 | `transfer_to_agent`      | Action      |
+| `report_payment`         | Action      |
 
-(Previously: table did not include `calculate_amount_bs`)
+(Previously: table did not include `calculate_amount_bs`; now updated to include `report_payment`)
 
 Unknown tool names MUST default to `InfoLookup` (safe default).
 
@@ -92,6 +93,14 @@ categorization table, to signal that an explicit categorization is missing.
 **When** the tool call has `success = true`
 **Then** the system MUST treat it as `InfoLookup` (skip increment, no reset)
 **And** a `tracing::warn!` SHOULD be emitted indicating the tool name is uncategorized
+
+### Scenario 1.8: report_payment as Action — counter reset
+
+**Given** a dispatch turn where `report_payment` executes with `success = true`
+  and `no_resolution_count = N` (N ≥ 0)
+**When** `tool_category("report_payment")` is evaluated
+**Then** it MUST return `Action`
+**And** the counter SHALL be reset to 0 per Scenario 1.2
 
 ---
 
@@ -186,6 +195,208 @@ configuration. The tool MUST NOT fall back to any other `sTarget` value if
 - WHEN the tool executes with valid inputs
 - THEN it MUST behave identically to `is_sandbox = false`
 - AND no special sandbox branch SHALL exist for this tool (it is read-only)
+
+---
+
+## Requirement 1.6: report_payment Tool
+
+The system MUST expose a tool named `report_payment` in the AI Agent tool registry.
+The tool MUST register a client payment report end-to-end: download proof image, resolve
+amounts via BCV rate + client IVA, and persist a `PaymentReport` document with audit trail.
+
+Input contract (all fields passed as JSON args):
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `client_id` | string | MUST | MongoDB ObjectId (hex) |
+| `reference` | string | MUST | Payment reference number |
+| `media_id` | string | MUST | Meta media reference; tool downloads it |
+| `amount_bs` | number | XOR | Exclusive with `amount_usd` |
+| `amount_usd` | number | XOR | Exclusive with `amount_bs` |
+| `bank` | string | MAY | Accepted as-is, no whitelist validation |
+| `phone` | string | MAY | Sender phone |
+| `debt_id` | string | MAY | ObjectId of debt to associate |
+| `payment_date` | string | MAY | ISO date string |
+
+Success response shape (live mode):
+
+```json
+{
+  "ok": true,
+  "mode": "live",
+  "payment_id": "<hex ObjectId>",
+  "already_registered": false,
+  "amount_bs": <number>,
+  "amount_usd": <number>,
+  "exchange_rate": <number>,
+  "iva_rate": <number>
+}
+```
+
+Error codes (returned as `ToolResult::err`):
+
+| Code | Trigger |
+|---|---|
+| `invalid_args:<msg>` | Malformed args (wrong type, can't deserialize to `ReportPaymentArgs`) |
+| `invalid_client_id` | `client_id` cannot be parsed as ObjectId hex (consistent with `exec_get_invoices`) |
+| `invalid_debt_id` | `debt_id` provided but cannot be parsed as ObjectId hex |
+| `image_required` | `media_id` missing, empty, or whitespace-only |
+| `image_empty` | Meta download succeeded but body is 0 bytes |
+| `image_download_failed:<msg>` | Meta media download fails (404, network, relay error) |
+| `image_save_failed:<msg>` | Filesystem write to `uploads/` fails |
+| `reference_required` | `reference` is empty or whitespace-only |
+| `amount_required` | Neither `amount_bs` nor `amount_usd` provided |
+| `amount_conflict` | Both `amount_bs` and `amount_usd` provided |
+| `invalid_amount` | Amount ≤ 0 or NaN |
+| `client_not_found` | `client_id` parses but no matching document in `Clients` |
+| `payment_method_not_configured` | Client's owner has no `idPaymentMethod` in `Users` |
+| `exchange_rate_unavailable` | Redis miss AND DB error for BCV rate |
+| `exchange_rate_zero` | Resolved rate is `<= 0.0` (defensive: covers exactly-zero and negative outliers) |
+| `wa_settings_not_found` | `WaSettings` doc for the workspace can't be found (operational) |
+| `wa_token_decrypt_failed` | The encrypted Meta access token can't be decrypted with `JWT_SECRET` |
+| `db_error:<msg>` | Unexpected DB failure during insert or auxiliary lookup |
+
+### Scenario 1.6.1: Successful registration
+
+- GIVEN valid `client_id`, `reference`, downloadable `media_id`, exactly one of `amount_bs` / `amount_usd`, `ctx.is_sandbox = false`
+- WHEN the tool executes
+- THEN it MUST download the image from Meta, save it to `uploads/` local storage, compute the missing amount using BCV rate and client IVA, insert a `PaymentReport` doc with `state="Pendiente"`, `id_creator=ctx.ai_user_id`, `image_url=<local_path>`
+- AND return `{ ok: true, mode: "live", payment_id: <new_id>, already_registered: false, amount_bs, amount_usd, exchange_rate, iva_rate, is_advance: <bool> }`
+- AND `is_advance` MUST be `true` if no `debt_id` was provided (the report is on-account credit), `false` otherwise
+
+### Scenario 1.6.2: Idempotent re-call — same `(client_id, reference)` pair
+
+- GIVEN a `PaymentReport` (or `Payments`) document already exists for `(client_id, reference)` resolvable via `check_reference`
+- WHEN the tool is called again with the same pair
+- THEN it MUST NOT create a duplicate document AND MUST NOT download the image
+- AND it MUST return a richer payload that lets the caller distinguish prior state without an extra DB query:
+
+  ```json
+  {
+    "ok": true,
+    "mode": "live",
+    "already_registered": true,
+    "source": "<PaymentReports | Payments>",
+    "is_same_client": <bool>,
+    "matched_reference": "<string>",
+    "matched_state": "<Pendiente | Aprobado | Rechazado | ...>",
+    "matched_amount_bs": <number | null>,
+    "matched_amount_usd": <number | null>
+  }
+  ```
+
+- AND `is_same_client` MUST be `true` if the matched document's `idClient` equals the requested `client_id`, `false` otherwise (catches mis-attribution: the reference is in use by a different client)
+- AND `payment_id` is intentionally OMITTED from this shape: `check_reference` returns match info, not the matched `_id`. Callers that need the existing `_id` MUST do a follow-up query — out of scope for the AI tool, which only needs to know the prior reference is occupied
+- AND the existing record's `image_url` MUST NOT be overwritten
+
+### Scenario 1.6.3: amount_bs only — derive amount_usd
+
+- GIVEN `amount_bs = N` provided, `amount_usd` not provided
+- WHEN the tool executes
+- THEN it MUST compute `amount_usd = round2((amount_bs / iva_rate) / exchange_rate)` and persist both
+
+### Scenario 1.6.4: amount_usd only — derive amount_bs
+
+- GIVEN `amount_usd = N` provided, `amount_bs` not provided
+- WHEN the tool executes
+- THEN it MUST compute `amount_bs = round2(amount_usd * exchange_rate * iva_rate)` and persist both
+
+### Scenario 1.6.5: amount_required — neither amount provided
+
+- GIVEN neither `amount_bs` nor `amount_usd` provided
+- WHEN the tool executes
+- THEN it MUST return `ToolResult::err` with code `amount_required` BEFORE any DB or download work
+
+### Scenario 1.6.6: amount_conflict — both amounts provided
+
+- GIVEN both `amount_bs` and `amount_usd` provided
+- WHEN the tool executes
+- THEN it MUST return `ToolResult::err` with code `amount_conflict`
+
+### Scenario 1.6.7: invalid_amount — non-positive value
+
+- GIVEN any provided amount is ≤ 0 or NaN
+- WHEN the tool executes
+- THEN it MUST return `ToolResult::err` with code `invalid_amount`
+
+### Scenario 1.6.8: image_required — missing or blank media_id
+
+- GIVEN `media_id` is absent, empty string, or whitespace-only
+- WHEN the tool executes
+- THEN it MUST return `ToolResult::err` with code `image_required` BEFORE any DB or download work
+
+### Scenario 1.6.9: image_download_failed — Meta download error
+
+- GIVEN the Meta media download fails (404, network error, relay error)
+- WHEN the tool executes
+- THEN it MUST return `ToolResult::err` with code `image_download_failed`
+- AND no `PaymentReport` SHALL be created
+
+### Scenario 1.6.10: client_not_found
+
+- GIVEN `client_id` does not match any document in `Clients`
+- WHEN the tool executes
+- THEN it MUST return `ToolResult::err` with code `client_not_found`
+
+### Scenario 1.6.11: payment_method_not_configured
+
+- GIVEN the client's owner has no `idPaymentMethod` set in `Users`
+- WHEN the tool executes
+- THEN it MUST return `ToolResult::err` with code `payment_method_not_configured`
+
+### Scenario 1.6.12: exchange_rate_unavailable
+
+- GIVEN Redis returns no BCV rate AND the DB fallback also returns no result
+- WHEN the tool executes
+- THEN it MUST return `ToolResult::err` with code `exchange_rate_unavailable`
+
+### Scenario 1.6.13: exchange_rate_zero
+
+- GIVEN the resolved BCV rate is `<= 0.0` (zero or negative)
+- WHEN the tool executes
+- THEN it MUST return `ToolResult::err` with code `exchange_rate_zero`
+- AND the implementation MAY use `rate <= 0.0` instead of `rate == 0.0` for defensive coverage of negative outliers
+
+### Scenario 1.6.14: iva_rate default when tax absent
+
+- GIVEN the client's `idTax` is None OR `find_tax_by_id` returns None
+- WHEN the tool executes
+- THEN `iva_rate` MUST default to `1.0` (no IVA applied), matching the existing endpoint behavior
+
+### Scenario 1.6.15: id_creator persistence
+
+- GIVEN a successful registration in live mode
+- WHEN the `PaymentReport` document is persisted
+- THEN the `idCreator` field MUST equal `ctx.ai_user_id` (the AI synthetic user UUID)
+
+### Scenario 1.6.16: Sandbox mode — no side effects
+
+- GIVEN `ctx.is_sandbox = true`
+- WHEN the tool executes with otherwise valid args (validations still fire BEFORE the sandbox short-circuit)
+- THEN it MUST NOT touch DB and MUST NOT download the image
+- AND it MUST return `{ ok: true, mode: "sandbox", payment_id: "sandbox-fake-payment", already_registered: false, amount_bs: <input or null>, amount_usd: <input or null>, exchange_rate: 0.0, iva_rate: 1.0 }`
+- AND the sandbox response MAY echo the raw input amounts (no BCV/IVA computation) — `exchange_rate` and `iva_rate` carry placeholder values to keep the response shape compatible with the live success contract
+
+### Scenario 1.6.17: invalid_args — malformed input
+
+- GIVEN args are malformed (wrong type, missing required field outside the specialized error codes above)
+- WHEN the tool executes
+- THEN it MUST return `ToolResult::err` with code `invalid_args:<descriptive_message>`
+
+---
+
+## Requirement 1.7: PaymentReport id_creator Field
+
+The `PaymentReport` struct MUST include an `id_creator: Option<String>` field
+(`idCreator` in MongoDB). The field MUST use `#[serde(default)]` so that existing
+documents without `idCreator` deserialize without error.
+
+### Scenario 1.7.1: Backwards compatibility — existing docs without idCreator
+
+- GIVEN a `PaymentReport` document in MongoDB that predates this change (no `idCreator` field)
+- WHEN the document is deserialized
+- THEN `id_creator` MUST deserialize as `None` without error
+- AND no data migration SHALL be required
 
 ---
 

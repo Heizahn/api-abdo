@@ -41,31 +41,56 @@ Error codes (returned as `ToolResult::err`):
 
 | Code | Trigger |
 |---|---|
-| `invalid_args:<msg>` | Malformed args (wrong type, missing required field outside specialized codes) |
+| `invalid_args:<msg>` | Malformed args (wrong type, can't deserialize to `ReportPaymentArgs`) |
+| `invalid_client_id` | `client_id` cannot be parsed as ObjectId hex (consistent with `exec_get_invoices`) |
+| `invalid_debt_id` | `debt_id` provided but cannot be parsed as ObjectId hex |
 | `image_required` | `media_id` missing, empty, or whitespace-only |
+| `image_empty` | Meta download succeeded but body is 0 bytes |
+| `image_download_failed:<msg>` | Meta media download fails (404, network, relay error) |
+| `image_save_failed:<msg>` | Filesystem write to `uploads/` fails |
+| `reference_required` | `reference` is empty or whitespace-only |
 | `amount_required` | Neither `amount_bs` nor `amount_usd` provided |
 | `amount_conflict` | Both `amount_bs` and `amount_usd` provided |
 | `invalid_amount` | Amount ≤ 0 or NaN |
-| `client_not_found` | `client_id` not found in `Clients` |
-| `image_download_failed` | Meta media download fails (404, network, relay error) |
+| `client_not_found` | `client_id` parses but no matching document in `Clients` |
 | `payment_method_not_configured` | Client's owner has no `idPaymentMethod` in `Users` |
-| `exchange_rate_unavailable` | Redis miss AND DB miss for BCV rate |
-| `exchange_rate_zero` | Resolved rate equals 0.0 |
-| `db_error` | Unexpected DB failure during insert |
+| `exchange_rate_unavailable` | Redis miss AND DB error for BCV rate |
+| `exchange_rate_zero` | Resolved rate is `<= 0.0` (defensive: covers exactly-zero and negative outliers) |
+| `wa_settings_not_found` | `WaSettings` doc for the workspace can't be found (operational) |
+| `wa_token_decrypt_failed` | The encrypted Meta access token can't be decrypted with `JWT_SECRET` |
+| `db_error:<msg>` | Unexpected DB failure during insert or auxiliary lookup |
 
 #### Scenario: Successful registration
 
 - GIVEN valid `client_id`, `reference`, downloadable `media_id`, exactly one of `amount_bs` / `amount_usd`, `ctx.is_sandbox = false`
 - WHEN the tool executes
 - THEN it MUST download the image from Meta, save it to `uploads/` local storage, compute the missing amount using BCV rate and client IVA, insert a `PaymentReport` doc with `state="Pendiente"`, `id_creator=ctx.ai_user_id`, `image_url=<local_path>`
-- AND return `{ ok: true, mode: "live", payment_id: <new_id>, already_registered: false, amount_bs, amount_usd, exchange_rate, iva_rate }`
+- AND return `{ ok: true, mode: "live", payment_id: <new_id>, already_registered: false, amount_bs, amount_usd, exchange_rate, iva_rate, is_advance: <bool> }`
+- AND `is_advance` MUST be `true` if no `debt_id` was provided (the report is on-account credit), `false` otherwise
 
-#### Scenario: Idempotent re-call — same (client_id, reference) pair
+#### Scenario: Idempotent re-call — same `(client_id, reference)` pair
 
-- GIVEN a `PaymentReport` already exists for `(client_id, reference)`
+- GIVEN a `PaymentReport` (or `Payments`) document already exists for `(client_id, reference)` resolvable via `check_reference`
 - WHEN the tool is called again with the same pair
-- THEN it MUST NOT create a duplicate document
-- AND it MUST return `{ ok: true, mode: "live", payment_id: <existing_id>, already_registered: true }`
+- THEN it MUST NOT create a duplicate document AND MUST NOT download the image
+- AND it MUST return a richer payload that lets the caller distinguish prior state without an extra DB query:
+
+  ```json
+  {
+    "ok": true,
+    "mode": "live",
+    "already_registered": true,
+    "source": "<PaymentReports | Payments>",
+    "is_same_client": <bool>,
+    "matched_reference": "<string>",
+    "matched_state": "<Pendiente | Aprobado | Rechazado | ...>",
+    "matched_amount_bs": <number | null>,
+    "matched_amount_usd": <number | null>
+  }
+  ```
+
+- AND `is_same_client` MUST be `true` if the matched document's `idClient` equals the requested `client_id`, `false` otherwise (catches mis-attribution: the reference is in use by a different client)
+- AND `payment_id` is intentionally OMITTED from this shape: `check_reference` returns match info, not the matched `_id`. Callers that need the existing `_id` MUST do a follow-up query — out of scope for the AI tool, which only needs to know the prior reference is occupied
 - AND the existing record's `image_url` MUST NOT be overwritten
 
 #### Scenario: amount_bs only — derive amount_usd
@@ -131,9 +156,10 @@ Error codes (returned as `ToolResult::err`):
 
 #### Scenario: exchange_rate_zero
 
-- GIVEN the resolved BCV rate equals 0.0
+- GIVEN the resolved BCV rate is `<= 0.0` (zero or negative)
 - WHEN the tool executes
 - THEN it MUST return `ToolResult::err` with code `exchange_rate_zero`
+- AND the implementation MAY use `rate <= 0.0` instead of `rate == 0.0` for defensive coverage of negative outliers
 
 #### Scenario: iva_rate default when tax absent
 
@@ -150,9 +176,10 @@ Error codes (returned as `ToolResult::err`):
 #### Scenario: Sandbox mode — no side effects
 
 - GIVEN `ctx.is_sandbox = true`
-- WHEN the tool executes with otherwise valid args
+- WHEN the tool executes with otherwise valid args (validations still fire BEFORE the sandbox short-circuit)
 - THEN it MUST NOT touch DB and MUST NOT download the image
-- AND it MUST return `{ ok: true, mode: "sandbox", payment_id: "<sandbox-fake>", already_registered: false }`
+- AND it MUST return `{ ok: true, mode: "sandbox", payment_id: "sandbox-fake-payment", already_registered: false, amount_bs: <input or null>, amount_usd: <input or null>, exchange_rate: 0.0, iva_rate: 1.0 }`
+- AND the sandbox response MAY echo the raw input amounts (no BCV/IVA computation) — `exchange_rate` and `iva_rate` carry placeholder values to keep the response shape compatible with the live success contract
 
 #### Scenario: invalid_args — malformed input
 
