@@ -50,7 +50,7 @@ const RECENT_WINDOW: i64 = 20;
 /// viejos antes del campo). El default real es 10s y vive en el agente.
 const DEBOUNCE_FALLBACK_SECONDS: u64 = 10;
 
-fn ai_agent_secret() -> String {
+pub(super) fn ai_agent_secret() -> String {
     std::env::var("JWT_SECRET").unwrap_or_default()
 }
 

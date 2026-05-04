@@ -121,6 +121,7 @@ pub const T_TRANSFER_AGENT: &str = "transfer_to_agent";
 pub const T_LIST_PLANS: &str = "list_plans";
 pub const T_CHECK_COVERAGE: &str = "check_coverage";
 pub const T_CALCULATE_AMOUNT_BS: &str = "calculate_amount_bs";
+pub const T_REPORT_PAYMENT: &str = "report_payment";
 
 /// Segmento de IVA aplicado por el tool `calculate_amount_bs`. Hardcoded
 /// porque hoy todos los quotes públicos por WhatsApp se cotizan en
@@ -159,7 +160,8 @@ pub fn tool_category(tool_name: &str) -> ToolCategory {
 
         T_CREATE_TICKET
         | T_REQUEST_HUMAN
-        | T_TRANSFER_AGENT => ToolCategory::Action,
+        | T_TRANSFER_AGENT
+        | T_REPORT_PAYMENT => ToolCategory::Action,
 
         unknown => {
             tracing::warn!(
@@ -309,6 +311,28 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                 "required": ["target_agent_id", "reason"]
             }),
         )),
+        T_REPORT_PAYMENT => Some((
+            "Registra un reporte de pago del cliente (referencia + monto + comprobante). \
+             PRECONDICIONES: (1) llamá `lookup_customer` ANTES y confirmá con el cliente \
+             cuál servicio si hay varios. (2) Pedile la foto del comprobante por WhatsApp \
+             — sin imagen el tool falla. (3) Pasá `amount_bs` O `amount_usd`, NUNCA ambos: \
+             el sistema deriva el otro con la tasa BCV vigente.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "client_id":    { "type": "string", "description": "ObjectId hex devuelto por lookup_customer." },
+                    "reference":    { "type": "string", "description": "Referencia bancaria del comprobante." },
+                    "media_id":     { "type": "string", "description": "ID del media de WhatsApp (foto del comprobante). Lo recibís en el contexto del mensaje del cliente." },
+                    "amount_bs":    { "type": "number", "description": "Monto en bolívares. Mutuamente excluyente con amount_usd." },
+                    "amount_usd":   { "type": "number", "description": "Monto en dólares. Mutuamente excluyente con amount_bs." },
+                    "bank":         { "type": "string", "description": "Nombre del banco origen del pago. Opcional." },
+                    "phone":        { "type": "string", "description": "Teléfono asociado al pago móvil. Opcional." },
+                    "debt_id":      { "type": "string", "description": "ObjectId hex de la deuda específica si el cliente la mencionó. Opcional — si falta, el reporte queda como abono a cuenta." },
+                    "payment_date": { "type": "string", "description": "Fecha del pago en RFC3339 (ej: 2026-05-04T15:30:00Z). Opcional — default: ahora." }
+                },
+                "required": ["client_id", "reference", "media_id"]
+            }),
+        )),
         _ => None,
     }
 }
@@ -441,6 +465,7 @@ pub async fn execute_tool(name: &str, args: Value, ctx: &ToolContext) -> ToolRes
         T_LIST_PLANS => exec_list_plans(args, ctx, started).await,
         T_CHECK_COVERAGE => exec_check_coverage(args, ctx, started).await,
         T_CALCULATE_AMOUNT_BS => exec_calculate_amount_bs(args, ctx, started).await,
+        T_REPORT_PAYMENT => exec_report_payment(args, ctx, started).await,
         other => ToolResult::err(format!("unknown_tool:{}", other), started),
     }
 }
@@ -1090,6 +1115,284 @@ async fn exec_calculate_amount_bs(
             "iva_percent": iva_percent,
             "amount_bs_base": bs_base,
             "amount_bs_with_iva": bs_with_iva,
+        }),
+        started,
+    )
+}
+
+// ============================================
+// Tool: report_payment
+// ============================================
+
+#[derive(Deserialize)]
+struct ReportPaymentArgs {
+    client_id: String,
+    reference: String,
+    media_id: String,
+    #[serde(default)]
+    amount_bs: Option<f64>,
+    #[serde(default)]
+    amount_usd: Option<f64>,
+    #[serde(default)]
+    bank: Option<String>,
+    #[serde(default)]
+    phone: Option<String>,
+    #[serde(default)]
+    debt_id: Option<String>,
+    #[serde(default)]
+    payment_date: Option<String>,
+}
+
+async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
+    use chrono::{DateTime, Utc};
+    use tokio::fs::File;
+    use tokio::io::AsyncWriteExt;
+    use uuid::Uuid;
+
+    use crate::crypto::aes::decrypt_payload;
+    use super::dispatch::ai_agent_secret;
+
+    // 1. Parse args
+    let parsed: ReportPaymentArgs = match serde_json::from_value(args) {
+        Ok(v) => v,
+        Err(e) => return ToolResult::err(format!("invalid_args:{}", e), started),
+    };
+
+    // 2. Validate media_id non-empty
+    if parsed.media_id.trim().is_empty() {
+        return ToolResult::err("image_required", started);
+    }
+
+    // 3. Validate reference non-empty
+    if parsed.reference.trim().is_empty() {
+        return ToolResult::err("reference_required", started);
+    }
+
+    // 4. Validate amount XOR (catches NaN via !(x > 0.0))
+    let (amount_input_bs, amount_input_usd) = match (parsed.amount_bs, parsed.amount_usd) {
+        (None, None) => return ToolResult::err("amount_required", started),
+        (Some(_), Some(_)) => return ToolResult::err("amount_conflict", started),
+        (Some(b), None) if b > 0.0 => (Some(b), None),
+        (None, Some(u)) if u > 0.0 => (None, Some(u)),
+        _ => return ToolResult::err("invalid_amount", started),
+    };
+
+    // 5. Sandbox short-circuit — AFTER validations, BEFORE any side effect
+    if ctx.is_sandbox {
+        return ToolResult::ok(
+            json!({
+                "ok": true,
+                "mode": "sandbox",
+                "payment_id": "sandbox-fake-payment",
+                "already_registered": false,
+                "amount_bs": amount_input_bs,
+                "amount_usd": amount_input_usd,
+                "exchange_rate": 0.0,
+                "iva_rate": 1.0,
+            }),
+            started,
+        );
+    }
+
+    // 6. Parse client_id
+    let client_oid = match ObjectId::parse_str(parsed.client_id.trim()) {
+        Ok(o) => o,
+        Err(_) => return ToolResult::err("invalid_client_id", started),
+    };
+
+    // 7. Find client (need id_tax).
+    // NOTE: find_client_by_id returns Ok(fake_client) on "not found" — detect
+    // by comparing returned _id to the queried _id.
+    let client = match ctx.state.db.find_client_by_id(&client_oid.to_hex()).await {
+        Ok(c) if c._id == client_oid => c,
+        Ok(_) => return ToolResult::err("client_not_found", started),
+        Err(e) => {
+            tracing::warn!("[ai_agent.report_payment] find_client_by_id error: {}", e);
+            return ToolResult::err("client_not_found", started);
+        }
+    };
+
+    // 8. Idempotency check — BEFORE any network or DB write
+    let trimmed_ref = parsed.reference.trim().to_string();
+    match ctx.state.db.check_reference(&client_oid, &trimmed_ref).await {
+        Ok(Some(match_info)) => {
+            return ToolResult::ok(
+                json!({
+                    "ok": true,
+                    "mode": "live",
+                    "already_registered": true,
+                    "source": match_info.source,
+                    "is_same_client": match_info.is_same_client,
+                    "matched_reference": match_info.s_reference,
+                    "matched_state": match_info.s_state,
+                    "matched_amount_bs": match_info.n_bs,
+                    "matched_amount_usd": match_info.n_amount,
+                }),
+                started,
+            );
+        }
+        Ok(None) => {} // proceed
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    }
+
+    // 9. Resolve owner → payment_method
+    let owner = match ctx.state.db.find_client_owner_by_id(&client_oid).await {
+        Ok(Some(o)) => o,
+        Ok(None) => return ToolResult::err("payment_method_not_configured", started),
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    };
+    let user_info = match ctx.state.db.find_user_payment_info_by_id(&owner.id_owner).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return ToolResult::err("payment_method_not_configured", started),
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    };
+    let id_payment_method = match user_info.id_payment_method {
+        Some(id) => id,
+        None => return ToolResult::err("payment_method_not_configured", started),
+    };
+
+    // 10. Resolve exchange rate (Redis → DB fallback)
+    let exchange_rate: f64 = match ctx.state.redis.get_exchange_rate().await {
+        Ok(Some(r)) => r,
+        _ => match ctx.state.db.get_latest_exchange_rate().await {
+            Ok(r) => r,
+            Err(_) => return ToolResult::err("exchange_rate_unavailable", started),
+        },
+    };
+    if exchange_rate <= 0.0 {
+        return ToolResult::err("exchange_rate_zero", started);
+    }
+
+    // 11. Resolve iva_rate (default 1.0 if id_tax missing/not found)
+    let iva_rate: f64 = if let Some(tax_id) = client.id_tax {
+        match ctx.state.db.find_tax_by_id(Some(tax_id)).await {
+            Ok(Some(t)) => t.iva,
+            _ => 1.0,
+        }
+    } else {
+        1.0
+    };
+
+    // 12. Compute the missing amount
+    let (amount_bs, amount_usd) = match (amount_input_bs, amount_input_usd) {
+        (Some(bs), None) => {
+            let bs_neto = bs / iva_rate;
+            let usd = round2(bs_neto / exchange_rate);
+            (round2(bs), usd)
+        }
+        (None, Some(usd)) => {
+            let bs_neto = usd * exchange_rate;
+            let bs = round2(bs_neto * iva_rate);
+            (bs, round2(usd))
+        }
+        _ => unreachable!("amounts validated above"),
+    };
+
+    // 13. Resolve WaSettings → build WhatsAppService → download media
+    let wa_settings = match ctx.state.db.find_wa_settings_by_id(&ctx.workspace_id).await {
+        Ok(Some(s)) => s,
+        _ => return ToolResult::err("wa_settings_not_found", started),
+    };
+    let token = match decrypt_payload(&ai_agent_secret(), &wa_settings.access_token) {
+        Some(t) => t,
+        None => return ToolResult::err("wa_token_decrypt_failed", started),
+    };
+    let mut svc = crate::modules::whatsapp::service::WhatsAppService::new(
+        ctx.state.reqwest_client.clone(),
+        wa_settings.phone_number_id.clone(),
+        token,
+    );
+    if let (Some(url), Some(secret)) = (
+        ctx.state.config.wa_media_relay_url.as_ref(),
+        ctx.state.config.wa_media_relay_secret.as_ref(),
+    ) {
+        svc = svc.with_media_relay(crate::modules::whatsapp::service::MediaRelay {
+            url: url.clone(),
+            secret: secret.clone(),
+        });
+    }
+    let (bytes, mime, _filename) = match svc.download_media(&parsed.media_id).await {
+        Ok(t) => t,
+        Err(e) => return ToolResult::err(format!("image_download_failed:{}", e), started),
+    };
+    if bytes.is_empty() {
+        return ToolResult::err("image_empty", started);
+    }
+
+    // 14. Save to uploads/ (mirror payments::handler convention)
+    let ext = match mime.as_str() {
+        "image/png"  => "png",
+        "image/webp" => "webp",
+        "image/gif"  => "gif",
+        _            => "jpg",
+    };
+    let unique_name = format!("{}.{}", Uuid::new_v4(), ext);
+    let file_path = format!("uploads/{}", unique_name);
+    if let Err(e) = async {
+        let mut file = File::create(&file_path).await?;
+        file.write_all(&bytes).await?;
+        file.flush().await?;
+        Ok::<_, std::io::Error>(())
+    }.await {
+        return ToolResult::err(format!("image_save_failed:{}", e), started);
+    }
+    let image_url = format!("/uploads/{}", unique_name);
+
+    // 15. Parse optional debt_id and payment_date
+    let id_debt_oid: Option<ObjectId> = match parsed.debt_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        Some(s) => match ObjectId::parse_str(s) {
+            Ok(o) => Some(o),
+            Err(_) => return ToolResult::err("invalid_debt_id", started),
+        },
+        None => None,
+    };
+    let payment_date: DateTime<Utc> = parsed.payment_date
+        .as_deref()
+        .and_then(|d| d.parse::<DateTime<Utc>>().ok())
+        .unwrap_or_else(Utc::now);
+
+    // 16. Build PaymentReport
+    let report = crate::models::payment::PaymentReport {
+        id: None,
+        id_client: Some(client_oid),
+        id_debt: id_debt_oid,
+        id_payment_method: Some(id_payment_method),
+        reference: trimmed_ref,
+        payment_date,
+        amount_bs,
+        bank_origin: parsed.bank.unwrap_or_default(),
+        phone_number: parsed.phone.unwrap_or_default(),
+        image_url,
+        amount_usd,
+        exchange_rate,
+        state: "Pendiente".to_string(),
+        rejection_reason: None,
+        id_creator: Some(ctx.ai_user_id.clone()),
+        created_at: Utc::now(),
+    };
+
+    // 17. Persist
+    let inserted = match ctx.state.db.create_payment_report(report).await {
+        Ok(r) => r,
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    };
+    let payment_id = inserted
+        .inserted_id
+        .as_object_id()
+        .map(|o| o.to_hex())
+        .unwrap_or_default();
+
+    ToolResult::ok(
+        json!({
+            "ok": true,
+            "mode": "live",
+            "payment_id": payment_id,
+            "already_registered": false,
+            "amount_bs": amount_bs,
+            "amount_usd": amount_usd,
+            "exchange_rate": exchange_rate,
+            "iva_rate": iva_rate,
+            "is_advance": id_debt_oid.is_none(),
         }),
         started,
     )

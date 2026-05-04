@@ -438,6 +438,7 @@ pub async fn report_payment_handler(
         exchange_rate,
         state: "Pendiente".to_string(),
         rejection_reason: None,
+        id_creator: None,
         created_at: Utc::now(),
     };
 
@@ -633,6 +634,7 @@ pub async fn report_payment_user_handler(
         exchange_rate,
         state: "Pendiente".to_string(),
         rejection_reason: None,
+        id_creator: None,
         created_at: Utc::now(),
     };
 

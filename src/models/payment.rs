@@ -168,6 +168,9 @@ pub struct PaymentReport {
     #[serde(rename = "sRejectionReason", default)]
     pub rejection_reason: Option<String>,
 
+    #[serde(rename = "idCreator", skip_serializing_if = "Option::is_none", default)]
+    pub id_creator: Option<String>,
+
     #[serde(rename = "dCreation")]
     pub created_at: DateTime<Utc>,
 }
