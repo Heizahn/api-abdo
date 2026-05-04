@@ -241,8 +241,6 @@ fn default_agent(label: String, description: String, ai_user_id: String, now: Bs
         },
         limits: AiLimits::defaults(),
         debounce_seconds: 10,
-        enable_guardrails: true,
-        enable_conversation_state: true,
         created_at: now,
         updated_at: now,
     }

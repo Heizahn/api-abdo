@@ -2572,6 +2572,8 @@ pub async fn create_settings_handler(
         active: true,
         purposes: payload.purposes.unwrap_or_default(),
         templates_synced_at: None,
+        enable_guardrails: true,
+        enable_conversation_state: true,
         created_at: now,
         updated_at: now,
     };

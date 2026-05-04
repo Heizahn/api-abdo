@@ -983,6 +983,20 @@ pub struct WaSettings {
     /// `now` es < 24h, el GET de templates lee directo de DB sin tocar Meta.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub templates_synced_at: Option<DateTime>,
+    /// Guardrails server-side (Phase 1) para los agentes IA de este workspace.
+    /// Default `true`. Cuando `false`, `check_coverage` y `report_payment` NO
+    /// validan que el cliente haya mencionado la zona / mandado el media.
+    /// Se aplica a TODOS los agentes del workspace — los agentes acatan la
+    /// política del workspace al que pertenecen. Configurable desde la UI
+    /// SUPERADMIN sin redeploy.
+    #[serde(default = "default_true")]
+    pub enable_guardrails: bool,
+    /// Persistencia de `ai_conv_state` (Phase 2) para los agentes IA de este
+    /// workspace. Default `true`. Cuando `false`, dispatch no lee/escribe
+    /// el state ni inyecta el bloque `[conversation_state]`. Los tools
+    /// siguen emitiendo state_patches pero se descartan silenciosamente.
+    #[serde(default = "default_true")]
+    pub enable_conversation_state: bool,
     pub created_at: DateTime,
     pub updated_at: DateTime,
 }

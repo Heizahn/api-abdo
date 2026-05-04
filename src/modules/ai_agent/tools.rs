@@ -85,6 +85,14 @@ pub struct ToolContext {
     /// media_ids de mensajes inbound recientes con archivo adjunto.
     /// Precomputado en dispatch. Vacío en sandbox.
     pub recent_media_ids: Vec<String>,
+
+    /// Toggle del workspace para guardrails server-side (Phase 1).
+    /// Resuelto desde `WaSettings.enable_guardrails` en dispatch. Los
+    /// agentes acatan la política del workspace al que pertenecen.
+    /// Solo lo leen las tools de validación (check_coverage,
+    /// report_payment); el toggle de conversation_state lo lee dispatch
+    /// directamente desde wa_settings, no se propaga al ctx.
+    pub workspace_enable_guardrails: bool,
 }
 
 #[allow(dead_code)]
@@ -735,7 +743,7 @@ async fn exec_check_coverage(args: Value, ctx: &ToolContext, started: Instant) -
     }
 
     // ── GUARDRAIL: zona debe haber sido mencionada por el cliente ──────────
-    if ctx.agent_snapshot.enable_guardrails && !ctx.is_sandbox {
+    if ctx.workspace_enable_guardrails && !ctx.is_sandbox {
         if !crate::modules::ai_agent::guardrails::validate_zone_mentioned(
             raw,
             &ctx.customer_explicit_zones,
@@ -1256,7 +1264,7 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
 
     // 2.b GUARDRAIL: media_id debe ser uno que el cliente haya enviado en
     // los mensajes recientes (evita que la IA invente un ID).
-    if ctx.agent_snapshot.enable_guardrails && !ctx.is_sandbox {
+    if ctx.workspace_enable_guardrails && !ctx.is_sandbox {
         let mid = parsed.media_id.trim();
         if !ctx.recent_media_ids.iter().any(|m| m == mid) {
             return ToolResult::err("media_id_not_in_conversation", started);
