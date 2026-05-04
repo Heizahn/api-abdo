@@ -260,6 +260,16 @@ impl ProfileRepository for MongoDB {
         Ok(tax_doc)
     }
 
+    async fn find_tax_by_target(&self, target: &str) -> Result<Option<Tax>, String> {
+        let db_bcv = self.client.database("BCV");
+        let collection: Collection<Tax> = db_bcv.collection("IVA");
+        let filter = doc! { "sTarget": target };
+        collection
+            .find_one(filter)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn get_clients_by_phone_group(&self, id: String) -> Result<Vec<Document>, MongoError> {
         let collection: Collection<Document> = self.db.collection("Clients");
         let obj_id = ObjectId::parse_str(id)

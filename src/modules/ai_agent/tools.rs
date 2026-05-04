@@ -120,6 +120,12 @@ pub const T_CREATE_TICKET: &str = "create_ticket";
 pub const T_TRANSFER_AGENT: &str = "transfer_to_agent";
 pub const T_LIST_PLANS: &str = "list_plans";
 pub const T_CHECK_COVERAGE: &str = "check_coverage";
+pub const T_CALCULATE_AMOUNT_BS: &str = "calculate_amount_bs";
+
+/// Segmento de IVA aplicado por el tool `calculate_amount_bs`. Hardcoded
+/// porque hoy todos los quotes públicos por WhatsApp se cotizan en
+/// EMPRESARIAL. Para cambiar a multi-segmento, abrir un change separado.
+const TAX_TARGET_EMPRESARIAL: &str = "EMPRESARIAL";
 
 /// Categoría operativa de un tool, usada por `dispatch.rs` para decidir si un
 /// turn cuenta como "resolución" (que resetea el counter) o sólo como "trabajo
@@ -148,7 +154,8 @@ pub fn tool_category(tool_name: &str) -> ToolCategory {
         T_LOOKUP_CUSTOMER
         | T_LIST_PLANS
         | T_CHECK_COVERAGE
-        | T_GET_INVOICES => ToolCategory::InfoLookup,
+        | T_GET_INVOICES
+        | T_CALCULATE_AMOUNT_BS => ToolCategory::InfoLookup,
 
         T_CREATE_TICKET
         | T_REQUEST_HUMAN
@@ -264,6 +271,22 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                     }
                 },
                 "required": ["zone"]
+            }),
+        )),
+        T_CALCULATE_AMOUNT_BS => Some((
+            "Calcula cuánto sale en bolívares un monto en USD aplicando la tasa BCV \
+             vigente más IVA del 16% (segmento EMPRESARIAL). Llamar SIEMPRE que el \
+             cliente pregunte un precio en Bs — NUNCA inventes la tasa ni el total. \
+             La respuesta incluye el desglose: tasa, base sin IVA y monto final con IVA.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "amount_usd": {
+                        "type": "number",
+                        "description": "Monto en dólares a convertir. Debe ser mayor a 0."
+                    }
+                },
+                "required": ["amount_usd"]
             }),
         )),
         T_TRANSFER_AGENT => Some((
@@ -417,6 +440,7 @@ pub async fn execute_tool(name: &str, args: Value, ctx: &ToolContext) -> ToolRes
         T_TRANSFER_AGENT => exec_transfer_to_agent(args, ctx, started).await,
         T_LIST_PLANS => exec_list_plans(args, ctx, started).await,
         T_CHECK_COVERAGE => exec_check_coverage(args, ctx, started).await,
+        T_CALCULATE_AMOUNT_BS => exec_calculate_amount_bs(args, ctx, started).await,
         other => ToolResult::err(format!("unknown_tool:{}", other), started),
     }
 }
@@ -991,6 +1015,81 @@ async fn exec_create_ticket(args: Value, ctx: &ToolContext, started: Instant) ->
             "ticket_id": saved.id.map(|o| o.to_hex()).unwrap_or_default(),
             "category_id": category_id,
             "category_label": label,
+        }),
+        started,
+    )
+}
+
+// ============================================
+// Tool: calculate_amount_bs
+// ============================================
+
+#[derive(Deserialize)]
+struct CalculateAmountBsArgs {
+    amount_usd: f64,
+}
+
+#[inline]
+fn round2(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
+}
+
+async fn exec_calculate_amount_bs(
+    args: Value,
+    ctx: &ToolContext,
+    started: Instant,
+) -> ToolResult {
+    // 1. Parse args
+    let parsed: CalculateAmountBsArgs = match serde_json::from_value(args) {
+        Ok(v) => v,
+        Err(e) => return ToolResult::err(format!("invalid_args:{}", e), started),
+    };
+    let amount_usd = parsed.amount_usd;
+
+    // 2. Validate amount
+    if !(amount_usd > 0.0) {  // catches 0, negatives, NaN
+        return ToolResult::err("invalid_amount", started);
+    }
+
+    // 3. Resolve BCV rate (Redis → DB fallback)
+    let rate: f64 = match ctx.state.redis.get_exchange_rate().await {
+        Ok(Some(r)) => r,
+        _ => match ctx.state.db.get_latest_exchange_rate().await {
+            Ok(r) => r,
+            Err(_) => return ToolResult::err("exchange_rate_unavailable", started),
+        },
+    };
+    if rate == 0.0 {
+        return ToolResult::err("exchange_rate_zero", started);
+    }
+
+    // 4. Resolve EMPRESARIAL tax (NO DEFAULT fallback)
+    let tax = match ctx.state.db.find_tax_by_target(TAX_TARGET_EMPRESARIAL).await {
+        Ok(Some(t)) => t,
+        Ok(None) => return ToolResult::err("tax_config_missing", started),
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    };
+    let iva_factor = tax.iva;
+
+    // 5. Compute (no chained rounding)
+    let bs_base     = round2(amount_usd * rate);
+    let bs_with_iva = round2(amount_usd * rate * iva_factor);
+    let iva_percent = round2((iva_factor - 1.0) * 100.0);
+
+    // 6. Date stamp (Caracas TZ — coherente con la clave diaria del cron BCV).
+    let rate_date = crate::utils::timezone::VenezuelaDateTime::now()
+        .date_string_venezuela();
+
+    // 7. Result
+    ToolResult::ok(
+        json!({
+            "amount_usd": amount_usd,
+            "bcv_rate": rate,
+            "rate_date": rate_date,
+            "iva_factor": iva_factor,
+            "iva_percent": iva_percent,
+            "amount_bs_base": bs_base,
+            "amount_bs_with_iva": bs_with_iva,
         }),
         started,
     )
