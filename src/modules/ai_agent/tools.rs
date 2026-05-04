@@ -262,7 +262,10 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
             }),
         )),
         T_CHECK_COVERAGE => Some((
-            "Verifica si una zona/sector/municipio tiene cobertura. Llamar SIEMPRE cuando el cliente menciona dónde vive, antes de recomendar plan. \
+            "Verifica si una zona/sector/municipio tiene cobertura. \
+             SOLO llamar cuando el cliente DIJO EXPLÍCITAMENTE dónde vive en su último mensaje o en la conversación. \
+             NUNCA inventes la zona ni la infieras del prior estadístico (ej: 'es venezolano → debe ser Naguanagua'). \
+             Si el cliente NO mencionó la zona: NO llames este tool — preguntale primero '¿de qué zona/municipio nos escribís?'. \
              La verificación es por nombre de municipio o sector — pasá el texto que mencionó el cliente tal cual.",
             json!({
                 "type": "object",
