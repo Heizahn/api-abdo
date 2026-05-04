@@ -57,12 +57,28 @@ pub struct AiAgent {
     /// todo el contexto. Default 10. 0 = procesar inmediato (no recomendado).
     #[serde(default = "default_debounce_seconds")]
     pub debounce_seconds: u32,
+    /// Guardrails server-side (Phase 1). Default `true`. Cuando `false`,
+    /// `check_coverage` y `report_payment` NO validan que el cliente haya
+    /// mencionado la zona / mandado el media. Útil para testing en shadow
+    /// o debug. Configurable desde la UI SUPERADMIN sin redeploy.
+    #[serde(default = "default_true")]
+    pub enable_guardrails: bool,
+    /// Persistencia de `ai_conv_state` (Phase 2). Default `true`. Cuando
+    /// `false`, dispatch no lee/escribe el state ni inyecta el bloque
+    /// `[conversation_state]`. Los tools siguen emitiendo state_patches
+    /// pero se descartan silenciosamente. Configurable desde la UI.
+    #[serde(default = "default_true")]
+    pub enable_conversation_state: bool,
     pub created_at: DateTime,
     pub updated_at: DateTime,
 }
 
 fn default_debounce_seconds() -> u32 {
     10
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, ToSchema)]

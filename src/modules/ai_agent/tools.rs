@@ -735,7 +735,7 @@ async fn exec_check_coverage(args: Value, ctx: &ToolContext, started: Instant) -
     }
 
     // ── GUARDRAIL: zona debe haber sido mencionada por el cliente ──────────
-    if ctx.state.config.enable_ai_guardrails && !ctx.is_sandbox {
+    if ctx.agent_snapshot.enable_guardrails && !ctx.is_sandbox {
         if !crate::modules::ai_agent::guardrails::validate_zone_mentioned(
             raw,
             &ctx.customer_explicit_zones,
@@ -1256,7 +1256,7 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
 
     // 2.b GUARDRAIL: media_id debe ser uno que el cliente haya enviado en
     // los mensajes recientes (evita que la IA invente un ID).
-    if ctx.state.config.enable_ai_guardrails && !ctx.is_sandbox {
+    if ctx.agent_snapshot.enable_guardrails && !ctx.is_sandbox {
         let mid = parsed.media_id.trim();
         if !ctx.recent_media_ids.iter().any(|m| m == mid) {
             return ToolResult::err("media_id_not_in_conversation", started);

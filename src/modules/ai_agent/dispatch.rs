@@ -521,9 +521,11 @@ async fn run_dispatch(
 
     // ── Phase 2: conversation state ────────────────────────────────────────
     // current_ai_conv_state: snapshot al inicio del dispatch (antes del chain).
-    // Aplica solo si el kill switch está activo.
+    // Aplica solo si el kill switch del agente está activo (per-agent toggle
+    // via UI SUPERADMIN — antes era env var ENABLE_AI_CONVERSATION_STATE,
+    // movido a AiAgent.enable_conversation_state).
     let current_ai_conv_state: Option<WaConversationAiState> =
-        if state.config.enable_ai_conversation_state {
+        if agent.enable_conversation_state {
             conv.ai_conv_state.clone()
         } else {
             None
@@ -862,7 +864,11 @@ async fn run_dispatch(
     // Esto da `current_intent` determinístico desde el primer mensaje sin
     // pedirle al modelo que se auto-clasifique.
     let mut all_state_patches = all_state_patches; // shadow to allow prepend
-    if state.config.enable_ai_conversation_state {
+    // Kill switch ahora vive per-agent en `AiAgent.enable_conversation_state`
+    // (configurable desde UI SUPERADMIN). Usamos `last_agent` (el agente que
+    // finalmente respondió, post-chain) para que la decisión refleje el agente
+    // que persiste el state.
+    if last_agent.enable_conversation_state {
         let base_intent = current_ai_conv_state.as_ref().and_then(|s| s.current_intent.as_ref());
         if base_intent.is_none() && !customer_explicit_intents.is_empty() {
             all_state_patches.insert(
@@ -875,7 +881,7 @@ async fn run_dispatch(
         }
     }
 
-    if state.config.enable_ai_conversation_state && !all_state_patches.is_empty() {
+    if last_agent.enable_conversation_state && !all_state_patches.is_empty() {
         let base = current_ai_conv_state
             .clone()
             .unwrap_or_default();
