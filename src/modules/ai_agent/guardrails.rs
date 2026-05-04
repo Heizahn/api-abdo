@@ -7,16 +7,21 @@ use super::runner::{ConvRole, ConvTurn};
 use super::tools::normalize_zone;
 
 /// Mapping intent group → trigger substrings. Substrings ya normalizados
-/// (lowercase, sin tildes). Modificar con cuidado: cada cambio impacta el
-/// HUD que lee Gemini en CADA turno.
+/// (lowercase, sin tildes). Claves en español alineadas con los prompts
+/// del proyecto. Modificar con cuidado: cada cambio impacta el HUD que
+/// lee Gemini en CADA turno.
 const INTENT_KEYWORDS: &[(&str, &[&str])] = &[
-    ("payment",     &["pagar", "pago", "abono", "transferi", "deposit", "comprobante", "referencia"]),
-    ("billing",     &["factura", "facturacion", "deuda", "saldo", "cuanto debo", "cuanto sale"]),
-    ("coverage",    &["cobertura", "cubren", "llegan", "instalacion", "instalan"]),
-    ("plans",       &["plan", "planes", "mbps", "megas", "velocidad"]),
-    ("support",     &["no tengo internet", "sin internet", "se cayo", "no me anda",
-                      "lento", "no funciona", "no carga", "falla", "averia", "problema"]),
-    ("human",       &["agente", "humano", "persona", "asesor", "operador", "supervisor"]),
+    ("internet",    &["internet", "conexion", "wifi", "red"]),
+    ("contratar",   &["contratar", "contrato", "instalar", "instalacion", "nuevo servicio", "instalan"]),
+    ("precio",      &["precio", "costo", "cuanto", "vale"]),
+    ("cobertura",   &["cobertura", "llegan", "llega", "cubren", "zona"]),
+    ("factura",     &["factura", "facturacion"]),
+    ("pago",        &["pago", "pagar", "pague", "comprobante", "deposito", "transferencia", "transferi", "abono", "referencia"]),
+    ("saldo",       &["saldo", "debo", "deuda", "mora"]),
+    ("planes",      &["plan", "planes", "mbps", "megas", "velocidad"]),
+    ("soporte",     &["soporte", "no anda", "no funciona", "no tengo internet", "sin internet",
+                      "lento", "se cayo", "no me anda", "no carga", "falla", "averia", "problema"]),
+    ("humano",      &["humano", "persona", "asesor", "operador", "hablar con alguien", "agente", "supervisor"]),
     ("plan_change", &["cambiar de plan", "subir plan", "bajar plan", "upgrade", "downgrade"]),
     ("account",     &["actualizar", "cambiar datos", "mi correo", "mi telefono", "mi direccion"]),
     ("cancel",      &["cancelar", "dar de baja", "retirar"]),

@@ -164,7 +164,8 @@ pub struct WaMessage {
     pub conversation_id: ObjectId,
     /// ID de mensaje de WhatsApp (wamid...) — usado para deduplicar y actualizar status
     pub wa_message_id: String,
-    /// "inbound" | "outbound"
+    /// "in" | "out" — valores REALES persistidos en MongoDB. NO uses
+    /// "inbound"/"outbound" en filtros: el match exacto fallará.
     pub direction: String,
     /// "text" | "image" | "document" | "audio" | "video" | "template" | "interactive" | "unknown"
     pub msg_type: String,
