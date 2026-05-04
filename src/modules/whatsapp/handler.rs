@@ -5889,6 +5889,7 @@ pub async fn upload_template_header_media_handler(
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct ResetAiStateResponse {
     pub ok: bool,
+    pub conversation_id: String,
 }
 
 #[utoipa::path(
@@ -5926,9 +5927,8 @@ pub async fn reset_ai_conv_state_handler(
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::NotFound)?;
 
-    // Si el dispatch está corriendo para esta conv, rechazamos para no
-    // crear race conditions con el estado que se va a persistir al final
-    // del dispatch. El caller puede reintentar en unos segundos.
+    // Acquire dispatch lock — DEBE mantenerse durante todo el reset (DB write + audit + WS)
+    // para evitar que un dispatch concurrente sobrescriba el estado que estamos limpiando.
     if !state.redis.try_lock_ai_dispatch(&id).await {
         return Err(ApiError::domain_simple(
             StatusCode::CONFLICT,
@@ -5936,33 +5936,38 @@ pub async fn reset_ai_conv_state_handler(
             "El agente IA está procesando esta conversación. Reintentá en unos segundos.",
         ));
     }
-    // Tenemos el lock: lo liberamos inmediatamente (solo lo usamos para chequear).
-    state.redis.release_ai_dispatch_lock(&id).await;
 
-    // Borrar el estado IA.
-    state
+    // Borrar el estado IA INSIDE the lock window.
+    let write_result = state
         .db
         .update_conversation_ai_conv_state(&oid, None)
-        .await
-        .map_err(ApiError::DatabaseError)?;
+        .await;
+
+    // Auditoría también dentro del lock (mejor consistencia: si el write falló, no auditamos
+    // un reset que no ocurrió).
+    if write_result.is_ok() {
+        record_conv_event(&state, WaConversationEventInput {
+            conversation_id: &oid,
+            business_phone: &conv.business_phone,
+            event_type: "ai_state_reset",
+            actor_id: Some(claims.id.as_str()),
+            actor_name: Some(claims.name.as_str()),
+            target_id: None,
+            target_name: None,
+            note: Some("Reset manual del estado IA por supervisor"),
+        }).await;
+    }
+
+    // Liberar el lock antes del broadcast (broadcast es best-effort, no necesita exclusión).
+    state.redis.release_ai_dispatch_lock(&id).await;
+
+    write_result.map_err(ApiError::DatabaseError)?;
 
     tracing::info!(
         "[ai_agent] ai_conv_state reset manual (conv={}, by={})",
         id,
         claims.id
     );
-
-    // Auditoría con el patrón WaConversationEvent.
-    record_conv_event(&state, WaConversationEventInput {
-        conversation_id: &oid,
-        business_phone: &conv.business_phone,
-        event_type: "ai_state_reset",
-        actor_id: Some(claims.id.as_str()),
-        actor_name: Some(claims.name.as_str()),
-        target_id: None,
-        target_name: None,
-        note: Some("Reset manual del estado IA por supervisor"),
-    }).await;
 
     // Broadcast WS: ai_conv_state = null (limpiado).
     let ev = WsServerEvent::ConversacionEstadoIa {
@@ -5971,5 +5976,8 @@ pub async fn reset_ai_conv_state_handler(
     };
     broadcast_all(&state.ws_registry, &ev).await;
 
-    Ok(Json(ResetAiStateResponse { ok: true }))
+    Ok(Json(ResetAiStateResponse {
+        ok: true,
+        conversation_id: id,
+    }))
 }

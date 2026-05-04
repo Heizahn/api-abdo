@@ -201,10 +201,11 @@ pub enum WsServerEvent {
     /// Se emite tras cada dispatch que modifique `aiConvState` y tras un reset manual.
     /// El front mergea los campos en la conversación por `conversation_id`.
     /// Cuando `ai_conv_state` es `null`, el estado fue borrado (reopen / reset manual).
+    /// El campo `ai_conv_state` SIEMPRE se serializa (sin skip_serializing_if) —
+    /// en clear events va explícito como `"ai_conv_state": null`, según contrato del front.
     #[serde(rename = "CONVERSACION_ESTADO_IA")]
     ConversacionEstadoIa {
         conversation_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         ai_conv_state: Option<serde_json::Value>,
     },
 

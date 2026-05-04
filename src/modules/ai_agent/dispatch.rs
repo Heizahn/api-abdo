@@ -856,6 +856,25 @@ async fn run_dispatch(
         .ok_or_else(|| "last_agent sin _id".to_string())?;
 
     // ── Phase 2: fold state patches + persistir ai_conv_state ─────────────
+    // Synthetic intent derivation (Spec 19.3): si el state aún no tiene
+    // current_intent Y los guardrails detectaron al menos un intent en los
+    // mensajes del cliente, inyectamos un SetIntent al frente de los patches.
+    // Esto da `current_intent` determinístico desde el primer mensaje sin
+    // pedirle al modelo que se auto-clasifique.
+    let mut all_state_patches = all_state_patches; // shadow to allow prepend
+    if state.config.enable_ai_conversation_state {
+        let base_intent = current_ai_conv_state.as_ref().and_then(|s| s.current_intent.as_ref());
+        if base_intent.is_none() && !customer_explicit_intents.is_empty() {
+            all_state_patches.insert(
+                0,
+                crate::models::whatsapp::StatePatch::SetIntent {
+                    intent: customer_explicit_intents[0].clone(),
+                    confidence: 1.0,
+                },
+            );
+        }
+    }
+
     if state.config.enable_ai_conversation_state && !all_state_patches.is_empty() {
         let base = current_ai_conv_state
             .clone()
