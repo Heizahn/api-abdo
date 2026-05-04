@@ -101,7 +101,7 @@ These are explicitly **not** in this change:
 - **Cost calculation refresh** against Gemini's current pricing — separate ops task. The existing `cost_usd_estimate` field is preserved as-is.
 - **A/B testing harness** for pre-classifier accuracy — manual smoke testing + iterating the prompt is enough for v1. Confidence threshold + audit log give us enough signal.
 - **Pre-classifier shadow mode** (run but don't act) — would be useful for accuracy validation but adds branching complexity. If we end up wanting it, it's a small follow-up.
-- **Regex / advanced trigger matching** for `TrivialResponse.triggers` — substring match only. Keeps the admin UI sane and avoids ReDoS surprises.
+- **Regex / advanced trigger matching** for `TrivialResponse.triggers` — substring match only. Keeps the admin UI sane and avoids ReDoS.
 
 ---
 

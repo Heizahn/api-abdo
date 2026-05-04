@@ -30,8 +30,6 @@ _Spec refs: Requirements 25–32 | Design ADRs 1–9_
 
 ## Phase 4 — Trivial response matching + RunnerOutput wiring
 
-_4.1–4.2 depend on Phase 1 (TrivialResponse). 4.3–4.4 depend on Phase 2 (UsageMetadata). These two tracks are independent of each other — can be done in any order within Phase 4._
-
 - [x] 4.1 Add `fn pick_trivial<'a>(responses, kind, text_normalized) -> Option<&'a TrivialResponse>` in `src/modules/ai_agent/dispatch.rs` (private). Filter enabled + kind, trigger via `normalize_zone` substring (empty triggers = catch-all), stable sort by `priority` desc, return first. — _Spec 28.1–28.2, ADR-4_
 - [x] 4.2 Add `fn build_customer_summary_short(customer_context: &Option<String>) -> String` in `dispatch.rs`. Extracts `"  - [1]"` line from existing `build_customer_context` output; returns `"sin match en DB"` on no match. — _ADR-3, §2.3_
 - [x] 4.3 Add `cached_tokens: u32` to `RunnerOutput` in `src/modules/ai_agent/runner.rs`. Accumulate from `usage.cached_content_token_count` inside the turn loop. Pass to `RunnerOutput` constructor. — _Spec 29, §2.6_
@@ -40,8 +38,6 @@ _4.1–4.2 depend on Phase 1 (TrivialResponse). 4.3–4.4 depend on Phase 2 (Usa
 
 ## Phase 5 — DB trait + Mongo implementation
 
-_Depends on Phase 1.4 (AiAgentPurpose) and Phase 1.3 (AiInteraction new fields)._
-
 - [x] 5.1 In `src/db/mod.rs`, add to `AiAgentRepository` trait: `async fn find_active_agent_by_workspace_and_purpose(workspace_id, purpose: AiAgentPurpose) -> Result<Option<AiAgent>, String>`. — _ADR-5, Spec 27.3_
 - [x] 5.2 In `src/db/mod.rs`, add `pub enum MetricsGranularity { Summary, Daily }`. Add `AiAgentMetricsRaw`, `AiAgentMetricsSummary` (Default derive), `AiAgentMetricsDailyBucket` structs. Add `async fn get_ai_agent_metrics(agent_id, from, to, granularity) -> Result<AiAgentMetricsRaw, String>` to `AiAgentRepository`. — _Spec 30, ADR-9_
 - [x] 5.3 Implement `find_active_agent_by_workspace_and_purpose` in `src/db/mongo/ai_agent.rs`. Query: `{ workspace_ids: oid, enabled: true, purpose: "<snake_case>" }`, sort `created_at: 1`. — _ADR-5_
@@ -49,8 +45,6 @@ _Depends on Phase 1.4 (AiAgentPurpose) and Phase 1.3 (AiInteraction new fields).
 - [x] 5.5 `cargo check`. — _Gate_
 
 ## Phase 6 — Dispatch wiring (pre-classifier gate)
-
-_Depends on Phases 1–4 (all schemas, helpers, and RunnerOutput fields). The largest single task block._
 
 - [x] 6.1 In `dispatch.rs`, after `build_customer_context(...)` and after keyword escalation, before `build_prompt_variables(...)`: insert the pre-classifier gate. Gate fires only when `wa_settings.pre_classifier_enabled && !user_text.trim().is_empty()`. Wrap in API-key decrypt check; on missing key → skip gate silently. — _ADR-1, Spec 25.1–25.3_
 - [x] 6.2 Implement `Spam` match arm: call `pick_trivial(…, "spam", …)`. If match → `send_outbound` template text; if no match → silent drop. Both paths: call `persist_pre_class_only_interaction(...)` helper then `return Ok(())`. — _Spec 27.1, ADR-6_
@@ -63,8 +57,6 @@ _Depends on Phases 1–4 (all schemas, helpers, and RunnerOutput fields). The la
 
 ## Phase 7 — Metrics HTTP handler + OpenAPI
 
-_Depends on Phase 5 (DB method). Independent of Phase 6._
-
 - [x] 7.1 Add `AiAgentMetricsResponse { ok: bool, data: AiAgentMetricsData }` and supporting DTOs (`pre_classified_breakdown: HashMap<String,u64>`, `daily_breakdown: Option<Vec<DailyBucket>>`) to `src/modules/ai_agent/handler.rs`. Implement `From<AiAgentMetricsRaw>` to convert DB shape → response DTO; fill missing breakdown keys with 0; compute `cache_hit_rate = cached/input` (guard div-by-zero). — _Spec 30_
 - [x] 7.2 Add `get_ai_agent_metrics_handler` to `handler.rs` with `#[utoipa::path]`. Validate: `ObjectId::parse_str` → 400 `invalid_agent_id`; RFC3339 parse for `from`/`to` → 400 `invalid_date_range`; `from > to` → 400 `invalid_date_range`; unknown granularity → 400 `invalid_granularity`; agent not found → 404 `agent_not_found`. — _Spec 30.2–30.4_
 - [x] 7.3 Register route in `src/modules/ai_agent/mod.rs` under `user_routes()`: `GET /v1/auth-user/whatsapp/ai-agent/agents/:id/metrics`. Mirror existing AI Agent route registration pattern. — _Spec 30_
@@ -72,8 +64,6 @@ _Depends on Phase 5 (DB method). Independent of Phase 6._
 - [x] 7.5 `cargo check`. — _Gate_
 
 ## Phase 8 — MongoDB index
-
-_Independent of all other phases — can be done any time._
 
 - [x] 8.1 Add compound index declaration to `scripts/create_indexes.js`: `db.AiInteractions.createIndex({ agent_id: 1, created_at: -1 }, { name: "agent_id_1_created_at_-1" })`. Mirror existing syntax in the file. — _Spec 31_
 
@@ -98,5 +88,3 @@ Phase 5 (needs 1) ────────────────────�
 Phase 7 (needs 5) ──────────────────────┘──► Phase 9
 Phase 8 (independent) ──────────────────────► Phase 9
 ```
-
-Phases 4, 5, 7, and 8 can partially overlap once Phase 1 is green. Phases 3 and 4.3–4.4 can overlap after Phase 2. Phase 6 is the integration point and must come after all others.
