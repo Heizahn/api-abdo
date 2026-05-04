@@ -121,6 +121,8 @@ pub struct RunnerOutput {
     /// Tokens gastados en reasoning interno por modelos thinking. Separado de
     /// `output_tokens` (texto visible) para diagnosticar truncamiento.
     pub thinking_tokens: u32,
+    /// Phase 3a — tokens servidos desde caché implícito/explícito de Gemini.
+    pub cached_tokens: u32,
     pub total_tokens: u32,
     pub cost_usd_estimate: f64,
     pub latency_ms: u32,
@@ -144,6 +146,10 @@ pub struct RunnerOutput {
 impl RunnerOutput {
     /// Construye un `AiInteraction` listo para persistir (PR 3 lo va a usar
     /// desde el dispatch real). Sandbox descarta esto.
+    ///
+    /// `pre_class` — cuando el pre-clasificador corrió antes del LLM, pasar
+    /// `Some(&result)` para registrar `pre_classified=true` y el raw variant.
+    /// Pasar `None` si el turno no pasó por el gate (comportamiento anterior).
     #[allow(dead_code)]
     pub fn to_interaction(
         &self,
@@ -153,8 +159,27 @@ impl RunnerOutput {
         agent_id: mongodb::bson::oid::ObjectId,
         turn_index: u32,
         model_id: &str,
+        pre_class: Option<&super::pre_classifier::PreClassResultFull>,
     ) -> AiInteraction {
         let now = mongodb::bson::DateTime::now();
+
+        // Cuando el pre-clasificador corrió y el turno cayó al LLM (fall-through),
+        // sumamos sus tokens y costo al registro del turno completo para que las
+        // métricas sean exactas (un row = un turno inbound, incluyendo todo el
+        // gasto del gate).
+        let pc_in    = pre_class.map_or(0u32, |p| p.tokens.input);
+        let pc_out   = pre_class.map_or(0u32, |p| p.tokens.output);
+        let pc_cost  = pre_class.map_or(0.0_f64, |p| {
+            super::gemini::estimate_cost_usd(
+                "gemini-2.5-flash-lite",
+                p.tokens.input,
+                0,
+                p.tokens.output,
+                0,
+            )
+        });
+        let pc_lat   = pre_class.map_or(0u32, |p| p.latency_ms);
+
         AiInteraction {
             id: None,
             conversation_id,
@@ -163,14 +188,18 @@ impl RunnerOutput {
             agent_id,
             turn_index,
             model_id: model_id.to_string(),
-            input_tokens: self.input_tokens,
-            output_tokens: self.output_tokens,
-            cost_usd_estimate: self.cost_usd_estimate,
-            latency_ms: self.latency_ms,
+            input_tokens:  self.input_tokens.saturating_add(pc_in),
+            output_tokens: self.output_tokens.saturating_add(pc_out),
+            cost_usd_estimate: self.cost_usd_estimate + pc_cost,
+            latency_ms: self.latency_ms.saturating_add(pc_lat),
             tool_calls: self.tool_calls.clone(),
             response_text: self.response_text.clone(),
             escalated: self.escalated,
             escalation_reason: self.escalation_reason.clone(),
+            thinking_tokens: self.thinking_tokens,
+            cached_tokens: self.cached_tokens,
+            pre_classified: pre_class.is_some(),
+            pre_class_result: pre_class.map(|p| p.variant.as_str().to_string()),
             created_at: now,
         }
     }
@@ -420,11 +449,15 @@ pub async fn run_turn(
         // demás thinking models pueden gastar 100% del cap en thoughts y
         // dejar la respuesta vacía. Los modelos no-thinking ignoran el campo.
         thinking_config: Some(super::gemini::ThinkingConfig { thinking_budget: 0 }),
+        response_mime_type: None,
+        response_schema: None,
     };
 
     let mut total_in: u32 = 0;
     let mut total_out: u32 = 0;
     let mut total_thinking: u32 = 0;
+    // Phase 3a — tokens servidos desde caché implícito/explícito de Gemini.
+    let mut total_cached: u32 = 0;
     let mut tool_call_logs: Vec<AiToolCallLog> = Vec::new();
     let mut response_text: Option<String> = None;
     let mut finish_reason: Option<String> = None;
@@ -451,6 +484,8 @@ pub async fn run_turn(
                 temperature: gen_config.temperature,
                 max_output_tokens: gen_config.max_output_tokens,
                 thinking_config: gen_config.thinking_config.clone(),
+                response_mime_type: None,
+                response_schema: None,
             }),
         };
 
@@ -469,6 +504,8 @@ pub async fn run_turn(
         total_in = total_in.saturating_add(usage.prompt_token_count);
         total_out = total_out.saturating_add(usage.candidates_token_count);
         total_thinking = total_thinking.saturating_add(usage.thoughts_token_count);
+        // Phase 3a: acumular cache hits (Gemini cobra a tarifa reducida).
+        total_cached = total_cached.saturating_add(usage.cached_content_token_count);
 
         let candidate = match resp.candidates.into_iter().next() {
             Some(c) => c,
@@ -611,8 +648,14 @@ pub async fn run_turn(
         escalation_reason = Some("max_iterations_reached".into());
     }
 
-    let cost_usd_estimate =
-        gemini::estimate_cost_usd(&agent.model.model_id, total_in, total_out);
+    // Phase 3a: usa la formula de 5-args con cached + thinking tokens.
+    let cost_usd_estimate = gemini::estimate_cost_usd(
+        &agent.model.model_id,
+        total_in,
+        total_cached,
+        total_out,
+        total_thinking,
+    );
     let latency_ms = started.elapsed().as_millis() as u32;
 
     // Extraer info del último transfer_to_agent exitoso (si lo hubo). El
@@ -650,6 +693,7 @@ pub async fn run_turn(
         input_tokens: total_in,
         output_tokens: total_out,
         thinking_tokens: total_thinking,
+        cached_tokens: total_cached,
         total_tokens: total_in.saturating_add(total_out),
         cost_usd_estimate,
         latency_ms,

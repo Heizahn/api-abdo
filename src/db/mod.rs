@@ -1,6 +1,6 @@
 pub mod mongo;
 use crate::models::ai_agent::{
-    AiAgent, AiAgentFaq, AiClientLookup, AiCoverageZone, AiInteraction, AiPlan,
+    AiAgent, AiAgentFaq, AiAgentPurpose, AiClientLookup, AiCoverageZone, AiInteraction, AiPlan,
 };
 use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
 use crate::models::whatsapp::{
@@ -1189,6 +1189,82 @@ pub trait AiAgentRepository {
     ) -> Result<Option<AiCoverageZone>, String>;
     async fn delete_ai_coverage_zone(&self, id: &ObjectId) -> Result<bool, String>;
     async fn ai_coverage_zones_is_empty(&self) -> Result<bool, String>;
+
+    /// Phase 3a. Busca el agente activo (`enabled=true`) más viejo del workspace
+    /// que tenga `purpose == <purpose>`. El SUPERADMIN debe setear el campo
+    /// explícitamente; agentes legacy (`purpose = None`) nunca matchean.
+    ///
+    /// Retorna `None` si no hay especialista disponible → dispatcher hace fall-through.
+    async fn find_active_agent_by_workspace_and_purpose(
+        &self,
+        workspace_id: &ObjectId,
+        purpose: AiAgentPurpose,
+    ) -> Result<Option<AiAgent>, String>;
+
+    /// Phase 3a. Agrega métricas de `AiInteractions` para el agente dado en el
+    /// rango `[from, to]` (inclusive). Dos pipelines paralelos:
+    /// - Aggregate A: totales de resumen.
+    /// - Aggregate B: desglose por `pre_class_result`.
+    /// Para `Daily`, Aggregate A usa `$dateToString` (TZ Caracas) como `_id`.
+    async fn get_ai_agent_metrics(
+        &self,
+        agent_id: &ObjectId,
+        from: mongodb::bson::DateTime,
+        to: mongodb::bson::DateTime,
+        granularity: MetricsGranularity,
+    ) -> Result<AiAgentMetricsRaw, String>;
+}
+
+// ============================================
+// 12. AI Agent Metrics types (Phase 3a)
+// ============================================
+
+/// Granularidad del aggregate de métricas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricsGranularity {
+    Summary,
+    Daily,
+}
+
+/// Totales del aggregate de resumen (Aggregate A).
+#[derive(Debug, Clone, Default)]
+pub struct AiAgentMetricsSummary {
+    pub total_turns: u64,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub total_thinking_tokens: u64,
+    pub total_cached_tokens: u64,
+    pub total_cost_usd: f64,
+    pub avg_latency_ms: f64,
+    pub pre_classified_count: u64,
+    pub escalated_count: u64,
+    pub tool_calls_count: u64,
+}
+
+/// Bucket diario (para granularity = Daily).
+#[derive(Debug, Clone)]
+pub struct AiAgentMetricsDailyBucket {
+    /// Fecha en formato "YYYY-MM-DD" (TZ Caracas).
+    pub date: String,
+    pub total_turns: u64,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub total_thinking_tokens: u64,
+    pub total_cached_tokens: u64,
+    pub total_cost_usd: f64,
+    pub pre_classified_count: u64,
+    pub escalated_count: u64,
+}
+
+/// Resultado raw del aggregate de métricas (antes de convertir a DTO HTTP).
+#[derive(Debug, Clone)]
+pub struct AiAgentMetricsRaw {
+    pub summary: AiAgentMetricsSummary,
+    /// Desglose por `pre_class_result` (Aggregate B). Clave = variante ("Spam",
+    /// "GreetingOnly", etc). El handler rellena las claves ausentes con 0.
+    pub pre_class_breakdown: HashMap<String, u64>,
+    /// Solo presente cuando `granularity == Daily`.
+    pub daily: Option<Vec<AiAgentMetricsDailyBucket>>,
 }
 
 // ============================================

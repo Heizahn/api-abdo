@@ -9,10 +9,14 @@ use futures::stream::TryStreamExt;
 use mongodb::bson::{doc, oid::ObjectId, Document};
 use mongodb::options::{FindOneAndReplaceOptions, FindOptions, ReturnDocument};
 use mongodb::Collection;
+use std::collections::HashMap;
 
 use super::MongoDB;
-use crate::db::AiAgentRepository;
-use crate::models::ai_agent::{AiAgent, AiAgentFaq, AiCoverageZone, AiInteraction, AiPlan};
+use crate::db::{
+    AiAgentMetricsDailyBucket, AiAgentMetricsRaw, AiAgentMetricsSummary, AiAgentRepository,
+    MetricsGranularity,
+};
+use crate::models::ai_agent::{AiAgent, AiAgentFaq, AiAgentPurpose, AiCoverageZone, AiInteraction, AiPlan};
 use crate::models::whatsapp::WaMessage;
 
 impl MongoDB {
@@ -428,4 +432,236 @@ impl AiAgentRepository for MongoDB {
         items.reverse();
         Ok(items)
     }
+
+    // ─── Phase 3a ──────────────────────────────────────────────────────────
+
+    async fn find_active_agent_by_workspace_and_purpose(
+        &self,
+        workspace_id: &ObjectId,
+        purpose: AiAgentPurpose,
+    ) -> Result<Option<AiAgent>, String> {
+        // Serializa el enum como snake_case (e.g. AiAgentPurpose::Soporte → "soporte").
+        let purpose_str = serde_json::to_value(purpose)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+
+        self.ai_agents()
+            .find_one(doc! {
+                "workspace_ids": workspace_id,
+                "enabled": true,
+                "purpose": &purpose_str,
+            })
+            .sort(doc! { "created_at": 1 })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn get_ai_agent_metrics(
+        &self,
+        agent_id: &ObjectId,
+        from: mongodb::bson::DateTime,
+        to: mongodb::bson::DateTime,
+        granularity: MetricsGranularity,
+    ) -> Result<AiAgentMetricsRaw, String> {
+        let coll = self.ai_interactions();
+        let match_stage = doc! {
+            "$match": {
+                "agent_id": agent_id,
+                "created_at": { "$gte": from, "$lte": to },
+            }
+        };
+
+        // ── Aggregate A: resumen total (o daily) ─────────────────────────────
+        let agg_a_pipeline: Vec<Document> = match granularity {
+            MetricsGranularity::Summary => vec![
+                match_stage.clone(),
+                doc! { "$group": {
+                    "_id": null,
+                    "total_turns":           { "$sum": 1 },
+                    "total_input_tokens":    { "$sum": { "$ifNull": ["$input_tokens",  0] } },
+                    "total_output_tokens":   { "$sum": { "$ifNull": ["$output_tokens", 0] } },
+                    "total_thinking_tokens": { "$sum": { "$ifNull": ["$thinking_tokens", 0] } },
+                    "total_cached_tokens":   { "$sum": { "$ifNull": ["$cached_tokens", 0] } },
+                    "total_cost_usd":        { "$sum": { "$ifNull": ["$cost_usd_estimate", 0.0] } },
+                    "avg_latency_ms":        { "$avg": { "$ifNull": ["$latency_ms", 0] } },
+                    "pre_classified_count":  { "$sum": { "$cond": [{ "$eq": ["$pre_classified", true] }, 1, 0] } },
+                    "escalated_count":       { "$sum": { "$cond": [{ "$eq": ["$escalated", true] }, 1, 0] } },
+                    "tool_calls_count":      { "$sum": { "$size": { "$ifNull": ["$tool_calls", []] } } },
+                } },
+            ],
+            MetricsGranularity::Daily => vec![
+                match_stage.clone(),
+                doc! { "$group": {
+                    "_id": {
+                        "$dateToString": {
+                            "format": "%Y-%m-%d",
+                            "date": "$created_at",
+                            "timezone": "America/Caracas",
+                        }
+                    },
+                    "total_turns":           { "$sum": 1 },
+                    "total_input_tokens":    { "$sum": { "$ifNull": ["$input_tokens",  0] } },
+                    "total_output_tokens":   { "$sum": { "$ifNull": ["$output_tokens", 0] } },
+                    "total_thinking_tokens": { "$sum": { "$ifNull": ["$thinking_tokens", 0] } },
+                    "total_cached_tokens":   { "$sum": { "$ifNull": ["$cached_tokens", 0] } },
+                    "total_cost_usd":        { "$sum": { "$ifNull": ["$cost_usd_estimate", 0.0] } },
+                    "avg_latency_ms":        { "$avg": { "$ifNull": ["$latency_ms", 0] } },
+                    "pre_classified_count":  { "$sum": { "$cond": [{ "$eq": ["$pre_classified", true] }, 1, 0] } },
+                    "escalated_count":       { "$sum": { "$cond": [{ "$eq": ["$escalated", true] }, 1, 0] } },
+                } },
+                doc! { "$sort": { "_id": 1 } },
+            ],
+        };
+
+        // ── Aggregate B: desglose por pre_class_result ────────────────────────
+        let agg_b_pipeline = vec![
+            doc! { "$match": {
+                "agent_id": agent_id,
+                "created_at": { "$gte": from, "$lte": to },
+                "pre_classified": true,
+            } },
+            doc! { "$group": {
+                "_id": "$pre_class_result",
+                "count": { "$sum": 1 },
+            } },
+        ];
+
+        // Correr los dos aggregates en paralelo.
+        let (res_a, res_b) = tokio::join!(
+            async {
+                coll.aggregate(agg_a_pipeline)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .try_collect::<Vec<Document>>()
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+            async {
+                coll.aggregate(agg_b_pipeline)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .try_collect::<Vec<Document>>()
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+        );
+
+        let docs_a = res_a?;
+        let docs_b = res_b?;
+
+        // ── Parse Aggregate B ─────────────────────────────────────────────────
+        let mut pre_class_breakdown: HashMap<String, u64> = HashMap::new();
+        for doc in &docs_b {
+            let key = doc
+                .get_str("_id")
+                .unwrap_or("unknown")
+                .to_string();
+            let count = doc
+                .get_i64("count")
+                .or_else(|_| doc.get_i32("count").map(|n| n as i64))
+                .unwrap_or(0) as u64;
+            pre_class_breakdown.insert(key, count);
+        }
+
+        // ── Parse Aggregate A ─────────────────────────────────────────────────
+        match granularity {
+            MetricsGranularity::Summary => {
+                let summary = if let Some(d) = docs_a.first() {
+                    parse_summary_doc(d)
+                } else {
+                    AiAgentMetricsSummary::default()
+                };
+                Ok(AiAgentMetricsRaw {
+                    summary,
+                    pre_class_breakdown,
+                    daily: None,
+                })
+            }
+            MetricsGranularity::Daily => {
+                // Para daily, el "summary" lo computamos sumando los buckets
+                // (evita un tercer aggregate).
+                let mut buckets: Vec<AiAgentMetricsDailyBucket> = Vec::new();
+                let mut summary = AiAgentMetricsSummary::default();
+                let mut latency_sum: f64 = 0.0;
+
+                for d in &docs_a {
+                    let date = d.get_str("_id").unwrap_or("").to_string();
+                    let turns = get_u64(d, "total_turns");
+                    let input = get_u64(d, "total_input_tokens");
+                    let output = get_u64(d, "total_output_tokens");
+                    let thinking = get_u64(d, "total_thinking_tokens");
+                    let cached = get_u64(d, "total_cached_tokens");
+                    let cost = get_f64(d, "total_cost_usd");
+                    let lat = get_f64(d, "avg_latency_ms");
+                    let pre_cls = get_u64(d, "pre_classified_count");
+                    let escalated = get_u64(d, "escalated_count");
+
+                    summary.total_turns += turns;
+                    summary.total_input_tokens += input;
+                    summary.total_output_tokens += output;
+                    summary.total_thinking_tokens += thinking;
+                    summary.total_cached_tokens += cached;
+                    summary.total_cost_usd += cost;
+                    latency_sum += lat * turns as f64;
+                    summary.pre_classified_count += pre_cls;
+                    summary.escalated_count += escalated;
+
+                    buckets.push(AiAgentMetricsDailyBucket {
+                        date,
+                        total_turns: turns,
+                        total_input_tokens: input,
+                        total_output_tokens: output,
+                        total_thinking_tokens: thinking,
+                        total_cached_tokens: cached,
+                        total_cost_usd: cost,
+                        pre_classified_count: pre_cls,
+                        escalated_count: escalated,
+                    });
+                }
+
+                if summary.total_turns > 0 {
+                    summary.avg_latency_ms = latency_sum / summary.total_turns as f64;
+                }
+
+                Ok(AiAgentMetricsRaw {
+                    summary,
+                    pre_class_breakdown,
+                    daily: Some(buckets),
+                })
+            }
+        }
+    }
+}
+
+// ── Helpers privados para parsear documentos BSON ─────────────────────────────
+
+fn parse_summary_doc(d: &Document) -> AiAgentMetricsSummary {
+    AiAgentMetricsSummary {
+        total_turns: get_u64(d, "total_turns"),
+        total_input_tokens: get_u64(d, "total_input_tokens"),
+        total_output_tokens: get_u64(d, "total_output_tokens"),
+        total_thinking_tokens: get_u64(d, "total_thinking_tokens"),
+        total_cached_tokens: get_u64(d, "total_cached_tokens"),
+        total_cost_usd: get_f64(d, "total_cost_usd"),
+        avg_latency_ms: get_f64(d, "avg_latency_ms"),
+        pre_classified_count: get_u64(d, "pre_classified_count"),
+        escalated_count: get_u64(d, "escalated_count"),
+        tool_calls_count: get_u64(d, "tool_calls_count"),
+    }
+}
+
+fn get_u64(d: &Document, key: &str) -> u64 {
+    d.get_i64(key)
+        .or_else(|_| d.get_i32(key).map(|n| n as i64))
+        .unwrap_or(0)
+        .max(0) as u64
+}
+
+fn get_f64(d: &Document, key: &str) -> f64 {
+    d.get_f64(key)
+        .or_else(|_| d.get_i64(key).map(|n| n as f64))
+        .or_else(|_| d.get_i32(key).map(|n| n as f64))
+        .unwrap_or(0.0)
+        .max(0.0)
 }

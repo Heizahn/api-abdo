@@ -57,12 +57,32 @@ pub struct AiAgent {
     /// todo el contexto. Default 10. 0 = procesar inmediato (no recomendado).
     #[serde(default = "default_debounce_seconds")]
     pub debounce_seconds: u32,
+    /// Phase 3a. Propósito semántico del agente para enrutamiento por el
+    /// pre-clasificador. `None` = agente legacy, siempre cae a Sofía.
+    /// Set by SUPERADMIN to enable Clear* routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<AiAgentPurpose>,
     pub created_at: DateTime,
     pub updated_at: DateTime,
 }
 
 fn default_debounce_seconds() -> u32 {
     10
+}
+
+/// Propósito semántico del agente (Phase 3a). Usado por el pre-clasificador
+/// para enrutar mensajes directamente a un especialista sin pasar por Sofía.
+///
+/// Set by SUPERADMIN to enable Clear* routing; legacy agents (`None`) always
+/// fall through to Sofía. Valores válidos: `recepcionista`, `ventas`,
+/// `pagos`, `soporte`.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AiAgentPurpose {
+    Recepcionista,
+    Ventas,
+    Pagos,
+    Soporte,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, ToSchema)]
@@ -242,6 +262,22 @@ pub struct AiInteraction {
     pub escalated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub escalation_reason: Option<String>,
+    /// Phase 3a. Tokens consumidos por razonamiento interno (thinking models).
+    /// Separado de `output_tokens` para diagnosticar truncamiento.
+    #[serde(default)]
+    pub thinking_tokens: u32,
+    /// Phase 3a. Tokens servidos desde el caché implícito/explícito de Gemini.
+    /// Ausente en docs legacy → 0 via `#[serde(default)]`.
+    #[serde(default)]
+    pub cached_tokens: u32,
+    /// Phase 3a. `true` cuando el turno pasó por el pre-clasificador.
+    #[serde(default)]
+    pub pre_classified: bool,
+    /// Phase 3a. Resultado del pre-clasificador ("Spam", "GreetingOnly",
+    /// "ClearVentas", "ClearPagos", "ClearSoporte", "Ambiguous"). `None` si
+    /// el pre-clasificador no corrió en este turno.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_class_result: Option<String>,
     pub created_at: DateTime,
 }
 
@@ -845,4 +881,60 @@ pub struct AiAgentModelItem {
 pub struct AiAgentModelsListResponse {
     pub ok: bool,
     pub data: Vec<AiAgentModelItem>,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 3a — Metrics response DTOs
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Breakdown de pre-clasificaciones por variante (`Spam`, `GreetingOnly`, etc.).
+#[derive(Debug, Serialize, ToSchema, Default)]
+pub struct AiAgentPreClassBreakdown {
+    pub spam: u64,
+    pub greeting_only: u64,
+    pub clear_ventas: u64,
+    pub clear_pagos: u64,
+    pub clear_soporte: u64,
+    pub ambiguous: u64,
+}
+
+/// Bucket diario (cuando `granularity=daily`).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiAgentMetricsDailyBucketDto {
+    /// Fecha en formato `YYYY-MM-DD` (TZ Caracas).
+    pub date: String,
+    pub total_turns: u64,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub total_thinking_tokens: u64,
+    pub total_cached_tokens: u64,
+    pub total_cost_usd: f64,
+    pub pre_classified_count: u64,
+    pub escalated_count: u64,
+}
+
+/// Métricas resumen para el rango pedido.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiAgentMetricsData {
+    pub total_turns: u64,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
+    pub total_thinking_tokens: u64,
+    pub total_cached_tokens: u64,
+    pub total_cost_usd: f64,
+    pub avg_latency_ms: f64,
+    pub pre_classified_count: u64,
+    pub escalated_count: u64,
+    pub tool_calls_count: u64,
+    pub pre_class_breakdown: AiAgentPreClassBreakdown,
+    /// `null` cuando `granularity=summary`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daily: Option<Vec<AiAgentMetricsDailyBucketDto>>,
+}
+
+/// Respuesta del endpoint `GET /agents/:id/metrics`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiAgentMetricsResponse {
+    pub ok: bool,
+    pub data: AiAgentMetricsData,
 }

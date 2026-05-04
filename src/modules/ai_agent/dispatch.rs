@@ -27,7 +27,7 @@ use crate::{
         WhatsAppRepository,
     },
     models::{
-        ai_agent::{AiAgent, AiAgentMode},
+        ai_agent::{AiAgent, AiAgentMode, AiAgentPurpose, AiInteraction},
         whatsapp::{StatePatch, WaConversationAiState, WaMessage},
     },
     state::AppState,
@@ -37,6 +37,7 @@ use super::{
     escalation,
     gemini::AiRelay,
     guardrails,
+    pre_classifier::{self, PreClassResult, PreClassResultFull},
     runner::{decrypt_api_key, run_turn, ConvRole, ConvTurn, MediaInput, PromptVariables},
     state::{apply_state_patches, format_conversation_state},
     tools::{extract_allowed_transfer_targets, ToolContext},
@@ -470,6 +471,228 @@ async fn run_dispatch(
     let (customer_context, customer_first_name) =
         build_customer_context(&state, &conv.phone).await;
 
+    // ── Phase 3a: Pre-classifier gate ─────────────────────────────────────
+    // Solo si el workspace lo habilitó y hay texto del cliente.
+    // Corre con la api_key del agente inicial (flash-lite es un modelo aparte).
+    // Si no hay api_key disponible o el classify falla, se salta silenciosamente.
+    //
+    // `pre_class_result`   — para auditoría en AiInteraction (turno LLM normal).
+    // `pre_class_specialist` — (AiAgent, api_key) cuando Clear* encuentra un
+    //                          especialista distinto; reemplaza `agent` en el loop.
+    let mut pre_class_result: Option<PreClassResultFull> = None;
+    let mut pre_class_specialist: Option<(AiAgent, String)> = None;
+
+    if wa_settings.pre_classifier_enabled && !user_text.trim().is_empty() {
+        if let Ok(pc_api_key) = decrypt_api_key(&agent, &ai_agent_secret()) {
+            let relay_for_pc = AiRelay::from_config(&state.config);
+            let pc_ctx = pre_classifier::PreClassifierContext {
+                api_key: &pc_api_key,
+                relay: relay_for_pc.as_ref(),
+                base_url_override: agent
+                    .model
+                    .endpoint_override
+                    .as_deref()
+                    .or(state.config.gemini_base_url.as_deref()),
+                http: &state.reqwest_client,
+            };
+            let summary = build_customer_summary_short(&customer_context);
+            match pre_classifier::classify(&user_text, &summary, &pc_ctx).await {
+                Ok(result) => {
+                    tracing::info!(
+                        "[ai_agent.dispatch] pre_class: variant={} gated={} confidence={:.2} latency={}ms (conv={})",
+                        result.variant.as_str(),
+                        result.gated_variant.as_str(),
+                        result.confidence,
+                        result.latency_ms,
+                        conv_hex
+                    );
+
+                    let text_norm = super::tools::normalize_zone(&user_text);
+                    match result.gated_variant {
+                        // ── Spam: respuesta trivial (opcional) + silencio ─
+                        PreClassResult::Spam => {
+                            if let Some(trivial) =
+                                pick_trivial(&wa_settings.trivial_responses, "spam", &text_norm)
+                            {
+                                if is_live {
+                                    if let Err(e) = send_live_response(
+                                        &state,
+                                        &wa_settings,
+                                        &conv.phone,
+                                        &agent.ai_user_id,
+                                        inbound.conversation_id,
+                                        &trivial.response,
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!(
+                                            "[ai_agent.dispatch] spam trivial send falló: {}",
+                                            e
+                                        );
+                                    }
+                                } else {
+                                    tracing::info!(
+                                        "[ai_agent.dispatch] shadow+spam → habría respondido: {}",
+                                        truncate(&trivial.response, 200)
+                                    );
+                                }
+                            }
+                            persist_pre_class_only_interaction(
+                                &state,
+                                inbound.conversation_id,
+                                inbound.id.unwrap_or_else(ObjectId::new),
+                                workspace_id,
+                                agent_id,
+                                &agent.model.model_id,
+                                &result,
+                            )
+                            .await;
+                            return Ok(());
+                        }
+
+                        // ── GreetingOnly: respuesta trivial o fallthrough ──
+                        PreClassResult::GreetingOnly => {
+                            if let Some(trivial) =
+                                pick_trivial(&wa_settings.trivial_responses, "greeting", &text_norm)
+                            {
+                                if is_live {
+                                    if let Err(e) = send_live_response(
+                                        &state,
+                                        &wa_settings,
+                                        &conv.phone,
+                                        &agent.ai_user_id,
+                                        inbound.conversation_id,
+                                        &trivial.response,
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!(
+                                            "[ai_agent.dispatch] greeting trivial send falló: {}",
+                                            e
+                                        );
+                                    }
+                                } else {
+                                    tracing::info!(
+                                        "[ai_agent.dispatch] shadow+greeting → habría respondido: {}",
+                                        truncate(&trivial.response, 200)
+                                    );
+                                }
+                                persist_pre_class_only_interaction(
+                                    &state,
+                                    inbound.conversation_id,
+                                    inbound.id.unwrap_or_else(ObjectId::new),
+                                    workspace_id,
+                                    agent_id,
+                                    &agent.model.model_id,
+                                    &result,
+                                )
+                                .await;
+                                return Ok(());
+                            }
+                            // Sin plantilla de saludo: cae al LLM con auditoría.
+                            pre_class_result = Some(result);
+                        }
+
+                        // ── Clear*: buscar especialista y redirigir ────────
+                        PreClassResult::ClearVentas
+                        | PreClassResult::ClearPagos
+                        | PreClassResult::ClearSoporte => {
+                            let purpose = match result.gated_variant {
+                                PreClassResult::ClearVentas => AiAgentPurpose::Ventas,
+                                PreClassResult::ClearPagos => AiAgentPurpose::Pagos,
+                                _ => AiAgentPurpose::Soporte,
+                            };
+                            match state
+                                .db
+                                .find_active_agent_by_workspace_and_purpose(
+                                    &workspace_id,
+                                    purpose,
+                                )
+                                .await
+                            {
+                                Ok(Some(specialist))
+                                    if specialist.id.map(|id| id != agent_id).unwrap_or(false) =>
+                                {
+                                    let spec_id = specialist.id;
+                                    tracing::info!(
+                                        "[ai_agent.dispatch] pre_class Clear*: redirigiendo a specialist={} purpose={:?} (conv={})",
+                                        spec_id.map(|o| o.to_hex()).unwrap_or_default(),
+                                        purpose,
+                                        conv_hex
+                                    );
+                                    // Persistir ai_active_agent_id para que el próximo
+                                    // dispatch (si ocurre antes del loop actual) ya sepa
+                                    // cuál es el agente activo.
+                                    let patch = ConversationAiPatch {
+                                        ai_active_agent_id: spec_id.as_ref().map(Some),
+                                        ai_disabled: None,
+                                        ai_transfer_context: None,
+                                    };
+                                    if let Err(e) = state
+                                        .db
+                                        .update_conversation_ai_state(
+                                            &inbound.conversation_id,
+                                            patch,
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            "[ai_agent.dispatch] set specialist agent in conv falló: {}",
+                                            e
+                                        );
+                                    }
+                                    // Descifrar api_key del specialist.
+                                    match decrypt_api_key(&specialist, &ai_agent_secret()) {
+                                        Ok(spec_key) => {
+                                            pre_class_specialist = Some((specialist, spec_key));
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "[ai_agent.dispatch] specialist api_key indisponible: {:?}; usando agente original",
+                                                e
+                                            );
+                                            // Specialist sin key: cae al agente original.
+                                        }
+                                    }
+                                    pre_class_result = Some(result);
+                                }
+                                Ok(_) => {
+                                    // Sin especialista distinto: cae al agente original.
+                                    tracing::debug!(
+                                        "[ai_agent.dispatch] pre_class Clear* sin specialist para {:?} en workspace={}, fallthrough",
+                                        purpose,
+                                        workspace_id.to_hex()
+                                    );
+                                    pre_class_result = Some(result);
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "[ai_agent.dispatch] find specialist error: {}; fallthrough",
+                                        e
+                                    );
+                                    pre_class_result = Some(result);
+                                }
+                            }
+                        }
+
+                        // ── Ambiguous: auditoría, flujo normal ────────────
+                        PreClassResult::Ambiguous => {
+                            pre_class_result = Some(result);
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Error de red/parse → skip silencioso.
+                    tracing::warn!(
+                        "[ai_agent.dispatch] pre_classifier error (skipping gate): {}",
+                        e
+                    );
+                }
+            }
+        }
+        // Sin api_key → skip silencioso (decrypt_api_key ya lo logueó).
+    }
+
     let prompt_vars = build_prompt_variables(
         &agent,
         &wa_settings,
@@ -538,8 +761,13 @@ async fn run_dispatch(
     // Acumulador de todos los patches emitidos durante el chain completo.
     let mut all_state_patches: Vec<StatePatch> = Vec::new();
 
-    let mut active_agent: AiAgent = agent;
-    let mut active_api_key: String = api_key;
+    // Si el pre-clasificador encontró un especialista, usar ese en vez del agente inicial.
+    let (mut active_agent, mut active_api_key): (AiAgent, String) =
+        if let Some((specialist, spec_key)) = pre_class_specialist {
+            (specialist, spec_key)
+        } else {
+            (agent, api_key)
+        };
     let mut active_transfer_context: Option<String> = initial_transfer_context_owned.clone();
     let mut chain_count: u32 = 0;
     let last_output: Option<crate::modules::ai_agent::runner::RunnerOutput>;
@@ -720,6 +948,8 @@ async fn run_dispatch(
 
         // Persistir AiInteraction de esta iteración (auditoría completa por
         // turno — cada agente queda con su propio registro).
+        // Solo pasamos pre_class_result en el primer paso del chain (el pre-clasificador
+        // corrió sobre el turno completo, no sobre cada agente individual del chain).
         let interaction = output.to_interaction(
             inbound.conversation_id,
             inbound.id.unwrap_or_else(ObjectId::new),
@@ -727,6 +957,7 @@ async fn run_dispatch(
             active_agent_id,
             chain_count,
             &active_agent.model.model_id,
+            if chain_count == 0 { pre_class_result.as_ref() } else { None },
         );
         if let Err(e) = state.db.create_ai_interaction(interaction).await {
             tracing::warn!(
@@ -1393,6 +1624,118 @@ async fn build_customer_context(
     (Some(buf), first_name)
 }
 
+/// Extrae un resumen de una línea del output de `build_customer_context` para
+/// el prompt del pre-clasificador. Mantiene el prompt pequeño y predictable.
+/// Retorna `"sin match en DB"` cuando no hay matcheo o el contexto es `None`.
+fn build_customer_summary_short(customer_context: &Option<String>) -> String {
+    match customer_context {
+        None => "sin match en DB".into(),
+        Some(ctx) if ctx.contains("matches: 0") || !ctx.contains("matches:") => {
+            "sin match en DB".into()
+        }
+        Some(ctx) => ctx
+            .lines()
+            .find(|l| l.trim_start().starts_with("- [1]"))
+            .map(|l| l.trim().to_string())
+            .unwrap_or_else(|| "sin match en DB".into()),
+    }
+}
+
+/// Selecciona la plantilla de respuesta trivial que mejor matchea el texto del
+/// cliente para el `kind` indicado (e.g. `"spam"`, `"greeting"`).
+///
+/// Reglas de selección:
+/// 1. Filtra por `enabled == true` y `kind == requested_kind`.
+/// 2. Filtra por triggers: si `triggers.is_empty()` (catch-all) o cualquier
+///    trigger (normalizado) es substring del texto normalizado.
+/// 3. Ordena por `priority` descendente (sort estable → empates preservan orden).
+/// 4. Retorna la primera.
+fn pick_trivial<'a>(
+    responses: &'a [crate::models::whatsapp::TrivialResponse],
+    kind: &str,
+    text_normalized: &str,
+) -> Option<&'a crate::models::whatsapp::TrivialResponse> {
+    let mut candidates: Vec<&crate::models::whatsapp::TrivialResponse> = responses
+        .iter()
+        .filter(|t| t.enabled && t.kind == kind)
+        .filter(|t| {
+            t.triggers.is_empty()
+                || t.triggers.iter().any(|tr| {
+                    let tr_norm = super::tools::normalize_zone(tr);
+                    !tr_norm.is_empty() && text_normalized.contains(&tr_norm)
+                })
+        })
+        .collect();
+    // Sort estable desc por priority (sort_by es estable en Rust).
+    candidates.sort_by(|a, b| b.priority.cmp(&a.priority));
+    candidates.first().copied()
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use crate::models::whatsapp::TrivialResponse;
+
+    fn make_trivial(kind: &str, triggers: &[&str], response: &str, priority: i32, enabled: bool) -> TrivialResponse {
+        TrivialResponse {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: kind.to_string(),
+            triggers: triggers.iter().map(|s| s.to_string()).collect(),
+            response: response.to_string(),
+            enabled,
+            priority,
+        }
+    }
+
+    #[test]
+    fn pick_trivial_empty_list() {
+        let result = pick_trivial(&[], "spam", "hola");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn pick_trivial_no_kind_match() {
+        let items = vec![make_trivial("greeting", &["hola"], "ok", 0, true)];
+        assert!(pick_trivial(&items, "spam", "hola").is_none());
+    }
+
+    #[test]
+    fn pick_trivial_multi_match_priority() {
+        let items = vec![
+            make_trivial("spam", &["promo"], "resp_low", 0, true),
+            make_trivial("spam", &["promo"], "resp_high", 5, true),
+        ];
+        let result = pick_trivial(&items, "spam", "promo oferta");
+        assert_eq!(result.unwrap().response, "resp_high");
+    }
+
+    #[test]
+    fn pick_trivial_empty_triggers_catchall() {
+        let items = vec![make_trivial("greeting", &[], "hola a vos", 0, true)];
+        let result = pick_trivial(&items, "greeting", "buenas tardes");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().response, "hola a vos");
+    }
+
+    #[test]
+    fn pick_trivial_disabled_skipped() {
+        let items = vec![
+            make_trivial("spam", &["promo"], "resp_disabled", 10, false),
+            make_trivial("spam", &["promo"], "resp_enabled", 0, true),
+        ];
+        let result = pick_trivial(&items, "spam", "promo");
+        assert_eq!(result.unwrap().response, "resp_enabled");
+    }
+
+    #[test]
+    fn pick_trivial_accent_normalization() {
+        let items = vec![make_trivial("spam", &["promoción"], "resp", 0, true)];
+        let normalized = super::super::tools::normalize_zone("PROMOCION gratis");
+        let result = pick_trivial(&items, "spam", &normalized);
+        assert!(result.is_some());
+    }
+}
+
 /// Construye los valores que sustituyen `{placeholders}` del `system_prompt`.
 fn build_prompt_variables(
     agent: &AiAgent,
@@ -1518,6 +1861,51 @@ fn truncate(s: &str, n: usize) -> String {
     } else {
         let cut: String = s.chars().take(n).collect();
         format!("{}…", cut)
+    }
+}
+
+/// Persiste un `AiInteraction` mínimo (sin tokens LLM) cuando el
+/// pre-clasificador cortocircuitó el turno (Spam / GreetingOnly con plantilla).
+/// Registra `pre_classified=true` y el variant crudo para auditoría.
+/// Los tokens del pre-clasificador son insignificantes (< 200 tokens) y no se
+/// rastrean individualmente por turno — solo se registra que el gate actuó.
+async fn persist_pre_class_only_interaction(
+    state: &Arc<AppState>,
+    conversation_id: mongodb::bson::oid::ObjectId,
+    message_id: mongodb::bson::oid::ObjectId,
+    workspace_id: mongodb::bson::oid::ObjectId,
+    agent_id: mongodb::bson::oid::ObjectId,
+    model_id: &str,
+    pre_class: &PreClassResultFull,
+) {
+    let now = BsonDateTime::now();
+    let interaction = AiInteraction {
+        id: None,
+        conversation_id,
+        message_id,
+        workspace_id,
+        agent_id,
+        turn_index: 0,
+        model_id: model_id.to_string(),
+        input_tokens: pre_class.tokens.input,
+        output_tokens: pre_class.tokens.output,
+        cost_usd_estimate: 0.0, // flash-lite en gate: costo < $0.00001, no rastrear
+        latency_ms: pre_class.latency_ms,
+        tool_calls: Vec::new(),
+        response_text: None,
+        escalated: false,
+        escalation_reason: None,
+        thinking_tokens: 0,
+        cached_tokens: 0,
+        pre_classified: true,
+        pre_class_result: Some(pre_class.variant.as_str().to_string()),
+        created_at: now,
+    };
+    if let Err(e) = state.db.create_ai_interaction(interaction).await {
+        tracing::warn!(
+            "[ai_agent.dispatch] persist_pre_class_only_interaction falló: {}",
+            e
+        );
     }
 }
 

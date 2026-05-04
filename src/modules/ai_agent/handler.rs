@@ -29,13 +29,14 @@ use std::sync::Arc;
 
 use crate::{
     crypto::aes::encrypt_payload,
-    db::{AiAgentRepository, UserRepository, WhatsAppRepository},
+    db::{AiAgentRepository, MetricsGranularity, UserRepository, WhatsAppRepository},
     error::ApiError,
     models::{
         ai_agent::{
             AiAgent, AiAgentDeleteResponse, AiAgentFaq, AiAgentFaqItem, AiAgentFaqListResponse,
-            AiAgentFaqResponse, AiAgentItem, AiAgentMode, AiAgentModelItem,
-            AiAgentModelsListResponse, AiAgentResponse, AiAgentsListResponse, AiEscalationRules,
+            AiAgentFaqResponse, AiAgentItem, AiAgentMetricsData, AiAgentMetricsDailyBucketDto,
+            AiAgentMetricsResponse, AiAgentMode, AiAgentModelItem, AiAgentModelsListResponse,
+            AiAgentPreClassBreakdown, AiAgentResponse, AiAgentsListResponse, AiEscalationRules,
             AiLimits, AiModelConfig, AiPersonality, AiSchedule, AiToolConfig,
             CreateAiAgentFaqRequest, CreateAiAgentRequest, TestConnectionData,
             TestConnectionRequest, TestConnectionResponse, TestConnectionSource,
@@ -241,6 +242,7 @@ fn default_agent(label: String, description: String, ai_user_id: String, now: Bs
         },
         limits: AiLimits::defaults(),
         debounce_seconds: 10,
+        purpose: None,
         created_at: now,
         updated_at: now,
     }
@@ -1340,6 +1342,153 @@ pub async fn list_models_for_agent_handler(
     Ok(Json(AiAgentModelsListResponse {
         ok: true,
         data: items,
+    }))
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 3a — Metrics handler
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct MetricsQueryParams {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub granularity: Option<String>,
+}
+
+/// Parsea un string ISO-8601 UTC (ej. "2026-05-01T00:00:00Z") a `chrono::DateTime<Utc>`.
+fn parse_iso(s: &str) -> Result<chrono::DateTime<chrono::Utc>, ()> {
+    s.parse::<chrono::DateTime<chrono::Utc>>().map_err(|_| ())
+}
+
+/// `GET /v1/auth-user/whatsapp/ai-agent/agents/:id/metrics`
+///
+/// Devuelve métricas de uso del agente en el rango `[from, to]`.
+/// `granularity=summary` (default): totales del período.
+/// `granularity=daily`: totales por día en TZ Caracas.
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/ai-agent/agents/{id}/metrics",
+    tag = "WhatsApp — AI Agent",
+    security(("bearerAuth" = [])),
+    params(
+        ("id"          = String,          Path,  description = "AiAgent ObjectId hex"),
+        ("from"        = String,          Query, description = "ISO-8601 UTC timestamp inclusive (ej. 2026-05-01T00:00:00Z)"),
+        ("to"          = String,          Query, description = "ISO-8601 UTC timestamp inclusive"),
+        ("granularity" = Option<String>,  Query, description = "summary | daily (default: summary)"),
+    ),
+    responses(
+        (status = 200, description = "OK",            body = AiAgentMetricsResponse),
+        (status = 400, description = "Bad request"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Forbidden — solo SUPERADMIN"),
+        (status = 404, description = "Agente no encontrado"),
+    )
+)]
+pub async fn get_ai_agent_metrics_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user): Extension<User>,
+    Path(agent_id_hex): Path<String>,
+    Query(params): Query<MetricsQueryParams>,
+) -> Result<Json<AiAgentMetricsResponse>, ApiError> {
+    require_superadmin(&current_user)?;
+
+    let agent_id = parse_oid(&agent_id_hex, "id")?;
+
+    let from_dt = parse_iso(&params.from)
+        .map_err(|_| ApiError::ValidationError {
+            code: "invalid_from".into(),
+            field: "from".into(),
+            message: "Formato inválido. Usa ISO-8601 UTC (ej. 2026-05-01T00:00:00Z)".into(),
+        })?;
+    let to_dt = parse_iso(&params.to)
+        .map_err(|_| ApiError::ValidationError {
+            code: "invalid_to".into(),
+            field: "to".into(),
+            message: "Formato inválido. Usa ISO-8601 UTC (ej. 2026-05-31T23:59:59Z)".into(),
+        })?;
+    if to_dt < from_dt {
+        return Err(ApiError::ValidationError {
+            code: "range_inverted".into(),
+            field: "to".into(),
+            message: "'to' debe ser mayor o igual que 'from'".into(),
+        });
+    }
+
+    let granularity = match params.granularity.as_deref() {
+        Some("daily") => MetricsGranularity::Daily,
+        Some("summary") | None => MetricsGranularity::Summary,
+        Some(_) => return Err(ApiError::ValidationError {
+            code: "invalid_granularity".into(),
+            field: "granularity".into(),
+            message: "Valor inválido. Usa 'summary' o 'daily'".into(),
+        }),
+    };
+
+    // 404 si el agente no existe.
+    state
+        .db
+        .find_ai_agent_by_id(&agent_id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(agent_not_found)?;
+
+    let from_bson = mongodb::bson::DateTime::from_millis(from_dt.timestamp_millis());
+    let to_bson   = mongodb::bson::DateTime::from_millis(to_dt.timestamp_millis());
+
+    let raw = state
+        .db
+        .get_ai_agent_metrics(&agent_id, from_bson, to_bson, granularity)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    // Mapear breakdown: HashMap<String, u64> → AiAgentPreClassBreakdown.
+    let bd = &raw.pre_class_breakdown;
+    let breakdown = AiAgentPreClassBreakdown {
+        spam:          *bd.get("Spam").unwrap_or(&0),
+        greeting_only: *bd.get("GreetingOnly").unwrap_or(&0),
+        clear_ventas:  *bd.get("ClearVentas").unwrap_or(&0),
+        clear_pagos:   *bd.get("ClearPagos").unwrap_or(&0),
+        clear_soporte: *bd.get("ClearSoporte").unwrap_or(&0),
+        ambiguous:     *bd.get("Ambiguous").unwrap_or(&0),
+    };
+
+    // Mapear daily buckets si los hay.
+    let daily = raw.daily.map(|buckets| {
+        buckets
+            .into_iter()
+            .map(|b| AiAgentMetricsDailyBucketDto {
+                date: b.date,
+                total_turns: b.total_turns,
+                total_input_tokens: b.total_input_tokens,
+                total_output_tokens: b.total_output_tokens,
+                total_thinking_tokens: b.total_thinking_tokens,
+                total_cached_tokens: b.total_cached_tokens,
+                total_cost_usd: b.total_cost_usd,
+                pre_classified_count: b.pre_classified_count,
+                escalated_count: b.escalated_count,
+            })
+            .collect()
+    });
+
+    let s = &raw.summary;
+    Ok(Json(AiAgentMetricsResponse {
+        ok: true,
+        data: AiAgentMetricsData {
+            total_turns: s.total_turns,
+            total_input_tokens: s.total_input_tokens,
+            total_output_tokens: s.total_output_tokens,
+            total_thinking_tokens: s.total_thinking_tokens,
+            total_cached_tokens: s.total_cached_tokens,
+            total_cost_usd: s.total_cost_usd,
+            avg_latency_ms: s.avg_latency_ms,
+            pre_classified_count: s.pre_classified_count,
+            escalated_count: s.escalated_count,
+            tool_calls_count: s.tool_calls_count,
+            pre_class_breakdown: breakdown,
+            daily,
+        },
     }))
 }
 

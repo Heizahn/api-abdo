@@ -2574,6 +2574,8 @@ pub async fn create_settings_handler(
         templates_synced_at: None,
         enable_guardrails: true,
         enable_conversation_state: true,
+        pre_classifier_enabled: false,
+        trivial_responses: Vec::new(),
         created_at: now,
         updated_at: now,
     };

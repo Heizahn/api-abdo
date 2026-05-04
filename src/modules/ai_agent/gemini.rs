@@ -226,6 +226,15 @@ pub struct GenerationConfig {
     /// y deja al cliente con `out_tokens=0` (silencio).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_config: Option<ThinkingConfig>,
+    /// NEW — Phase 3a. Cuando se setea a "application/json", Gemini coerce
+    /// la salida a JSON válido. Usado por el pre-clasificador; runner no lo
+    /// setea (queda `None` → sin cambio de comportamiento).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_mime_type: Option<String>,
+    /// NEW — Phase 3a. Schema JSON opcional para reforzar la forma del output.
+    /// Pre-clasificador provee schema de 3 campos; runner deja `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_schema: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -279,6 +288,11 @@ pub struct UsageMetadata {
     /// el budget.
     #[serde(default)]
     pub thoughts_token_count: u32,
+    /// NEW — Phase 3a. Tokens servidos desde el caché implícito/explícito de
+    /// Gemini. Ausente cuando no hay cache hit; `#[serde(default)]` → 0.
+    /// Gemini cobra este subconjunto a la tarifa reducida (25 % del input rate).
+    #[serde(default)]
+    pub cached_content_token_count: u32,
 }
 
 // ─── Cliente ────────────────────────────────────────────────────────────────
@@ -655,19 +669,191 @@ pub async fn list_models(
 
 // ─── Helpers de costos (estimación) ─────────────────────────────────────────
 
-/// Estimación grosera de costo USD basada en tarifas Gemini 1.5 Flash (2025-Q1):
-/// - input: ~$0.075 / 1M tokens
-/// - output: ~$0.30 / 1M tokens
+/// Tarifas por 1M tokens (USD) para un modelo de la familia Gemini.
+/// Fuente: https://ai.google.dev/pricing — actualizar trimestralmente.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelRates {
+    /// Costo por 1M tokens de entrada (billable = input - cached).
+    pub input_per_m: f64,
+    /// Costo por 1M tokens de salida (incluye thinking tokens en Gemini).
+    pub output_per_m: f64,
+    /// Costo por 1M tokens servidos desde caché (25% del input rate).
+    pub cached_input_per_m: f64,
+}
+
+// Tarifas 2026-05. Fuente: https://ai.google.dev/pricing
+// Revisión trimestral recomendada.
+const RATES_FLASH: ModelRates = ModelRates {
+    input_per_m: 0.30,
+    output_per_m: 2.50,
+    cached_input_per_m: 0.075,
+};
+const RATES_FLASH_LITE: ModelRates = ModelRates {
+    input_per_m: 0.10,
+    output_per_m: 0.40,
+    cached_input_per_m: 0.025,
+};
+const RATES_PRO: ModelRates = ModelRates {
+    input_per_m: 1.25,
+    output_per_m: 10.00,
+    cached_input_per_m: 0.3125,
+};
+/// Fallback para modelos no reconocidos: usamos flash (sobreestima flash-lite,
+/// subestima pro — dirección segura para el use case más común).
+const RATES_DEFAULT: ModelRates = RATES_FLASH;
+
+/// Detecta la familia del modelo por substring y devuelve las tarifas
+/// correspondientes. Fallback = `RATES_DEFAULT` (flash) para modelos
+/// desconocidos — cost es estimación, no billing real.
+pub fn rate_for_model(model_id: &str) -> ModelRates {
+    let m = model_id.to_lowercase();
+    if m.contains("flash-lite") {
+        RATES_FLASH_LITE
+    } else if m.contains("flash") {
+        RATES_FLASH
+    } else if m.contains("pro") {
+        RATES_PRO
+    } else {
+        tracing::debug!("[gemini] model_id '{}' no reconocido — usando RATES_DEFAULT (flash)", model_id);
+        RATES_DEFAULT
+    }
+}
+
+/// Estimación de costo USD para un turno completo.
 ///
-/// Para Pro/2.0 los multiplicadores cambian — el cálculo sirve como referencia
-/// en la UI del sandbox y métricas, no para billing real.
-pub fn estimate_cost_usd(model_id: &str, input_tokens: u32, output_tokens: u32) -> f64 {
-    let (in_per_m, out_per_m) = match model_id {
-        m if m.contains("flash") => (0.075, 0.30),
-        m if m.contains("pro") => (1.25, 5.00),
-        _ => (0.075, 0.30),
-    };
-    let input = (input_tokens as f64) * in_per_m / 1_000_000.0;
-    let output = (output_tokens as f64) * out_per_m / 1_000_000.0;
-    input + output
+/// Formula:
+///   billable_input = input_tokens - cached_tokens
+///   cost = billable_input * input_rate + cached * cached_rate + (output + thinking) * output_rate
+///   (todo por 1M)
+///
+/// Los thinking tokens se cobran a la tarifa de output (documentado por Google).
+/// Los cached tokens se cobran a la tarifa reducida (~25% del input rate).
+///
+/// El resultado es una ESTIMACIÓN — el billing real viene de Google Console.
+pub fn estimate_cost_usd(
+    model_id: &str,
+    input_tokens: u32,
+    cached_tokens: u32,
+    output_tokens: u32,
+    thinking_tokens: u32,
+) -> f64 {
+    let r = rate_for_model(model_id);
+    let billable_input = input_tokens.saturating_sub(cached_tokens) as f64;
+    let cached = cached_tokens as f64;
+    let output = output_tokens as f64;
+    let thinking = thinking_tokens as f64;
+    (billable_input * r.input_per_m
+        + cached * r.cached_input_per_m
+        + output * r.output_per_m
+        + thinking * r.output_per_m)
+        / 1_000_000.0
+}
+
+/// Compatibilidad hacia atrás — llama a la firma de 5 argumentos con
+/// `cached_tokens = 0` y `thinking_tokens = 0`. Los callers legacy no
+/// necesitan cambiar hasta que tengan acceso a los tokens extra.
+#[allow(dead_code)]
+pub fn estimate_cost_usd_simple(model_id: &str, input_tokens: u32, output_tokens: u32) -> f64 {
+    estimate_cost_usd(model_id, input_tokens, 0, output_tokens, 0)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Unit tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── rate_for_model ────────────────────────────────────────────────────────
+
+    #[test]
+    fn rate_flash_lite() {
+        let r = rate_for_model("gemini-2.5-flash-lite");
+        assert_eq!(r.input_per_m, RATES_FLASH_LITE.input_per_m);
+        assert_eq!(r.output_per_m, RATES_FLASH_LITE.output_per_m);
+        assert_eq!(r.cached_input_per_m, RATES_FLASH_LITE.cached_input_per_m);
+    }
+
+    #[test]
+    fn rate_flash_lite_prefix_variant() {
+        // Asegura que "flash-lite" gana sobre "flash" (substring más específico).
+        let r = rate_for_model("gemini-2.5-flash-lite-preview");
+        assert_eq!(r.input_per_m, RATES_FLASH_LITE.input_per_m);
+    }
+
+    #[test]
+    fn rate_flash() {
+        let r = rate_for_model("gemini-2.0-flash-exp");
+        assert_eq!(r.input_per_m, RATES_FLASH.input_per_m);
+        assert_eq!(r.output_per_m, RATES_FLASH.output_per_m);
+    }
+
+    #[test]
+    fn rate_pro() {
+        let r = rate_for_model("gemini-1.5-pro-latest");
+        assert_eq!(r.input_per_m, RATES_PRO.input_per_m);
+        assert_eq!(r.output_per_m, RATES_PRO.output_per_m);
+    }
+
+    #[test]
+    fn rate_unknown_falls_back_to_default() {
+        let r = rate_for_model("gpt-4-turbo"); // not a gemini model
+        assert_eq!(r.input_per_m, RATES_DEFAULT.input_per_m);
+    }
+
+    #[test]
+    fn rate_case_insensitive() {
+        let r = rate_for_model("GEMINI-2.5-FLASH-LITE");
+        assert_eq!(r.input_per_m, RATES_FLASH_LITE.input_per_m);
+    }
+
+    // ── estimate_cost_usd ─────────────────────────────────────────────────────
+
+    #[test]
+    fn cost_zero_tokens_is_zero() {
+        let cost = estimate_cost_usd("gemini-2.5-flash", 0, 0, 0, 0);
+        assert_eq!(cost, 0.0);
+    }
+
+    #[test]
+    fn cost_flash_lite_basic() {
+        // 1M input + 1M output → 0.10 + 0.40 = 0.50 USD
+        let cost = estimate_cost_usd("gemini-2.5-flash-lite", 1_000_000, 0, 1_000_000, 0);
+        let expected = RATES_FLASH_LITE.input_per_m + RATES_FLASH_LITE.output_per_m;
+        assert!((cost - expected).abs() < 1e-9, "cost={cost}, expected={expected}");
+    }
+
+    #[test]
+    fn cost_cached_tokens_reduce_billable_input() {
+        // 1000 input, 500 cached → 500 billed at input_rate + 500 at cached_rate.
+        let r = RATES_FLASH;
+        let cost = estimate_cost_usd("gemini-2.0-flash-exp", 1000, 500, 0, 0);
+        let expected = (500.0 * r.input_per_m + 500.0 * r.cached_input_per_m) / 1_000_000.0;
+        assert!((cost - expected).abs() < 1e-12, "cost={cost}, expected={expected}");
+    }
+
+    #[test]
+    fn cost_thinking_tokens_billed_at_output_rate() {
+        // 0 input, 0 output, 1M thinking → billed at output rate.
+        let r = RATES_PRO;
+        let cost = estimate_cost_usd("gemini-1.5-pro-latest", 0, 0, 0, 1_000_000);
+        assert!((cost - r.output_per_m).abs() < 1e-9, "cost={cost}, expected={}", r.output_per_m);
+    }
+
+    #[test]
+    fn cost_cached_cannot_exceed_input() {
+        // Si cached > input, saturating_sub → 0 billable input; no panic.
+        let cost = estimate_cost_usd("gemini-2.5-flash", 100, 200, 50, 0);
+        // billable_input = 0, cached = 200 (but actual input was 100 — anomaly;
+        // we trust the caller; cost shouldn't be negative).
+        assert!(cost >= 0.0, "cost should not be negative: {cost}");
+    }
+
+    #[test]
+    fn cost_simple_shim_matches_zero_cached() {
+        let full = estimate_cost_usd("gemini-2.0-flash-exp", 500, 0, 200, 0);
+        let simple = estimate_cost_usd_simple("gemini-2.0-flash-exp", 500, 200);
+        assert_eq!(full, simple);
+    }
 }

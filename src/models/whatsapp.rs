@@ -997,8 +997,40 @@ pub struct WaSettings {
     /// siguen emitiendo state_patches pero se descartan silenciosamente.
     #[serde(default = "default_true")]
     pub enable_conversation_state: bool,
+    /// Phase 3a. Opt-in pre-classifier (gemini-2.5-flash-lite) before Sofía
+    /// gets the turn. Default `false` — admin enables per-workspace from UI.
+    #[serde(default)]
+    pub pre_classifier_enabled: bool,
+    /// Phase 3a. Templates for trivial-response replies (spam, greeting).
+    /// Empty = pre-classifier still runs, but Spam silent-drops and
+    /// GreetingOnly falls through to Sofía.
+    #[serde(default)]
+    pub trivial_responses: Vec<TrivialResponse>,
     pub created_at: DateTime,
     pub updated_at: DateTime,
+}
+
+/// Plantilla de respuesta rápida usada por el pre-clasificador (Phase 3a).
+/// Permite responder automáticamente a mensajes triviales (spam, saludo)
+/// sin invocar al agente principal.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TrivialResponse {
+    /// UUID estable. Permite que la UI SUPERADMIN edite/elimine sin ambigüedad.
+    pub id: String,
+    /// Tipo de respuesta: `"spam"` | `"greeting"` — coincide con la variante
+    /// que emite el pre-clasificador.
+    pub kind: String,
+    /// Patrones substring (case-insensitive, accent-insensitive via normalize_zone).
+    /// Vacío = coincide con cualquier texto de este `kind` (fallback).
+    pub triggers: Vec<String>,
+    /// Texto que se envía al cliente vía WhatsAppService.
+    pub response: String,
+    /// Deshabilitar sin borrar.
+    pub enabled: bool,
+    /// Mayor prioridad gana. Default 0. Sort estable preserva el orden de
+    /// declaración en empates.
+    #[serde(default)]
+    pub priority: i32,
 }
 
 /// Configuración de un template aprobado en Meta que se usará para un propósito dado.
@@ -1057,6 +1089,13 @@ pub struct UpdateSettingsRequest {
     pub active: Option<bool>,
     #[serde(default)]
     pub purposes: Option<WaPurposesPatch>,
+    /// Phase 3a. `true` activa el pre-clasificador para este workspace.
+    #[serde(default)]
+    pub pre_classifier_enabled: Option<bool>,
+    /// Phase 3a. Replace-all: la lista enviada REEMPLAZA la lista guardada.
+    /// Semántica intencional — la UI SUPERADMIN guarda el estado completo.
+    #[serde(default)]
+    pub trivial_responses: Option<Vec<TrivialResponse>>,
 }
 
 /// Patch per-purpose. Cada campo es tri-state:

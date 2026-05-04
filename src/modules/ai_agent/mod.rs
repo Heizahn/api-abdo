@@ -10,6 +10,7 @@ pub mod escalation;
 pub mod gemini;
 pub mod guardrails;
 pub mod handler;
+pub mod pre_classifier;
 pub mod runner;
 pub mod sandbox;
 pub mod seed;
@@ -61,6 +62,10 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/auth-user/whatsapp/ai-agent/agents/:id/sandbox",
             post(sandbox::sandbox_handler),
+        )
+        .route(
+            "/v1/auth-user/whatsapp/ai-agent/agents/:id/metrics",
+            get(handler::get_ai_agent_metrics_handler),
         )
         // Test connection / models RAW (pre-creación)
         .route(

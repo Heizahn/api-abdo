@@ -314,6 +314,14 @@ db.AiAgentFaqs.createIndex(
 );
 print("  ✅ AiAgentFaqs.agent_id + created_at desc");
 
+// Phase 3a — metrics aggregate over (agent_id, created_at) range.
+// Covers: get_ai_agent_metrics summary + daily pipelines.
+db.AiInteractions.createIndex(
+  { "agent_id": 1, "created_at": -1 },
+  { name: "agent_id_1_created_at_-1", background: true }
+);
+print("  ✅ AiInteractions.agent_id + created_at desc (Phase 3a metrics)");
+
 print("");
 
 // ============================================

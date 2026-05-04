@@ -3,9 +3,10 @@ use utoipa::OpenApi;
 use crate::db::mongo::{PaymentDetails, ResultGroupedByDate};
 use crate::models::ai_agent::{
     AiAgentDeleteResponse, AiAgentFaqItem, AiAgentFaqListResponse, AiAgentFaqResponse,
-    AiAgentItem, AiAgentMode, AiAgentModelItem, AiAgentModelsListResponse, AiAgentResponse,
-    AiAgentsListResponse, AiBusinessDataDeleteResponse, AiCoverageZoneItem,
-    AiCoverageZoneResponse, AiCoverageZonesListResponse, AiEscalationRulesDto,
+    AiAgentItem, AiAgentMetricsData, AiAgentMetricsDailyBucketDto, AiAgentMetricsResponse,
+    AiAgentMode, AiAgentModelItem, AiAgentModelsListResponse, AiAgentPreClassBreakdown,
+    AiAgentPurpose, AiAgentResponse, AiAgentsListResponse, AiBusinessDataDeleteResponse,
+    AiCoverageZoneItem, AiCoverageZoneResponse, AiCoverageZonesListResponse, AiEscalationRulesDto,
     AiEscalationRulesInput, AiLimitsDto, AiLimitsInput, AiModelConfigDto, AiModelConfigInput,
     AiPersonalityDto, AiPersonalityInput, AiPlanItem, AiPlanResponse, AiPlansListResponse,
     AiScheduleDto, AiScheduleInput, AiToolConfigDto, AiToolConfigInput,
@@ -60,6 +61,7 @@ use crate::models::whatsapp::{
     TransferAndTicketData, TransferAndTicketRequest, TransferAndTicketResponse,
     TransferConversationRequest, TransferableAgentItem, TransferableAgentsResponse,
     HeaderMediaUploadData, HeaderMediaUploadResponse,
+    TrivialResponse,
     UpdateQuickReplyRequest, UpdateResponse, UpdateSettingsRequest, UpdateTicketStatusRequest,
     UpdateWaTemplateRequest,
     WaTemplateHeaderInput, WaTemplateButtonInput,
@@ -183,6 +185,7 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
         crate::modules::ai_agent::handler::update_ai_agent_faq_handler,
         crate::modules::ai_agent::handler::delete_ai_agent_faq_handler,
         crate::modules::ai_agent::sandbox::sandbox_handler,
+        crate::modules::ai_agent::handler::get_ai_agent_metrics_handler,
         crate::modules::ai_agent::handler::test_connection_raw_handler,
         crate::modules::ai_agent::handler::test_connection_for_agent_handler,
         crate::modules::ai_agent::handler::list_models_raw_handler,
@@ -303,6 +306,11 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
             TestConnectionSource,
             // AI Agent — List models
             AiAgentModelItem, AiAgentModelsListResponse,
+            // AI Agent — Phase 3a (Pre-classifier + Metrics)
+            AiAgentPurpose,
+            TrivialResponse,
+            AiAgentMetricsResponse, AiAgentMetricsData, AiAgentPreClassBreakdown,
+            AiAgentMetricsDailyBucketDto,
             // AI Agent — datos de negocio
             AiPlanItem, CreateAiPlanRequest, UpdateAiPlanRequest,
             AiPlanResponse, AiPlansListResponse,
