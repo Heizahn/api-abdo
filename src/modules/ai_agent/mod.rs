@@ -8,6 +8,7 @@ pub mod business_data;
 pub mod dispatch;
 pub mod escalation;
 pub mod gemini;
+pub mod guardrails;
 pub mod handler;
 pub mod runner;
 pub mod sandbox;

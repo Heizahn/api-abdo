@@ -74,6 +74,16 @@ pub struct ToolContext {
     /// Categoría default que `create_ticket` usa cuando la IA no manda
     /// `category_id`. Sale de `escalation.default_ticket_category_id`.
     pub default_ticket_category_id: Option<String>,
+
+    /// Zonas (textos crudos normalizados) que el cliente mencionó en sus
+    /// mensajes inbound recientes. Precomputado en dispatch desde el slice
+    /// `recent`. Vacío en sandbox (los guardrails se gatean por
+    /// `is_sandbox` antes de leer este campo).
+    pub customer_explicit_zones: Vec<String>,
+
+    /// media_ids de mensajes inbound recientes con archivo adjunto.
+    /// Precomputado en dispatch. Vacío en sandbox.
+    pub recent_media_ids: Vec<String>,
 }
 
 #[allow(dead_code)]
@@ -692,6 +702,17 @@ async fn exec_check_coverage(args: Value, ctx: &ToolContext, started: Instant) -
         return ToolResult::err("missing_zone", started);
     }
 
+    // ── GUARDRAIL: zona debe haber sido mencionada por el cliente ──────────
+    if ctx.state.config.enable_ai_guardrails && !ctx.is_sandbox {
+        if !crate::modules::ai_agent::guardrails::validate_zone_mentioned(
+            raw,
+            &ctx.customer_explicit_zones,
+        ) {
+            return ToolResult::err("zone_not_mentioned_by_customer", started);
+        }
+    }
+    // ── /GUARDRAIL ──────────────────────────────────────────────────────────
+
     let zones = match load_active_zones(ctx).await {
         Ok(z) => z,
         Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
@@ -1164,6 +1185,15 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     // 2. Validate media_id non-empty
     if parsed.media_id.trim().is_empty() {
         return ToolResult::err("image_required", started);
+    }
+
+    // 2.b GUARDRAIL: media_id debe ser uno que el cliente haya enviado en
+    // los mensajes recientes (evita que la IA invente un ID).
+    if ctx.state.config.enable_ai_guardrails && !ctx.is_sandbox {
+        let mid = parsed.media_id.trim();
+        if !ctx.recent_media_ids.iter().any(|m| m == mid) {
+            return ToolResult::err("media_id_not_in_conversation", started);
+        }
     }
 
     // 3. Validate reference non-empty

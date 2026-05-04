@@ -275,6 +275,8 @@ pub async fn sandbox_handler(
         transfer_target_labels,
         agent_snapshot: agent_snapshot.clone(),
         default_ticket_category_id: agent.escalation.default_ticket_category_id.clone(),
+        customer_explicit_zones: Vec::new(),
+        recent_media_ids: Vec::new(),
     };
 
     use chrono::Datelike;
@@ -314,10 +316,11 @@ pub async fn sandbox_handler(
         &message,
         &[],
         faqs_inline.as_deref(),
-        None,
-        None,
-        None,
-        None,
+        None,            // customer_context
+        None,            // transfer_context
+        None,            // first_turn_note
+        None,            // agent_state
+        None,            // turn_state
         Some(&prompt_vars),
         &tool_ctx,
     )

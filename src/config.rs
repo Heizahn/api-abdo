@@ -70,6 +70,13 @@ pub struct Config {
     /// `https://aiplatform.googleapis.com/v1/publishers/google/models`
     /// El cliente le agrega `/{model}:generateContent` al final.
     pub gemini_base_url: Option<String>,
+
+    /// Server-side guardrails on AI Agent tool calls. When `true`, blocks:
+    ///   - `check_coverage` calls with zones the customer never mentioned.
+    ///   - `report_payment` calls with media_ids never seen in this conversation.
+    /// Set `ENABLE_AI_GUARDRAILS=false` (or `0` / `no`) to bypass — emergency
+    /// kill switch only; production should keep this `true`.
+    pub enable_ai_guardrails: bool,
 }
 
 impl Config {
@@ -153,6 +160,9 @@ impl Config {
             ai_relay_url: env::var("AI_RELAY_URL").ok().filter(|s| !s.is_empty()),
             ai_relay_secret: env::var("AI_RELAY_SECRET").ok().filter(|s| !s.is_empty()),
             gemini_base_url: env::var("GEMINI_BASE_URL").ok().filter(|s| !s.is_empty()),
+            enable_ai_guardrails: env::var("ENABLE_AI_GUARDRAILS")
+                .map(|v| !matches!(v.trim().to_lowercase().as_str(), "false" | "0" | "no"))
+                .unwrap_or(true),
         }
     }
 

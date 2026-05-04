@@ -180,6 +180,7 @@ fn build_system_instruction(
     transfer_context: Option<&str>,
     first_turn_note: Option<&str>,
     agent_state: Option<&str>,
+    turn_state: Option<&str>,
     vars: Option<&PromptVariables>,
 ) -> SystemInstruction {
     // El back solo pasa DATOS etiquetados — el SUPERADMIN decide el
@@ -258,6 +259,12 @@ fn build_system_instruction(
         }
     }
 
+    if let Some(ts) = turn_state {
+        if !ts.trim().is_empty() {
+            chunks.push(format!("[turn_state]\n{}", ts.trim()));
+        }
+    }
+
     if let Some(faqs) = faqs_inline {
         if !faqs.trim().is_empty() {
             chunks.push(format!("[faqs]\n{}", faqs.trim()));
@@ -307,6 +314,7 @@ pub async fn run_turn(
     transfer_context: Option<&str>,
     first_turn_note: Option<&str>,
     agent_state: Option<&str>,
+    turn_state: Option<&str>,
     prompt_vars: Option<&PromptVariables>,
     tool_ctx: &ToolContext,
 ) -> Result<RunnerOutput, ApiError> {
@@ -318,6 +326,7 @@ pub async fn run_turn(
         transfer_context,
         first_turn_note,
         agent_state,
+        turn_state,
         prompt_vars,
     );
 

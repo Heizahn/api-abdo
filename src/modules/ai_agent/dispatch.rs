@@ -36,6 +36,7 @@ use crate::{
 use super::{
     escalation,
     gemini::AiRelay,
+    guardrails,
     runner::{decrypt_api_key, run_turn, ConvRole, ConvTurn, MediaInput, PromptVariables},
     tools::{extract_allowed_transfer_targets, ToolContext},
 };
@@ -297,6 +298,14 @@ async fn run_dispatch(
         .list_recent_messages_for_conversation(&inbound.conversation_id, RECENT_WINDOW)
         .await?;
 
+    // ── Guardrail data + turn-state HUD (precomputado por turno) ────────────
+    // Vive a este nivel porque NO cambia entre iteraciones del chain de
+    // transfer (zones / media_ids / intents son función del cliente, no del
+    // agente activo). turn_number también se computa una vez por turno.
+    let customer_explicit_zones = guardrails::extract_customer_explicit_zones(&recent);
+    let recent_media_ids = guardrails::extract_recent_media_ids(&recent);
+    let customer_explicit_intents = guardrails::extract_customer_explicit_intents(&recent);
+
     // History: todo lo que NO está en la ráfaga. Esto incluye outbounds
     // posteriores al inbound_oid (porque el bot pudo haber respondido a
     // un turno previo mientras este mensaje quedaba pendiente). Los
@@ -321,6 +330,15 @@ async fn run_dispatch(
             Some(ConvTurn { role, text })
         })
         .collect();
+
+    // El history que ve el modelo arranca desde full_history (puede recortarse
+    // adelante por fresh-start). Para turn_number contamos `User` turns en
+    // ESTE history — que es lo que efectivamente ve Gemini.
+    let turn_state_owned: Option<String> = guardrails::build_turn_state(
+        &full_history,
+        &customer_explicit_zones,
+        &customer_explicit_intents,
+    );
 
     // ── Fresh-start detection ──────────────────────────────────────────────
     // Si la IA NUNCA respondió en esta conv y hay history previo (mensajes
@@ -557,6 +575,8 @@ async fn run_dispatch(
             transfer_target_labels,
             agent_snapshot: agent_snapshot.clone(),
             default_ticket_category_id: active_agent.escalation.default_ticket_category_id.clone(),
+            customer_explicit_zones: customer_explicit_zones.clone(),
+            recent_media_ids: recent_media_ids.clone(),
         };
 
         // FAQs y prompt_vars del agente activo (assistant_name cambia entre
@@ -640,6 +660,7 @@ async fn run_dispatch(
             active_transfer_context.as_deref(),
             ftn_for_iter,
             agent_state_owned.as_deref(),
+            turn_state_owned.as_deref(),
             Some(&active_prompt_vars),
             &tool_ctx,
         )
