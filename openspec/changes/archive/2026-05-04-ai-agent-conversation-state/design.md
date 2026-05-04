@@ -952,7 +952,7 @@ POST /v1/auth-user/whatsapp/conversations/{id}/ai-state/reset
    - `completed_actions` contains `"lookup_customer"`.
 3. **`check_coverage` patch.** Customer says `"vivo en Valencia"`, IA calls `check_coverage("Valencia")`:
    - `aiConvState.collected_data.zone === "Valencia"` (or matched_zone if different).
-   - `completed_actions` ⊇ `["lookup_customer", "check_coverage"]`.
+   - `aiConvState.completed_actions` ⊇ `["lookup_customer", "check_coverage"]`.
 4. **Transfer to ventas.** IA calls `transfer_to_agent` with the ventas agent:
    - `aiConvState.current_step === "transferred_to_ventas"` (or slugified label).
    - `aiConvState.current_intent === null` (cleared by transfer-reset).

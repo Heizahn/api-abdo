@@ -2,7 +2,7 @@
 
 ## Capability: ai-agent / conversation state
 
-Delta over `openspec/specs/ai-agent/spec.md` (Requirements 1–14). Adds Requirements 15–23.
+Delta over `openspec/specs/ai-agent/spec.md` (Requirements 1–14). Adds Requirements 15–24.
 
 ---
 
@@ -283,6 +283,28 @@ The Mongo impl MUST use `$set` to persist the value atomically.
 
 ---
 
+### Requirement 23: Kill Switch — enable_ai_conversation_state
+
+`Config` MUST expose `enable_ai_conversation_state: bool` (default `true`).
+When `false`, dispatch MUST skip the `[conversation_state]` block injection AND skip the
+post-turn state write. Accumulated `state_patches` from tools MUST be silently discarded.
+
+#### Scenario 23.1: Kill switch off — no read, no write
+
+- GIVEN `Config.enable_ai_conversation_state = false`
+- WHEN dispatch runs a turn
+- THEN no `[conversation_state]` block MUST appear in the system instruction
+- AND `update_conversation_ai_conv_state` MUST NOT be called
+- AND tools still execute normally; their `state_patches` are simply discarded
+
+#### Scenario 23.2: Kill switch on — default behavior
+
+- GIVEN `Config.enable_ai_conversation_state = true` (default, env var not set)
+- WHEN the server starts
+- THEN the full state lifecycle (Requirements 19–21) MUST be active
+
+---
+
 ### Requirement 24: WS Broadcast on State Change
 
 The system MUST broadcast a WebSocket event `CONVERSACION_ESTADO_IA` to all connected agents whenever `ai_conv_state` changes for a conversation. This includes:
@@ -312,25 +334,3 @@ The broadcast event payload MUST be:
 - GIVEN a turn produces zero state_patches AND `current_intent` derivation is also a no-op (no change)
 - WHEN dispatch finishes
 - THEN no `CONVERSACION_ESTADO_IA` event MUST be emitted (avoid noise)
-
----
-
-### Requirement 23: Kill Switch — enable_ai_conversation_state
-
-`Config` MUST expose `enable_ai_conversation_state: bool` (default `true`).
-When `false`, dispatch MUST skip the `[conversation_state]` block injection AND skip the
-post-turn state write. Accumulated `state_patches` from tools MUST be silently discarded.
-
-#### Scenario 23.1: Kill switch off — no read, no write
-
-- GIVEN `Config.enable_ai_conversation_state = false`
-- WHEN dispatch runs a turn
-- THEN no `[conversation_state]` block MUST appear in the system instruction
-- AND `update_conversation_ai_conv_state` MUST NOT be called
-- AND tools still execute normally; their `state_patches` are simply discarded
-
-#### Scenario 23.2: Kill switch on — default behavior
-
-- GIVEN `Config.enable_ai_conversation_state = true` (default, env var not set)
-- WHEN the server starts
-- THEN the full state lifecycle (Requirements 19–21) MUST be active
