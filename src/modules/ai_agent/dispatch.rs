@@ -28,7 +28,7 @@ use crate::{
     },
     models::{
         ai_agent::{AiAgent, AiAgentMode},
-        whatsapp::WaMessage,
+        whatsapp::{StatePatch, WaConversationAiState, WaMessage},
     },
     state::AppState,
 };
@@ -38,6 +38,7 @@ use super::{
     gemini::AiRelay,
     guardrails,
     runner::{decrypt_api_key, run_turn, ConvRole, ConvTurn, MediaInput, PromptVariables},
+    state::{apply_state_patches, format_conversation_state},
     tools::{extract_allowed_transfer_targets, ToolContext},
 };
 
@@ -518,6 +519,23 @@ async fn run_dispatch(
     const MAX_TRANSFER_CHAIN: u32 = 2;
     let initial_transfer_context_owned = conv.ai_transfer_context.clone();
 
+    // ── Phase 2: conversation state ────────────────────────────────────────
+    // current_ai_conv_state: snapshot al inicio del dispatch (antes del chain).
+    // Aplica solo si el kill switch está activo.
+    let current_ai_conv_state: Option<WaConversationAiState> =
+        if state.config.enable_ai_conversation_state {
+            conv.ai_conv_state.clone()
+        } else {
+            None
+        };
+    // conversation_state_owned: el bloque [conversation_state] formateado para
+    // inyectar en el system_instruction del PRIMER agente del chain. En chain
+    // steps > 0, no lo inyectamos (el target arranca sin estado del anterior).
+    let conversation_state_owned: Option<String> =
+        current_ai_conv_state.as_ref().map(format_conversation_state);
+    // Acumulador de todos los patches emitidos durante el chain completo.
+    let mut all_state_patches: Vec<StatePatch> = Vec::new();
+
     let mut active_agent: AiAgent = agent;
     let mut active_api_key: String = api_key;
     let mut active_transfer_context: Option<String> = initial_transfer_context_owned.clone();
@@ -661,6 +679,9 @@ async fn run_dispatch(
             ftn_for_iter,
             agent_state_owned.as_deref(),
             turn_state_owned.as_deref(),
+            // Inyectamos el estado solo en el primer paso del chain (chain_count==0).
+            // En pasos > 0 el target arranca sin estado heredado del anterior.
+            if chain_count == 0 { conversation_state_owned.as_deref() } else { None },
             Some(&active_prompt_vars),
             &tool_ctx,
         )
@@ -690,6 +711,9 @@ async fn run_dispatch(
             output.latency_ms,
             chain_count
         );
+
+        // Acumular patches de este turno.
+        all_state_patches.extend(output.state_patches.iter().cloned());
 
         // Persistir AiInteraction de esta iteración (auditoría completa por
         // turno — cada agente queda con su propio registro).
@@ -830,6 +854,54 @@ async fn run_dispatch(
     let last_agent_id = last_agent
         .id
         .ok_or_else(|| "last_agent sin _id".to_string())?;
+
+    // ── Phase 2: fold state patches + persistir ai_conv_state ─────────────
+    if state.config.enable_ai_conversation_state && !all_state_patches.is_empty() {
+        let base = current_ai_conv_state
+            .clone()
+            .unwrap_or_default();
+        let mut new_state = apply_state_patches(base, &all_state_patches);
+
+        // Transfer-reset: si el último step es "transferred_to_*" limpiamos el
+        // intent para que el próximo agente en la cadena (o en el próximo turno)
+        // reclasifique. El step se mantiene para que el agente sepa de dónde
+        // viene el cliente.
+        if new_state
+            .current_step
+            .as_deref()
+            .map(|s| s.starts_with("transferred_to_"))
+            .unwrap_or(false)
+        {
+            new_state.current_intent = None;
+            new_state.intent_confidence = None;
+        }
+
+        if Some(&new_state) != current_ai_conv_state.as_ref() {
+            if let Err(e) = state
+                .db
+                .update_conversation_ai_conv_state(&inbound.conversation_id, Some(&new_state))
+                .await
+            {
+                tracing::warn!(
+                    "[ai_agent.dispatch] persistir ai_conv_state falló (conv={}): {}",
+                    conv_hex,
+                    e
+                );
+            } else {
+                tracing::debug!(
+                    "[ai_agent.dispatch] ai_conv_state actualizado (conv={})",
+                    conv_hex
+                );
+                // Broadcast WS para que el front actualice el panel de estado IA.
+                let state_json = serde_json::to_value(&new_state).ok();
+                let ev = crate::modules::whatsapp::ws::WsServerEvent::ConversacionEstadoIa {
+                    conversation_id: inbound.conversation_id.to_hex(),
+                    ai_conv_state: state_json,
+                };
+                crate::modules::whatsapp::ws::broadcast_all(&state.ws_registry, &ev).await;
+            }
+        }
+    }
 
     // ── Marcar inbounds como procesados por IA ────────────────────────────
     let burst_msg_ids: Vec<ObjectId> = burst.iter().filter_map(|m| m.id).collect();

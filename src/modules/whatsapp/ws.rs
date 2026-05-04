@@ -197,6 +197,17 @@ pub enum WsServerEvent {
         ai_processed_at: String,
     },
 
+    /// El estado IA de una conversación cambió (o fue limpiado).
+    /// Se emite tras cada dispatch que modifique `aiConvState` y tras un reset manual.
+    /// El front mergea los campos en la conversación por `conversation_id`.
+    /// Cuando `ai_conv_state` es `null`, el estado fue borrado (reopen / reset manual).
+    #[serde(rename = "CONVERSACION_ESTADO_IA")]
+    ConversacionEstadoIa {
+        conversation_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ai_conv_state: Option<serde_json::Value>,
+    },
+
     #[serde(rename = "ERROR")]
     Error { error: String },
 

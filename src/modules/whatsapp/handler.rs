@@ -2182,6 +2182,13 @@ pub async fn reopen_conversation_handler(
         };
         broadcast_all(&state.ws_registry, &ev).await;
 
+        // Notificar al front que ai_conv_state fue limpiado (null = borrado).
+        let ev_ia = WsServerEvent::ConversacionEstadoIa {
+            conversation_id: id.clone(),
+            ai_conv_state: None,
+        };
+        broadcast_all(&state.ws_registry, &ev_ia).await;
+
         record_conv_event(&state, WaConversationEventInput {
             conversation_id: &oid,
             business_phone: &business_phone_for_audit,
@@ -3821,6 +3828,7 @@ fn conv_to_item(
         ai_active_agent_id: c.ai_active_agent_id.map(|o| o.to_hex()),
         ai_disabled: c.ai_disabled,
         ai_last_processed_at: c.ai_last_processed_at.map(iso8601),
+        ai_conv_state: c.ai_conv_state,
     }
 }
 
@@ -5872,4 +5880,96 @@ pub async fn upload_template_header_media_handler(
             sha256: stored.sha256,
         },
     }))
+}
+
+// ============================================
+// RESET AI CONVERSATION STATE
+// ============================================
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct ResetAiStateResponse {
+    pub ok: bool,
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/conversations/{id}/agent-state/reset",
+    tag = "WhatsApp — Conversaciones",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ObjectId hex de la conversación")),
+    responses(
+        (status = 200, description = "Estado IA reseteado", body = ResetAiStateResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Requiere bCanChat y rol supervisor"),
+        (status = 404, description = "Conversación no encontrada"),
+        (status = 409, description = "dispatch_in_progress — el dispatch está corriendo, reintentá en segundos"),
+    )
+)]
+pub async fn reset_ai_conv_state_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+) -> Result<Json<ResetAiStateResponse>, ApiError> {
+    // Requiere bCanChat Y rol supervisor (superadmin / operador / contador).
+    let caller = require_can_chat(&state, &claims.id).await?;
+    if caller.role != 0.0 && caller.role != 0.5 && caller.role != 1.0 {
+        return Err(ApiError::Forbidden);
+    }
+
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+
+    // Verificar que la conv existe.
+    let conv = state
+        .db
+        .find_conversation_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    // Si el dispatch está corriendo para esta conv, rechazamos para no
+    // crear race conditions con el estado que se va a persistir al final
+    // del dispatch. El caller puede reintentar en unos segundos.
+    if !state.redis.try_lock_ai_dispatch(&id).await {
+        return Err(ApiError::domain_simple(
+            StatusCode::CONFLICT,
+            "dispatch_in_progress",
+            "El agente IA está procesando esta conversación. Reintentá en unos segundos.",
+        ));
+    }
+    // Tenemos el lock: lo liberamos inmediatamente (solo lo usamos para chequear).
+    state.redis.release_ai_dispatch_lock(&id).await;
+
+    // Borrar el estado IA.
+    state
+        .db
+        .update_conversation_ai_conv_state(&oid, None)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    tracing::info!(
+        "[ai_agent] ai_conv_state reset manual (conv={}, by={})",
+        id,
+        claims.id
+    );
+
+    // Auditoría con el patrón WaConversationEvent.
+    record_conv_event(&state, WaConversationEventInput {
+        conversation_id: &oid,
+        business_phone: &conv.business_phone,
+        event_type: "ai_state_reset",
+        actor_id: Some(claims.id.as_str()),
+        actor_name: Some(claims.name.as_str()),
+        target_id: None,
+        target_name: None,
+        note: Some("Reset manual del estado IA por supervisor"),
+    }).await;
+
+    // Broadcast WS: ai_conv_state = null (limpiado).
+    let ev = WsServerEvent::ConversacionEstadoIa {
+        conversation_id: id.clone(),
+        ai_conv_state: None,
+    };
+    broadcast_all(&state.ws_registry, &ev).await;
+
+    Ok(Json(ResetAiStateResponse { ok: true }))
 }

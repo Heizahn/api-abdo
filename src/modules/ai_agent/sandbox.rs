@@ -321,6 +321,7 @@ pub async fn sandbox_handler(
         None,            // first_turn_note
         None,            // agent_state
         None,            // turn_state
+        None,            // conversation_state — sandbox is stateless (Phase 2)
         Some(&prompt_vars),
         &tool_ctx,
     )

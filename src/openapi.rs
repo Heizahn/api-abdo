@@ -43,6 +43,7 @@ use crate::models::users::{
     UserItem, UserListResponse, UserLoginRequest, UserLoginResponse, UserResponse,
     UserResponseEnvelope,
 };
+use crate::modules::whatsapp::handler::ResetAiStateResponse;
 use crate::models::whatsapp::{
     ConversationDetailResponse, ConversationItem, ConversationMessagesResponse, ConversationStats,
     ConversationStatsResponse, ConversationsListResponse, CreateQuickReplyRequest,
@@ -141,6 +142,7 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
         crate::modules::whatsapp::handler::transfer_conversation_handler,
         crate::modules::whatsapp::handler::close_conversation_handler,
         crate::modules::whatsapp::handler::reopen_conversation_handler,
+        crate::modules::whatsapp::handler::reset_ai_conv_state_handler,
         crate::modules::whatsapp::handler::initiate_conversation_handler,
         crate::modules::whatsapp::handler::list_transferable_agents_handler,
         crate::modules::whatsapp::handler::list_settings_handler,
@@ -309,6 +311,8 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
             AiBusinessDataDeleteResponse,
             // AI Agent — discovery
             AiToolMetaItem, AiToolsListResponse,
+            // AI Agent — conversation state
+            ResetAiStateResponse,
         )
     ),
     tags(

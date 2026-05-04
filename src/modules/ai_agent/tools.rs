@@ -24,12 +24,13 @@ use crate::{
     },
     models::{
         ai_agent::{AiAgent, AiAgentMode, AiInvoice, AiToolConfig},
-        whatsapp::{WaTicket, WaTicketTimelineEntry},
+        whatsapp::{StatePatch, WaTicket, WaTicketTimelineEntry},
     },
     state::AppState,
 };
 
 use super::escalation;
+use super::state::slugify_label;
 
 use super::gemini::FunctionDeclaration;
 
@@ -97,6 +98,10 @@ pub struct ToolResult {
     pub data: Value,
     pub error: Option<String>,
     pub duration_ms: u32,
+    /// Patches que el dispatch plegará en `WaConversation.ai_conv_state`
+    /// después del chain loop. Vacío por defecto — las tools opt-in con
+    /// `.with_patches(vec![...])` en el path de éxito.
+    pub state_patches: Vec<StatePatch>,
 }
 
 impl ToolResult {
@@ -106,6 +111,7 @@ impl ToolResult {
             data,
             error: None,
             duration_ms: started.elapsed().as_millis() as u32,
+            state_patches: Vec::new(),
         }
     }
     fn err(msg: impl Into<String>, started: Instant) -> Self {
@@ -115,7 +121,14 @@ impl ToolResult {
             data: json!({ "error": &m }),
             error: Some(m),
             duration_ms: started.elapsed().as_millis() as u32,
+            state_patches: Vec::new(),
         }
+    }
+    /// Builder: adjunta patches al resultado. Las tools lo llaman en el
+    /// path de éxito: `ToolResult::ok(...).with_patches(vec![...])`.
+    fn with_patches(mut self, patches: Vec<StatePatch>) -> Self {
+        self.state_patches = patches;
+        self
     }
 }
 
@@ -510,7 +523,19 @@ async fn exec_lookup_customer(args: Value, ctx: &ToolContext, started: Instant) 
         .find_clients_for_ai_lookup(phone, id)
         .await
     {
-        Ok(items) => ToolResult::ok(json!({ "items": items }), started),
+        Ok(items) => {
+            // Patch: si hay al menos un resultado, colectar el client_id del primero.
+            let patches = if let Some(first) = items.first() {
+                let cid = first.client_id.clone();
+                vec![
+                    StatePatch::SetCollectedData { key: "client_id".into(), value: cid },
+                    StatePatch::AddCompletedAction("lookup_customer".into()),
+                ]
+            } else {
+                vec![StatePatch::AddCompletedAction("lookup_customer".into())]
+            };
+            ToolResult::ok(json!({ "items": items }), started).with_patches(patches)
+        }
         Err(e) => ToolResult::err(format!("db_error:{}", e), started),
     }
 }
@@ -563,6 +588,7 @@ async fn exec_get_invoices(args: Value, ctx: &ToolContext, started: Instant) -> 
         .collect();
 
     ToolResult::ok(json!({ "items": invoices }), started)
+        .with_patches(vec![StatePatch::AddCompletedAction("get_invoices".into())])
 }
 
 // ============================================
@@ -622,6 +648,10 @@ async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) ->
         }),
         started,
     )
+    .with_patches(vec![
+        StatePatch::AddCompletedAction("request_human".into()),
+        StatePatch::SetCurrentStep("transferred_to_human".into()),
+    ])
 }
 
 // ============================================
@@ -631,7 +661,8 @@ async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) ->
 async fn exec_list_plans(_args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
     if let Some(cached) = ctx.state.redis.get_ai_plans_cache().await {
         if let Ok(parsed) = serde_json::from_str::<Value>(&cached) {
-            return ToolResult::ok(parsed, started);
+            return ToolResult::ok(parsed, started)
+                .with_patches(vec![StatePatch::AddCompletedAction("list_plans".into())]);
         }
     }
 
@@ -658,6 +689,7 @@ async fn exec_list_plans(_args: Value, ctx: &ToolContext, started: Instant) -> T
         ctx.state.redis.set_ai_plans_cache(&s, AI_BUSINESS_CACHE_TTL_SECS).await;
     }
     ToolResult::ok(response, started)
+        .with_patches(vec![StatePatch::AddCompletedAction("list_plans".into())])
 }
 
 // ============================================
@@ -724,15 +756,31 @@ async fn exec_check_coverage(args: Value, ctx: &ToolContext, started: Instant) -
         normalized == nz || normalized.contains(&nz) || nz.contains(&normalized)
     });
 
+    let covered = matched.is_some();
     let (matched_zone, region) = match matched {
         Some(z) => (Some(z.name.clone()), Some(z.region.clone())),
         None => (None, None),
     };
     let available_zones: Vec<&str> = zones.iter().map(|z| z.name.as_str()).collect();
 
+    // Patch: si hay cobertura, guardar la zona matcheada (o la consultada como
+    // fallback). Siempre registrar la acción completada.
+    let patches = if covered {
+        let zone_value = matched_zone
+            .as_deref()
+            .unwrap_or(raw)
+            .to_string();
+        vec![
+            StatePatch::SetCollectedData { key: "zone".into(), value: zone_value },
+            StatePatch::AddCompletedAction("check_coverage".into()),
+        ]
+    } else {
+        vec![StatePatch::AddCompletedAction("check_coverage".into())]
+    };
+
     ToolResult::ok(
         json!({
-            "covered": matched.is_some(),
+            "covered": covered,
             "matched_zone": matched_zone,
             "queried_zone": raw,
             "region": region,
@@ -740,6 +788,7 @@ async fn exec_check_coverage(args: Value, ctx: &ToolContext, started: Instant) -
         }),
         started,
     )
+    .with_patches(patches)
 }
 
 // ============================================
@@ -848,7 +897,11 @@ async fn exec_transfer_to_agent(args: Value, ctx: &ToolContext, started: Instant
                 "reason": reason,
             }),
             started,
-        );
+        )
+        .with_patches(vec![
+            StatePatch::AddCompletedAction("transfer_to_agent".into()),
+            StatePatch::SetCurrentStep("cross_workspace_redirect".into()),
+        ]);
     }
 
     // Mismo workspace: persistir routing para que el próximo turno (en la
@@ -889,6 +942,7 @@ async fn exec_transfer_to_agent(args: Value, ctx: &ToolContext, started: Instant
     };
     crate::modules::whatsapp::ws::broadcast_all(&ctx.state.ws_registry, &event).await;
 
+    let step = format!("transferred_to_{}", slugify_label(&target.label));
     ToolResult::ok(
         json!({
             "ok": true,
@@ -899,6 +953,10 @@ async fn exec_transfer_to_agent(args: Value, ctx: &ToolContext, started: Instant
         }),
         started,
     )
+    .with_patches(vec![
+        StatePatch::AddCompletedAction("transfer_to_agent".into()),
+        StatePatch::SetCurrentStep(step),
+    ])
 }
 
 /// "584125403745" → "+58 412 540 3745". Defensivo: si el formato no matchea
@@ -1057,16 +1115,22 @@ async fn exec_create_ticket(args: Value, ctx: &ToolContext, started: Instant) ->
         }
     }
 
+    let ticket_id = saved.id.map(|o| o.to_hex()).unwrap_or_default();
     ToolResult::ok(
         json!({
             "ok": true,
             "mode": "live",
-            "ticket_id": saved.id.map(|o| o.to_hex()).unwrap_or_default(),
+            "ticket_id": ticket_id,
             "category_id": category_id,
             "category_label": label,
         }),
         started,
     )
+    .with_patches(vec![
+        StatePatch::AddCompletedAction("create_ticket".into()),
+        StatePatch::SetCurrentStep("ticket_created".into()),
+        StatePatch::SetCollectedData { key: "ticket_id".into(), value: ticket_id },
+    ])
 }
 
 // ============================================
@@ -1142,6 +1206,9 @@ async fn exec_calculate_amount_bs(
         }),
         started,
     )
+    .with_patches(vec![StatePatch::AddCompletedAction(
+        "calculate_amount_bs".into(),
+    )])
 }
 
 // ============================================
@@ -1262,7 +1329,10 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
                     "matched_amount_usd": match_info.n_amount,
                 }),
                 started,
-            );
+            )
+            .with_patches(vec![StatePatch::SetCurrentStep(
+                "payment_already_registered".into(),
+            )]);
         }
         Ok(None) => {} // proceed
         Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
@@ -1429,4 +1499,8 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         }),
         started,
     )
+    .with_patches(vec![
+        StatePatch::AddCompletedAction("report_payment".into()),
+        StatePatch::SetCurrentStep("payment_reported".into()),
+    ])
 }

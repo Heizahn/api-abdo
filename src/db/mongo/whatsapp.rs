@@ -16,7 +16,7 @@ use crate::db::{
     WaTemplateUpdatePatch, WaTicketRepository, WhatsAppRepository,
 };
 use crate::db::mongo::MongoDB;
-use crate::models::whatsapp::{ConversationStats, UrlPreview, WaConversation, WaConversationEvent, WaConversationEventInput, WaConversationOpen, WaMessage, WaPurposesPatch, WaQuickReply, WaSettings, WaTemplate, WaTemplateStatus, WaPurposeUsage, WaTicket};
+use crate::models::whatsapp::{ConversationStats, UrlPreview, WaConversation, WaConversationAiState, WaConversationEvent, WaConversationEventInput, WaConversationOpen, WaMessage, WaPurposesPatch, WaQuickReply, WaSettings, WaTemplate, WaTemplateStatus, WaPurposeUsage, WaTicket};
 
 impl MongoDB {
     pub(crate) fn wa_conversations(&self) -> mongodb::Collection<WaConversation> {
@@ -476,11 +476,15 @@ impl WhatsAppRepository for MongoDB {
                         "assigned_to": "",
                         "ai_active_agent_id": "",
                         "ai_transfer_context": "",
+                        "aiConvState": "",
                     },
                 },
             )
             .await
             .map_err(|e| e.to_string())?;
+        if res.modified_count > 0 {
+            tracing::info!("[ai_agent] ai_conv_state cleared on reopen conv={}", id.to_hex());
+        }
         Ok(res.modified_count > 0)
     }
 
@@ -546,6 +550,26 @@ impl WhatsAppRepository for MongoDB {
             .await
             .map_err(|e| e.to_string())?;
         Ok(res.matched_count > 0)
+    }
+
+    async fn update_conversation_ai_conv_state(
+        &self,
+        conv_id: &ObjectId,
+        state: Option<&WaConversationAiState>,
+    ) -> Result<(), String> {
+        let update = match state {
+            Some(s) => {
+                let bson_state = mongodb::bson::to_bson(s)
+                    .map_err(|e| format!("serialize ai_conv_state: {}", e))?;
+                doc! { "$set": { "aiConvState": bson_state } }
+            }
+            None => doc! { "$unset": { "aiConvState": "" } },
+        };
+        self.wa_conversations()
+            .update_one(doc! { "_id": conv_id }, update)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     async fn assign_conversation(

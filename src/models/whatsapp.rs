@@ -1,6 +1,76 @@
+use std::collections::BTreeMap;
+
+use chrono::{DateTime as ChronoDateTime, Utc};
 use mongodb::bson::{oid::ObjectId, DateTime};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+
+// ============================================
+// AI CONVERSATION STATE (Phase 2)
+// ============================================
+
+/// Registro de un intento fallido de tool en un turno IA.
+/// Parte del historial de diagnóstico embebido en `WaConversationAiState`.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, PartialEq)]
+pub struct FailedAttempt {
+    pub tool: String,
+    pub error: String,
+    /// UTC timestamp del intento fallido.
+    pub at: ChronoDateTime<Utc>,
+}
+
+/// Estado persistido de la IA por conversación. Embebido en `WaConversation`
+/// como `aiConvState` (camelCase en MongoDB). `None` = conversación nueva o
+/// sin turno IA aún. Se lee una vez al inicio del dispatch y se escribe una
+/// vez al final del chain (dentro del lock `try_lock_ai_dispatch`).
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default, PartialEq)]
+pub struct WaConversationAiState {
+    /// Intención activa del cliente (llave del grupo en `INTENT_KEYWORDS`).
+    /// `None` hasta que el dispatch la derive desde `customer_explicit_intents`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_intent: Option<String>,
+
+    /// Confianza 0.0–1.0. v1 siempre 1.0 (derivada por keywords deterministas).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_confidence: Option<f32>,
+
+    /// Contexto freeform recolectado. Máx 20 llaves × 500 chars/valor.
+    /// Ejemplos: `client_id`, `zone`, `payment_reference`, `plan_name`.
+    #[serde(default)]
+    pub collected_data: BTreeMap<String, String>,
+
+    /// Lista de preguntas que la IA aún espera respuesta. Cap 20.
+    #[serde(default)]
+    pub pending_data: Vec<String>,
+
+    /// Tools/acciones que completaron con éxito, deduplicadas. FIFO cap 50.
+    #[serde(default)]
+    pub completed_actions: Vec<String>,
+
+    /// Marcador de paso libre. Ejemplos: `"transferred_to_ventas"`,
+    /// `"ticket_created"`, `"payment_reported"`. No lo parsea el back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_step: Option<String>,
+
+    /// Ring buffer FIFO de los últimos 5 intentos fallidos (diagnóstico).
+    #[serde(default)]
+    pub failed_attempts: Vec<FailedAttempt>,
+
+    /// Última vez que se modificó este estado (siempre seteado).
+    pub updated_at: ChronoDateTime<Utc>,
+}
+
+/// Patch atómico emitido por una tool en su `ToolResult.state_patches`.
+/// El dispatch los acumula a lo largo del chain y los pliega al final.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind")]
+pub enum StatePatch {
+    SetIntent { intent: String, confidence: f32 },
+    SetCollectedData { key: String, value: String },
+    AddCompletedAction(String),
+    SetCurrentStep(String),
+    AddFailedAttempt { tool: String, error: String },
+}
 
 // ============================================
 // DOCUMENTOS DE BASE DE DATOS
@@ -94,6 +164,11 @@ pub struct WaConversation {
     /// receipts de Meta. `None` cuando la IA nunca atendió esta conv.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_last_processed_at: Option<DateTime>,
+    /// Estado IA persistido de esta conversación. Se lee al inicio del dispatch
+    /// y se escribe al final del chain. `None` en convs legacy o sin turno IA.
+    /// Ver `WaConversationAiState`.
+    #[serde(rename = "aiConvState", skip_serializing_if = "Option::is_none", default)]
+    pub ai_conv_state: Option<WaConversationAiState>,
 }
 
 /// Registro "conversación abierta por agente X en fecha Y" (colección `WaConversationOpens`).
@@ -691,6 +766,11 @@ pub struct ConversationItem {
     /// "IA respondió hace X" en el listado sin tocar `unread_count`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ai_last_processed_at: Option<String>,
+    /// Estado IA persistido — mismo shape que en `WaConversation`. El front
+    /// lo muestra en el sidebar de detalle para que un agente humano vea
+    /// qué recolectó la IA antes del takeover.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_conv_state: Option<WaConversationAiState>,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema)]

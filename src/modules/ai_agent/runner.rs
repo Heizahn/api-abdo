@@ -27,7 +27,10 @@ use std::time::Instant;
 use crate::{
     crypto::aes::decrypt_payload,
     error::ApiError,
-    models::ai_agent::{AiAgent, AiInteraction, AiToolCallLog},
+    models::{
+        ai_agent::{AiAgent, AiInteraction, AiToolCallLog},
+        whatsapp::StatePatch,
+    },
 };
 
 /// Valores que el back inyecta en `system_prompt` reemplazando los
@@ -132,6 +135,10 @@ pub struct RunnerOutput {
     /// dispatch lo usa para decidir si re-correr en memoria con el target o
     /// enviar el mensaje cross-workspace al cliente.
     pub transfer: Option<TransferInfo>,
+    /// Patches de estado acumulados por todas las tools ejecutadas en este
+    /// turno, en orden de ejecución. El dispatch los pliega en
+    /// `WaConversation.ai_conv_state` después del chain loop.
+    pub state_patches: Vec<StatePatch>,
 }
 
 impl RunnerOutput {
@@ -181,6 +188,7 @@ fn build_system_instruction(
     first_turn_note: Option<&str>,
     agent_state: Option<&str>,
     turn_state: Option<&str>,
+    conversation_state: Option<&str>,   // NEW — Phase 2
     vars: Option<&PromptVariables>,
 ) -> SystemInstruction {
     // El back solo pasa DATOS etiquetados — el SUPERADMIN decide el
@@ -265,6 +273,13 @@ fn build_system_instruction(
         }
     }
 
+    // NEW — Phase 2: bloque de estado IA persistido, entre [turn_state] y [faqs].
+    if let Some(cs) = conversation_state {
+        if !cs.trim().is_empty() {
+            chunks.push(format!("[conversation_state]\n{}", cs.trim()));
+        }
+    }
+
     if let Some(faqs) = faqs_inline {
         if !faqs.trim().is_empty() {
             chunks.push(format!("[faqs]\n{}", faqs.trim()));
@@ -315,6 +330,7 @@ pub async fn run_turn(
     first_turn_note: Option<&str>,
     agent_state: Option<&str>,
     turn_state: Option<&str>,
+    conversation_state: Option<&str>,   // NEW — Phase 2
     prompt_vars: Option<&PromptVariables>,
     tool_ctx: &ToolContext,
 ) -> Result<RunnerOutput, ApiError> {
@@ -327,6 +343,7 @@ pub async fn run_turn(
         first_turn_note,
         agent_state,
         turn_state,
+        conversation_state,  // NEW — Phase 2
         prompt_vars,
     );
 
@@ -413,6 +430,8 @@ pub async fn run_turn(
     let mut finish_reason: Option<String> = None;
     let mut escalated = false;
     let mut escalation_reason: Option<String> = None;
+    // Phase 2: acumula patches de cada tool call en este turno.
+    let mut state_patches_acc: Vec<StatePatch> = Vec::new();
 
     'turn: for iter in 0..MAX_ITERATIONS {
         let body = GenerateContentRequest {
@@ -524,6 +543,8 @@ pub async fn run_turn(
                     result.duration_ms,
                     truncate_summary(&result.data),
                 );
+                // Phase 2: acumular patches del path de éxito.
+                state_patches_acc.extend(result.state_patches.iter().cloned());
             } else {
                 tracing::warn!(
                     "[ai_agent.runner] tool_result: name={} success=false duration_ms={} error={:?}",
@@ -531,6 +552,12 @@ pub async fn run_turn(
                     result.duration_ms,
                     result.error,
                 );
+                // Phase 2: patch centralizado de fallo (el dispatch lo acumula
+                // sin que cada tool tenga que recordar hacerlo).
+                state_patches_acc.push(crate::models::whatsapp::StatePatch::AddFailedAttempt {
+                    tool: call.name.clone(),
+                    error: result.error.clone().unwrap_or_else(|| "unknown_error".into()),
+                });
             }
 
             tool_call_logs.push(AiToolCallLog {
@@ -630,6 +657,7 @@ pub async fn run_turn(
         escalation_reason,
         finish_reason,
         transfer,
+        state_patches: state_patches_acc,
     })
 }
 

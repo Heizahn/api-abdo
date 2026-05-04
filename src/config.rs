@@ -77,6 +77,16 @@ pub struct Config {
     /// Set `ENABLE_AI_GUARDRAILS=false` (or `0` / `no`) to bypass — emergency
     /// kill switch only; production should keep this `true`.
     pub enable_ai_guardrails: bool,
+
+    /// Kill switch for the persisted AI conversation state feature (Phase 2).
+    /// When `false`:
+    ///   - The `[conversation_state]` block is NOT injected in system_instruction.
+    ///   - Post-turn state is NOT written to DB.
+    ///   - Tool state_patches are computed but silently discarded.
+    ///   - Existing `aiConvState` documents in MongoDB are NOT erased.
+    /// Set `ENABLE_AI_CONVERSATION_STATE=false` (or `0` / `no`) to bypass.
+    /// Default: `true`.
+    pub enable_ai_conversation_state: bool,
 }
 
 impl Config {
@@ -161,6 +171,9 @@ impl Config {
             ai_relay_secret: env::var("AI_RELAY_SECRET").ok().filter(|s| !s.is_empty()),
             gemini_base_url: env::var("GEMINI_BASE_URL").ok().filter(|s| !s.is_empty()),
             enable_ai_guardrails: env::var("ENABLE_AI_GUARDRAILS")
+                .map(|v| !matches!(v.trim().to_lowercase().as_str(), "false" | "0" | "no"))
+                .unwrap_or(true),
+            enable_ai_conversation_state: env::var("ENABLE_AI_CONVERSATION_STATE")
                 .map(|v| !matches!(v.trim().to_lowercase().as_str(), "false" | "0" | "no"))
                 .unwrap_or(true),
         }

@@ -5,9 +5,9 @@ use crate::models::ai_agent::{
 use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
 use crate::models::whatsapp::{
     ConversationStats, QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyList,
-    UrlPreview, WaConversation, WaConversationEvent, WaConversationEventInput, WaMessage,
-    WaQuickReply, WaSettings, WaTemplate, WaTemplateCategory, WaTemplateStatus, WaTicket,
-    WaTicketTimelineEntry,
+    UrlPreview, WaConversation, WaConversationAiState, WaConversationEvent,
+    WaConversationEventInput, WaMessage, WaQuickReply, WaSettings, WaTemplate,
+    WaTemplateCategory, WaTemplateStatus, WaTicket, WaTicketTimelineEntry,
 };
 use std::collections::HashMap;
 
@@ -509,6 +509,17 @@ pub trait WhatsAppRepository {
         id: &ObjectId,
         patch: ConversationAiPatch<'_>,
     ) -> Result<bool, String>;
+
+    /// Reemplaza (o elimina) el campo `aiConvState` de una conversación.
+    /// `Some(state)` → `$set { "aiConvState": state }` (atómico).
+    /// `None` → `$unset { "aiConvState": "" }` (borrado).
+    /// Usado por el dispatch (escribe post-turn), el endpoint de reset manual
+    /// y la actualización de reopen (borra). Non-fatal si falla.
+    async fn update_conversation_ai_conv_state(
+        &self,
+        conv_id: &ObjectId,
+        state: Option<&WaConversationAiState>,
+    ) -> Result<(), String>;
 
     /// Marca varios mensajes inbound como procesados por la IA en `when` y
     /// actualiza `ai_last_processed_at` de la conv en una sola operación.
