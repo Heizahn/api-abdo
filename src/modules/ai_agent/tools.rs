@@ -1732,7 +1732,7 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     use uuid::Uuid;
 
     use crate::crypto::aes::decrypt_payload;
-    use super::dispatch::ai_agent_secret;
+    use super::ai_agent_secret;
 
     // 1. Parse args
     let parsed: ReportPaymentArgs = match serde_json::from_value(args) {

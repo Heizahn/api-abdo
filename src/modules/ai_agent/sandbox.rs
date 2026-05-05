@@ -31,6 +31,7 @@ use crate::{
 };
 
 use super::{
+    config_resolver::resolve_ai_api_key,
     openrouter::{AiRelay, resolve_base_url},
     runner::{run_turn, ConvRole, ConvTurn, PromptVariables},
     tools::{extract_allowed_transfer_targets, ToolContext},
@@ -53,10 +54,6 @@ fn parse_oid(s: &str, field: &str) -> Result<ObjectId, ApiError> {
         field: field.into(),
         message: format!("'{}' no es un ObjectId válido", field),
     })
-}
-
-fn ai_agent_secret() -> String {
-    std::env::var("JWT_SECRET").unwrap_or_default()
 }
 
 // ============================================
@@ -225,7 +222,7 @@ pub async fn sandbox_handler(
             )
         })?;
 
-    let api_key = super::runner::decrypt_api_key(&agent, &ai_agent_secret())?;
+    let api_key = resolve_ai_api_key(&state).await?;
 
     let faqs = state
         .db

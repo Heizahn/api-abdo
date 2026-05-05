@@ -34,11 +34,13 @@ use crate::{
 };
 
 use super::{
+    ai_agent_secret,
+    config_resolver::resolve_ai_api_key,
     escalation,
     openrouter::{AiRelay, resolve_base_url},
     guardrails,
     pre_classifier::{self, PreClassResult, PreClassResultFull},
-    runner::{decrypt_api_key, run_turn, ConvRole, ConvTurn, MediaInput, PromptVariables},
+    runner::{run_turn, ConvRole, ConvTurn, MediaInput, PromptVariables},
     state::{apply_state_patches, format_conversation_state},
     tools::{extract_allowed_transfer_targets, ToolContext},
 };
@@ -52,10 +54,6 @@ const RECENT_WINDOW: i64 = 20;
 /// Fallback cuando el agente no tiene `debounce_seconds` (compat con docs
 /// viejos antes del campo). El default real es 10s y vive en el agente.
 const DEBOUNCE_FALLBACK_SECONDS: u64 = 10;
-
-pub(super) fn ai_agent_secret() -> String {
-    std::env::var("JWT_SECRET").unwrap_or_default()
-}
 
 /// Spawnea el dispatch en background. Llamada desde el webhook tras
 /// persistir el inbound. No bloquea — el webhook ya respondió 200 al
@@ -493,7 +491,16 @@ async fn run_dispatch(
     let mut pre_class_specialist: Option<(AiAgent, String)> = None;
 
     if wa_settings.pre_classifier_enabled && !user_text.trim().is_empty() {
-        if let Ok(pc_api_key) = decrypt_api_key(&agent, &ai_agent_secret()) {
+        let pc_api_key_result = resolve_ai_api_key(&state).await;
+        let pc_api_key_opt = match pc_api_key_result {
+            Ok(k) => Some(k),
+            Err(ref e) if matches!(e, crate::error::ApiError::Domain { code, .. } if code == "ai_global_config_missing") => {
+                tracing::debug!("[ai_agent.dispatch] pre-classifier skipped: global config missing");
+                None
+            }
+            Err(_) => None,
+        };
+        if let Some(pc_api_key) = pc_api_key_opt {
             let relay_for_pc = AiRelay::from_config(&state.config);
             let pc_ctx = pre_classifier::PreClassifierContext {
                 api_key: &pc_api_key,
@@ -647,17 +654,17 @@ async fn run_dispatch(
                                             e
                                         );
                                     }
-                                    // Descifrar api_key del specialist.
-                                    match decrypt_api_key(&specialist, &ai_agent_secret()) {
+                                    // Obtener api_key global para el specialist.
+                                    match resolve_ai_api_key(&state).await {
                                         Ok(spec_key) => {
                                             pre_class_specialist = Some((specialist, spec_key));
                                         }
                                         Err(e) => {
                                             tracing::warn!(
-                                                "[ai_agent.dispatch] specialist api_key indisponible: {:?}; usando agente original",
+                                                "[ai_agent.dispatch] global api_key indisponible para specialist: {:?}; usando agente original",
                                                 e
                                             );
-                                            // Specialist sin key: cae al agente original.
+                                            // Config global no disponible: cae al agente original.
                                         }
                                     }
                                     pre_class_result = Some(result);
@@ -696,7 +703,7 @@ async fn run_dispatch(
                 }
             }
         }
-        // Sin api_key → skip silencioso (decrypt_api_key ya lo logueó).
+        // Sin config global → skip silencioso del pre-clasificador.
     }
 
     let prompt_vars = build_prompt_variables(
@@ -706,11 +713,11 @@ async fn run_dispatch(
         customer_first_name.as_deref(),
     );
 
-    let api_key = match decrypt_api_key(&agent, &ai_agent_secret()) {
+    let api_key = match resolve_ai_api_key(&state).await {
         Ok(k) => k,
         Err(e) => {
             tracing::warn!(
-                "[ai_agent.dispatch] api_key indisponible (agent={}): {:?}",
+                "[ai_agent.dispatch] global api_key indisponible (agent={}): {:?}",
                 agent_id.to_hex(),
                 e
             );
@@ -1119,13 +1126,13 @@ async fn run_dispatch(
                 }
             };
 
-            // api_key del target (puede ser distinta — cada agente tiene la
-            // suya). Si falla descifrar, escalamos.
-            let target_api_key = match decrypt_api_key(&target, &ai_agent_secret()) {
+            // api_key global (compartida por todos los agentes). Si no está
+            // configurada, escalamos a humano.
+            let target_api_key = match resolve_ai_api_key(&state).await {
                 Ok(k) => k,
                 Err(e) => {
                     tracing::warn!(
-                        "[ai_agent.dispatch] api_key del target {} indisponible: {:?}; escalando a humano",
+                        "[ai_agent.dispatch] global api_key indisponible para target {}: {:?}; escalando a humano",
                         transfer.target_agent_id.to_hex(),
                         e
                     );

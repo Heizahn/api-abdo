@@ -31,6 +31,8 @@ use crate::{
     state::AppState,
 };
 
+use super::ai_agent_secret;
+
 // Reasons que llegan al evento WS y al timeline. Stable strings — el front
 // los usa para decidir copy / icono.
 pub const REASON_REQUEST_HUMAN: &str = "request_human";
@@ -43,10 +45,6 @@ pub const REASON_MAX_ID_ATTEMPTS: &str = "max_identification_attempts";
 pub const REASON_CRITICAL_TOOL_FAILURE: &str = "critical_tool_failure";
 
 const FALLBACK_FAREWELL: &str = "Te derivo con un compañero del equipo para que te atienda.";
-
-fn ai_agent_secret() -> String {
-    std::env::var("JWT_SECRET").unwrap_or_default()
-}
 
 /// Resultado del helper. Útil para que el caller decida si seguir procesando
 /// o cortar (auto-escalación corta el flujo del dispatch).

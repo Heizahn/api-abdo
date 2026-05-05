@@ -29,14 +29,15 @@ use std::sync::Arc;
 
 use crate::{
     crypto::aes::encrypt_payload,
-    db::{AiAgentRepository, MetricsGranularity, UserRepository, WhatsAppRepository},
+    db::{AiAgentRepository, AiConfigRepository, MetricsGranularity, UserRepository, WhatsAppRepository},
     error::ApiError,
     models::{
         ai_agent::{
             AiAgent, AiAgentDeleteResponse, AiAgentFaq, AiAgentFaqItem, AiAgentFaqListResponse,
             AiAgentFaqResponse, AiAgentItem, AiAgentMetricsData, AiAgentMetricsDailyBucketDto,
             AiAgentMetricsResponse, AiAgentMode, AiAgentModelItem, AiAgentModelsListResponse,
-            AiAgentPreClassBreakdown, AiAgentResponse, AiAgentsListResponse, AiEscalationRules,
+            AiAgentPreClassBreakdown, AiAgentResponse, AiAgentsListResponse, AiConfigDto,
+            AiConfigPatchRequest, AiConfigResponse, AiEscalationRules,
             AiLimits, AiModelConfig, AiPersonality, AiSchedule, AiToolConfig,
             CreateAiAgentFaqRequest, CreateAiAgentRequest, TestConnectionData,
             TestConnectionRequest, TestConnectionResponse, TestConnectionSource,
@@ -48,8 +49,9 @@ use crate::{
 };
 
 use super::{
+    ai_agent_secret,
+    config_resolver::resolve_ai_api_key,
     openrouter::{AiRelay, OpenRouterClient, resolve_base_url},
-    runner::decrypt_api_key,
 };
 
 const SUPERADMIN_ROLE: f32 = 0.0;
@@ -176,10 +178,6 @@ fn parse_oid(s: &str, field: &str) -> Result<ObjectId, ApiError> {
 
 fn iso8601(d: BsonDateTime) -> String {
     d.try_to_rfc3339_string().unwrap_or_default()
-}
-
-fn ai_agent_secret() -> String {
-    std::env::var("JWT_SECRET").unwrap_or_default()
 }
 
 fn validate_string_len(value: &str, field: &str, max: usize) -> Result<(), ApiError> {
@@ -637,7 +635,18 @@ pub async fn create_ai_agent_handler(
     if let Some(v) = body.enabled { agent.enabled = v; }
     if let Some(v) = body.mode { agent.mode = v; }
     apply_schedule(&mut agent.schedule, body.schedule);
+    // I1: api_key en body es deprecated. Emitir warn, ignorar y persistir vacío.
+    if let Some(ref m) = body.model {
+        if m.api_key.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
+            tracing::warn!(
+                "[ai_agent.handler] create: api_key en body está deprecada y es ignorada. \
+                 Configurar la key global en PATCH /v1/auth-user/whatsapp/ai-agent/config"
+            );
+        }
+    }
     apply_model(&mut agent.model, body.model)?;
+    // Forzar api_key_encrypted a vacío (ignoramos cualquier valor que apply_model haya seteado).
+    agent.model.api_key_encrypted = String::new();
     apply_personality(&mut agent.personality, body.personality);
     if let Some(sp) = body.system_prompt { agent.system_prompt = sp; }
     if let Some(tools) = body.tools {
@@ -714,12 +723,21 @@ pub async fn update_ai_agent_handler(
         None => None,
     };
 
-    let api_key_rotated = body
+    // I2: api_key en body está deprecated — emitir warn, ignorar. No se escribe
+    // api_key_encrypted en el agente. La key global va en PATCH /config.
+    let api_key_in_body = body
         .model
         .as_ref()
         .and_then(|m| m.api_key.as_deref())
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
+    if api_key_in_body {
+        tracing::warn!(
+            "[ai_agent.handler] update: api_key en body está deprecada y es ignorada. \
+             Configurar la key global en PATCH /v1/auth-user/whatsapp/ai-agent/config"
+        );
+    }
+    let api_key_rotated = false; // deprecated — cache invalidation no longer needed per-agent
 
     let mut agent = state
         .db
@@ -735,7 +753,9 @@ pub async fn update_ai_agent_handler(
     if let Some(v) = body.enabled { agent.enabled = v; }
     if let Some(v) = body.mode { agent.mode = v; }
     apply_schedule(&mut agent.schedule, body.schedule);
-    apply_model(&mut agent.model, body.model)?;
+    // Strippear api_key del model input antes de apply_model (deprecada — se ignora).
+    let model_without_key = body.model.map(|mut m| { m.api_key = None; m });
+    apply_model(&mut agent.model, model_without_key)?;
     apply_personality(&mut agent.personality, body.personality);
     if let Some(sp) = body.system_prompt { agent.system_prompt = sp; }
     if let Some(tools) = body.tools {
@@ -765,9 +785,8 @@ pub async fn update_ai_agent_handler(
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(agent_not_found)?;
 
-    if api_key_rotated {
-        state.redis.invalidate_ai_models_cache(&oid.to_hex()).await;
-    }
+    // api_key_rotated is always false (per-agent key deprecated); no cache invalidation needed.
+    let _ = api_key_rotated;
 
     Ok(Json(AiAgentResponse {
         ok: true,
@@ -1202,7 +1221,7 @@ pub async fn test_connection_for_agent_handler(
     let (api_key, source) = match body_key {
         Some(k) => (k.to_string(), TestConnectionSource::Body),
         None => (
-            decrypt_api_key(&agent, &ai_agent_secret())?,
+            resolve_ai_api_key(&state).await?,
             TestConnectionSource::Stored,
         ),
     };
@@ -1479,5 +1498,136 @@ pub async fn get_ai_agent_metrics_handler(
             daily,
         },
     }))
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Global AI Config — GET + PATCH (SUPERADMIN only)
+// ──────────────────────────────────────────────────────────────────────────────
+
+const MAX_API_KEY_LEN: usize = 200;
+const MAX_MODEL_LEN: usize = 100;
+
+/// `GET /v1/auth-user/whatsapp/ai-agent/config`
+///
+/// Devuelve el estado actual de la configuración global de AI.
+/// La API key nunca se devuelve — solo `has_api_key: bool`.
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/ai-agent/config",
+    tag = "AI Agent",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Configuración global de AI", body = AiConfigResponse),
+        (status = 401, description = "Missing/invalid token"),
+        (status = 403, description = "No es SUPERADMIN"),
+    )
+)]
+pub async fn get_ai_config_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user): Extension<User>,
+) -> Result<Json<AiConfigResponse>, ApiError> {
+    require_superadmin(&current_user)?;
+
+    // Lee directo de DB (no de cache) — la UI debe ver estado fresco tras un PATCH.
+    let dto = match state.db.get_ai_config().await {
+        Ok(Some(cfg)) => cfg.to_dto(),
+        Ok(None) => AiConfigDto::default(),
+        Err(_) => {
+            return Err(ApiError::domain_simple(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Error leyendo configuración",
+            ))
+        }
+    };
+
+    Ok(Json(AiConfigResponse { ok: true, data: dto }))
+}
+
+/// `PATCH /v1/auth-user/whatsapp/ai-agent/config`
+///
+/// Actualiza la configuración global de AI (parcial). Al menos un campo
+/// debe estar presente. La API key se cifra antes de persistir.
+/// Invalida Redis `ai_agent:config` tras escribir.
+#[utoipa::path(
+    patch,
+    path = "/v1/auth-user/whatsapp/ai-agent/config",
+    tag = "AI Agent",
+    security(("bearerAuth" = [])),
+    request_body = AiConfigPatchRequest,
+    responses(
+        (status = 200, description = "Configuración actualizada", body = AiConfigResponse),
+        (status = 400, description = "empty_patch o campo demasiado largo"),
+        (status = 401, description = "Missing/invalid token"),
+        (status = 403, description = "No es SUPERADMIN"),
+    )
+)]
+pub async fn patch_ai_config_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user): Extension<User>,
+    Json(body): Json<AiConfigPatchRequest>,
+) -> Result<Json<AiConfigResponse>, ApiError> {
+    require_superadmin(&current_user)?;
+
+    // Normalizar campos.
+    let trimmed_key = body.api_key.as_ref().map(|s| s.trim().to_string());
+    let trimmed_model = body.default_model.as_ref().map(|s| s.trim().to_string());
+
+    let key_present = trimmed_key.as_deref().map_or(false, |s| !s.is_empty());
+    let model_present = trimmed_model.as_deref().map_or(false, |s| !s.is_empty());
+
+    // Al menos un campo debe estar presente y no vacío.
+    if !key_present && !model_present {
+        return Err(ApiError::ValidationError {
+            code: "empty_patch".into(),
+            field: "request_body".into(),
+            message: "Debe proveer al menos api_key o default_model".into(),
+        });
+    }
+
+    // Validar longitudes.
+    if let Some(ref k) = trimmed_key {
+        if key_present && k.len() > MAX_API_KEY_LEN {
+            return Err(ApiError::ValidationError {
+                code: "field_too_long".into(),
+                field: "api_key".into(),
+                message: format!("api_key supera {} caracteres", MAX_API_KEY_LEN),
+            });
+        }
+    }
+    if let Some(ref m) = trimmed_model {
+        if model_present && m.len() > MAX_MODEL_LEN {
+            return Err(ApiError::ValidationError {
+                code: "field_too_long".into(),
+                field: "default_model".into(),
+                message: format!("default_model supera {} caracteres", MAX_MODEL_LEN),
+            });
+        }
+    }
+
+    // Cifrar la api_key si viene.
+    let api_key_cipher = if key_present {
+        let plain = trimmed_key.unwrap();
+        Some(encrypt_payload(&ai_agent_secret(), &plain))
+    } else {
+        None
+    };
+
+    let model_to_set = if model_present { trimmed_model } else { None };
+
+    let updated = state
+        .db
+        .upsert_ai_config(api_key_cipher, model_to_set, &current_user.id)
+        .await
+        .map_err(|_| ApiError::domain_simple(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "Error guardando configuración",
+        ))?;
+
+    // Invalidar cache para que el próximo dispatch lea la key fresca.
+    state.redis.invalidate_ai_config_cache().await;
+
+    Ok(Json(AiConfigResponse { ok: true, data: updated.to_dto() }))
 }
 

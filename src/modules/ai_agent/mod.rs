@@ -5,6 +5,7 @@
 //! agente sirve directo. La recepcionista llega en una vuelta posterior.
 
 pub mod business_data;
+pub mod config_resolver;
 pub mod dispatch;
 pub mod escalation;
 pub mod guardrails;
@@ -16,6 +17,16 @@ pub mod sandbox;
 pub mod seed;
 pub mod state;
 pub mod tools;
+
+/// Retorna el secreto usado para cifrar/descifrar con AES-GCM:
+/// - La `openrouter_api_key` en `AiConfig.openrouter_api_key`
+/// - El `access_token` de Meta WhatsApp en `WaSettings.access_token`
+///
+/// Ambos usan el mismo `JWT_SECRET` derivado del entorno — el caller decide
+/// qué payload descifra.
+pub(crate) fn ai_agent_secret() -> String {
+    std::env::var("JWT_SECRET").unwrap_or_default()
+}
 
 use axum::{
     routing::{get, patch, post},
@@ -29,6 +40,11 @@ use crate::state::AppState;
 /// (validado dentro del handler — el middleware ya filtra `nRole == -1`).
 pub fn user_routes() -> Router<Arc<AppState>> {
     Router::new()
+        // Configuración global de AI (SUPERADMIN)
+        .route(
+            "/v1/auth-user/whatsapp/ai-agent/config",
+            get(handler::get_ai_config_handler).patch(handler::patch_ai_config_handler),
+        )
         // CRUD agentes
         .route(
             "/v1/auth-user/whatsapp/ai-agent/agents",
