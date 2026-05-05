@@ -28,9 +28,12 @@ const INTENT_KEYWORDS: &[(&str, &[&str])] = &[
 ];
 
 /// Devuelve los bodies normalizados (lowercase + sin tildes + trim) de los
-/// mensajes inbound del cliente. Ignora mensajes sin body o vacíos. Cada
-/// elemento es el mensaje completo — el matching es substring bidireccional
-/// contra la `zone` que mande Gemini (ver `validate_zone_mentioned`).
+/// mensajes inbound del cliente. Ignora mensajes sin body o vacíos.
+///
+/// El nombre habla de "zones" pero en realidad son **bodies completos**: la
+/// extracción de zonas reales pasa en `validate_zone_mentioned`, que hace
+/// matching por tokens significativos sobre este buffer. Conservamos el
+/// nombre por compatibilidad con `ToolContext.customer_explicit_zones`.
 pub fn extract_customer_explicit_zones(messages: &[WaMessage]) -> Vec<String> {
     messages
         .iter()
@@ -57,24 +60,64 @@ pub fn extract_recent_media_ids(messages: &[WaMessage]) -> Vec<String> {
     seen
 }
 
-/// Bidirectional substring match con `normalize_zone`. true si la zona
-/// reclamada por la IA está mencionada (literal o como parte de un texto
-/// más largo) por el cliente, o viceversa.
+/// Stopwords que se descartan al tokenizar la zona reclamada por la IA. Si
+/// no las filtráramos, palabras como "municipio" o "estado" siempre estarían
+/// presentes en el buffer del cliente y matchearían cualquier alucinación.
+const ZONE_STOPWORDS: &[&str] = &[
+    "municipio", "parroquia", "sector", "urbanizacion", "urb",
+    "estado", "ciudad", "pueblo", "calle", "avenida",
+    "zona", "area", "region",
+];
+
+/// Largo mínimo de un token para considerarse significativo. 4 descarta
+/// conectores comunes ("en", "por", "del", "los", etc.) sin esfuerzo.
+const MIN_SIGNIFICANT_TOKEN_LEN: usize = 4;
+
+/// Tokeniza un string ya normalizado por palabras alfanuméricas, descartando
+/// tokens cortos y stopwords geográficos.
+fn significant_tokens(normalized: &str) -> Vec<String> {
+    normalized
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .filter(|t| t.chars().count() >= MIN_SIGNIFICANT_TOKEN_LEN)
+        .filter(|t| !ZONE_STOPWORDS.contains(t))
+        .map(|t| t.to_string())
+        .collect()
+}
+
+/// true si la zona reclamada por la IA fue mencionada por el cliente. Hace
+/// matching por tokens significativos: tokeniza la zona reclamada (descartando
+/// stopwords como "municipio", "estado") y verifica que **al menos un token**
+/// aparezca en el buffer normalizado de mensajes del cliente.
+///
+/// Diseñado para tolerar el caso real:
+///   cliente: "estoy ubicado en pedernales municipio carlos arvelo"
+///   AI claim: "Loro Pedernales, municipio Carlos Arvelo"
+///   → tokens claim filtrados: [loro, pedernales, carlos, arvelo]
+///   → buffer cliente contiene "pedernales" → ✅ pasa
+///
+/// Si el claim no tiene ningún token significativo (todo stopwords o texto
+/// muy corto), retorna `false` por seguridad — la IA no debería estar
+/// llamando `check_coverage` con argumentos así.
 pub fn validate_zone_mentioned(claimed_zone: &str, customer_zones: &[String]) -> bool {
     let n_claimed = normalize_zone(claimed_zone);
     if n_claimed.is_empty() {
         return false;
     }
-    customer_zones.iter().any(|raw| {
-        // raw ya viene normalizado desde extract_customer_explicit_zones,
-        // pero re-normalizamos por defensiva (función puede ser llamada
-        // con datos crudos en otro contexto).
-        let n_cust = normalize_zone(raw);
-        if n_cust.is_empty() {
-            return false;
-        }
-        n_claimed.contains(&n_cust) || n_cust.contains(&n_claimed)
-    })
+    let claim_tokens = significant_tokens(&n_claimed);
+    if claim_tokens.is_empty() {
+        return false;
+    }
+    let buffer: String = customer_zones
+        .iter()
+        .map(|s| normalize_zone(s))
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if buffer.is_empty() {
+        return false;
+    }
+    claim_tokens.iter().any(|t| buffer.contains(t.as_str()))
 }
 
 /// Scanea bodies de mensajes inbound y devuelve los GROUP KEYS detectados
@@ -124,4 +167,100 @@ pub fn build_turn_state(
         lines.push(format!("customer_explicit_intents: {}", customer_intents.join(", ")));
     }
     Some(lines.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn customer_buffer(messages: &[&str]) -> Vec<String> {
+        messages.iter().map(|s| normalize_zone(s)).collect()
+    }
+
+    #[test]
+    fn passes_when_claim_token_appears_in_long_customer_phrase() {
+        // Caso real prod: cliente dice frase larga, AI reclama zona compuesta.
+        let zones = customer_buffer(&[
+            "hola buenas",
+            "estoy ubicado en pedernales municipio carlos arvelo",
+            "creo que tambien se llama Loro Pedernales",
+        ]);
+        assert!(validate_zone_mentioned(
+            "Loro Pedernales, municipio Carlos Arvelo",
+            &zones
+        ));
+    }
+
+    #[test]
+    fn passes_when_customer_says_zone_alone_and_ai_claims_same() {
+        let zones = customer_buffer(&["vivo en Naguanagua"]);
+        assert!(validate_zone_mentioned("Naguanagua", &zones));
+    }
+
+    #[test]
+    fn passes_when_ai_claims_subset_of_customer_message() {
+        let zones = customer_buffer(&[
+            "estoy en Valencia, Estado Carabobo",
+        ]);
+        assert!(validate_zone_mentioned("Valencia", &zones));
+        assert!(validate_zone_mentioned("Carabobo", &zones));
+    }
+
+    #[test]
+    fn blocks_when_ai_hallucinates_zone() {
+        let zones = customer_buffer(&[
+            "hola, quiero info del internet",
+            "soy nuevo cliente",
+        ]);
+        assert!(!validate_zone_mentioned("Naguanagua", &zones));
+        assert!(!validate_zone_mentioned("Valencia, Estado Carabobo", &zones));
+    }
+
+    #[test]
+    fn blocks_when_only_stopwords_match() {
+        // Si el AI manda "Municipio Carabobo" y el cliente solo dijo
+        // "estoy en mi municipio", municipio matchea pero es stopword
+        // → debe bloquear (carabobo no aparece en buffer).
+        let zones = customer_buffer(&["estoy en mi municipio"]);
+        assert!(!validate_zone_mentioned("Municipio Carabobo", &zones));
+    }
+
+    #[test]
+    fn blocks_empty_claim() {
+        let zones = customer_buffer(&["vivo en Caracas"]);
+        assert!(!validate_zone_mentioned("", &zones));
+        assert!(!validate_zone_mentioned("   ", &zones));
+    }
+
+    #[test]
+    fn blocks_when_customer_buffer_empty() {
+        assert!(!validate_zone_mentioned("Caracas", &[]));
+        assert!(!validate_zone_mentioned("Caracas", &["".to_string()]));
+    }
+
+    #[test]
+    fn blocks_when_claim_has_no_significant_tokens() {
+        let zones = customer_buffer(&["vivo en algun lugar"]);
+        // Solo tiene tokens cortos / stopwords.
+        assert!(!validate_zone_mentioned("la el", &zones));
+        assert!(!validate_zone_mentioned("zona", &zones));
+    }
+
+    #[test]
+    fn matches_case_and_accent_insensitive() {
+        let zones = customer_buffer(&["estoy en Maracaibo"]);
+        assert!(validate_zone_mentioned("MARACAIBO", &zones));
+        assert!(validate_zone_mentioned("Maracaíbo", &zones));
+    }
+
+    #[test]
+    fn significant_tokens_filters_correctly() {
+        let n = normalize_zone("Loro Pedernales, municipio Carlos Arvelo");
+        let tokens = significant_tokens(&n);
+        assert!(tokens.contains(&"loro".to_string()));
+        assert!(tokens.contains(&"pedernales".to_string()));
+        assert!(tokens.contains(&"carlos".to_string()));
+        assert!(tokens.contains(&"arvelo".to_string()));
+        assert!(!tokens.contains(&"municipio".to_string()));
+    }
 }
