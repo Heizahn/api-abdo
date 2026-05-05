@@ -746,31 +746,109 @@ async fn load_active_zones(ctx: &ToolContext) -> Result<Vec<CachedZone>, String>
     Ok(cached)
 }
 
-/// Devuelve `true` si la zona matchea la query normalizada en alguno de sus campos.
-/// Orden: display_name → state → municipality → parish → sector → aliases.
-/// Match: igualdad normalizada primero, luego contains en ambas direcciones.
-fn zone_matches(z: &CachedZone, q: &str) -> bool {
-    let check = |field: &str| -> bool {
-        let nf = normalize_zone(field);
-        nf == q || nf.contains(q) || q.contains(nf.as_str())
-    };
-
-    if check(&z.display_name) { return true; }
-    if check(&z.state) { return true; }
-    if check(&z.municipality) { return true; }
-    if let Some(ref p) = z.parish {
-        if check(p) { return true; }
-    }
-    if let Some(ref s) = z.sector {
-        if check(s) { return true; }
-    }
-    z.aliases.iter().any(|a| check(a))
+/// Tier de especificidad de un match. Mayor = más específico. Cuando varias
+/// zonas matchean a tiers distintos, se devuelven SÓLO las del tier máximo —
+/// así "centro de güigüe" prefiere sector="Centro Güigüe" (SECTOR) sobre
+/// otra zona que comparte parish="Güigüe" pero no contiene "centro".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MatchTier {
+    State = 1,
+    Municipality = 2,
+    Parish = 3,
+    Display = 4,
+    Sector = 5,
 }
 
-/// Función pura para testabilidad — filtra las zonas que matchean `q`.
+/// Tokens cortos que filtramos al comparar nombres de zonas. Conjunciones,
+/// preposiciones, artículos. Si el cliente dice "centro de güigüe", el "de"
+/// no debería contar.
+const TOKEN_STOPWORDS: &[&str] = &[
+    "de", "del", "la", "el", "los", "las", "y", "o", "en",
+];
+const TOKEN_MIN_LEN: usize = 3;
+
+fn tokenize_zone(s: &str) -> Vec<String> {
+    normalize_zone(s)
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .filter(|t| t.chars().count() >= TOKEN_MIN_LEN)
+        .filter(|t| !TOKEN_STOPWORDS.contains(t))
+        .map(|t| t.to_string())
+        .collect()
+}
+
+/// Match estricto: TODOS los tokens del campo deben aparecer en la query.
+/// Usado para SECTOR y PARISH (descriptores específicos — el cliente debe
+/// haberlos dicho explícitamente).
+fn strict_match(field: &str, query_tokens: &[String]) -> bool {
+    let field_tokens = tokenize_zone(field);
+    if field_tokens.is_empty() {
+        return false;
+    }
+    field_tokens.iter().all(|ft| query_tokens.iter().any(|qt| qt == ft))
+}
+
+/// Match bidireccional: query tokens ⊆ field tokens, O field tokens ⊆ query
+/// tokens. Usado para identificadores (DISPLAY, ALIAS) y campos amplios
+/// (MUNICIPALITY, STATE) — más permisivo, captura menciones parciales.
+fn lenient_match(field: &str, query_tokens: &[String]) -> bool {
+    let field_tokens = tokenize_zone(field);
+    if field_tokens.is_empty() || query_tokens.is_empty() {
+        return false;
+    }
+    let q_in_f = query_tokens.iter().all(|qt| field_tokens.iter().any(|ft| ft == qt));
+    let f_in_q = field_tokens.iter().all(|ft| query_tokens.iter().any(|qt| qt == ft));
+    q_in_f || f_in_q
+}
+
+/// Devuelve el tier más específico al que la zona matchea la query, o `None`.
+fn zone_match_tier(z: &CachedZone, query_tokens: &[String]) -> Option<MatchTier> {
+    if let Some(ref s) = z.sector {
+        if strict_match(s, query_tokens) {
+            return Some(MatchTier::Sector);
+        }
+    }
+    if lenient_match(&z.display_name, query_tokens)
+        || z.aliases.iter().any(|a| lenient_match(a, query_tokens))
+    {
+        return Some(MatchTier::Display);
+    }
+    if let Some(ref p) = z.parish {
+        if strict_match(p, query_tokens) {
+            return Some(MatchTier::Parish);
+        }
+    }
+    if lenient_match(&z.municipality, query_tokens) {
+        return Some(MatchTier::Municipality);
+    }
+    if lenient_match(&z.state, query_tokens) {
+        return Some(MatchTier::State);
+    }
+    None
+}
+
+/// Función pura para testabilidad — devuelve las zonas matcheadas en el
+/// tier de especificidad MÁXIMO. Si varias zonas matchean a tiers distintos,
+/// las del tier menor se descartan (especificidad gana).
 /// `q` debe estar ya normalizado con `normalize_zone`.
 fn match_zones<'a>(zones: &'a [CachedZone], q: &str) -> Vec<&'a CachedZone> {
-    zones.iter().filter(|z| zone_matches(z, q)).collect()
+    let q_tokens = tokenize_zone(q);
+    if q_tokens.is_empty() {
+        return Vec::new();
+    }
+    let scored: Vec<(MatchTier, &CachedZone)> = zones
+        .iter()
+        .filter_map(|z| zone_match_tier(z, &q_tokens).map(|t| (t, z)))
+        .collect();
+    if scored.is_empty() {
+        return Vec::new();
+    }
+    let max_tier = scored.iter().map(|(t, _)| *t).max().unwrap();
+    scored
+        .into_iter()
+        .filter(|(t, _)| *t == max_tier)
+        .map(|(_, z)| z)
+        .collect()
 }
 
 async fn exec_check_coverage(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
@@ -972,6 +1050,89 @@ mod tests {
         let result = match_zones(&zones, &q);
         // Deben ser 4 (todas las de Carabobo)
         assert!(result.len() > 1, "Estado 'Carabobo' debe matchear múltiples zonas → disambiguation");
+    }
+
+    #[test]
+    fn test_sector_specificity_beats_shared_parish() {
+        // Caso real prod: dos zonas en el mismo parish "Güigüe", una con
+        // sector "Centro Güigüe" y otra con sector "Loro Pedernales".
+        // Cliente dice "centro de güigüe" — sólo Centro Güigüe debe matchear.
+        let zones = vec![
+            make_zone(
+                "Pedernales",
+                "Carabobo",
+                "Carlos Arvelo",
+                Some("Güigüe"),
+                Some("Loro Pedernales"),
+                &[],
+            ),
+            make_zone(
+                "Carlos Arvelo",
+                "Carabobo",
+                "Carlos Arvelo",
+                Some("Güigüe"),
+                Some("Centro Güigüe"),
+                &[],
+            ),
+        ];
+        let q = normalize_zone("centro de Güigüe");
+        let result = match_zones(&zones, &q);
+        assert_eq!(result.len(), 1, "Sólo la zona con sector 'Centro Güigüe' debe matchear");
+        assert_eq!(result[0].sector.as_deref(), Some("Centro Güigüe"));
+    }
+
+    #[test]
+    fn test_shared_parish_alone_yields_disambiguation() {
+        // Mismo escenario, pero el cliente sólo dice "güigüe" sin discriminador.
+        // Ambas zonas matchean al mismo tier (PARISH) → disambiguation.
+        let zones = vec![
+            make_zone(
+                "Pedernales",
+                "Carabobo",
+                "Carlos Arvelo",
+                Some("Güigüe"),
+                Some("Loro Pedernales"),
+                &[],
+            ),
+            make_zone(
+                "Carlos Arvelo",
+                "Carabobo",
+                "Carlos Arvelo",
+                Some("Güigüe"),
+                Some("Centro Güigüe"),
+                &[],
+            ),
+        ];
+        let q = normalize_zone("güigüe");
+        let result = match_zones(&zones, &q);
+        assert_eq!(result.len(), 2, "Sin discriminador, ambas zonas en parish 'Güigüe' deben matchear");
+    }
+
+    #[test]
+    fn test_full_sector_query_matches_uniquely() {
+        // Cliente dice el sector exacto.
+        let zones = vec![
+            make_zone(
+                "Pedernales",
+                "Carabobo",
+                "Carlos Arvelo",
+                Some("Güigüe"),
+                Some("Loro Pedernales"),
+                &[],
+            ),
+            make_zone(
+                "Carlos Arvelo",
+                "Carabobo",
+                "Carlos Arvelo",
+                Some("Güigüe"),
+                Some("Centro Güigüe"),
+                &[],
+            ),
+        ];
+        let q = normalize_zone("Loro Pedernales");
+        let result = match_zones(&zones, &q);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].sector.as_deref(), Some("Loro Pedernales"));
     }
 }
 
