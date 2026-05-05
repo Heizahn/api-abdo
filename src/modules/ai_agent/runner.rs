@@ -25,7 +25,6 @@
 use std::time::Instant;
 
 use crate::{
-    crypto::aes::decrypt_payload,
     error::ApiError,
     models::{
         ai_agent::{AiAgent, AiInteraction, AiToolCallLog},
@@ -758,25 +757,3 @@ fn truncate_summary(value: &serde_json::Value) -> String {
     }
 }
 
-// ============================================
-// Helper para descifrar api_key del setting
-// ============================================
-
-/// Descifra `model.api_key_encrypted` o devuelve un error 503 si no hay key.
-pub fn decrypt_api_key(agent: &AiAgent, secret: &str) -> Result<String, ApiError> {
-    let enc = &agent.model.api_key_encrypted;
-    if enc.is_empty() {
-        return Err(ApiError::domain_simple(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "ai_api_key_missing",
-            "El agente no tiene api_key de OpenRouter configurada",
-        ));
-    }
-    decrypt_payload(secret, enc).ok_or_else(|| {
-        ApiError::domain_simple(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "ai_api_key_corrupt",
-            "No se pudo descifrar la api_key — posible cambio de JWT_SECRET",
-        )
-    })
-}
