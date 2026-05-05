@@ -389,6 +389,16 @@ async fn run_dispatch(
         })
         .collect();
 
+    // High water mark: el _id más alto que la IA "vio" en su prompt. Empieza
+    // siendo el max del burst inicial; si hay chain reload, se actualiza con
+    // el max del nuevo burst. Al final del dispatch lo usamos para detectar
+    // mensajes que llegaron DURANTE el LLM call y no fueron procesados.
+    let mut high_water_mark: ObjectId = burst
+        .iter()
+        .filter_map(|m| m.id)
+        .max()
+        .unwrap_or(inbound_oid);
+
     // Texto unificado de la ráfaga (4 mensajes seguidos del cliente se ven
     // como un solo input multilínea para la IA).
     let burst_texts: Vec<String> = burst
@@ -807,12 +817,15 @@ async fn run_dispatch(
                 .await
             {
                 Ok(refreshed) => {
-                    let new_burst_texts: Vec<String> = refreshed
+                    let new_burst: Vec<&WaMessage> = refreshed
                         .iter()
                         .filter(|m| {
                             m.direction == "in"
                                 && m.id.map(|i| i >= inbound_oid).unwrap_or(false)
                         })
+                        .collect();
+                    let new_burst_texts: Vec<String> = new_burst
+                        .iter()
                         .filter_map(|m| {
                             let t = m.body.as_deref()?.trim().to_string();
                             if t.is_empty() {
@@ -837,6 +850,14 @@ async fn run_dispatch(
                                 guardrails::extract_customer_explicit_zones(&refreshed);
                             recent_media_ids =
                                 guardrails::extract_recent_media_ids(&refreshed);
+                        }
+                    }
+                    // Actualizar HWM al máximo _id del burst refrescado —
+                    // así el follow-up post-dispatch sabe hasta dónde
+                    // llegó la cadena de chain reloads.
+                    if let Some(new_hwm) = new_burst.iter().filter_map(|m| m.id).max() {
+                        if new_hwm > high_water_mark {
+                            high_water_mark = new_hwm;
                         }
                     }
                 }
@@ -1464,6 +1485,32 @@ async fn run_dispatch(
             inbound.conversation_id.to_hex(),
             e
         );
+    }
+
+    // ── Follow-up check: mensajes que llegaron DURANTE este dispatch ───────
+    // Si un cliente envió otro mensaje mientras corría el LLM, su scheduled
+    // dispatch fue saltado por debounce/lock. Comparamos contra el
+    // high_water_mark (mayor _id de inbound que la IA realmente "vio" en su
+    // prompt — del burst inicial o del chain reload) y, si hay algo nuevo,
+    // disparamos otro dispatch para no dejar mensajes huérfanos.
+    let pending = state
+        .db
+        .list_recent_messages_for_conversation(&inbound.conversation_id, 5)
+        .await
+        .unwrap_or_default();
+    if let Some(latest_pending) = pending
+        .into_iter()
+        .filter(|m| m.direction == "in")
+        .filter(|m| m.id.map(|i| i > high_water_mark).unwrap_or(false))
+        .last()
+    {
+        tracing::info!(
+            "[ai_agent.dispatch] mensajes pendientes detectados post-dispatch (conv={}, latest_pending_id={}, hwm={}); spawn follow-up",
+            inbound.conversation_id.to_hex(),
+            latest_pending.id.map(|i| i.to_hex()).unwrap_or_default(),
+            high_water_mark.to_hex()
+        );
+        dispatch_inbound_async(state.clone(), latest_pending, workspace_id);
     }
 
     Ok(())
