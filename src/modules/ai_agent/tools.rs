@@ -32,7 +32,7 @@ use crate::{
 use super::escalation;
 use super::state::slugify_label;
 
-use super::gemini::FunctionDeclaration;
+use super::openrouter::{Tool, ToolFunction};
 
 // ============================================
 // Contexto + resultado
@@ -383,7 +383,7 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
 pub fn build_function_declarations(
     agent: &AiAgent,
     transfer_target_labels: &[(ObjectId, String)],
-) -> Vec<FunctionDeclaration> {
+) -> Vec<Tool> {
     let allowed_transfer_targets = extract_allowed_transfer_targets(&agent.tools);
     agent
         .tools
@@ -391,7 +391,7 @@ pub fn build_function_declarations(
         .filter(|t| t.enabled)
         .filter_map(|t| {
             // `transfer_to_agent` sin `allowed_targets` configurados =
-            // tool inválido, no la mostramos a Gemini (la validación de
+            // tool inválido, no la mostramos al LLM (la validación de
             // back ya bloquea guardar en ese estado, esto es defensivo).
             if t.name == T_TRANSFER_AGENT && allowed_transfer_targets.is_empty() {
                 return None;
@@ -402,13 +402,16 @@ pub fn build_function_declarations(
                 } else {
                     params
                 };
-                FunctionDeclaration {
-                    name: t.name.clone(),
-                    description: t
-                        .description_override
-                        .clone()
-                        .unwrap_or_else(|| default_desc.to_string()),
-                    parameters,
+                Tool {
+                    kind: "function".to_string(),
+                    function: ToolFunction {
+                        name: t.name.clone(),
+                        description: t
+                            .description_override
+                            .clone()
+                            .unwrap_or_else(|| default_desc.to_string()),
+                        parameters,
+                    },
                 }
             })
         })

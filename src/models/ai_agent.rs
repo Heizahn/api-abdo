@@ -992,3 +992,123 @@ pub struct AiAgentMetricsResponse {
     pub ok: bool,
     pub data: AiAgentMetricsData,
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Cost estimation — OpenRouter
+// ──────────────────────────────────────────────────────────────────────────────
+
+struct ModelRates {
+    input_per_m: f64,
+    output_per_m: f64,
+    /// Cached input rate. OpenRouter no cobra caché diferenciado en la mayoría
+    /// de los modelos — usamos 0.0 como fallback seguro (subestima ligeramente).
+    cached_input_per_m: f64,
+}
+
+// Tarifas 2026-05. Fuente: https://openrouter.ai/models
+// Revisión trimestral recomendada.
+const RATES_GPT4O_MINI: ModelRates = ModelRates {
+    input_per_m: 0.15,
+    output_per_m: 0.60,
+    cached_input_per_m: 0.075,
+};
+const RATES_CLAUDE_HAIKU: ModelRates = ModelRates {
+    input_per_m: 1.00,
+    output_per_m: 5.00,
+    cached_input_per_m: 0.10,
+};
+const RATES_LLAMA_70B: ModelRates = ModelRates {
+    input_per_m: 0.12,
+    output_per_m: 0.30,
+    cached_input_per_m: 0.0,
+};
+/// Fallback para modelos no reconocidos — usamos gpt-4o-mini rates como
+/// estimación conservadora.
+const RATES_DEFAULT: ModelRates = RATES_GPT4O_MINI;
+
+fn rate_for_model(model_id: &str) -> ModelRates {
+    let m = model_id.to_lowercase();
+    if m.contains("gpt-4o-mini") {
+        RATES_GPT4O_MINI
+    } else if m.contains("claude") && m.contains("haiku") {
+        RATES_CLAUDE_HAIKU
+    } else if m.contains("llama") && m.contains("70b") {
+        RATES_LLAMA_70B
+    } else {
+        tracing::debug!(
+            "[ai_agent] model_id '{}' no reconocido — usando RATES_DEFAULT (gpt-4o-mini)",
+            model_id
+        );
+        RATES_DEFAULT
+    }
+}
+
+/// Estimación de costo USD para un turno completo.
+///
+/// Formula:
+///   billable_input = input_tokens - cached_tokens
+///   cost = billable_input * input_rate + cached * cached_rate + (output + thinking) * output_rate
+///   (todo por 1M)
+///
+/// `thinking_tokens` siempre es 0 en modelos OpenRouter no-reasoning (mantenido
+/// por estabilidad de esquema). `cached_tokens` también es 0 en la mayoría de
+/// los modelos salvo que el proveedor lo soporte explícitamente.
+///
+/// El resultado es una ESTIMACIÓN — el billing real viene de OpenRouter Console.
+pub fn estimate_cost_usd(
+    model_id: &str,
+    input_tokens: u32,
+    cached_tokens: u32,
+    output_tokens: u32,
+    thinking_tokens: u32,
+) -> f64 {
+    let r = rate_for_model(model_id);
+    let billable_input = input_tokens.saturating_sub(cached_tokens) as f64;
+    let cached = cached_tokens as f64;
+    let output = output_tokens as f64;
+    let thinking = thinking_tokens as f64;
+    (billable_input * r.input_per_m
+        + cached * r.cached_input_per_m
+        + output * r.output_per_m
+        + thinking * r.output_per_m)
+        / 1_000_000.0
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Unit tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_estimate_gpt4o_mini() {
+        // 1M input + 1M output → $0.15 + $0.60 = $0.75
+        let cost = estimate_cost_usd("openai/gpt-4o-mini", 1_000_000, 0, 1_000_000, 0);
+        let expected = RATES_GPT4O_MINI.input_per_m + RATES_GPT4O_MINI.output_per_m;
+        assert!((cost - expected).abs() < 1e-9, "cost={}, expected={}", cost, expected);
+    }
+
+    #[test]
+    fn test_estimate_unknown_model_returns_default() {
+        // Unknown model falls back to gpt-4o-mini rates
+        let cost_unknown = estimate_cost_usd("unknown/model-xyz", 1_000_000, 0, 0, 0);
+        let cost_default = estimate_cost_usd("openai/gpt-4o-mini", 1_000_000, 0, 0, 0);
+        assert!((cost_unknown - cost_default).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_estimate_zero_tokens_is_zero() {
+        let cost = estimate_cost_usd("openai/gpt-4o-mini", 0, 0, 0, 0);
+        assert_eq!(cost, 0.0);
+    }
+
+    #[test]
+    fn test_estimate_cached_reduces_billable() {
+        // With 500k cached out of 1M input: billable = 500k
+        let full_cost = estimate_cost_usd("openai/gpt-4o-mini", 1_000_000, 0, 0, 0);
+        let cached_cost = estimate_cost_usd("openai/gpt-4o-mini", 1_000_000, 500_000, 0, 0);
+        assert!(cached_cost < full_cost, "cached should cost less than full");
+    }
+}

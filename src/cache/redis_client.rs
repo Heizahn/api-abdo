@@ -227,6 +227,7 @@ impl RedisClient {
     ///
     /// El key incluye el hash de la api_key para que rotar la key invalide
     /// implícitamente el cache (key vieja queda huérfana hasta que expire).
+    #[allow(dead_code)]
     pub async fn get_ai_models_cache(
         &self,
         workspace_id: &str,
@@ -238,6 +239,7 @@ impl RedisClient {
     }
 
     /// Cachea el listado serializado a JSON. TTL en segundos.
+    #[allow(dead_code)]
     pub async fn set_ai_models_cache(
         &self,
         workspace_id: &str,
@@ -675,6 +677,7 @@ fn media_cache_key(media_id: &str) -> String {
 /// Hash corto (8 bytes hex) de la api_key. No es para verificar la key —
 /// sólo para que dos workspaces con la misma key y dos workspaces con keys
 /// distintas usen entradas de cache separadas.
+#[allow(dead_code)]
 fn ai_models_cache_key(workspace_id: &str, api_key: &str) -> String {
     let digest = Sha256::digest(api_key.as_bytes());
     let mut hex = String::with_capacity(16);

@@ -61,20 +61,62 @@ fn substitute_prompt(text: &str, vars: &PromptVariables) -> String {
 }
 
 use super::{
-    gemini::{
-        self, AiRelay, Content, FunctionCall, FunctionResponse, GenerateContentRequest,
-        GenerationConfig, Part, SystemInstruction, ToolDeclaration, UsageMetadata,
+    openrouter::{
+        AiRelay, ChatCompletionRequest, ChatMessage, ContentBlock, MessageContent,
+        OpenRouterClient, ToolChoice,
     },
     tools::{build_function_declarations, execute_tool, ToolContext},
 };
 
-/// Adjunto multimedia que viene junto al texto del usuario en el primer
-/// turno. El runner lo inyecta como `Part::inline` en `contents[0]`.
+/// Adjunto multimedia que viene del dispatch junto al texto del usuario.
+/// El runner lo convierte a `ContentBlock` según el MIME type.
 #[derive(Debug, Clone)]
 pub struct MediaInput {
     pub mime_type: String,
     /// Base64 estándar (NO url-safe). El caller hace `STANDARD.encode(bytes)`.
     pub data_base64: String,
+}
+
+impl MediaInput {
+    /// Convierte este adjunto a un `ContentBlock` de OpenAI.
+    ///
+    /// - `image/*` → `ContentBlock::ImageUrl` con data URI base64
+    /// - `audio/wav`, `audio/mp3`, `audio/ogg` → `ContentBlock::InputAudio`
+    /// - otros (incluido audio desconocido) → `ContentBlock::Text` con placeholder
+    pub fn to_content_block(&self) -> ContentBlock {
+        let mime = self.mime_type.as_str();
+        if mime.starts_with("image/") {
+            ContentBlock::ImageUrl {
+                image_url: super::openrouter::ImageUrlInner {
+                    url: format!("data:{};base64,{}", mime, self.data_base64),
+                },
+            }
+        } else if matches!(mime, "audio/wav" | "audio/mp3" | "audio/mpeg" | "audio/ogg") {
+            let format = if mime.contains("wav") {
+                "wav"
+            } else if mime.contains("ogg") {
+                "ogg"
+            } else {
+                "mp3"
+            };
+            ContentBlock::InputAudio {
+                input_audio: super::openrouter::InputAudioInner {
+                    data: self.data_base64.clone(),
+                    format: format.to_string(),
+                },
+            }
+        } else {
+            // PDF, Office docs, etc. → placeholder texto para que el modelo
+            // sepa que hay un adjunto sin poder procesarlo directamente.
+            tracing::warn!(
+                "[ai_agent.runner] MIME type '{}' no soportado como ContentBlock — usando placeholder",
+                mime
+            );
+            ContentBlock::Text {
+                text: format!("[attachment type={}]", mime),
+            }
+        }
+    }
 }
 
 /// Cap defensivo para evitar loops infinitos. Si la IA gira pidiendo tools sin
@@ -170,8 +212,9 @@ impl RunnerOutput {
         let pc_in    = pre_class.map_or(0u32, |p| p.tokens.input);
         let pc_out   = pre_class.map_or(0u32, |p| p.tokens.output);
         let pc_cost  = pre_class.map_or(0.0_f64, |p| {
-            super::gemini::estimate_cost_usd(
-                "gemini-2.5-flash-lite",
+            // Pre-classifier usando openai/gpt-4o-mini — costo trivial, no rastrear.
+            crate::models::ai_agent::estimate_cost_usd(
+                "openai/gpt-4o-mini",
                 p.tokens.input,
                 0,
                 p.tokens.output,
@@ -219,7 +262,7 @@ fn build_system_instruction(
     turn_state: Option<&str>,
     conversation_state: Option<&str>,   // NEW — Phase 2
     vars: Option<&PromptVariables>,
-) -> SystemInstruction {
+) -> String {
     // El back solo pasa DATOS etiquetados — el SUPERADMIN decide el
     // comportamiento desde `system_prompt` en el front. No metemos
     // instrucciones imperativas ("NO pidas cédula", "úsalo cuando…").
@@ -315,20 +358,19 @@ fn build_system_instruction(
         }
     }
 
-    SystemInstruction {
-        parts: vec![Part::text(chunks.join("\n\n"))],
-    }
+    chunks.join("\n\n")
 }
 
-fn convert_history(history: &[ConvTurn]) -> Vec<Content> {
+fn convert_history(history: &[ConvTurn]) -> Vec<ChatMessage> {
     history
         .iter()
-        .map(|t| Content {
+        .map(|t| ChatMessage {
             role: match t.role {
                 ConvRole::User => "user".into(),
-                ConvRole::Assistant => "model".into(),
+                ConvRole::Assistant => "assistant".into(),
             },
-            parts: vec![Part::text(&t.text)],
+            content: Some(MessageContent::Text(t.text.clone())),
+            ..Default::default()
         })
         .collect()
 }
@@ -349,7 +391,7 @@ pub async fn run_turn(
     agent: &AiAgent,
     api_key_decrypted: &str,
     relay: Option<&AiRelay>,
-    base_url_override: Option<&str>,
+    base_url: &str,
     history: &[ConvTurn],
     user_message: &str,
     user_media: &[MediaInput],
@@ -377,16 +419,6 @@ pub async fn run_turn(
     );
 
     // ── Diagnóstico ────────────────────────────────────────────────────────
-    // INFO: stats compactas para producción — confirman que el prompt no
-    // está vacío y cuántas tools van a Gemini sin inflar logs.
-    // DEBUG: dump completo del prompt + decls. Activar con:
-    //   RUST_LOG=api_abdo::modules::ai_agent::runner=debug
-    let system_text_preview: String = system_instruction
-        .parts
-        .iter()
-        .filter_map(|p| p.text.as_deref())
-        .collect::<Vec<_>>()
-        .join("\n\n");
     let enabled_tool_names: Vec<&str> = agent
         .tools
         .iter()
@@ -397,7 +429,7 @@ pub async fn run_turn(
         "[ai_agent.runner] turno start (agent_id={}, model={}, system_chars={}, tools_enabled={}, history_turns={}, has_customer_ctx={}, has_transfer_ctx={}, has_first_turn_note={}, has_agent_state={})",
         agent.id.map(|o| o.to_hex()).unwrap_or_default(),
         agent.model.model_id,
-        system_text_preview.chars().count(),
+        system_instruction.chars().count(),
         enabled_tool_names.len(),
         history.len(),
         customer_context.is_some(),
@@ -407,57 +439,73 @@ pub async fn run_turn(
     );
     tracing::debug!(
         "[ai_agent.runner] system_instruction (final, placeholders sustituidos):\n{}",
-        system_text_preview
+        system_instruction
     );
     tracing::debug!(
-        "[ai_agent.runner] tools enviadas a gemini: {:?}",
+        "[ai_agent.runner] tools enviadas a openrouter: {:?}",
         enabled_tool_names
     );
 
-    let mut contents = convert_history(history);
-    // Mensaje nuevo del cliente: texto + cualquier multimedia adjunta.
-    let mut user_parts: Vec<Part> = Vec::with_capacity(1 + user_media.len());
+    // Construir el historial base (system + history convt + nuevo turno user).
+    let mut messages: Vec<ChatMessage> = Vec::new();
+
+    // System message en messages[0] (OpenAI style).
+    if !system_instruction.is_empty() {
+        messages.push(ChatMessage {
+            role: "system".into(),
+            content: Some(MessageContent::Text(system_instruction)),
+            ..Default::default()
+        });
+    }
+
+    // Historial previo.
+    messages.extend(convert_history(history));
+
+    // Nuevo turno del usuario: texto + adjuntos.
+    let mut user_blocks: Vec<ContentBlock> = Vec::new();
     if !user_message.trim().is_empty() {
-        user_parts.push(Part::text(user_message));
+        user_blocks.push(ContentBlock::Text { text: user_message.to_string() });
     }
     for m in user_media {
-        user_parts.push(Part::inline(&m.mime_type, &m.data_base64));
+        user_blocks.push(m.to_content_block());
     }
-    if user_parts.is_empty() {
-        // No hay nada que mandar. Defensivo.
-        user_parts.push(Part::text(""));
-    }
-    contents.push(Content {
+    let user_content = match user_blocks.len() {
+        0 => MessageContent::Text(String::new()), // fallback defensivo
+        1 => {
+            if let ContentBlock::Text { text } = &user_blocks[0] {
+                MessageContent::Text(text.clone())
+            } else {
+                MessageContent::Blocks(user_blocks)
+            }
+        }
+        _ => MessageContent::Blocks(user_blocks),
+    };
+    messages.push(ChatMessage {
         role: "user".into(),
-        parts: user_parts,
+        content: Some(user_content),
+        ..Default::default()
     });
 
-    let function_declarations = build_function_declarations(agent, &tool_ctx.transfer_target_labels);
-    let tools_block = if function_declarations.is_empty() {
-        None
-    } else {
-        Some(vec![ToolDeclaration {
-            function_declarations,
-        }])
-    };
+    // Tools del agente.
+    let tool_list = build_function_declarations(agent, &tool_ctx.transfer_target_labels);
+    let tools_option = if tool_list.is_empty() { None } else { Some(tool_list) };
+    let tool_choice_option = tools_option.as_ref().map(|_| ToolChoice::Auto);
 
-    let gen_config = GenerationConfig {
-        temperature: Some(agent.model.temperature),
-        max_output_tokens: Some(agent.model.max_tokens),
-        // Desactivamos el thinking para garantizar que todos los tokens del
-        // budget vayan al output visible. Sin esto, gemini-2.5-flash y los
-        // demás thinking models pueden gastar 100% del cap en thoughts y
-        // dejar la respuesta vacía. Los modelos no-thinking ignoran el campo.
-        thinking_config: Some(super::gemini::ThinkingConfig { thinking_budget: 0 }),
-        response_mime_type: None,
-        response_schema: None,
-    };
+    // Construir el cliente OpenRouter.
+    let or_client = OpenRouterClient::new(
+        http.clone(),
+        base_url.to_string(),
+        api_key_decrypted.to_string(),
+        relay.cloned(),
+    );
 
-    let mut total_in: u32 = 0;
-    let mut total_out: u32 = 0;
-    let mut total_thinking: u32 = 0;
-    // Phase 3a — tokens servidos desde caché implícito/explícito de Gemini.
-    let mut total_cached: u32 = 0;
+    // Acumuladores de tokens y resultado.
+    let mut total_in: i64 = 0;
+    let mut total_out: i64 = 0;
+    // OpenRouter / OpenAI non-reasoning models no exponen thinking tokens —
+    // siempre 0. Se mantiene el campo para compat con AiInteraction schema.
+    let total_thinking: i64 = 0;
+    let mut total_cached: i64 = 0;
     let mut tool_call_logs: Vec<AiToolCallLog> = Vec::new();
     let mut response_text: Option<String> = None;
     let mut finish_reason: Option<String> = None;
@@ -467,139 +515,135 @@ pub async fn run_turn(
     let mut state_patches_acc: Vec<StatePatch> = Vec::new();
 
     'turn: for iter in 0..MAX_ITERATIONS {
-        let body = GenerateContentRequest {
-            system_instruction: Some(SystemInstruction {
-                parts: system_instruction.parts.iter().map(|p| Part {
-                    text: p.text.clone(),
-                    function_call: None,
-                    function_response: None,
-                    inline_data: None,
-                    thought_signature: None,
-                    thought: None,
-                }).collect(),
-            }),
-            contents: contents.clone(),
-            tools: tools_block.clone(),
-            generation_config: Some(GenerationConfig {
-                temperature: gen_config.temperature,
-                max_output_tokens: gen_config.max_output_tokens,
-                thinking_config: gen_config.thinking_config.clone(),
-                response_mime_type: None,
-                response_schema: None,
-            }),
+        let req = ChatCompletionRequest {
+            model: agent.model.model_id.clone(),
+            messages: messages.clone(),
+            tools: tools_option.clone(),
+            tool_choice: tool_choice_option.clone(),
+            response_format: None,
+            temperature: Some(agent.model.temperature),
+            max_tokens: Some(agent.model.max_tokens),
+            stream: None,
         };
 
-        let resp = gemini::generate_content(
-            http,
-            api_key_decrypted,
-            &agent.model.model_id,
-            agent.model.timeout_seconds,
-            &body,
-            relay,
-            base_url_override,
-        )
-        .await?;
+        let resp = or_client.complete(&req).await?;
 
-        let usage = resp.usage_metadata.unwrap_or(UsageMetadata::default());
-        total_in = total_in.saturating_add(usage.prompt_token_count);
-        total_out = total_out.saturating_add(usage.candidates_token_count);
-        total_thinking = total_thinking.saturating_add(usage.thoughts_token_count);
-        // Phase 3a: acumular cache hits (Gemini cobra a tarifa reducida).
-        total_cached = total_cached.saturating_add(usage.cached_content_token_count);
+        let usage = resp.usage.unwrap_or_default();
+        total_in += usage.prompt_tokens;
+        total_out += usage.completion_tokens;
+        total_cached += usage
+            .prompt_tokens_details
+            .as_ref()
+            .map(|d| d.cached_tokens)
+            .unwrap_or(0);
 
-        let candidate = match resp.candidates.into_iter().next() {
+        let choice = match resp.choices.into_iter().next() {
             Some(c) => c,
             None => {
-                // Sin candidatos = filtros de seguridad o input rechazado.
                 tracing::warn!(
-                    "[ai_agent] no candidates from gemini (iter {}), prompt_feedback={:?}",
-                    iter,
-                    resp.prompt_feedback
+                    "[ai_agent.runner] no choices from openrouter (iter {})",
+                    iter
                 );
                 response_text = Some(
                     "Disculpá, no pude generar respuesta. Te conecto con un compañero del equipo."
                         .to_string(),
                 );
                 escalated = true;
-                escalation_reason = Some("no_candidates".into());
+                escalation_reason = Some("no_choices".into());
                 break 'turn;
             }
         };
-        finish_reason = candidate.finish_reason.clone();
+        finish_reason = choice.finish_reason.clone();
 
-        // Separamos parts de texto vs function calls. Si hay ambos, el text
-        // suele ser un comentario del modelo previo a la tool call —
-        // prevalece el function call (debemos ejecutarlo y volver).
-        let mut pending_calls: Vec<FunctionCall> = Vec::new();
-        let mut accumulated_text = String::new();
-        for p in &candidate.content.parts {
-            if let Some(fc) = &p.function_call {
-                pending_calls.push(fc.clone());
-            } else if let Some(t) = &p.text {
-                if !t.is_empty() {
-                    accumulated_text.push_str(t);
-                }
-            }
-        }
+        let assistant_msg = choice.message;
+        let tool_calls = assistant_msg.tool_calls.clone().unwrap_or_default();
 
-        if pending_calls.is_empty() {
+        if tool_calls.is_empty() {
             // Respuesta final en texto.
-            response_text = Some(accumulated_text);
+            let text = match assistant_msg.content {
+                Some(MessageContent::Text(s)) => s,
+                Some(MessageContent::Blocks(blocks)) => blocks
+                    .into_iter()
+                    .filter_map(|b| if let ContentBlock::Text { text } = b { Some(text) } else { None })
+                    .collect::<Vec<_>>()
+                    .join(""),
+                None => String::new(),
+            };
+            response_text = Some(text);
             break 'turn;
         }
 
-        // Persistimos en `contents` el turno del modelo tal cual vino
-        // (texto opcional + function calls), para que el siguiente roundtrip
-        // mantenga el contexto coherente.
-        contents.push(Content {
-            role: "model".into(),
-            parts: candidate.content.parts.clone(),
+        // Appendear el mensaje del assistant con sus tool_calls al historial.
+        messages.push(ChatMessage {
+            role: "assistant".into(),
+            content: assistant_msg.content.clone(),
+            tool_calls: Some(tool_calls.clone()),
+            ..Default::default()
         });
 
-        // Ejecutar cada function call y mandar la respuesta como `user` part.
-        for call in pending_calls {
-            // Detectar escalation tools antes de ejecutar (si el call es
-            // exitoso, el flag queda en `true`; si falla, el LLM decide).
-            let is_escalation = call.name == "request_human" || call.name == "create_ticket";
+        // Ejecutar cada tool call y agregar mensaje {role:"tool"} por call.
+        for tc in &tool_calls {
+            let is_escalation = tc.function.name == "request_human" || tc.function.name == "create_ticket";
 
-            // Log del tool call ANTES de ejecutar — útil para diagnosticar
-            // cuando una tool se queda colgada (DB lenta, network, etc).
             tracing::info!(
-                "[ai_agent.runner] tool_call: name={} args={}",
-                call.name,
-                serde_json::to_string(&call.args).unwrap_or_else(|_| "<unserializable>".into())
+                "[ai_agent.runner] tool_call: id={} name={} args={}",
+                tc.id,
+                tc.function.name,
+                &tc.function.arguments
             );
 
-            let result = execute_tool(&call.name, call.args.clone(), tool_ctx).await;
+            // Parsear argumentos: JSON-encoded string → Value.
+            let args_value: serde_json::Value = match serde_json::from_str(&tc.function.arguments) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        "[ai_agent.runner] tool_call id={} args parse error: {} | raw='{}'",
+                        tc.id, e, tc.function.arguments
+                    );
+                    serde_json::json!({ "error": "invalid_args", "details": e.to_string() })
+                }
+            };
 
-            // Log del resultado del tool call.
+            // Detectar si es args de error — no ejecutar la tool en ese caso.
+            let result = if args_value.get("error").is_some() && args_value.get("details").is_some() {
+                // Args inválidos: devolver error como resultado sin llamar la tool.
+                super::tools::ToolResult {
+                    success: false,
+                    data: args_value.clone(),
+                    error: Some("invalid_args".into()),
+                    duration_ms: 0,
+                    state_patches: Vec::new(),
+                }
+            } else {
+                execute_tool(&tc.function.name, args_value.clone(), tool_ctx).await
+            };
+
             if result.success {
                 tracing::info!(
-                    "[ai_agent.runner] tool_result: name={} success=true duration_ms={} summary={}",
-                    call.name,
+                    "[ai_agent.runner] tool_result: id={} name={} success=true duration_ms={} summary={}",
+                    tc.id,
+                    tc.function.name,
                     result.duration_ms,
                     truncate_summary(&result.data),
                 );
-                // Phase 2: acumular patches del path de éxito.
                 state_patches_acc.extend(result.state_patches.iter().cloned());
             } else {
                 tracing::warn!(
-                    "[ai_agent.runner] tool_result: name={} success=false duration_ms={} error={:?}",
-                    call.name,
+                    "[ai_agent.runner] tool_result: id={} name={} success=false duration_ms={} error={:?}",
+                    tc.id,
+                    tc.function.name,
                     result.duration_ms,
                     result.error,
                 );
-                // Phase 2: patch centralizado de fallo (el dispatch lo acumula
-                // sin que cada tool tenga que recordar hacerlo).
                 state_patches_acc.push(crate::models::whatsapp::StatePatch::AddFailedAttempt {
-                    tool: call.name.clone(),
+                    tool: tc.function.name.clone(),
                     error: result.error.clone().unwrap_or_else(|| "unknown_error".into()),
                 });
             }
 
             tool_call_logs.push(AiToolCallLog {
-                tool_name: call.name.clone(),
-                args: call.args.clone(),
+                tool_name: tc.function.name.clone(),
+                args: args_value,
                 result_summary: truncate_summary(&result.data),
                 success: result.success,
                 error: result.error.clone(),
@@ -608,38 +652,31 @@ pub async fn run_turn(
 
             if is_escalation && result.success {
                 escalated = true;
-                escalation_reason = Some(format!("tool:{}", call.name));
+                escalation_reason = Some(format!("tool:{}", tc.function.name));
             }
 
-            // Empaquetar el resultado como functionResponse.
             let payload = if result.success {
                 result.data
             } else {
                 serde_json::json!({ "error": result.error.clone().unwrap_or_default() })
             };
 
-            contents.push(Content {
-                role: "user".into(),
-                parts: vec![Part {
-                    text: None,
-                    function_call: None,
-                    function_response: Some(FunctionResponse {
-                        name: call.name,
-                        response: payload,
-                    }),
-                    inline_data: None,
-                    thought_signature: None,
-                    thought: None,
-                }],
+            let content_str = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+
+            // {role:"tool"} con tool_call_id — CRÍTICO: debe coincidir con tc.id.
+            messages.push(ChatMessage {
+                role: "tool".into(),
+                content: Some(MessageContent::Text(content_str)),
+                tool_call_id: Some(tc.id.clone()),
+                name: Some(tc.function.name.clone()),
+                ..Default::default()
             });
         }
-        // Si la IA escaló por create_ticket o request_human, igual seguimos
-        // un turno más para que pueda producir una despedida en texto. El
-        // loop se corta cuando esa respuesta llegue (ya no hay tool call).
+        // Si escaló por create_ticket/request_human, continúa un turno más
+        // para que el LLM produzca la despedida en texto.
     }
 
     if response_text.is_none() {
-        // Salimos por max_iterations sin texto final.
         response_text = Some(
             "Disculpá, no logré resolverlo en este momento. Te derivo con un compañero del equipo."
                 .to_string(),
@@ -648,13 +685,18 @@ pub async fn run_turn(
         escalation_reason = Some("max_iterations_reached".into());
     }
 
-    // Phase 3a: usa la formula de 5-args con cached + thinking tokens.
-    let cost_usd_estimate = gemini::estimate_cost_usd(
+    // Mapear tokens a u32 para compatibilidad con el schema de AiInteraction.
+    let total_in_u32 = total_in.max(0) as u32;
+    let total_out_u32 = total_out.max(0) as u32;
+    let total_thinking_u32 = total_thinking.max(0) as u32;
+    let total_cached_u32 = total_cached.max(0) as u32;
+
+    let cost_usd_estimate = crate::models::ai_agent::estimate_cost_usd(
         &agent.model.model_id,
-        total_in,
-        total_cached,
-        total_out,
-        total_thinking,
+        total_in_u32,
+        total_cached_u32,
+        total_out_u32,
+        total_thinking_u32,
     );
     let latency_ms = started.elapsed().as_millis() as u32;
 
@@ -690,11 +732,11 @@ pub async fn run_turn(
     Ok(RunnerOutput {
         response_text,
         tool_calls: tool_call_logs,
-        input_tokens: total_in,
-        output_tokens: total_out,
-        thinking_tokens: total_thinking,
-        cached_tokens: total_cached,
-        total_tokens: total_in.saturating_add(total_out),
+        input_tokens: total_in_u32,
+        output_tokens: total_out_u32,
+        thinking_tokens: total_thinking_u32,
+        cached_tokens: total_cached_u32,
+        total_tokens: total_in_u32.saturating_add(total_out_u32),
         cost_usd_estimate,
         latency_ms,
         escalated,
@@ -727,7 +769,7 @@ pub fn decrypt_api_key(agent: &AiAgent, secret: &str) -> Result<String, ApiError
         return Err(ApiError::domain_simple(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "ai_api_key_missing",
-            "El agente no tiene api_key de Gemini configurada",
+            "El agente no tiene api_key de OpenRouter configurada",
         ));
     }
     decrypt_payload(secret, enc).ok_or_else(|| {

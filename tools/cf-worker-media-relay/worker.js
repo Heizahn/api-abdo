@@ -38,8 +38,10 @@ const ALLOWED_HOST_SUFFIXES = [
   '.fbsbx.com',
   '.facebook.com',
   '.cdninstagram.com',
-  // Gemini (Google Generative Language API)
+  // Gemini (Google Generative Language API) — KEEP for transition; remove after all agents migrate
   '.googleapis.com',
+  // OpenRouter AI API
+  'openrouter.ai',
 ];
 
 export default {

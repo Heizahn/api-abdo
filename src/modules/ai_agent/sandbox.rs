@@ -31,7 +31,7 @@ use crate::{
 };
 
 use super::{
-    gemini::AiRelay,
+    openrouter::{AiRelay, resolve_base_url},
     runner::{run_turn, ConvRole, ConvTurn, PromptVariables},
     tools::{extract_allowed_transfer_targets, ToolContext},
 };
@@ -304,18 +304,17 @@ pub async fn sandbox_handler(
         weekday: weekday.to_string(),
     };
 
-    let endpoint_override = agent
-        .model
-        .endpoint_override
-        .as_deref()
-        .or(state.config.gemini_base_url.as_deref());
+    let effective_base_url = resolve_base_url(
+        agent.model.endpoint_override.as_deref(),
+        &state.config,
+    );
 
     let output = run_turn(
         &state.reqwest_client,
         &agent,
         &api_key,
         relay,
-        endpoint_override,
+        &effective_base_url,
         &history,
         &message,
         &[],

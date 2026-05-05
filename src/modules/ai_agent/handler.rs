@@ -47,7 +47,10 @@ use crate::{
     state::AppState,
 };
 
-use super::{gemini::AiRelay, runner::decrypt_api_key};
+use super::{
+    openrouter::{AiRelay, OpenRouterClient, resolve_base_url},
+    runner::decrypt_api_key,
+};
 
 const SUPERADMIN_ROLE: f32 = 0.0;
 /// Sentinel para `nRole` del bot. 99 deja libres 6/7/8 para roles humanos
@@ -62,29 +65,98 @@ const FAQ_ANSWER_MAX_LEN: usize = 4_000;
 const FAQ_TAG_MAX_LEN: usize = 64;
 const FAQ_TAGS_MAX_COUNT: usize = 16;
 
-const MODELS_CACHE_TTL_SECS: u64 = 600;
-const MODELS_FETCH_TIMEOUT: u32 = 15;
 const TEST_TIMEOUT_MAX: u32 = 30;
-const DEFAULT_TEST_MODEL: &str = "gemini-1.5-flash-latest";
+const DEFAULT_TEST_MODEL: &str = "openai/gpt-4o-mini";
 
-const RECOMMENDED_MODEL_IDS: &[&str] = &[
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-flash-8b-latest",
-    "gemini-2.0-flash-exp",
-];
+// ============================================
+// ModelMetadata — lista curada de modelos OpenRouter
+// ============================================
 
-/// Patrones de modelos que están en el free tier de Google AI Studio
-/// (a 2026-04). Match por substring contra el id devuelto por Gemini.
-/// Cuando Google ajuste los tiers, actualizar acá.
-const FREE_TIER_PATTERNS: &[&str] = &[
-    "gemini-1.5-flash",      // 1.5-flash y 1.5-flash-8b (todas variantes)
-    "gemini-2.0-flash-exp",  // experimental free tier
-    "gemini-2.0-flash-thinking-exp",
-    "gemini-2.5-flash-lite", // 2.5 flash lite — free tier confirmado
-];
+/// Metadata de un modelo disponible en OpenRouter (lista curada, no fetch live).
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
+pub struct ModelMetadata {
+    /// Slug del modelo en OpenRouter (ej. `openai/gpt-4o-mini`).
+    pub slug: String,
+    /// Nombre amigable para mostrar en la UI.
+    pub label: String,
+    /// Descripción corta para el SUPERADMIN.
+    pub description: String,
+    /// Tokens máximos de contexto.
+    pub context_window: u32,
+    /// Precio de entrada por millón de tokens (USD).
+    pub input_price_per_million: f64,
+    /// Precio de salida por millón de tokens (USD).
+    pub output_price_per_million: f64,
+    /// Soporta imágenes en el contexto.
+    pub supports_vision: bool,
+    /// Soporta function calling / tools.
+    pub supports_tools: bool,
+}
 
-fn is_free_tier(id: &str) -> bool {
-    FREE_TIER_PATTERNS.iter().any(|p| id.contains(p))
+/// Lista curada de modelos OpenRouter disponibles para los agentes.
+/// Hardcoded — no hace fetch live a `/models`. Cuando se quiera agregar
+/// un modelo nuevo, cambiar acá + actualizar `estimate_cost_usd` en models/ai_agent.rs.
+pub fn curated_models() -> Vec<ModelMetadata> {
+    vec![
+        ModelMetadata {
+            slug: "openai/gpt-4o-mini".into(),
+            label: "GPT-4o mini".into(),
+            description: "Recomendado: rápido, económico, soporta visión y tools".into(),
+            context_window: 128_000,
+            input_price_per_million: 0.15,
+            output_price_per_million: 0.60,
+            supports_vision: true,
+            supports_tools: true,
+        },
+        ModelMetadata {
+            slug: "anthropic/claude-haiku-4.5".into(),
+            label: "Claude Haiku 4.5".into(),
+            description: "Alternativa Anthropic; rápida; soporta tools y visión".into(),
+            context_window: 200_000,
+            input_price_per_million: 1.0,
+            output_price_per_million: 5.0,
+            supports_vision: true,
+            supports_tools: true,
+        },
+        ModelMetadata {
+            slug: "meta-llama/llama-3.3-70b-instruct".into(),
+            label: "Llama 3.3 70B Instruct".into(),
+            description: "Open-weight; económico para texto puro; sin visión nativa".into(),
+            context_window: 128_000,
+            input_price_per_million: 0.12,
+            output_price_per_million: 0.30,
+            supports_vision: false,
+            supports_tools: true,
+        },
+    ]
+}
+
+/// Convierte la lista curada de `ModelMetadata` al shape legacy `AiAgentModelItem`
+/// para mantener compatibilidad con el contrato de respuesta existente.
+fn curated_models_as_items() -> Vec<AiAgentModelItem> {
+    curated_models()
+        .into_iter()
+        .enumerate()
+        .map(|(i, m)| AiAgentModelItem {
+            id: m.slug.clone(),
+            display_name: m.label,
+            description: m.description,
+            // context_window es el límite de entrada del modelo.
+            input_token_limit: m.context_window,
+            // output_token_limit: usamos un máximo razonable de 4096 (valor
+            // típico de agents config); no expuesto directamente por OpenRouter.
+            output_token_limit: 4096,
+            supports_function_calling: m.supports_tools,
+            // OpenRouter soporta mensajes de sistema en todos los modelos.
+            supports_system_instruction: true,
+            // version: tomamos la parte post-slash del slug (ej. "gpt-4o-mini").
+            version: m.slug.split('/').nth(1).unwrap_or("").to_string(),
+            // El primer modelo de la lista es el recomendado (gpt-4o-mini).
+            recommended: i == 0,
+            // OpenRouter no tiene free tier equivalente al de Google AI Studio.
+            free_tier: false,
+        })
+        .collect()
 }
 
 fn require_superadmin(u: &User) -> Result<(), ApiError> {
@@ -169,14 +241,6 @@ fn faq_not_found() -> ApiError {
     )
 }
 
-fn missing_api_key() -> ApiError {
-    ApiError::domain_simple(
-        StatusCode::BAD_REQUEST,
-        "missing_api_key",
-        "Pasá `api_key` o configurá la del agente antes",
-    )
-}
-
 // ============================================
 // Defaults
 // ============================================
@@ -199,8 +263,8 @@ fn default_agent(label: String, description: String, ai_user_id: String, now: Bs
             to_hour: 23,
         },
         model: AiModelConfig {
-            provider: "gemini".into(),
-            model_id: "gemini-2.5-flash-lite".into(),
+            provider: "openrouter".into(),
+            model_id: "openai/gpt-4o-mini".into(),
             temperature: 0.7,
             // 2000 default. Antes era 500 que se quedaba corto cuando el
             // agente combinaba check_coverage + list_plans + recomendación
@@ -1076,21 +1140,20 @@ pub async fn test_connection_raw_handler(
         .filter(|s| !s.is_empty())
         .unwrap_or(DEFAULT_TEST_MODEL)
         .to_string();
-    let timeout = body
+    let _timeout = body
         .timeout_seconds
         .map(|n| n.clamp(1, TEST_TIMEOUT_MAX))
         .unwrap_or(10);
 
     let relay = AiRelay::from_config(&state.config);
-    super::gemini::test_connection(
-        &state.reqwest_client,
-        &api_key,
-        &model_id,
-        timeout,
-        relay.as_ref(),
-        state.config.gemini_base_url.as_deref(),
-    )
-    .await?;
+    let base_url = resolve_base_url(None, &state.config);
+    let or_client = OpenRouterClient::new(
+        state.reqwest_client.clone(),
+        base_url,
+        api_key.clone(),
+        relay,
+    );
+    or_client.test_connection(&model_id).await?;
 
     Ok(Json(TestConnectionResponse {
         ok: true,
@@ -1158,20 +1221,20 @@ pub async fn test_connection_for_agent_handler(
         .unwrap_or(10);
 
     let relay = AiRelay::from_config(&state.config);
-    let endpoint_override = agent
-        .model
-        .endpoint_override
-        .as_deref()
-        .or(state.config.gemini_base_url.as_deref());
-    super::gemini::test_connection(
-        &state.reqwest_client,
-        &api_key,
-        &model_id,
-        timeout,
-        relay.as_ref(),
-        endpoint_override,
-    )
-    .await?;
+    let base_url = resolve_base_url(
+        agent.model.endpoint_override.as_deref(),
+        &state.config,
+    );
+    let or_client = OpenRouterClient::new(
+        state.reqwest_client.clone(),
+        base_url,
+        api_key.clone(),
+        relay,
+    );
+    // timeout está calculado arriba pero OpenRouterClient usa su propio backoff interno;
+    // el campo se ignora — se deja en la firma por compatibilidad con TestConnectionRequest.
+    let _ = timeout;
+    or_client.test_connection(&model_id).await?;
 
     Ok(Json(TestConnectionResponse {
         ok: true,
@@ -1187,11 +1250,13 @@ pub async fn test_connection_for_agent_handler(
 // LIST MODELS — raw (pre-creación)
 // ============================================
 
+/// Query params legacy (campos ignorados en OpenRouter mode, mantenidos por
+/// compatibilidad con clientes que aún los envían).
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct ListModelsRawQuery {
-    pub api_key: String,
-    /// Por default solo devolvemos modelos del free tier de Google AI Studio.
-    /// Pasar `true` incluye los que requieren billing.
+    #[serde(default)]
+    pub api_key: Option<String>,
     #[serde(default)]
     pub include_paid: Option<bool>,
 }
@@ -1201,59 +1266,26 @@ pub struct ListModelsRawQuery {
     path = "/v1/auth-user/whatsapp/ai-agent/models",
     tag = "WhatsApp — AI Agent",
     security(("bearerAuth" = [])),
-    params(("api_key" = String, Query, description = "API key de Gemini para preview")),
     responses(
-        (status = 200, description = "Modelos disponibles", body = AiAgentModelsListResponse),
-        (status = 400, description = "missing_api_key"),
-        (status = 401, description = "invalid_api_key"),
-        (status = 429, description = "gemini_rate_limited"),
-        (status = 502, description = "gemini_unreachable"),
+        (status = 200, description = "Modelos disponibles (lista curada)", body = AiAgentModelsListResponse),
     )
 )]
 pub async fn list_models_raw_handler(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     Extension(current_user): Extension<User>,
-    Query(q): Query<ListModelsRawQuery>,
+    Query(_q): Query<ListModelsRawQuery>,
 ) -> Result<Json<AiAgentModelsListResponse>, ApiError> {
     require_superadmin(&current_user)?;
-    let api_key = q.api_key.trim().to_string();
-    if api_key.is_empty() {
-        return Err(missing_api_key());
-    }
-
-    // Sin :id no hay clave estable para cache. Cada call pega a Gemini.
-    let relay = AiRelay::from_config(&state.config);
-    let raw = super::gemini::list_models(
-        &state.reqwest_client,
-        &api_key,
-        MODELS_FETCH_TIMEOUT,
-        relay.as_ref(),
-        state.config.gemini_base_url.as_deref(),
-    )
-    .await?;
-    // Por default devolvemos TODOS los modelos (free + paid). El flag
-    // `free_tier` viene en cada item para que el FE muestre badge si quiere.
-    let include_paid = q.include_paid.unwrap_or(true);
+    // OpenRouter: lista curada, sin fetch live. Cualquier SUPERADMIN la ve.
     Ok(Json(AiAgentModelsListResponse {
         ok: true,
-        data: filter_and_map_models(raw, include_paid),
+        data: curated_models_as_items(),
     }))
 }
 
 // ============================================
 // LIST MODELS por agente
 // ============================================
-
-#[derive(Debug, Deserialize)]
-pub struct ListModelsForAgentQuery {
-    /// Override de api_key. Si no viene, se usa la guardada del agente.
-    #[serde(default)]
-    pub api_key: Option<String>,
-    /// Por default solo devolvemos modelos del free tier de Google AI Studio.
-    /// Pasar `true` incluye los que requieren billing.
-    #[serde(default)]
-    pub include_paid: Option<bool>,
-}
 
 #[utoipa::path(
     get,
@@ -1262,86 +1294,31 @@ pub struct ListModelsForAgentQuery {
     security(("bearerAuth" = [])),
     params(
         ("id" = String, Path, description = "ObjectId hex del agente"),
-        ("api_key" = Option<String>, Query, description = "Override de api_key"),
     ),
     responses(
-        (status = 200, description = "Modelos disponibles", body = AiAgentModelsListResponse),
-        (status = 400, description = "missing_api_key"),
-        (status = 401, description = "invalid_api_key"),
+        (status = 200, description = "Modelos disponibles (lista curada OpenRouter)", body = AiAgentModelsListResponse),
         (status = 404, description = "agent_not_found"),
-        (status = 429, description = "gemini_rate_limited"),
-        (status = 502, description = "gemini_unreachable"),
     )
 )]
 pub async fn list_models_for_agent_handler(
     State(state): State<Arc<AppState>>,
     Extension(current_user): Extension<User>,
     Path(id): Path<String>,
-    Query(q): Query<ListModelsForAgentQuery>,
 ) -> Result<Json<AiAgentModelsListResponse>, ApiError> {
     require_superadmin(&current_user)?;
     let oid = parse_oid(&id, "id")?;
-    let agent = state
+    // Verificar que el agente existe (mantiene semántica 404).
+    state
         .db
         .find_ai_agent_by_id(&oid)
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(agent_not_found)?;
 
-    let query_key = q.api_key.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let api_key = match query_key {
-        Some(k) => k.to_string(),
-        None => {
-            if agent.model.api_key_encrypted.is_empty() {
-                return Err(missing_api_key());
-            }
-            decrypt_api_key(&agent, &ai_agent_secret())?
-        }
-    };
-
-    // Por default devolvemos TODOS los modelos (free + paid). El flag
-    // `free_tier` viene en cada item para que el FE muestre badge si quiere.
-    let include_paid = q.include_paid.unwrap_or(true);
-    let agent_hex = oid.to_hex();
-    // Cacheamos SIEMPRE todos los modelos (con `free_tier` flag por item) y
-    // filtramos al servir según `include_paid`. Un solo cache para los dos
-    // modos.
-    if let Some(cached) = state.redis.get_ai_models_cache(&agent_hex, &api_key).await {
-        if let Ok(items) = serde_json::from_str::<Vec<AiAgentModelItem>>(&cached) {
-            let filtered = if include_paid {
-                items
-            } else {
-                items.into_iter().filter(|m| m.free_tier).collect()
-            };
-            return Ok(Json(AiAgentModelsListResponse { ok: true, data: filtered }));
-        }
-    }
-
-    let relay = AiRelay::from_config(&state.config);
-    let raw = super::gemini::list_models(
-        &state.reqwest_client,
-        &api_key,
-        MODELS_FETCH_TIMEOUT,
-        relay.as_ref(),
-        state.config.gemini_base_url.as_deref(),
-    )
-    .await?;
-    // Cacheamos todos (include_paid=true para no filtrar en cache).
-    let all_items = filter_and_map_models(raw, true);
-    if let Ok(json) = serde_json::to_string(&all_items) {
-        state
-            .redis
-            .set_ai_models_cache(&agent_hex, &api_key, &json, MODELS_CACHE_TTL_SECS)
-            .await;
-    }
-    let items = if include_paid {
-        all_items
-    } else {
-        all_items.into_iter().filter(|m| m.free_tier).collect()
-    };
+    // OpenRouter: lista curada, sin fetch live.
     Ok(Json(AiAgentModelsListResponse {
         ok: true,
-        data: items,
+        data: curated_models_as_items(),
     }))
 }
 
@@ -1507,43 +1484,3 @@ pub async fn get_ai_agent_metrics_handler(
     }))
 }
 
-fn filter_and_map_models(
-    raw: Vec<super::gemini::GeminiModelEntry>,
-    include_paid: bool,
-) -> Vec<AiAgentModelItem> {
-    raw.into_iter()
-        .filter_map(|m| {
-            let id = m.name.strip_prefix("models/").unwrap_or(&m.name);
-            if !id.starts_with("gemini-") {
-                return None;
-            }
-            if !m
-                .supported_generation_methods
-                .iter()
-                .any(|s| s == "generateContent")
-            {
-                return None;
-            }
-            let free_tier = is_free_tier(id);
-            // Por default solo devolvemos los free; con ?include_paid=true
-            // el FE también recibe los que requieren billing.
-            if !include_paid && !free_tier {
-                return None;
-            }
-            let supports = true;
-            let recommended = RECOMMENDED_MODEL_IDS.iter().any(|r| *r == id);
-            Some(AiAgentModelItem {
-                id: id.to_string(),
-                display_name: m.display_name.unwrap_or_default(),
-                description: m.description.unwrap_or_default(),
-                input_token_limit: m.input_token_limit.unwrap_or(0),
-                output_token_limit: m.output_token_limit.unwrap_or(0),
-                supports_function_calling: supports,
-                supports_system_instruction: supports,
-                version: m.version.unwrap_or_default(),
-                recommended,
-                free_tier,
-            })
-        })
-        .collect()
-}

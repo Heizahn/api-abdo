@@ -57,19 +57,14 @@ pub struct Config {
     pub whatsapp_app_id: Option<String>,
 
     // AI Agent Relay (Cloudflare Worker) — mismo patrón que `wa_media_relay`.
-    // Si ambas están seteadas, las llamadas a Gemini
-    // (`generativelanguage.googleapis.com`) pasan por el worker en lugar
-    // de conectar directo. Pueden apuntar al mismo worker que WA media o
-    // a uno separado — el worker `tools/cf-worker-media-relay` ya soporta
-    // ambos hosts en la whitelist.
+    // Si ambas están seteadas, las llamadas a OpenRouter pasan por el worker
+    // en lugar de conectar directo. El worker ya soporta `openrouter.ai`.
     pub ai_relay_url: Option<String>,
     pub ai_relay_secret: Option<String>,
-    /// Override del endpoint de Gemini. Por default usamos AI Studio
-    /// (`generativelanguage.googleapis.com/v1beta`). Para Vertex AI Express
-    /// (con la misma API key compatible), poner:
-    /// `https://aiplatform.googleapis.com/v1/publishers/google/models`
-    /// El cliente le agrega `/{model}:generateContent` al final.
-    pub gemini_base_url: Option<String>,
+    /// Override del endpoint de OpenRouter. Por default usamos
+    /// `https://openrouter.ai/api/v1`. Útil para apuntar a un proxy
+    /// local o staging. El cliente le agrega `/chat/completions`.
+    pub openrouter_base_url: Option<String>,
 }
 
 impl Config {
@@ -148,11 +143,10 @@ impl Config {
             whatsapp_app_id: env::var("WHATSAPP_APP_ID").ok().filter(|s| !s.is_empty()),
 
             // AI Agent Relay — opcional. Si no están seteadas, las llamadas
-            // a Gemini van directo (probablemente fallen desde la VM por
-            // bloqueo del ISP, igual que WA).
+            // a OpenRouter van directo.
             ai_relay_url: env::var("AI_RELAY_URL").ok().filter(|s| !s.is_empty()),
             ai_relay_secret: env::var("AI_RELAY_SECRET").ok().filter(|s| !s.is_empty()),
-            gemini_base_url: env::var("GEMINI_BASE_URL").ok().filter(|s| !s.is_empty()),
+            openrouter_base_url: env::var("OPENROUTER_BASE_URL").ok().filter(|s| !s.is_empty()),
         }
     }
 

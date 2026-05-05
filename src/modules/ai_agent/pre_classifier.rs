@@ -1,4 +1,4 @@
-//! Pre-clasificador (Phase 3a): un único roundtrip a gemini-2.5-flash-lite que
+//! Pre-clasificador (Phase 3a): un único roundtrip a openai/gpt-4o-mini que
 //! decide si el turno es trivial (Spam / GreetingOnly), routeable directo a
 //! un especialista (Clear*), o ambiguo (cae al flujo normal).
 //!
@@ -8,9 +8,8 @@
 use serde::Deserialize;
 use std::time::Instant;
 
-use super::gemini::{
-    self, AiRelay, Content, GenerateContentRequest, GenerationConfig, Part, SystemInstruction,
-    ThinkingConfig,
+use super::openrouter::{
+    AiRelay, ChatCompletionRequest, ChatMessage, MessageContent, OpenRouterClient, ResponseFormat,
 };
 
 // ──────────────────────────────────────────────
@@ -75,11 +74,11 @@ pub struct PreClassResultFull {
     pub latency_ms: u32,
 }
 
-/// Contexto que el pre-clasificador necesita para llamar a Gemini.
+/// Contexto que el pre-clasificador necesita para llamar a OpenRouter.
 pub struct PreClassifierContext<'a> {
     pub api_key: &'a str,
     pub relay: Option<&'a AiRelay>,
-    pub base_url_override: Option<&'a str>,
+    pub base_url: String,
     pub http: &'a reqwest::Client,
 }
 
@@ -100,8 +99,7 @@ struct PreClassRaw {
 // Constants
 // ──────────────────────────────────────────────
 
-const PRE_CLASS_MODEL_ID: &str = "gemini-2.5-flash-lite";
-const PRE_CLASS_TIMEOUT_SECONDS: u32 = 10;
+const PRE_CLASS_MODEL_ID: &str = "openai/gpt-4o-mini";
 const PRE_CLASS_CONFIDENCE_THRESHOLD: f32 = 0.85;
 
 // ──────────────────────────────────────────────
@@ -123,55 +121,55 @@ pub async fn classify(
     let started = Instant::now();
     let prompt = build_prompt(text, customer_lookup_summary);
 
-    let body = GenerateContentRequest {
-        system_instruction: Some(SystemInstruction {
-            parts: vec![Part::text(prompt)],
-        }),
-        contents: vec![Content {
-            role: "user".into(),
-            parts: vec![Part::text(text)],
-        }],
+    let req = ChatCompletionRequest {
+        model: PRE_CLASS_MODEL_ID.to_string(),
+        messages: vec![
+            ChatMessage {
+                role: "system".into(),
+                content: Some(MessageContent::Text(prompt)),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: Some(MessageContent::Text(text.to_string())),
+                ..Default::default()
+            },
+        ],
         tools: None,
-        generation_config: Some(GenerationConfig {
-            temperature: Some(0.0),
-            max_output_tokens: Some(80),
-            thinking_config: Some(ThinkingConfig { thinking_budget: 0 }),
-            response_mime_type: Some("application/json".to_string()),
-            response_schema: Some(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "result":     { "type": "string" },
-                    "confidence": { "type": "number" },
-                    "reasoning":  { "type": "string" }
-                },
-                "required": ["result", "confidence", "reasoning"]
-            })),
-        }),
+        tool_choice: None,
+        response_format: Some(ResponseFormat::JsonObject),
+        temperature: Some(0.0),
+        max_tokens: Some(64),
+        stream: None,
     };
 
-    let resp = gemini::generate_content(
-        ctx.http,
-        ctx.api_key,
-        PRE_CLASS_MODEL_ID,
-        PRE_CLASS_TIMEOUT_SECONDS,
-        &body,
-        ctx.relay,
-        ctx.base_url_override,
-    )
-    .await
-    .map_err(|e| format!("{:?}", e))?;
+    let client = OpenRouterClient::new(
+        ctx.http.clone(),
+        ctx.base_url.clone(),
+        ctx.api_key.to_string(),
+        ctx.relay.cloned(),
+    );
 
-    let usage = resp.usage_metadata.unwrap_or_default();
+    let resp = client
+        .complete(&req)
+        .await
+        .map_err(|e| format!("{:?}", e))?;
+
+    let usage = resp.usage.unwrap_or_default();
     let tokens = PreClassTokens {
-        input: usage.prompt_token_count,
-        output: usage.candidates_token_count,
+        input: usage.prompt_tokens as u32,
+        output: usage.completion_tokens as u32,
     };
 
     let raw_text = resp
-        .candidates
+        .choices
         .into_iter()
         .next()
-        .and_then(|c| c.content.parts.into_iter().find_map(|p| p.text))
+        .and_then(|c| c.message.content)
+        .map(|c| match c {
+            MessageContent::Text(s) => s,
+            MessageContent::Blocks(_) => String::new(),
+        })
         .unwrap_or_default();
 
     let cleaned = strip_json_fence(&raw_text);

@@ -17,6 +17,7 @@ use crate::models::ai_agent::{
     UpdateAiCoverageZoneRequest, UpdateAiPlanRequest,
 };
 use crate::modules::ai_agent::business_data::{AiToolMetaItem, AiToolsListResponse};
+use crate::modules::ai_agent::handler::ModelMetadata;
 use crate::modules::ai_agent::sandbox::{
     SandboxData, SandboxHistoryEntry, SandboxRequest, SandboxResponse, SandboxToolCall,
     SandboxUsage,
@@ -307,7 +308,7 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
             TestConnectionRequest, TestConnectionResponse, TestConnectionData,
             TestConnectionSource,
             // AI Agent — List models
-            AiAgentModelItem, AiAgentModelsListResponse,
+            AiAgentModelItem, AiAgentModelsListResponse, ModelMetadata,
             // AI Agent — Phase 3a (Pre-classifier + Metrics)
             AiAgentPurpose,
             TrivialResponse,

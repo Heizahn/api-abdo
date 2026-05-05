@@ -35,7 +35,7 @@ use crate::{
 
 use super::{
     escalation,
-    gemini::AiRelay,
+    openrouter::{AiRelay, resolve_base_url},
     guardrails,
     pre_classifier::{self, PreClassResult, PreClassResultFull},
     runner::{decrypt_api_key, run_turn, ConvRole, ConvTurn, MediaInput, PromptVariables},
@@ -498,11 +498,10 @@ async fn run_dispatch(
             let pc_ctx = pre_classifier::PreClassifierContext {
                 api_key: &pc_api_key,
                 relay: relay_for_pc.as_ref(),
-                base_url_override: agent
-                    .model
-                    .endpoint_override
-                    .as_deref()
-                    .or(state.config.gemini_base_url.as_deref()),
+                base_url: resolve_base_url(
+                    agent.model.endpoint_override.as_deref(),
+                    &state.config,
+                ),
                 http: &state.reqwest_client,
             };
             let summary = build_customer_summary_short(&customer_context);
@@ -970,19 +969,18 @@ async fn run_dispatch(
             None
         };
 
-        // Endpoint override: prevalece el del agente sobre el global del .env.
-        let endpoint_override = active_agent
-            .model
-            .endpoint_override
-            .as_deref()
-            .or(state.config.gemini_base_url.as_deref());
+        // Resuelve base URL efectiva: agente override → env → default OpenRouter.
+        let effective_base_url = resolve_base_url(
+            active_agent.model.endpoint_override.as_deref(),
+            &state.config,
+        );
 
         let output = match run_turn(
             &state.reqwest_client,
             &active_agent,
             &active_api_key,
             relay,
-            endpoint_override,
+            &effective_base_url,
             &history,
             &effective_user_message,
             &user_media,
