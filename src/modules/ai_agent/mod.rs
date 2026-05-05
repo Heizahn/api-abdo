@@ -97,15 +97,16 @@ pub fn user_routes() -> Router<Arc<AppState>> {
             get(business_data::list_coverage_zones_handler)
                 .post(business_data::create_coverage_zone_handler),
         )
-        // IMPORTANTE: /political-divisions debe registrarse ANTES de /:id para
-        // que Axum no interprete "political-divisions" como un ObjectId.
-        .route(
-            "/v1/auth-user/whatsapp/ai-agent/coverage-zones/political-divisions",
-            get(business_data::list_political_divisions_handler),
-        )
         .route(
             "/v1/auth-user/whatsapp/ai-agent/coverage-zones/:id",
             patch(business_data::update_coverage_zone_handler)
                 .delete(business_data::delete_coverage_zone_handler),
+        )
+        // División política canónica VE (estados/municipios) — path acordado
+        // con el front team. Vive bajo /ai/zones/ por contrato, no bajo
+        // /ai-agent/coverage-zones/, para mantener el contrato original.
+        .route(
+            "/v1/auth-user/whatsapp/ai/zones/political-divisions",
+            get(business_data::list_political_divisions_handler),
         )
 }

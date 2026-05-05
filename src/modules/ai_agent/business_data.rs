@@ -4,7 +4,7 @@
 //!
 //! También expone:
 //! - Discovery (`GET /tools`) con metadata de todas las tools soportadas.
-//! - División política canónica (`GET /coverage-zones/political-divisions`).
+//! - División política canónica (`GET /ai/zones/political-divisions`).
 
 use axum::{
     extract::{Path, State},
@@ -626,12 +626,12 @@ pub async fn delete_coverage_zone_handler(
 }
 
 // ============================================
-// GET /coverage-zones/political-divisions
+// GET /ai/zones/political-divisions
 // ============================================
 
 #[utoipa::path(
     get,
-    path = "/v1/auth-user/whatsapp/ai-agent/coverage-zones/political-divisions",
+    path = "/v1/auth-user/whatsapp/ai/zones/political-divisions",
     tag = "WhatsApp — AI Agent",
     security(("bearerAuth" = [])),
     responses(

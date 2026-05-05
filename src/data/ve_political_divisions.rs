@@ -3,7 +3,7 @@
 //! Datos compilados en tiempo de compilación como const array. El `LazyLock`
 //! ordena estados y municipios con collation es-VE (Ñ entre N y O) la primera
 //! vez que se accede. Usado por:
-//! - El endpoint `GET /coverage-zones/political-divisions`.
+//! - El endpoint `GET /ai/zones/political-divisions`.
 //! - La capa de validación (`validate_state`, `validate_municipality`).
 
 use std::collections::HashMap;
