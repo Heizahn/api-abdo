@@ -1,4 +1,5 @@
 use mongodb::bson::oid::ObjectId;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::{db::WhatsAppRepository, state::AppState};
@@ -7,6 +8,11 @@ use super::ws::{broadcast_all, WsServerEvent};
 
 /// Selecciona el agente con menor carga y le asigna la conversación.
 /// `agents` viene de la configuración `wa_settings` del número que originó el mensaje.
+///
+/// Estrategia: prefiere agentes **online** (presentes en `WsRegistry`) sobre
+/// los que están desconectados, incluso si tienen más carga. Si nadie está
+/// online, hace fallback a min-load global para que la conv quede asignada y
+/// aparezca en la cola del agente cuando se conecte.
 pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents: Vec<String>) {
     let conv_id_str = conv_id.to_hex();
 
@@ -38,14 +44,38 @@ pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents
         return;
     }
 
-    // Cargar carga de cada agente desde Redis
-    let mut loads = Vec::with_capacity(agents.len());
-    for agent_id in &agents {
+    // Snapshot de agentes online (presentes en WsRegistry).
+    let online: HashSet<String> = {
+        let map = state.ws_registry.read().await;
+        map.keys().cloned().collect()
+    };
+
+    // Filtrar candidatos por online primero. Si ninguno está conectado,
+    // hacer fallback a la lista completa para que la conv no quede huérfana.
+    let online_candidates: Vec<String> = agents
+        .iter()
+        .filter(|a| online.contains(*a))
+        .cloned()
+        .collect();
+    let used_online_filter = !online_candidates.is_empty();
+    let candidates: &[String] = if used_online_filter {
+        &online_candidates
+    } else {
+        tracing::warn!(
+            "[assignment] ningún agente online (configurados={:?}) — fallback a min-load global para conv {}",
+            agents, conv_id_str
+        );
+        &agents
+    };
+
+    // Cargar carga de cada candidato desde Redis
+    let mut loads = Vec::with_capacity(candidates.len());
+    for agent_id in candidates {
         let load = state.redis.get_agent_load(agent_id).await;
         loads.push((agent_id.clone(), load));
     }
 
-    // Elegir el menos ocupado
+    // Elegir el menos ocupado entre los candidatos
     let (chosen_agent, _) = loads
         .iter()
         .min_by_key(|(_, load)| *load)
@@ -53,8 +83,8 @@ pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents
         .unwrap();
 
     tracing::info!(
-        "[assignment] asignando conv {} a agente {} (cargas: {:?})",
-        conv_id_str, chosen_agent, loads
+        "[assignment] asignando conv {} a agente {} (online_filter={}, cargas: {:?})",
+        conv_id_str, chosen_agent, used_online_filter, loads
     );
 
     // Actualizar MongoDB
