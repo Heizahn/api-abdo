@@ -6,6 +6,7 @@ use crate::models::ai_agent::{
     AiAgentItem, AiAgentMetricsData, AiAgentMetricsDailyBucketDto, AiAgentMetricsResponse,
     AiAgentMode, AiAgentModelItem, AiAgentModelsListResponse, AiAgentPreClassBreakdown,
     AiAgentPurpose, AiAgentResponse, AiAgentsListResponse, AiBusinessDataDeleteResponse,
+    AiConfigDto, AiConfigPatchRequest, AiConfigResponse,
     AiCoverageZoneItem, AiCoverageZoneResponse, AiCoverageZonesListResponse, AiEscalationRulesDto,
     AiEscalationRulesInput, AiLimitsDto, AiLimitsInput, AiModelConfigDto, AiModelConfigInput,
     AiPersonalityDto, AiPersonalityInput, AiPlanItem, AiPlanResponse, AiPlansListResponse,
@@ -192,6 +193,8 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
         crate::modules::ai_agent::handler::test_connection_for_agent_handler,
         crate::modules::ai_agent::handler::list_models_raw_handler,
         crate::modules::ai_agent::handler::list_models_for_agent_handler,
+        crate::modules::ai_agent::handler::get_ai_config_handler,
+        crate::modules::ai_agent::handler::patch_ai_config_handler,
         // AI Agent — datos de negocio (planes, cobertura) + discovery de tools
         crate::modules::ai_agent::business_data::list_plans_handler,
         crate::modules::ai_agent::business_data::create_plan_handler,
@@ -309,6 +312,8 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
             TestConnectionSource,
             // AI Agent — List models
             AiAgentModelItem, AiAgentModelsListResponse, ModelMetadata,
+            // AI Agent — Global config
+            AiConfigDto, AiConfigPatchRequest, AiConfigResponse,
             // AI Agent — Phase 3a (Pre-classifier + Metrics)
             AiAgentPurpose,
             TrivialResponse,
