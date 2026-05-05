@@ -1,4 +1,5 @@
 pub mod ai_agent;
+pub mod ai_config;
 pub mod auth;
 pub mod onu;
 pub mod profile;

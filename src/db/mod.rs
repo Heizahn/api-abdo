@@ -1,6 +1,6 @@
 pub mod mongo;
 use crate::models::ai_agent::{
-    AiAgent, AiAgentFaq, AiAgentPurpose, AiClientLookup, AiCoverageZone, AiInteraction, AiPlan,
+    AiAgent, AiAgentFaq, AiAgentPurpose, AiClientLookup, AiCoverageZone, AiConfig, AiInteraction, AiPlan,
 };
 use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
 use crate::models::whatsapp::{
@@ -1272,6 +1272,27 @@ pub struct AiAgentMetricsRaw {
 }
 
 // ============================================
+// 12. AiConfigRepository — singleton de configuración global de AI
+// ============================================
+
+#[async_trait::async_trait]
+pub trait AiConfigRepository: Send + Sync {
+    /// Devuelve `Some` cuando el doc singleton existe, `None` cuando la colección
+    /// `AiConfig` está vacía.
+    async fn get_ai_config(&self) -> Result<Option<AiConfig>, String>;
+
+    /// Upsert del singleton. `api_key_cipher` y `default_model` son `Option` —
+    /// `None` significa "no tocar este campo". Siempre actualiza `updated_at`
+    /// y `editor_id`. Devuelve el documento post-escritura.
+    async fn upsert_ai_config(
+        &self,
+        api_key_cipher: Option<String>,
+        default_model: Option<String>,
+        editor_id: &str,
+    ) -> Result<AiConfig, String>;
+}
+
+// ============================================
 // TRAIT MAESTRO
 // ============================================
 pub trait Db:
@@ -1286,6 +1307,7 @@ pub trait Db:
     + WaTemplateMediaRepository
     + WaTicketRepository
     + AiAgentRepository
+    + AiConfigRepository
     + Clone
     + Send
     + Sync

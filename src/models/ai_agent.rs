@@ -15,6 +15,93 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 // ============================================
+// AiConfig — singleton de configuración global
+// ============================================
+
+/// Documento único de la colección `AiConfig`.
+/// App-level singleton: se usa `find_one({})` + upsert para garantizar
+/// como máximo un documento.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiConfig {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    /// AES-GCM ciphertext (Base64URL) de la OpenRouter API key. String vacío = no configurada.
+    #[serde(default)]
+    pub openrouter_api_key: String,
+    /// Slug del modelo default pre-rellenado al crear un nuevo AiAgent.
+    #[serde(default)]
+    pub default_model: String,
+    pub updated_at: DateTime,
+    /// UUID del staff user que persistió este doc por última vez.
+    #[serde(default)]
+    pub editor_id: String,
+}
+
+impl AiConfig {
+    /// Convierte el documento a DTO de respuesta HTTP. Nunca expone ciphertext ni cleartext.
+    pub fn to_dto(&self) -> AiConfigDto {
+        AiConfigDto {
+            has_api_key: !self.openrouter_api_key.is_empty(),
+            default_model: self.default_model.clone(),
+            updated_at: Some(
+                self.updated_at
+                    .try_to_rfc3339_string()
+                    .unwrap_or_default(),
+            ),
+            editor_id: if self.editor_id.is_empty() {
+                None
+            } else {
+                Some(self.editor_id.clone())
+            },
+        }
+    }
+}
+
+/// DTO de respuesta para GET/PATCH /config. No contiene la clave en claro.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiConfigDto {
+    /// `true` si hay una api_key configurada (no expone el valor).
+    pub has_api_key: bool,
+    /// Slug del modelo default para nuevos agentes. Vacío = sin configurar.
+    pub default_model: String,
+    /// ISO8601 de la última escritura. `null` cuando la colección está vacía.
+    pub updated_at: Option<String>,
+    /// UUID del editor. `null` cuando la colección está vacía.
+    pub editor_id: Option<String>,
+}
+
+impl Default for AiConfigDto {
+    /// Usado cuando la colección `AiConfig` está vacía.
+    fn default() -> Self {
+        Self {
+            has_api_key: false,
+            default_model: String::new(),
+            updated_at: None,
+            editor_id: None,
+        }
+    }
+}
+
+/// Body de `PATCH /v1/auth-user/whatsapp/ai-agent/config`. Ambos campos son opcionales
+/// pero al menos uno debe estar presente.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct AiConfigPatchRequest {
+    /// Cleartext de la OpenRouter API key. El servidor la cifra antes de guardar.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Slug del modelo default (ej: `"openai/gpt-4o"`).
+    #[serde(default)]
+    pub default_model: Option<String>,
+}
+
+/// Envelope de respuesta para GET/PATCH /config.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiConfigResponse {
+    pub ok: bool,
+    pub data: AiConfigDto,
+}
+
+// ============================================
 // AiAgent — doc principal
 // ============================================
 
@@ -114,8 +201,9 @@ pub struct AiModelConfig {
     pub temperature: f32,
     pub max_tokens: u32,
     pub timeout_seconds: u32,
-    /// Ciphertext AES-GCM (Base64URL) de la `api_key`. Nunca se devuelve al
-    /// front; el response usa `api_key_set: bool`.
+    /// DEPRECATED 2026-05-05: runtime ignores this field. SUPERADMIN sets the
+    /// global key via PATCH /v1/auth-user/whatsapp/ai-agent/config. Field kept
+    /// to avoid breaking existing documents.
     #[serde(default)]
     pub api_key_encrypted: String,
     /// Override del endpoint base. Si está seteado, prevalece sobre la env
@@ -1081,6 +1169,62 @@ pub fn estimate_cost_usd(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── AiConfig::to_dto tests (A4) ────────────────────────────────────────
+
+    #[test]
+    fn ai_config_to_dto_populated() {
+        let doc = AiConfig {
+            id: None,
+            openrouter_api_key: "ciphertext_abc".to_string(),
+            default_model: "openai/gpt-4o".to_string(),
+            updated_at: DateTime::now(),
+            editor_id: "user-uuid-123".to_string(),
+        };
+        let dto = doc.to_dto();
+        assert!(dto.has_api_key, "has_api_key should be true when key is non-empty");
+        assert_eq!(dto.default_model, "openai/gpt-4o");
+        assert!(dto.updated_at.is_some(), "updated_at should be present");
+        assert_eq!(dto.editor_id, Some("user-uuid-123".to_string()));
+    }
+
+    #[test]
+    fn ai_config_to_dto_empty_editor_id() {
+        let doc = AiConfig {
+            id: None,
+            openrouter_api_key: "some_cipher".to_string(),
+            default_model: String::new(),
+            updated_at: DateTime::now(),
+            editor_id: String::new(),
+        };
+        let dto = doc.to_dto();
+        assert!(dto.has_api_key);
+        assert!(dto.editor_id.is_none(), "empty editor_id should map to None");
+    }
+
+    #[test]
+    fn ai_config_to_dto_empty_key() {
+        let doc = AiConfig {
+            id: None,
+            openrouter_api_key: String::new(),
+            default_model: String::new(),
+            updated_at: DateTime::now(),
+            editor_id: String::new(),
+        };
+        let dto = doc.to_dto();
+        assert!(!dto.has_api_key, "has_api_key should be false when key is empty");
+    }
+
+    #[test]
+    fn ai_config_dto_default() {
+        let dto = AiConfigDto::default();
+        assert!(!dto.has_api_key);
+        assert!(dto.default_model.is_empty());
+        assert!(dto.updated_at.is_none());
+        assert!(dto.editor_id.is_none());
+    }
+
+    // ─── estimate_cost_usd tests ─────────────────────────────────────────────
 
     #[test]
     fn test_estimate_gpt4o_mini() {
