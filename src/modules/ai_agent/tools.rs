@@ -709,14 +709,21 @@ struct CheckCoverageArgs {
     zone: String,
 }
 
+/// Zona cacheada en Redis para uso por `check_coverage`. Sin `id` — Gemini
+/// no lo necesita y reducir datos en el contexto del LLM es el objetivo.
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct CachedZone {
-    name: String,
-    region: String,
+    display_name: String,
+    state: String,
+    municipality: String,
+    parish: Option<String>,
+    sector: Option<String>,
+    aliases: Vec<String>,
 }
 
+/// Carga las zonas activas desde Redis (v2) o DB, y repuebla el caché.
 async fn load_active_zones(ctx: &ToolContext) -> Result<Vec<CachedZone>, String> {
-    if let Some(cached) = ctx.state.redis.get_ai_coverage_cache().await {
+    if let Some(cached) = ctx.state.redis.get_ai_coverage_cache_v2().await {
         if let Ok(parsed) = serde_json::from_str::<Vec<CachedZone>>(&cached) {
             return Ok(parsed);
         }
@@ -724,12 +731,46 @@ async fn load_active_zones(ctx: &ToolContext) -> Result<Vec<CachedZone>, String>
     let zones = ctx.state.db.list_ai_coverage_zones(true).await?;
     let cached: Vec<CachedZone> = zones
         .into_iter()
-        .map(|z| CachedZone { name: z.name, region: z.region })
+        .map(|z| CachedZone {
+            display_name: z.display_name,
+            state: z.state,
+            municipality: z.municipality,
+            parish: z.parish,
+            sector: z.sector,
+            aliases: z.aliases,
+        })
         .collect();
     if let Ok(s) = serde_json::to_string(&cached) {
-        ctx.state.redis.set_ai_coverage_cache(&s, AI_BUSINESS_CACHE_TTL_SECS).await;
+        ctx.state.redis.set_ai_coverage_cache_v2(&s, AI_BUSINESS_CACHE_TTL_SECS).await;
     }
     Ok(cached)
+}
+
+/// Devuelve `true` si la zona matchea la query normalizada en alguno de sus campos.
+/// Orden: display_name → state → municipality → parish → sector → aliases.
+/// Match: igualdad normalizada primero, luego contains en ambas direcciones.
+fn zone_matches(z: &CachedZone, q: &str) -> bool {
+    let check = |field: &str| -> bool {
+        let nf = normalize_zone(field);
+        nf == q || nf.contains(q) || q.contains(nf.as_str())
+    };
+
+    if check(&z.display_name) { return true; }
+    if check(&z.state) { return true; }
+    if check(&z.municipality) { return true; }
+    if let Some(ref p) = z.parish {
+        if check(p) { return true; }
+    }
+    if let Some(ref s) = z.sector {
+        if check(s) { return true; }
+    }
+    z.aliases.iter().any(|a| check(a))
+}
+
+/// Función pura para testabilidad — filtra las zonas que matchean `q`.
+/// `q` debe estar ya normalizado con `normalize_zone`.
+fn match_zones<'a>(zones: &'a [CachedZone], q: &str) -> Vec<&'a CachedZone> {
+    zones.iter().filter(|z| zone_matches(z, q)).collect()
 }
 
 async fn exec_check_coverage(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
@@ -758,45 +799,180 @@ async fn exec_check_coverage(args: Value, ctx: &ToolContext, started: Instant) -
         Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
     };
 
-    let normalized = normalize_zone(raw);
-    let matched = zones.iter().find(|z| {
-        let nz = normalize_zone(&z.name);
-        normalized == nz || normalized.contains(&nz) || nz.contains(&normalized)
-    });
+    let q = normalize_zone(raw);
+    let matches = match_zones(&zones, &q);
 
-    let covered = matched.is_some();
-    let (matched_zone, region) = match matched {
-        Some(z) => (Some(z.name.clone()), Some(z.region.clone())),
-        None => (None, None),
-    };
-    let available_zones: Vec<&str> = zones.iter().map(|z| z.name.as_str()).collect();
+    match matches.len() {
+        0 => {
+            ToolResult::ok(
+                json!({
+                    "covered": false,
+                    "disambiguation_required": false,
+                    "queried_zone": raw,
+                }),
+                started,
+            )
+            .with_patches(vec![StatePatch::AddCompletedAction("check_coverage".into())])
+        }
+        1 => {
+            let z = matches[0];
+            ToolResult::ok(
+                json!({
+                    "covered": true,
+                    "matched_zone": {
+                        "display_name": z.display_name,
+                        "state": z.state,
+                        "municipality": z.municipality,
+                    },
+                    "queried_zone": raw,
+                }),
+                started,
+            )
+            .with_patches(vec![
+                StatePatch::SetCollectedData {
+                    key: "zone".into(),
+                    value: z.display_name.clone(),
+                },
+                StatePatch::AddCompletedAction("check_coverage".into()),
+            ])
+        }
+        _ => {
+            let summarized: Vec<_> = matches
+                .iter()
+                .map(|z| json!({
+                    "display_name": z.display_name,
+                    "state": z.state,
+                    "municipality": z.municipality,
+                }))
+                .collect();
+            ToolResult::ok(
+                json!({
+                    "covered": null,
+                    "disambiguation_required": true,
+                    "queried_zone": raw,
+                    "matches": summarized,
+                    "suggested_question": "¿En qué estado o municipio te encontrás?",
+                }),
+                started,
+            )
+            .with_patches(vec![StatePatch::AddCompletedAction("check_coverage".into())])
+        }
+    }
+}
 
-    // Patch: si hay cobertura, guardar la zona matcheada (o la consultada como
-    // fallback). Siempre registrar la acción completada.
-    let patches = if covered {
-        let zone_value = matched_zone
-            .as_deref()
-            .unwrap_or(raw)
-            .to_string();
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_zone(
+        display_name: &str,
+        state: &str,
+        municipality: &str,
+        parish: Option<&str>,
+        sector: Option<&str>,
+        aliases: &[&str],
+    ) -> CachedZone {
+        CachedZone {
+            display_name: display_name.to_string(),
+            state: state.to_string(),
+            municipality: municipality.to_string(),
+            parish: parish.map(str::to_string),
+            sector: sector.map(str::to_string),
+            aliases: aliases.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn fixture_zones() -> Vec<CachedZone> {
+        // Nota: estas zonas simulan zonas ya pre-filtradas con is_active=true
+        // (load_active_zones usa list_ai_coverage_zones(true) — las inactivas
+        // nunca llegan al matcher).
         vec![
-            StatePatch::SetCollectedData { key: "zone".into(), value: zone_value },
-            StatePatch::AddCompletedAction("check_coverage".into()),
+            make_zone("Valencia Centro", "Carabobo", "Valencia", None, None, &[]),
+            make_zone("Naguanaguá", "Carabobo", "Naguanagua", None, None, &["Naguanagua", "Naguanagüa"]),
+            make_zone("Loro Pedernales", "Carabobo", "Valencia", None, Some("Loro"), &[]),
+            make_zone("Las Vegas", "Carabobo", "Valencia", None, None, &[]),
+            make_zone("Las Vegas Norte", "Miranda", "Baruta", None, None, &[]),
         ]
-    } else {
-        vec![StatePatch::AddCompletedAction("check_coverage".into())]
-    };
+    }
 
-    ToolResult::ok(
-        json!({
-            "covered": covered,
-            "matched_zone": matched_zone,
-            "queried_zone": raw,
-            "region": region,
-            "available_zones": available_zones,
-        }),
-        started,
-    )
-    .with_patches(patches)
+    #[test]
+    fn test_match_exact_display_name() {
+        // "Valencia Centro" matchea por display_name exacto.
+        // Nota: dado que "valencia" (municipio) está contenido en "valencia centro",
+        // otras zonas de Valencia también pueden matchear — el algoritmo de
+        // contains-bidireccional es por diseño (spec §4, capability 4).
+        // Este test verifica que la zona con ese display_name esté en los resultados.
+        let zones = fixture_zones();
+        let q = normalize_zone("Valencia Centro");
+        let result = match_zones(&zones, &q);
+        assert!(
+            !result.is_empty(),
+            "Debe haber al menos un match para 'Valencia Centro'"
+        );
+        assert!(
+            result.iter().any(|z| z.display_name == "Valencia Centro"),
+            "La zona con display_name 'Valencia Centro' debe estar en los resultados"
+        );
+    }
+
+    #[test]
+    fn test_match_unique_display_name() {
+        // Zona con display_name único que no comparte substrings con otras.
+        // Usar "Naguanaguá" — no es municipio de ninguna otra zona del fixture.
+        let zones = vec![
+            make_zone("Naguanaguá", "Carabobo", "Naguanagua", None, None, &["Naguanagua"]),
+            make_zone("Valencia Sur", "Carabobo", "Valencia", None, None, &[]),
+        ];
+        let q = normalize_zone("Naguanaguá");
+        let result = match_zones(&zones, &q);
+        assert_eq!(result.len(), 1, "Debe ser un match único para Naguanaguá");
+        assert_eq!(result[0].display_name, "Naguanaguá");
+    }
+
+    #[test]
+    fn test_match_alias() {
+        let zones = fixture_zones();
+        let q = normalize_zone("Naguanagua");
+        let result = match_zones(&zones, &q);
+        // Debe matchear por alias "Naguanagua" (normalizado == normalizado del display_name también)
+        assert!(!result.is_empty());
+        assert_eq!(result[0].display_name, "Naguanaguá");
+    }
+
+    #[test]
+    fn test_match_sector_substring() {
+        let zones = fixture_zones();
+        let q = normalize_zone("Loro");
+        let result = match_zones(&zones, &q);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].display_name, "Loro Pedernales");
+    }
+
+    #[test]
+    fn test_no_match_returns_empty() {
+        let zones = fixture_zones();
+        let q = normalize_zone("El Limón");
+        let result = match_zones(&zones, &q);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_disambiguation_two_matches() {
+        let zones = fixture_zones();
+        let q = normalize_zone("Las Vegas");
+        let result = match_zones(&zones, &q);
+        assert_eq!(result.len(), 2, "Debe haber ambigüedad con dos zonas 'Las Vegas'");
+    }
+
+    #[test]
+    fn test_state_match_yields_multiple() {
+        let zones = fixture_zones();
+        // "carabobo" matchea todas las zonas con state="Carabobo"
+        let q = normalize_zone("Carabobo");
+        let result = match_zones(&zones, &q);
+        // Deben ser 4 (todas las de Carabobo)
+        assert!(result.len() > 1, "Estado 'Carabobo' debe matchear múltiples zonas → disambiguation");
+    }
 }
 
 // ============================================

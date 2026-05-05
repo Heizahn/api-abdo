@@ -303,7 +303,12 @@ impl RedisClient {
     // invalida la key y se repuebla en el siguiente tool call.
 
     const AI_PLANS_KEY: &str = "ai_agent:plans:list_active";
+    // TODO: eliminar AI_COVERAGE_KEY y sus métodos asociados después de un ciclo de release.
+    #[allow(dead_code)]
     const AI_COVERAGE_KEY: &str = "ai_agent:coverage:list_active";
+    /// Cache key para el esquema jerárquico (Phase coverage-zones-restructure).
+    /// Bumpeada a v2 para evitar conflictos durante rolling deploy.
+    const AI_COVERAGE_KEY_V2: &str = "ai_agent:coverage:list_active:v2";
 
     pub async fn get_ai_plans_cache(&self) -> Option<String> {
         let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;
@@ -326,11 +331,15 @@ impl RedisClient {
         let _: Result<(), _> = conn.del(Self::AI_PLANS_KEY).await;
     }
 
+    // TODO: eliminar los tres métodos siguientes después de un ciclo de release completo.
+    // Se mantienen para que un rollback a la binario anterior pueda limpiar su propia key.
+    #[allow(dead_code)]
     pub async fn get_ai_coverage_cache(&self) -> Option<String> {
         let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;
         conn.get(Self::AI_COVERAGE_KEY).await.ok().flatten()
     }
 
+    #[allow(dead_code)]
     pub async fn set_ai_coverage_cache(&self, payload: &str, ttl_secs: u64) {
         let mut conn = match self.client.get_multiplexed_async_connection().await {
             Ok(c) => c,
@@ -339,12 +348,37 @@ impl RedisClient {
         let _: Result<(), _> = conn.set_ex(Self::AI_COVERAGE_KEY, payload, ttl_secs).await;
     }
 
+    #[allow(dead_code)]
     pub async fn invalidate_ai_coverage_cache(&self) {
         let mut conn = match self.client.get_multiplexed_async_connection().await {
             Ok(c) => c,
             Err(_) => return,
         };
         let _: Result<(), _> = conn.del(Self::AI_COVERAGE_KEY).await;
+    }
+
+    // ─── Coverage cache v2 (esquema jerárquico) ──────────────────────────────
+    // TODO: Eliminar los métodos sin `_v2` después de un ciclo de release completo.
+
+    pub async fn get_ai_coverage_cache_v2(&self) -> Option<String> {
+        let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;
+        conn.get(Self::AI_COVERAGE_KEY_V2).await.ok().flatten()
+    }
+
+    pub async fn set_ai_coverage_cache_v2(&self, payload: &str, ttl_secs: u64) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let _: Result<(), _> = conn.set_ex(Self::AI_COVERAGE_KEY_V2, payload, ttl_secs).await;
+    }
+
+    pub async fn invalidate_ai_coverage_cache_v2(&self) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let _: Result<(), _> = conn.del(Self::AI_COVERAGE_KEY_V2).await;
     }
 
     // ============================================

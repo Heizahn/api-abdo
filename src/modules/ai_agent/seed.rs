@@ -5,7 +5,7 @@
 //! y `/cobertura/`. Si después el SUPERADMIN borra todo desde el front y
 //! reinicia, vuelven a insertarse: la IA sin datos comerciales es peor
 //! UX que arrastrar el catálogo viejo. Si querés un opt-out, deshabilitá
-//! desde el front (toggle `active`) en vez de borrar.
+//! desde el front (toggle `is_active`) en vez de borrar.
 
 use std::sync::Arc;
 
@@ -70,13 +70,21 @@ const SEED_PLANS: &[SeedPlan] = &[
     },
 ];
 
-const SEED_ZONES: &[(&str, &str)] = &[
-    ("Carlos Arvelo", "Carabobo"),
-    ("Guacara", "Carabobo"),
-    ("Los Guayos", "Carabobo"),
-    ("Valencia", "Carabobo"),
-    ("San Diego", "Carabobo"),
-    ("Libertador", "Carabobo"),
+/// Estructura de zona para el seed inicial (esquema jerárquico nuevo).
+struct SeedZone {
+    display_name: &'static str,
+    state: &'static str,
+    municipality: &'static str,
+}
+
+/// 6 zonas de Carabobo — seed inicial. Todas activas, sin revisión pendiente.
+const SEED_ZONES: &[SeedZone] = &[
+    SeedZone { display_name: "Carlos Arvelo", state: "Carabobo", municipality: "Carlos Arvelo" },
+    SeedZone { display_name: "Guacara",       state: "Carabobo", municipality: "Guacara"       },
+    SeedZone { display_name: "Los Guayos",    state: "Carabobo", municipality: "Los Guayos"    },
+    SeedZone { display_name: "Valencia",      state: "Carabobo", municipality: "Valencia"      },
+    SeedZone { display_name: "San Diego",     state: "Carabobo", municipality: "San Diego"     },
+    SeedZone { display_name: "Libertador",    state: "Carabobo", municipality: "Libertador"    },
 ];
 
 pub async fn run(state: Arc<AppState>) {
@@ -119,20 +127,25 @@ async fn seed_zones(state: &Arc<AppState>) -> Result<(), String> {
         return Ok(());
     }
     let now = BsonDateTime::now();
-    for (name, region) in SEED_ZONES {
+    for z in SEED_ZONES {
         let zone = AiCoverageZone {
             id: None,
-            name: name.to_string(),
-            region: region.to_string(),
-            active: true,
+            display_name: z.display_name.to_string(),
+            state: z.state.to_string(),
+            municipality: z.municipality.to_string(),
+            parish: None,
+            sector: None,
+            aliases: vec![],
+            is_active: true,
+            needs_review: false,
             created_at: now,
             updated_at: now,
         };
         if let Err(e) = state.db.create_ai_coverage_zone(zone).await {
-            tracing::warn!("[ai_agent.seed] insert zone {} falló: {}", name, e);
+            tracing::warn!("[ai_agent.seed] insert zone {} falló: {}", z.display_name, e);
         }
     }
-    state.redis.invalidate_ai_coverage_cache().await;
+    state.redis.invalidate_ai_coverage_cache_v2().await;
     tracing::info!("[ai_agent.seed] {} zonas insertadas", SEED_ZONES.len());
     Ok(())
 }

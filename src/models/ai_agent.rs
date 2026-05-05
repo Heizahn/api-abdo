@@ -382,12 +382,25 @@ pub struct UpdateAiPlanRequest {
 pub struct AiCoverageZone {
     #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
     pub id: Option<ObjectId>,
-    /// Display name canónico (ej: "Valencia", "San Diego"). El matching
-    /// normaliza tildes/case en runtime.
-    pub name: String,
-    /// Estado/región para contexto (ej: "Carabobo"). No participa del match.
-    pub region: String,
-    pub active: bool,
+    /// Etiqueta canónica que el SUPERADMIN ve en la UI. Cliente-provista.
+    pub display_name: String,
+    /// Estado canónico VE — debe existir en ve_political_divisions.
+    pub state: String,
+    /// Municipio canónico VE — debe pertenecer al `state` indicado.
+    pub municipality: String,
+    /// Parroquia/barrio opcional. Texto libre.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parish: Option<String>,
+    /// Sector/urbanización opcional. Texto libre.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sector: Option<String>,
+    /// Aliases para tolerancia a typos. Máx 5, normalizados y deduplicados.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    pub is_active: bool,
+    /// `true` para zonas migradas del esquema legacy que necesitan revisión
+    /// del SUPERADMIN antes de activarse. Read-only en la API.
+    pub needs_review: bool,
     pub created_at: DateTime,
     pub updated_at: DateTime,
 }
@@ -395,9 +408,14 @@ pub struct AiCoverageZone {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AiCoverageZoneItem {
     pub id: String,
-    pub name: String,
-    pub region: String,
-    pub active: bool,
+    pub display_name: String,
+    pub state: String,
+    pub municipality: String,
+    pub parish: Option<String>,
+    pub sector: Option<String>,
+    pub aliases: Vec<String>,
+    pub is_active: bool,
+    pub needs_review: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -416,20 +434,52 @@ pub struct AiCoverageZonesListResponse {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateAiCoverageZoneRequest {
-    pub name: String,
-    pub region: String,
+    pub display_name: String,
+    pub state: String,
+    pub municipality: String,
     #[serde(default)]
-    pub active: Option<bool>,
+    pub parish: Option<String>,
+    #[serde(default)]
+    pub sector: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    /// Default `false` — el admin opta explícitamente por activar.
+    /// `needs_review` no se deserializa: es campo server-controlled.
+    #[serde(default)]
+    pub is_active: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, ToSchema, Default)]
 pub struct UpdateAiCoverageZoneRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub region: Option<String>,
+    pub state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active: Option<bool>,
+    pub municipality: Option<String>,
+    /// `Some(Some(v))` → setear; `Some(None)` → limpiar; `None` → no tocar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parish: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sector: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aliases: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_active: Option<bool>,
+}
+
+// ─── Political Divisions DTOs ────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PoliticalDivisionItem {
+    pub state: String,
+    pub municipalities: Vec<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct PoliticalDivisionsResponse {
+    pub ok: bool,
+    pub data: Vec<PoliticalDivisionItem>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

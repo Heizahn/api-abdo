@@ -342,11 +342,20 @@ print("");
 // ============================================
 print("📦 Colección: AiCoverageZones");
 
+// Eliminar índice del esquema legacy (idempotente: no falla si no existe).
+try {
+    db.AiCoverageZones.dropIndex("idx_ai_coverage_active_name");
+    print("  🗑️  AiCoverageZones: eliminado índice legacy idx_ai_coverage_active_name");
+} catch (e) {
+    // El índice ya no existe — OK.
+}
+
+// Índice principal: cubre list_ai_coverage_zones(true) + futuras queries por estado/municipio.
 db.AiCoverageZones.createIndex(
-  { "active": 1, "name": 1 },
-  { name: "idx_ai_coverage_active_name", background: true }
+    { "is_active": 1, "state": 1, "municipality": 1 },
+    { name: "idx_ai_coverage_active_state_muni", background: true }
 );
-print("  ✅ AiCoverageZones.active + name");
+print("  ✅ AiCoverageZones.is_active + state + municipality");
 
 print("");
 

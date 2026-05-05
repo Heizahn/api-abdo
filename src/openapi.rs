@@ -11,7 +11,8 @@ use crate::models::ai_agent::{
     AiPersonalityDto, AiPersonalityInput, AiPlanItem, AiPlanResponse, AiPlansListResponse,
     AiScheduleDto, AiScheduleInput, AiToolConfigDto, AiToolConfigInput,
     CreateAiAgentFaqRequest, CreateAiAgentRequest, CreateAiCoverageZoneRequest,
-    CreateAiPlanRequest, TestConnectionData, TestConnectionRequest, TestConnectionResponse,
+    CreateAiPlanRequest, PoliticalDivisionItem, PoliticalDivisionsResponse,
+    TestConnectionData, TestConnectionRequest, TestConnectionResponse,
     TestConnectionSource, UpdateAiAgentFaqRequest, UpdateAiAgentRequest,
     UpdateAiCoverageZoneRequest, UpdateAiPlanRequest,
 };
@@ -199,6 +200,7 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
         crate::modules::ai_agent::business_data::create_coverage_zone_handler,
         crate::modules::ai_agent::business_data::update_coverage_zone_handler,
         crate::modules::ai_agent::business_data::delete_coverage_zone_handler,
+        crate::modules::ai_agent::business_data::list_political_divisions_handler,
         crate::modules::ai_agent::business_data::list_tools_handler,
         // Users — CRUD
         crate::modules::users::handler::list_users_handler,
@@ -316,6 +318,7 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
             AiPlanResponse, AiPlansListResponse,
             AiCoverageZoneItem, CreateAiCoverageZoneRequest, UpdateAiCoverageZoneRequest,
             AiCoverageZoneResponse, AiCoverageZonesListResponse,
+            PoliticalDivisionItem, PoliticalDivisionsResponse,
             AiBusinessDataDeleteResponse,
             // AI Agent — discovery
             AiToolMetaItem, AiToolsListResponse,

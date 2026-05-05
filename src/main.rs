@@ -1,14 +1,15 @@
 // Core modules
 mod auth;
+mod cache;
 mod config;
 mod crypto;
+mod data;
 mod db;
 mod domain;
 mod error;
 mod state;
 // Axum modules
 mod axum_router;
-mod cache;
 mod middleware;
 mod models;
 mod modules;
@@ -80,6 +81,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         modules::ai_agent::seed::run(state_for_ai_seed).await;
     });
+
+    // Calentar el índice de divisiones políticas de Venezuela (LazyLock).
+    // El costo es ~6KB RAM pagado una sola vez al arrancar.
+    let _ = data::ve_political_divisions::DIVISIONS.len();
 
     tracing::info!("✅ Conexiones establecidas");
     // 4. Construir router de Axum

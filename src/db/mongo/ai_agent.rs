@@ -334,10 +334,14 @@ impl AiAgentRepository for MongoDB {
         &self,
         only_active: bool,
     ) -> Result<Vec<AiCoverageZone>, String> {
-        let filter = if only_active { doc! { "active": true } } else { doc! {} };
+        let filter = if only_active {
+            doc! { "is_active": true }
+        } else {
+            doc! {}
+        };
         self.ai_coverage_zones()
             .find(filter)
-            .sort(doc! { "name": 1 })
+            .sort(doc! { "display_name": 1 })
             .await
             .map_err(|e| e.to_string())?
             .try_collect::<Vec<_>>()
