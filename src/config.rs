@@ -61,10 +61,6 @@ pub struct Config {
     // en lugar de conectar directo. El worker ya soporta `openrouter.ai`.
     pub ai_relay_url: Option<String>,
     pub ai_relay_secret: Option<String>,
-    /// Override del endpoint de OpenRouter. Por default usamos
-    /// `https://openrouter.ai/api/v1`. Útil para apuntar a un proxy
-    /// local o staging. El cliente le agrega `/chat/completions`.
-    pub openrouter_base_url: Option<String>,
 }
 
 impl Config {
@@ -146,7 +142,6 @@ impl Config {
             // a OpenRouter van directo.
             ai_relay_url: env::var("AI_RELAY_URL").ok().filter(|s| !s.is_empty()),
             ai_relay_secret: env::var("AI_RELAY_SECRET").ok().filter(|s| !s.is_empty()),
-            openrouter_base_url: env::var("OPENROUTER_BASE_URL").ok().filter(|s| !s.is_empty()),
         }
     }
 

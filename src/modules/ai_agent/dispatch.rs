@@ -498,10 +498,7 @@ async fn run_dispatch(
             let pc_ctx = pre_classifier::PreClassifierContext {
                 api_key: &pc_api_key,
                 relay: relay_for_pc.as_ref(),
-                base_url: resolve_base_url(
-                    agent.model.endpoint_override.as_deref(),
-                    &state.config,
-                ),
+                base_url: resolve_base_url(agent.model.endpoint_override.as_deref()),
                 http: &state.reqwest_client,
             };
             let summary = build_customer_summary_short(&customer_context);
@@ -969,11 +966,8 @@ async fn run_dispatch(
             None
         };
 
-        // Resuelve base URL efectiva: agente override → env → default OpenRouter.
-        let effective_base_url = resolve_base_url(
-            active_agent.model.endpoint_override.as_deref(),
-            &state.config,
-        );
+        // Resuelve base URL efectiva: agente override → default OpenRouter.
+        let effective_base_url = resolve_base_url(active_agent.model.endpoint_override.as_deref());
 
         let output = match run_turn(
             &state.reqwest_client,

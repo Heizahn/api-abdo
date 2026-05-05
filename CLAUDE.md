@@ -247,7 +247,6 @@ components(schemas(MiRequest, MiResponse, ...))
 | `WA_MEDIA_RELAY_SECRET` | (opcional) Secret compartido con el Worker; si ambas están seteadas, las descargas pasan por el relay en vez de `lookaside.fbsbx.com` directo |
 | `AI_RELAY_URL` | (opcional) URL del Cloudflare Worker relay para llamadas a OpenRouter (`openrouter.ai`). Mismo Worker que WA media o uno separado — agregar `'openrouter.ai'` a `ALLOWED_HOST_SUFFIXES` en `tools/cf-worker-media-relay/worker.js`. Si falta, el módulo AI Agent conecta directo (puede fallar desde la VM por bloqueo del ISP) |
 | `AI_RELAY_SECRET` | (opcional) Secret compartido con el Worker para AI. Independiente de `WA_MEDIA_RELAY_SECRET` para permitir rotación/aislamiento |
-| `OPENROUTER_BASE_URL` | (opcional) Override de la URL base de OpenRouter. Por defecto `https://openrouter.ai/api/v1`. Útil para test o providers compatibles con la API. |
 
 > El `access_token` y `phone_number_id` de Meta Cloud API **no** son env vars: se
 > configuran por cuenta en la colección `WaSettings` (el token se guarda cifrado

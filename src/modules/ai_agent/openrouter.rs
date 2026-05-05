@@ -19,18 +19,18 @@ use std::time::Duration;
 
 use crate::error::ApiError;
 
-/// URL por defecto — OpenRouter API v1.
+/// URL por defecto — OpenRouter API v1. Hardcoded.
+///
+/// No exponemos esto como env var: si OpenRouter cambia su URL, hay que
+/// rebuild igual (no es algo que cambie sin redeploy de la app), así que
+/// el indirection sólo agrega complejidad. El SUPERADMIN tiene un override
+/// per-agente desde la UI por si necesita apuntar a un proxy.
 const OPENROUTER_DEFAULT_BASE: &str = "https://openrouter.ai/api/v1";
 
-/// Resuelve la base URL efectiva:
-/// 1. per-agent override si está seteado
-/// 2. env `openrouter_base_url` si está seteado
-/// 3. default hardcoded
-pub fn resolve_base_url(per_agent: Option<&str>, cfg: &crate::config::Config) -> String {
+/// Resuelve la base URL efectiva. Solo respeta el override per-agent (UI);
+/// el resto cae al default hardcoded.
+pub fn resolve_base_url(per_agent: Option<&str>) -> String {
     if let Some(s) = per_agent.filter(|s| !s.trim().is_empty()) {
-        return s.trim_end_matches('/').to_string();
-    }
-    if let Some(s) = cfg.openrouter_base_url.as_deref().filter(|s| !s.is_empty()) {
         return s.trim_end_matches('/').to_string();
     }
     OPENROUTER_DEFAULT_BASE.to_string()
@@ -337,8 +337,8 @@ impl OpenRouterClient {
             };
 
             let resp = match request_builder
-                .header("http-referer", "https://api.abdo.local")
-                .header("x-title", "api-abdo")
+                .header("HTTP-Referer", "https://api.abdo.local")
+                .header("X-OpenRouter-Title", "api-abdo")
                 .json(req)
                 .send()
                 .await
@@ -630,34 +630,21 @@ mod tests {
 
     #[test]
     fn resolve_base_url_default() {
-        let cfg = crate::config::Config {
-            openrouter_base_url: None,
-            // fill required fields with dummy values
-            host: "127.0.0.1".into(),
-            port: 3000,
-            mongo_uri: "mongodb://localhost".into(),
-            mongo_db: "test".into(),
-            mongo_pool_size: 10,
-            mongo_min_pool_size: 1,
-            mongo_connect_timeout: 5,
-            redis_uri: "redis://localhost".into(),
-            redis_pool_size: 10,
-            redis_exchange_rate_ttl: 300,
-            rate_limit_auth_per_minute: 5,
-            rust_log: "info".into(),
-            log_format: "pretty".into(),
-            id_simcot: "".into(),
-            olt_zte_pass: "".into(),
-            port_mk: "22".into(),
-            pass_mk: "".into(),
-            zabbix_url: "".into(),
-            zabbix_token: "".into(),
-            wa_media_relay_url: None,
-            wa_media_relay_secret: None,
-            whatsapp_app_id: None,
-            ai_relay_url: None,
-            ai_relay_secret: None,
-        };
-        assert_eq!(resolve_base_url(None, &cfg), OPENROUTER_DEFAULT_BASE);
+        assert_eq!(resolve_base_url(None), OPENROUTER_DEFAULT_BASE);
+        assert_eq!(resolve_base_url(Some("")), OPENROUTER_DEFAULT_BASE);
+        assert_eq!(resolve_base_url(Some("   ")), OPENROUTER_DEFAULT_BASE);
+    }
+
+    #[test]
+    fn resolve_base_url_per_agent_override() {
+        assert_eq!(
+            resolve_base_url(Some("https://proxy.local/api/v1")),
+            "https://proxy.local/api/v1"
+        );
+        // Trailing slash trimmed.
+        assert_eq!(
+            resolve_base_url(Some("https://proxy.local/api/v1/")),
+            "https://proxy.local/api/v1"
+        );
     }
 }

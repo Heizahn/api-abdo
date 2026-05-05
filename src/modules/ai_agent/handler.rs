@@ -1146,7 +1146,7 @@ pub async fn test_connection_raw_handler(
         .unwrap_or(10);
 
     let relay = AiRelay::from_config(&state.config);
-    let base_url = resolve_base_url(None, &state.config);
+    let base_url = resolve_base_url(None);
     let or_client = OpenRouterClient::new(
         state.reqwest_client.clone(),
         base_url,
@@ -1221,10 +1221,7 @@ pub async fn test_connection_for_agent_handler(
         .unwrap_or(10);
 
     let relay = AiRelay::from_config(&state.config);
-    let base_url = resolve_base_url(
-        agent.model.endpoint_override.as_deref(),
-        &state.config,
-    );
+    let base_url = resolve_base_url(agent.model.endpoint_override.as_deref());
     let or_client = OpenRouterClient::new(
         state.reqwest_client.clone(),
         base_url,

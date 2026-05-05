@@ -304,10 +304,7 @@ pub async fn sandbox_handler(
         weekday: weekday.to_string(),
     };
 
-    let effective_base_url = resolve_base_url(
-        agent.model.endpoint_override.as_deref(),
-        &state.config,
-    );
+    let effective_base_url = resolve_base_url(agent.model.endpoint_override.as_deref());
 
     let output = run_turn(
         &state.reqwest_client,
