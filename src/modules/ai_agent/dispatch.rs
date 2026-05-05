@@ -721,11 +721,18 @@ async fn run_dispatch(
     // Si no hay texto y solo hay media, mandamos un placeholder MUY neutro
     // (solo el tipo) para que la IA tenga un pivot. El comportamiento ante
     // adjuntos lo decide el SUPERADMIN en el system_prompt.
-    let effective_user_message = if user_text.trim().is_empty() {
+    //
+    // `mut` porque al iniciar chain_count > 0 (handoff a otro agente) recargamos
+    // mensajes del cliente que pudieron haber llegado durante la iteración
+    // anterior. Sin esto, mensajes que arriban mientras Sofía está en su LLM
+    // call quedan huérfanos y Carla solo ve el primer mensaje.
+    let mut effective_user_message = if user_text.trim().is_empty() {
         format!("[attachment type={}]", inbound.msg_type)
     } else {
         user_text
     };
+    let mut customer_explicit_zones = customer_explicit_zones;
+    let mut recent_media_ids = recent_media_ids;
 
     // ── Loop de dispatch con chain de transfers ─────────────────────────────
     // Cuando un agente del MISMO workspace llama `transfer_to_agent`, el
@@ -788,6 +795,60 @@ async fn run_dispatch(
                 active_agent.mode,
                 inbound.conversation_id.to_hex()
             );
+
+            // Re-fetch recent: durante la iteración anterior pudieron llegar
+            // mensajes nuevos del cliente (debounce + lock activo descartó sus
+            // dispatches individuales). El target del chain debe verlos para
+            // responder a TODA la ráfaga, no solo al mensaje que originó el
+            // dispatch. Si recent no cambió, no actualizamos nada.
+            match state
+                .db
+                .list_recent_messages_for_conversation(&inbound.conversation_id, RECENT_WINDOW)
+                .await
+            {
+                Ok(refreshed) => {
+                    let new_burst_texts: Vec<String> = refreshed
+                        .iter()
+                        .filter(|m| {
+                            m.direction == "in"
+                                && m.id.map(|i| i >= inbound_oid).unwrap_or(false)
+                        })
+                        .filter_map(|m| {
+                            let t = m.body.as_deref()?.trim().to_string();
+                            if t.is_empty() {
+                                None
+                            } else {
+                                Some(t)
+                            }
+                        })
+                        .collect();
+                    if !new_burst_texts.is_empty() {
+                        let new_user_text = new_burst_texts.join("\n");
+                        if new_user_text != effective_user_message {
+                            tracing::info!(
+                                "[ai_agent.dispatch] burst recargado en chain step {} ({} mensajes en ráfaga, prev={} chars, new={} chars)",
+                                chain_count,
+                                new_burst_texts.len(),
+                                effective_user_message.len(),
+                                new_user_text.len()
+                            );
+                            effective_user_message = new_user_text;
+                            customer_explicit_zones =
+                                guardrails::extract_customer_explicit_zones(&refreshed);
+                            recent_media_ids =
+                                guardrails::extract_recent_media_ids(&refreshed);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[ai_agent.dispatch] no pude recargar recent en chain step {} (conv={}): {}",
+                        chain_count,
+                        inbound.conversation_id.to_hex(),
+                        e
+                    );
+                }
+            }
         }
 
         // Tools del agente activo (cada agente tiene su propia config).

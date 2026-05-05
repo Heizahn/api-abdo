@@ -777,53 +777,133 @@ fn tokenize_zone(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Match estricto: TODOS los tokens del campo deben aparecer en la query.
-/// Usado para SECTOR y PARISH (descriptores específicos — el cliente debe
-/// haberlos dicho explícitamente).
-fn strict_match(field: &str, query_tokens: &[String]) -> bool {
-    let field_tokens = tokenize_zone(field);
-    if field_tokens.is_empty() {
-        return false;
+/// Construye el "fingerprint" de la zona: union de tokens de TODOS sus campos
+/// (sector, parish, display_name, aliases, municipality, state). Usado para
+/// constraint-1: la zona explica todos los tokens significativos del cliente.
+fn zone_fingerprint(z: &CachedZone) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    if let Some(s) = z.sector.as_deref() {
+        tokens.extend(tokenize_zone(s));
     }
-    field_tokens.iter().all(|ft| query_tokens.iter().any(|qt| qt == ft))
+    if let Some(p) = z.parish.as_deref() {
+        tokens.extend(tokenize_zone(p));
+    }
+    tokens.extend(tokenize_zone(&z.display_name));
+    for a in &z.aliases {
+        tokens.extend(tokenize_zone(a));
+    }
+    tokens.extend(tokenize_zone(&z.municipality));
+    tokens.extend(tokenize_zone(&z.state));
+    tokens.sort();
+    tokens.dedup();
+    tokens
 }
 
-/// Match bidireccional: query tokens ⊆ field tokens, O field tokens ⊆ query
-/// tokens. Usado para identificadores (DISPLAY, ALIAS) y campos amplios
-/// (MUNICIPALITY, STATE) — más permisivo, captura menciones parciales.
-fn lenient_match(field: &str, query_tokens: &[String]) -> bool {
-    let field_tokens = tokenize_zone(field);
-    if field_tokens.is_empty() || query_tokens.is_empty() {
-        return false;
-    }
-    let q_in_f = query_tokens.iter().all(|qt| field_tokens.iter().any(|ft| ft == qt));
-    let f_in_q = field_tokens.iter().all(|ft| query_tokens.iter().any(|qt| qt == ft));
-    q_in_f || f_in_q
+/// `true` si todos los tokens del cliente aparecen en algún campo de la zona.
+/// Sin esto, una zona con sector="Centro" matchearía "centro de Güigüe"
+/// aunque "guigue" no exista en NINGÚN campo de esa zona — falso positivo.
+fn zone_explains_all_query_tokens(z: &CachedZone, query_tokens: &[String]) -> bool {
+    let fp = zone_fingerprint(z);
+    query_tokens.iter().all(|qt| fp.contains(qt))
+}
+
+/// Devuelve los tokens del campo que NO aparecen en `less_specific_tokens`.
+/// Eso evita que un token redundante (ej: "guigue" presente tanto en sector
+/// "Centro Güigüe" como en parish "Güigüe") cuente como especificidad
+/// adicional — sólo los tokens UNICOS al campo específico aportan tier-up.
+fn distinguishing_tokens(field_tokens: &[String], less_specific: &[String]) -> Vec<String> {
+    field_tokens
+        .iter()
+        .filter(|t| !less_specific.contains(t))
+        .cloned()
+        .collect()
 }
 
 /// Devuelve el tier más específico al que la zona matchea la query, o `None`.
+///
+/// Constraint 1: la zona debe explicar TODOS los tokens significativos del
+/// cliente en algún campo (`zone_explains_all_query_tokens`). Si el cliente
+/// dice "centro de güigüe" y la zona no tiene "guigue" en ningún campo, la
+/// zona queda fuera — no es honesto explicar solo "centro".
+///
+/// Constraint 2: clasificar por el campo más específico que comparte al menos
+/// un token DISTINGUISHING (no presente en campos menos específicos) con la
+/// query. Si la única coincidencia de un sector con la query es un token que
+/// también está en su parish, ese match no aporta especificidad sobre parish.
 fn zone_match_tier(z: &CachedZone, query_tokens: &[String]) -> Option<MatchTier> {
+    if !zone_explains_all_query_tokens(z, query_tokens) {
+        return None;
+    }
+
+    let parish_tokens: Vec<String> = z
+        .parish
+        .as_deref()
+        .map(tokenize_zone)
+        .unwrap_or_default();
+    let municipality_tokens = tokenize_zone(&z.municipality);
+    let state_tokens = tokenize_zone(&z.state);
+    let display_tokens = tokenize_zone(&z.display_name);
+    let alias_tokens: Vec<String> = z
+        .aliases
+        .iter()
+        .flat_map(|a| tokenize_zone(a))
+        .collect();
+
+    let mut display_and_alias = display_tokens.clone();
+    display_and_alias.extend(alias_tokens);
+
+    let any_in_query = |tokens: &[String]| -> bool {
+        tokens.iter().any(|t| query_tokens.contains(t))
+    };
+
+    // SECTOR: tokens en sector pero no en parish/muni/state. (No restamos display
+    // porque display puede coincidir con sector en zonas chicas y eso sigue siendo
+    // legítima especificidad de sector).
     if let Some(ref s) = z.sector {
-        if strict_match(s, query_tokens) {
+        let sector_tokens = tokenize_zone(s);
+        let mut less = parish_tokens.clone();
+        less.extend(municipality_tokens.clone());
+        less.extend(state_tokens.clone());
+        let dist = distinguishing_tokens(&sector_tokens, &less);
+        if any_in_query(&dist) {
             return Some(MatchTier::Sector);
         }
     }
-    if lenient_match(&z.display_name, query_tokens)
-        || z.aliases.iter().any(|a| lenient_match(a, query_tokens))
+
+    // DISPLAY/ALIAS: tokens en display o alias pero no en parish/muni/state.
     {
-        return Some(MatchTier::Display);
+        let mut less = parish_tokens.clone();
+        less.extend(municipality_tokens.clone());
+        less.extend(state_tokens.clone());
+        let dist = distinguishing_tokens(&display_and_alias, &less);
+        if any_in_query(&dist) {
+            return Some(MatchTier::Display);
+        }
     }
-    if let Some(ref p) = z.parish {
-        if strict_match(p, query_tokens) {
+
+    // PARISH: tokens en parish pero no en muni/state.
+    if !parish_tokens.is_empty() {
+        let mut less = municipality_tokens.clone();
+        less.extend(state_tokens.clone());
+        let dist = distinguishing_tokens(&parish_tokens, &less);
+        if any_in_query(&dist) {
             return Some(MatchTier::Parish);
         }
     }
-    if lenient_match(&z.municipality, query_tokens) {
-        return Some(MatchTier::Municipality);
+
+    // MUNICIPALITY: tokens en muni pero no en state.
+    {
+        let dist = distinguishing_tokens(&municipality_tokens, &state_tokens);
+        if any_in_query(&dist) {
+            return Some(MatchTier::Municipality);
+        }
     }
-    if lenient_match(&z.state, query_tokens) {
+
+    // STATE: cualquier token de state que esté en query.
+    if any_in_query(&state_tokens) {
         return Some(MatchTier::State);
     }
+
     None
 }
 
@@ -1106,6 +1186,69 @@ mod tests {
         let q = normalize_zone("güigüe");
         let result = match_zones(&zones, &q);
         assert_eq!(result.len(), 2, "Sin discriminador, ambas zonas en parish 'Güigüe' deben matchear");
+    }
+
+    #[test]
+    fn test_zone_must_explain_all_query_tokens() {
+        // Caso real prod: cliente dice "centro de Güigüe".
+        // Zone X tiene sector="Centro" en municipio "Libertador" — su
+        // fingerprint NO contiene "guigue". Aunque su sector matchee el
+        // token "centro" de la query, debe ser RECHAZADA porque la zona
+        // no explica el token "guigue" que el cliente dijo.
+        // Zone Y tiene sector="Centro Güigüe" — explica ambos tokens.
+        let zones = vec![
+            make_zone(
+                "Libertador",
+                "Carabobo",
+                "Libertador",
+                None,
+                Some("Centro"),
+                &[],
+            ),
+            make_zone(
+                "Carlos Arvelo",
+                "Carabobo",
+                "Carlos Arvelo",
+                Some("Güigüe"),
+                Some("Centro Güigüe"),
+                &[],
+            ),
+        ];
+        let q = normalize_zone("centro de Güigüe");
+        let result = match_zones(&zones, &q);
+        assert_eq!(
+            result.len(),
+            1,
+            "Sólo la zona que explica TODOS los tokens del cliente debe matchear"
+        );
+        assert_eq!(result[0].sector.as_deref(), Some("Centro Güigüe"));
+    }
+
+    #[test]
+    fn test_generic_centro_alone_yields_disambiguation() {
+        // Si el cliente dice solo "centro" sin discriminador, ambas zonas
+        // con "centro" en algún campo deben matchear → disambiguation.
+        let zones = vec![
+            make_zone(
+                "Libertador",
+                "Carabobo",
+                "Libertador",
+                None,
+                Some("Centro"),
+                &[],
+            ),
+            make_zone(
+                "Carlos Arvelo",
+                "Carabobo",
+                "Carlos Arvelo",
+                Some("Güigüe"),
+                Some("Centro Güigüe"),
+                &[],
+            ),
+        ];
+        let q = normalize_zone("centro");
+        let result = match_zones(&zones, &q);
+        assert_eq!(result.len(), 2, "Cliente dice solo 'centro' → ambas zonas con sector centro deben matchear → disambiguation");
     }
 
     #[test]
