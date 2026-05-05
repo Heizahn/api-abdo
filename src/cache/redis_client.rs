@@ -384,6 +384,42 @@ impl RedisClient {
     }
 
     // ============================================
+    // AI Agent — configuración global (AiConfig)
+    // ============================================
+    //
+    // Almacena el cleartext de la OpenRouter API key (solo la key, no el modelo)
+    // para acceso O(1) en cada dispatch. TTL 300s — PATCH /config invalida
+    // explícitamente esta key.
+
+    const AI_CONFIG_CACHE_KEY: &str = "ai_agent:config";
+
+    /// Devuelve la cleartext API key global desde cache. `None` en cache miss o
+    /// si Redis está caído.
+    pub async fn get_ai_config_cache(&self) -> Option<String> {
+        let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;
+        conn.get(Self::AI_CONFIG_CACHE_KEY).await.ok().flatten()
+    }
+
+    /// Persiste la cleartext API key en cache con el TTL dado (segundos).
+    pub async fn set_ai_config_cache(&self, api_key: &str, ttl_secs: u64) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let _: Result<(), _> = conn.set_ex(Self::AI_CONFIG_CACHE_KEY, api_key, ttl_secs).await;
+    }
+
+    /// Elimina la key de cache. Llamada inmediatamente después de cada
+    /// escritura exitosa en PATCH /config.
+    pub async fn invalidate_ai_config_cache(&self) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let _: Result<(), _> = conn.del(Self::AI_CONFIG_CACHE_KEY).await;
+    }
+
+    // ============================================
     // AI Agent — debounce de inbounds + lock anti-concurrencia
     // ============================================
 
