@@ -123,12 +123,6 @@ pub trait ProfileRepository {
     async fn get_client_names_by_phones(&self, phones: &[String]) -> Result<HashMap<String, String>, String>;
     async fn find_tax_by_id(&self, id: Option<ObjectId>) -> Result<Option<Tax>, String>;
 
-    /// Lookup de configuración de IVA por `sTarget` (segmento).
-    /// Usado por el AI Agent para resolver el IVA empresarial sin pasar
-    /// por el `idTax` de un cliente concreto. Devuelve `Ok(None)` si el
-    /// segmento no está configurado en `BCV.IVA`.
-    async fn find_tax_by_target(&self, target: &str) -> Result<Option<Tax>, String>;
-
     async fn get_clients_by_phone_group(&self, phone: String) -> Result<Vec<Document>, MongoError>;
     async fn get_last_payments_by_id_client(
         &self,

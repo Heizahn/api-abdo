@@ -157,11 +157,6 @@ pub const T_REPORT_PAYMENT: &str = "report_payment";
 pub const T_GET_INSTALLATION_INFO: &str = "get_installation_info";
 pub const T_GET_ACTIVE_PROMOTIONS: &str = "get_active_promotions";
 
-/// Segmento de IVA aplicado por el tool `calculate_amount_bs`. Hardcoded
-/// porque hoy todos los quotes públicos por WhatsApp se cotizan en
-/// EMPRESARIAL. Para cambiar a multi-segmento, abrir un change separado.
-const TAX_TARGET_EMPRESARIAL: &str = "EMPRESARIAL";
-
 /// Categoría operativa de un tool, usada por `dispatch.rs` para decidir si un
 /// turn cuenta como "resolución" (que resetea el counter) o sólo como "trabajo
 /// en progreso" (skip increment, sin reset).
@@ -266,7 +261,7 @@ const TOOL_CATALOG: &[ToolMeta] = &[
     ToolMeta {
         name: T_CALCULATE_AMOUNT_BS,
         display_name: "Calcular monto en Bs",
-        ui_description: "Convierte USD a Bs aplicando tasa BCV vigente + IVA empresarial (16%). Llamar al cotizar precios en bolívares.",
+        ui_description: "Convierte USD a Bs aplicando la tasa BCV vigente y el IVA configurado (sTarget=DEFAULT). Llamar al cotizar precios en bolívares.",
         ui_category: "info",
         default_enabled: false,
         operational_category: ToolCategory::InfoLookup,
@@ -459,10 +454,12 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
             }),
         )),
         T_CALCULATE_AMOUNT_BS => Some((
-            "Calcula cuánto sale en bolívares un monto en USD aplicando la tasa BCV \
-             vigente más IVA del 16% (segmento EMPRESARIAL). Llamar SIEMPRE que el \
-             cliente pregunte un precio en Bs — NUNCA inventes la tasa ni el total. \
-             La respuesta incluye el desglose: tasa, base sin IVA y monto final con IVA.",
+            "Convierte un monto en USD a bolívares aplicando la tasa BCV vigente \
+             y el IVA configurado en el sistema. Llamar SIEMPRE que el cliente \
+             pregunte un precio en Bs — NUNCA inventes la tasa ni el total. \
+             Devuelve `amount_bs` (con IVA ya aplicado, este es el monto que \
+             debés mostrarle al cliente) más `bcv_rate` y `iva_percent` como \
+             info de transparencia.",
             json!({
                 "type": "object",
                 "properties": {
@@ -2099,17 +2096,21 @@ async fn exec_calculate_amount_bs(
         return ToolResult::err("exchange_rate_zero", started);
     }
 
-    // 4. Resolve EMPRESARIAL tax (NO DEFAULT fallback)
-    let tax = match ctx.state.db.find_tax_by_target(TAX_TARGET_EMPRESARIAL).await {
+    // 4. Resolve tax — misma lógica que `/v2/utils/calculate`: sin id_tax,
+    //    `find_tax_by_id(None)` cae automáticamente a `sTarget = "DEFAULT"`.
+    //    Usar siempre DEFAULT mantiene un único contrato con el endpoint público
+    //    y evita drift cuando el admin cambia la configuración del IVA.
+    let tax = match ctx.state.db.find_tax_by_id(None).await {
         Ok(Some(t)) => t,
         Ok(None) => return ToolResult::err("tax_config_missing", started),
         Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
     };
     let iva_factor = tax.iva;
 
-    // 5. Compute (no chained rounding)
-    let bs_base     = round2(amount_usd * rate);
-    let bs_with_iva = round2(amount_usd * rate * iva_factor);
+    // 5. Compute — un solo monto final con IVA aplicado (mismo cálculo que el
+    //    endpoint v2). Devolver dos amounts (base + with_iva) en el JSON
+    //    confundía al LLM y mostraba el sin-IVA al cliente.
+    let amount_bs   = round2(amount_usd * rate * iva_factor);
     let iva_percent = round2((iva_factor - 1.0) * 100.0);
 
     // 6. Date stamp (Caracas TZ — coherente con la clave diaria del cron BCV).
@@ -2119,13 +2120,11 @@ async fn exec_calculate_amount_bs(
     // 7. Result
     ToolResult::ok(
         json!({
-            "amount_usd": amount_usd,
-            "bcv_rate": rate,
-            "rate_date": rate_date,
-            "iva_factor": iva_factor,
+            "amount_usd":  amount_usd,
+            "amount_bs":   amount_bs,
+            "bcv_rate":    rate,
+            "rate_date":   rate_date,
             "iva_percent": iva_percent,
-            "amount_bs_base": bs_base,
-            "amount_bs_with_iva": bs_with_iva,
         }),
         started,
     )
