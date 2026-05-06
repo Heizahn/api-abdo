@@ -272,7 +272,6 @@ fn default_agent(label: String, description: String, ai_user_id: String, now: Bs
             // en armar la respuesta. 10s era insuficiente.
             timeout_seconds: 20,
             api_key_encrypted: String::new(),
-            endpoint_override: None,
         },
         personality: AiPersonality {
             assistant_name: "Asistente Virtual".into(),
@@ -333,7 +332,6 @@ fn agent_to_item(a: AiAgent) -> AiAgentItem {
             max_tokens: a.model.max_tokens,
             timeout_seconds: a.model.timeout_seconds,
             api_key_set,
-            endpoint_override: a.model.endpoint_override,
         },
         personality: a.personality.into(),
         system_prompt: a.system_prompt,
@@ -853,23 +851,6 @@ fn apply_model(
             cur.api_key_encrypted = encrypt_payload(&ai_agent_secret(), trimmed);
         }
     }
-    if let Some(raw) = p.endpoint_override.as_deref() {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            // Some("") = limpiar (volver al default global).
-            cur.endpoint_override = None;
-        } else {
-            // Validación mínima: debe ser http(s).
-            if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
-                return Err(ApiError::domain_simple(
-                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                    "invalid_endpoint",
-                    "endpoint_override debe empezar con http:// o https://",
-                ));
-            }
-            cur.endpoint_override = Some(trimmed.trim_end_matches('/').to_string());
-        }
-    }
     Ok(())
 }
 
@@ -1165,7 +1146,7 @@ pub async fn test_connection_raw_handler(
         .unwrap_or(10);
 
     let relay = AiRelay::from_config(&state.config);
-    let base_url = resolve_base_url(None);
+    let base_url = resolve_base_url();
     let or_client = OpenRouterClient::new(
         state.reqwest_client.clone(),
         base_url,
@@ -1240,7 +1221,7 @@ pub async fn test_connection_for_agent_handler(
         .unwrap_or(10);
 
     let relay = AiRelay::from_config(&state.config);
-    let base_url = resolve_base_url(agent.model.endpoint_override.as_deref());
+    let base_url = resolve_base_url();
     let or_client = OpenRouterClient::new(
         state.reqwest_client.clone(),
         base_url,

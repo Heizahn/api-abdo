@@ -23,16 +23,13 @@ use crate::error::ApiError;
 ///
 /// No exponemos esto como env var: si OpenRouter cambia su URL, hay que
 /// rebuild igual (no es algo que cambie sin redeploy de la app), así que
-/// el indirection sólo agrega complejidad. El SUPERADMIN tiene un override
-/// per-agente desde la UI por si necesita apuntar a un proxy.
+/// el indirection sólo agrega complejidad.
 const OPENROUTER_DEFAULT_BASE: &str = "https://openrouter.ai/api/v1";
 
-/// Resuelve la base URL efectiva. Solo respeta el override per-agent (UI);
-/// el resto cae al default hardcoded.
-pub fn resolve_base_url(per_agent: Option<&str>) -> String {
-    if let Some(s) = per_agent.filter(|s| !s.trim().is_empty()) {
-        return s.trim_end_matches('/').to_string();
-    }
+/// Retorna la base URL canónica de OpenRouter. Wrapper sobre el const para
+/// preservar el import path en los call sites por si en el futuro se necesita
+/// volver a inyectar lógica (env var, fallback regional, etc.).
+pub fn resolve_base_url() -> String {
     OPENROUTER_DEFAULT_BASE.to_string()
 }
 
@@ -629,22 +626,7 @@ mod tests {
     // ── resolve_base_url ──────────────────────────────────────────────────────
 
     #[test]
-    fn resolve_base_url_default() {
-        assert_eq!(resolve_base_url(None), OPENROUTER_DEFAULT_BASE);
-        assert_eq!(resolve_base_url(Some("")), OPENROUTER_DEFAULT_BASE);
-        assert_eq!(resolve_base_url(Some("   ")), OPENROUTER_DEFAULT_BASE);
-    }
-
-    #[test]
-    fn resolve_base_url_per_agent_override() {
-        assert_eq!(
-            resolve_base_url(Some("https://proxy.local/api/v1")),
-            "https://proxy.local/api/v1"
-        );
-        // Trailing slash trimmed.
-        assert_eq!(
-            resolve_base_url(Some("https://proxy.local/api/v1/")),
-            "https://proxy.local/api/v1"
-        );
+    fn resolve_base_url_returns_default() {
+        assert_eq!(resolve_base_url(), OPENROUTER_DEFAULT_BASE);
     }
 }
