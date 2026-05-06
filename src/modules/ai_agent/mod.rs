@@ -29,7 +29,7 @@ pub(crate) fn ai_agent_secret() -> String {
 }
 
 use axum::{
-    routing::{delete, get, patch, post},
+    routing::{get, patch, post},
     Router,
 };
 use std::sync::Arc;

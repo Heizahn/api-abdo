@@ -836,14 +836,6 @@ fn installation_to_item(c: AiInstallationConfig) -> AiInstallationConfigItem {
     }
 }
 
-fn installation_not_found() -> ApiError {
-    ApiError::domain_simple(
-        StatusCode::NOT_FOUND,
-        "ai_installation_not_found",
-        "Configuración de instalación no encontrada",
-    )
-}
-
 /// Siembra un doc de instalación con valores 0 si no existe aún.
 async fn ensure_installation(
     state: &Arc<AppState>,
