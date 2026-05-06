@@ -19,11 +19,12 @@ use serde_json::{json, Value};
 
 use crate::{
     db::{
-        AiAgentRepository, ConversationAiPatch, ProfileRepository, SalesRepository,
+        AiAgentRepository, AiInstallationRepository, AiPromotionRepository,
+        ConversationAiPatch, ProfileRepository, SalesRepository,
         WaTicketRepository, WhatsAppRepository,
     },
     models::{
-        ai_agent::{AiAgent, AiAgentMode, AiInvoice, AiToolConfig},
+        ai_agent::{AiAgent, AiAgentMode, AiInvoice, AiToolConfig, ConnectionType},
         whatsapp::{StatePatch, WaTicket, WaTicketTimelineEntry},
     },
     state::AppState,
@@ -153,6 +154,8 @@ pub const T_LIST_PLANS: &str = "list_plans";
 pub const T_CHECK_COVERAGE: &str = "check_coverage";
 pub const T_CALCULATE_AMOUNT_BS: &str = "calculate_amount_bs";
 pub const T_REPORT_PAYMENT: &str = "report_payment";
+pub const T_GET_INSTALLATION_INFO: &str = "get_installation_info";
+pub const T_GET_ACTIVE_PROMOTIONS: &str = "get_active_promotions";
 
 /// Segmento de IVA aplicado por el tool `calculate_amount_bs`. Hardcoded
 /// porque hoy todos los quotes públicos por WhatsApp se cotizan en
@@ -187,7 +190,9 @@ pub fn tool_category(tool_name: &str) -> ToolCategory {
         | T_LIST_PLANS
         | T_CHECK_COVERAGE
         | T_GET_INVOICES
-        | T_CALCULATE_AMOUNT_BS => ToolCategory::InfoLookup,
+        | T_CALCULATE_AMOUNT_BS
+        | T_GET_INSTALLATION_INFO
+        | T_GET_ACTIVE_PROMOTIONS => ToolCategory::InfoLookup,
 
         T_CREATE_TICKET
         | T_REQUEST_HUMAN
@@ -323,6 +328,33 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                     }
                 },
                 "required": ["amount_usd"]
+            }),
+        )),
+        T_GET_INSTALLATION_INFO => Some((
+            "Retorna el costo y detalles de instalación para un tipo de conexión. \
+             Llamar cuando el cliente pregunta cuánto cuesta instalar o qué incluye la instalación. \
+             El parámetro `connection_type` debe ser 'fibra' o 'antena'. \
+             Si la zona soporta ambos tipos, preguntar al cliente cuál prefiere antes de llamar.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "connection_type": {
+                        "type": "string",
+                        "enum": ["fibra", "antena"],
+                        "description": "Tipo de conexión a consultar."
+                    }
+                },
+                "required": ["connection_type"]
+            }),
+        )),
+        T_GET_ACTIVE_PROMOTIONS => Some((
+            "Lista las promociones vigentes de contratación. \
+             Llamar cuando el cliente pregunta por descuentos, promociones u ofertas. \
+             También llamar automáticamente después de `list_plans` o `get_installation_info` \
+             para informar si hay promo aplicable.",
+            json!({
+                "type": "object",
+                "properties": {}
             }),
         )),
         T_TRANSFER_AGENT => Some((
@@ -503,6 +535,8 @@ pub async fn execute_tool(name: &str, args: Value, ctx: &ToolContext) -> ToolRes
         T_CHECK_COVERAGE => exec_check_coverage(args, ctx, started).await,
         T_CALCULATE_AMOUNT_BS => exec_calculate_amount_bs(args, ctx, started).await,
         T_REPORT_PAYMENT => exec_report_payment(args, ctx, started).await,
+        T_GET_INSTALLATION_INFO => exec_get_installation_info(args, ctx, started).await,
+        T_GET_ACTIVE_PROMOTIONS => exec_get_active_promotions(args, ctx, started).await,
         other => ToolResult::err(format!("unknown_tool:{}", other), started),
     }
 }
@@ -689,12 +723,13 @@ async fn exec_list_plans(_args: Value, ctx: &ToolContext, started: Instant) -> T
                 "mbps": p.mbps,
                 "devices_recommendation": p.devices_recommendation,
                 "benefits": p.benefits,
+                "price_usd": p.price_usd,
             })
         })
         .collect();
     let response = json!({
         "items": items,
-        "price_note": "Los precios no se exponen al asistente. Si el cliente pide costo, indicar que el equipo comercial confirma el monto al cerrar la instalación.",
+        "note": "price_usd es el precio mensual en USD. Usá calculate_amount_bs para convertir a Bs con la tasa BCV + IVA vigente.",
     });
     if let Ok(s) = serde_json::to_string(&response) {
         ctx.state.redis.set_ai_plans_cache(&s, AI_BUSINESS_CACHE_TTL_SECS).await;
@@ -722,6 +757,8 @@ struct CachedZone {
     parish: Option<String>,
     sector: Option<String>,
     aliases: Vec<String>,
+    #[serde(default)]
+    connection_types: Vec<ConnectionType>,
 }
 
 /// Carga las zonas activas desde Redis (v2) o DB, y repuebla el caché.
@@ -741,6 +778,7 @@ async fn load_active_zones(ctx: &ToolContext) -> Result<Vec<CachedZone>, String>
             parish: z.parish,
             sector: z.sector,
             aliases: z.aliases,
+            connection_types: z.connection_types,
         })
         .collect();
     if let Ok(s) = serde_json::to_string(&cached) {
@@ -977,6 +1015,7 @@ async fn exec_check_coverage(args: Value, ctx: &ToolContext, started: Instant) -
         }
         1 => {
             let z = matches[0];
+            let available_types: Vec<&str> = z.connection_types.iter().map(|t| t.as_slug()).collect();
             ToolResult::ok(
                 json!({
                     "covered": true,
@@ -985,6 +1024,7 @@ async fn exec_check_coverage(args: Value, ctx: &ToolContext, started: Instant) -
                         "state": z.state,
                         "municipality": z.municipality,
                     },
+                    "available_types": available_types,
                     "queried_zone": raw,
                 }),
                 started,
@@ -1021,6 +1061,89 @@ async fn exec_check_coverage(args: Value, ctx: &ToolContext, started: Instant) -
     }
 }
 
+// ============================================
+// Tool: get_installation_info
+// ============================================
+
+#[derive(Deserialize)]
+struct GetInstallationInfoArgs {
+    connection_type: String,
+}
+
+async fn exec_get_installation_info(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
+    let parsed: GetInstallationInfoArgs = match serde_json::from_value(args) {
+        Ok(v) => v,
+        Err(e) => return ToolResult::err(format!("invalid_args:{}", e), started),
+    };
+
+    let ct = match ConnectionType::from_slug(&parsed.connection_type) {
+        Some(t) => t,
+        None => return ToolResult::err(
+            format!("invalid_connection_type: '{}'. Usar 'fibra' o 'antena'", parsed.connection_type),
+            started,
+        ),
+    };
+
+    let config = match ctx.state.db.get_ai_installation(ct).await {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            return ToolResult::ok(
+                json!({
+                    "connection_type": ct.as_slug(),
+                    "available": false,
+                    "note": "No hay configuración de instalación cargada aún. El asesor confirmará los costos.",
+                }),
+                started,
+            );
+        }
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    };
+
+    ToolResult::ok(
+        json!({
+            "connection_type": config.connection_type.as_slug(),
+            "base_cost_usd": config.base_cost_usd,
+            "includes": config.includes,
+            "excedente_per_meter_usd": config.excedente_per_meter_usd,
+            "excedente_notes": config.excedente_notes,
+            "notes": config.notes,
+        }),
+        started,
+    )
+    .with_patches(vec![StatePatch::AddCompletedAction("get_installation_info".into())])
+}
+
+// ============================================
+// Tool: get_active_promotions
+// ============================================
+
+async fn exec_get_active_promotions(_args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
+    let now = mongodb::bson::DateTime::now();
+    let promos = match ctx.state.db.list_active_ai_promotions(now).await {
+        Ok(p) => p,
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    };
+
+    let items: Vec<Value> = promos
+        .iter()
+        .map(|p| {
+            json!({
+                "name": p.name,
+                "description": p.description,
+                "conditions": p.conditions,
+                "benefit": p.benefit,
+                "ends_at": p.ends_at.try_to_rfc3339_string().unwrap_or_default(),
+            })
+        })
+        .collect();
+
+    ToolResult::ok(
+        json!({ "items": items }),
+        started,
+    )
+    .with_patches(vec![StatePatch::AddCompletedAction("get_active_promotions".into())])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1037,6 +1160,7 @@ mod tests {
             display_name: display_name.to_string(),
             state: state.to_string(),
             municipality: municipality.to_string(),
+            connection_types: vec![ConnectionType::Fibra],
             parish: parish.map(str::to_string),
             sector: sector.map(str::to_string),
             aliases: aliases.iter().map(|s| s.to_string()).collect(),
