@@ -31,6 +31,8 @@ use crate::{
     state::AppState,
 };
 
+use crate::modules::whatsapp::assignment;
+
 use super::ai_agent_secret;
 
 // Reasons que llegan al evento WS y al timeline. Stable strings — el front
@@ -125,6 +127,49 @@ pub async fn auto_escalate(
             match send_farewell_message(state, c, agent, &farewell_text).await {
                 Ok(()) => farewell_sent = true,
                 Err(e) => tracing::warn!("[ai_agent.escalate] farewell envío falló: {}", e),
+            }
+        }
+    }
+
+    // 5b. Disparar asignación a humano.
+    // Al escalar a humano, la conv queda ai_disabled=true pero sin asignado. Si no
+    // disparamos la asignación explícitamente, el cliente espera indefinidamente.
+    // Cargamos wa_settings para obtener la lista de agentes humanos habilitados.
+    if let Some(c) = conv.as_ref() {
+        match state.db.find_wa_settings_by_phone(&c.business_phone).await {
+            Ok(Some(settings)) if !settings.agents.is_empty() => {
+                tracing::info!(
+                    "[ai_agent.tools] request_human → triggering human assignment for conv {}",
+                    conv_hex
+                );
+                let agents = settings.agents.clone();
+                let state_clone = Arc::clone(state);
+                let conv_id_for_assignment = *conversation_id;
+                tokio::spawn(async move {
+                    assignment::assign_conversation(state_clone, conv_id_for_assignment, agents).await;
+                    tracing::info!(
+                        "[ai_agent.tools] human assigned for conv {}",
+                        conv_id_for_assignment.to_hex()
+                    );
+                });
+            }
+            Ok(Some(_)) => {
+                tracing::warn!(
+                    "[ai_agent.escalate] wa_settings.agents vacío para phone {} — conv {} no puede asignarse a humano",
+                    c.business_phone, conv_hex
+                );
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "[ai_agent.escalate] wa_settings no encontrados para phone {} — conv {} no puede asignarse",
+                    c.business_phone, conv_hex
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[ai_agent.escalate] error cargando wa_settings para phone {}: {}",
+                    c.business_phone, e
+                );
             }
         }
     }
