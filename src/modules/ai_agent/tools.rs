@@ -172,37 +172,181 @@ const TAX_TARGET_EMPRESARIAL: &str = "EMPRESARIAL";
 /// **InfoLookup**: el tool consulta info pública o de catálogo. Un turn con
 /// sólo InfoLookup exitosos no resetea — el agente aún está conversando.
 ///
-/// Al agregar una tool nueva, se debe categorizar en `tool_category` en el
-/// mismo PR. El default safe es `InfoLookup`, pero el `tracing::warn!` en el
-/// arm `unknown =>` asegura visibilidad en logs.
+/// Al agregar una tool nueva, se debe agregar al `TOOL_CATALOG`. Una tool que
+/// no esté en el catálogo cae en `InfoLookup` con `tracing::warn!`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCategory {
     InfoLookup,
     Action,
 }
 
-/// Mapea el `tool_name` al ToolCategory. Default safe: `InfoLookup` para
-/// nombres desconocidos (preserva el comportamiento "skip" actual y emite
-/// `warn!` para que el dev categorice la tool nueva explícitamente).
+/// Metadata declarativa de un tool. Fuente de verdad única para:
+/// - El catálogo que la UI consume (`/v1/auth-user/whatsapp/ai-agent/tools`)
+/// - La categoría operativa que `dispatch.rs` lee
+/// - El flag `default_enabled` que se aplica al crear agentes nuevos
+///
+/// El **prompt para Gemini** (description larga + JSON schema de parámetros)
+/// vive aparte en `tool_default` — esa parte es prompt engineering y se
+/// mantiene separada del metadata UX para no colapsar dos contratos distintos.
+///
+/// El **config_schema** del agente (ej: `allowed_targets` de `transfer_to_agent`)
+/// se resuelve en `tool_config_schema(name)` — es opcional y muy puntual.
+pub struct ToolMeta {
+    /// Identificador estable. Se guarda en `AiAgent.tools[].name`.
+    pub name: &'static str,
+    /// Etiqueta corta para el editor (UI).
+    pub display_name: &'static str,
+    /// Descripción human-friendly que la UI muestra como helper text.
+    /// NO es la description que va a Gemini — esa vive en `tool_default`.
+    pub ui_description: &'static str,
+    /// Categoría visual para agrupar en la UI ("lookup", "info", "escalation",
+    /// "transfer", "action").
+    pub ui_category: &'static str,
+    /// Si la tool se incluye habilitada en agentes nuevos.
+    pub default_enabled: bool,
+    /// Categoría operativa para el dispatch (resolución vs progreso).
+    pub operational_category: ToolCategory,
+}
+
+/// Catálogo único de tools soportadas. Agregar una tool nueva requiere:
+/// 1. Constante `T_*` arriba
+/// 2. Entrada acá
+/// 3. Arm en `tool_default` (descripción Gemini + params schema)
+/// 4. Arm en `execute_tool` dispatch
+/// 5. Si tiene config del agente: arm en `tool_config_schema`
+const TOOL_CATALOG: &[ToolMeta] = &[
+    ToolMeta {
+        name: T_LOOKUP_CUSTOMER,
+        display_name: "Buscar cliente",
+        ui_description: "Busca clientes ISP por teléfono o cédula. La IA debe llamar antes de hablar de datos personales.",
+        ui_category: "lookup",
+        default_enabled: true,
+        operational_category: ToolCategory::InfoLookup,
+    },
+    ToolMeta {
+        name: T_GET_INVOICES,
+        display_name: "Consultar deudas / facturas",
+        ui_description: "Devuelve las deudas activas o recientes del cliente identificado.",
+        ui_category: "lookup",
+        default_enabled: true,
+        operational_category: ToolCategory::InfoLookup,
+    },
+    ToolMeta {
+        name: T_LIST_PLANS,
+        display_name: "Listar planes de internet",
+        ui_description: "Catálogo de planes (sin precio). Para uso típico del agente de Ventas.",
+        ui_category: "info",
+        default_enabled: false,
+        operational_category: ToolCategory::InfoLookup,
+    },
+    ToolMeta {
+        name: T_CHECK_COVERAGE,
+        display_name: "Verificar cobertura por zona",
+        ui_description: "Indica si una zona/sector tiene cobertura activa.",
+        ui_category: "info",
+        default_enabled: false,
+        operational_category: ToolCategory::InfoLookup,
+    },
+    ToolMeta {
+        name: T_REQUEST_HUMAN,
+        display_name: "Derivar a humano",
+        ui_description: "Pausa la IA y libera la conversación para que un agente humano la tome.",
+        ui_category: "escalation",
+        default_enabled: true,
+        operational_category: ToolCategory::Action,
+    },
+    ToolMeta {
+        name: T_CREATE_TICKET,
+        display_name: "Crear ticket de soporte",
+        ui_description: "Crea un ticket categorizado y cierra la conversación, escalando a humano.",
+        ui_category: "escalation",
+        default_enabled: true,
+        operational_category: ToolCategory::Action,
+    },
+    ToolMeta {
+        name: T_CALCULATE_AMOUNT_BS,
+        display_name: "Calcular monto en Bs",
+        ui_description: "Convierte USD a Bs aplicando tasa BCV vigente + IVA empresarial (16%). Llamar al cotizar precios en bolívares.",
+        ui_category: "info",
+        default_enabled: false,
+        operational_category: ToolCategory::InfoLookup,
+    },
+    ToolMeta {
+        name: T_GET_INSTALLATION_INFO,
+        display_name: "Info de instalación",
+        ui_description: "Retorna el costo base y detalles de instalación para un tipo de conexión (fibra o antena). Usar al cotizar instalación.",
+        ui_category: "info",
+        default_enabled: false,
+        operational_category: ToolCategory::InfoLookup,
+    },
+    ToolMeta {
+        name: T_GET_ACTIVE_PROMOTIONS,
+        display_name: "Promociones activas",
+        ui_description: "Lista las promociones vigentes. Llamar al cotizar para informar al cliente de descuentos o beneficios actuales.",
+        ui_category: "info",
+        default_enabled: false,
+        operational_category: ToolCategory::InfoLookup,
+    },
+    ToolMeta {
+        name: T_REPORT_PAYMENT,
+        display_name: "Reportar pago",
+        ui_description: "Registra un reporte de pago del cliente con referencia, monto y comprobante (foto). Crea la deuda/abono asociado y notifica al equipo de cobranzas.",
+        ui_category: "action",
+        default_enabled: false,
+        operational_category: ToolCategory::Action,
+    },
+    ToolMeta {
+        name: T_TRANSFER_AGENT,
+        display_name: "Transferir a otro agente IA",
+        ui_description: "Deriva la conversación a otro agente IA del whitelist (Soporte, Pagos, etc).",
+        ui_category: "transfer",
+        default_enabled: false,
+        operational_category: ToolCategory::Action,
+    },
+];
+
+/// Lista pública del catálogo de tools (orden estable).
+pub fn tool_catalog() -> &'static [ToolMeta] {
+    TOOL_CATALOG
+}
+
+/// Lookup por nombre. `None` si la tool no está registrada en el catálogo.
+pub fn tool_meta(name: &str) -> Option<&'static ToolMeta> {
+    TOOL_CATALOG.iter().find(|m| m.name == name)
+}
+
+/// Schema del `config` del agente para una tool dada. Sólo aplica a tools que
+/// tienen configuración por agente (ej: `transfer_to_agent.allowed_targets`).
+/// Devuelve `None` para tools sin config.
+pub fn tool_config_schema(name: &str) -> Option<Value> {
+    match name {
+        T_TRANSFER_AGENT => Some(json!({
+            "type": "object",
+            "required": ["allowed_targets"],
+            "properties": {
+                "allowed_targets": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 1,
+                    "ui_widget": "ai_agent_multiselect",
+                    "description": "ObjectId hex de cada agente IA destino. El front filtra excluyendo el id del agente que se está editando."
+                }
+            }
+        })),
+        _ => None,
+    }
+}
+
+/// Mapea el `tool_name` al ToolCategory leyendo del catálogo. Default safe:
+/// `InfoLookup` para nombres no registrados (emite `warn!` para que el dev
+/// agregue la tool nueva al `TOOL_CATALOG`).
 pub fn tool_category(tool_name: &str) -> ToolCategory {
-    match tool_name {
-        T_LOOKUP_CUSTOMER
-        | T_LIST_PLANS
-        | T_CHECK_COVERAGE
-        | T_GET_INVOICES
-        | T_CALCULATE_AMOUNT_BS
-        | T_GET_INSTALLATION_INFO
-        | T_GET_ACTIVE_PROMOTIONS => ToolCategory::InfoLookup,
-
-        T_CREATE_TICKET
-        | T_REQUEST_HUMAN
-        | T_TRANSFER_AGENT
-        | T_REPORT_PAYMENT => ToolCategory::Action,
-
-        unknown => {
+    match tool_meta(tool_name) {
+        Some(m) => m.operational_category,
+        None => {
             tracing::warn!(
-                "[ai_agent.tools] tool_category: unknown tool name '{}' — defaulting to InfoLookup. Add explicit categorization in tools.rs.",
-                unknown
+                "[ai_agent.tools] tool_category: unknown tool name '{}' — defaulting to InfoLookup. Add it to TOOL_CATALOG in tools.rs.",
+                tool_name
             );
             ToolCategory::InfoLookup
         }

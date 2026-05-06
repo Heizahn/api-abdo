@@ -38,7 +38,7 @@ use crate::{
     state::AppState,
 };
 
-use super::tools::normalize_zone;
+use super::tools::{normalize_zone, tool_catalog, tool_config_schema};
 
 const SUPERADMIN_ROLE: f32 = 0.0;
 
@@ -729,92 +729,17 @@ pub async fn list_tools_handler(
 ) -> Result<Json<AiToolsListResponse>, ApiError> {
     require_superadmin(&current_user)?;
 
-    let data = vec![
-        AiToolMetaItem {
-            name: "lookup_customer".into(),
-            display_name: "Buscar cliente".into(),
-            description: "Busca clientes ISP por teléfono o cédula. La IA debe llamar antes de hablar de datos personales.".into(),
-            category: "lookup".into(),
-            default_enabled: true,
-            config_schema: None,
-        },
-        AiToolMetaItem {
-            name: "get_invoices".into(),
-            display_name: "Consultar deudas / facturas".into(),
-            description: "Devuelve las deudas activas o recientes del cliente identificado.".into(),
-            category: "lookup".into(),
-            default_enabled: true,
-            config_schema: None,
-        },
-        AiToolMetaItem {
-            name: "list_plans".into(),
-            display_name: "Listar planes de internet".into(),
-            description: "Catálogo de planes (sin precio). Para uso típico del agente de Ventas.".into(),
-            category: "info".into(),
-            default_enabled: false,
-            config_schema: None,
-        },
-        AiToolMetaItem {
-            name: "check_coverage".into(),
-            display_name: "Verificar cobertura por zona".into(),
-            description: "Indica si una zona/sector tiene cobertura activa.".into(),
-            category: "info".into(),
-            default_enabled: false,
-            config_schema: None,
-        },
-        AiToolMetaItem {
-            name: "request_human".into(),
-            display_name: "Derivar a humano".into(),
-            description: "Pausa la IA y libera la conversación para que un agente humano la tome.".into(),
-            category: "escalation".into(),
-            default_enabled: true,
-            config_schema: None,
-        },
-        AiToolMetaItem {
-            name: "create_ticket".into(),
-            display_name: "Crear ticket de soporte".into(),
-            description: "Crea un ticket categorizado y cierra la conversación, escalando a humano.".into(),
-            category: "escalation".into(),
-            default_enabled: true,
-            config_schema: None,
-        },
-        AiToolMetaItem {
-            name: "get_installation_info".into(),
-            display_name: "Info de instalación".into(),
-            description: "Retorna el costo base y detalles de instalación para un tipo de conexión (fibra o antena). Usar al cotizar instalación.".into(),
-            category: "info".into(),
-            default_enabled: false,
-            config_schema: None,
-        },
-        AiToolMetaItem {
-            name: "get_active_promotions".into(),
-            display_name: "Promociones activas".into(),
-            description: "Lista las promociones vigentes. Llamar al cotizar para informar al cliente de descuentos o beneficios actuales.".into(),
-            category: "info".into(),
-            default_enabled: false,
-            config_schema: None,
-        },
-        AiToolMetaItem {
-            name: "transfer_to_agent".into(),
-            display_name: "Transferir a otro agente IA".into(),
-            description: "Deriva la conversación a otro agente IA del whitelist (Soporte, Pagos, etc).".into(),
-            category: "transfer".into(),
-            default_enabled: false,
-            config_schema: Some(serde_json::json!({
-                "type": "object",
-                "required": ["allowed_targets"],
-                "properties": {
-                    "allowed_targets": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "minItems": 1,
-                        "ui_widget": "ai_agent_multiselect",
-                        "description": "ObjectId hex de cada agente IA destino. El front filtra excluyendo el id del agente que se está editando."
-                    }
-                }
-            })),
-        },
-    ];
+    let data = tool_catalog()
+        .iter()
+        .map(|m| AiToolMetaItem {
+            name: m.name.to_string(),
+            display_name: m.display_name.to_string(),
+            description: m.ui_description.to_string(),
+            category: m.ui_category.to_string(),
+            default_enabled: m.default_enabled,
+            config_schema: tool_config_schema(m.name),
+        })
+        .collect();
 
     Ok(Json(AiToolsListResponse { ok: true, data }))
 }
