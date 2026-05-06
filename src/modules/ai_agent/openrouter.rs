@@ -57,7 +57,7 @@ pub struct AiRelay {
 impl AiRelay {
     /// Construye desde la config si ambas vars están seteadas.
     pub fn from_config(cfg: &crate::config::Config) -> Option<Self> {
-        match (cfg.ai_relay_url.as_ref(), cfg.ai_relay_secret.as_ref()) {
+        match (cfg.relay_url.as_ref(), cfg.relay_secret.as_ref()) {
             (Some(u), Some(s)) => Some(AiRelay {
                 url: u.clone(),
                 secret: s.clone(),

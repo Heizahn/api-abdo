@@ -243,10 +243,8 @@ components(schemas(MiRequest, MiResponse, ...))
 | `WHATSAPP_VERIFY_TOKEN` | Token de verificación del webhook de Meta (handshake GET) |
 | `WHATSAPP_APP_SECRET` | Secret de la Meta App — valida la firma HMAC-SHA256 del webhook |
 | `WHATSAPP_APP_ID` | (opcional) ID numérico de la Meta App — usado por la Resumable Upload API para subir media de headers de templates. Si falta, `POST /v1/auth-user/whatsapp/templates/header-media` responde 503 `app_id_not_configured` |
-| `WA_MEDIA_RELAY_URL` | (opcional) URL del Cloudflare Worker relay para descargas de media — ver `tools/cf-worker-media-relay/` |
-| `WA_MEDIA_RELAY_SECRET` | (opcional) Secret compartido con el Worker; si ambas están seteadas, las descargas pasan por el relay en vez de `lookaside.fbsbx.com` directo |
-| `AI_RELAY_URL` | (opcional) URL del Cloudflare Worker relay para llamadas a OpenRouter (`openrouter.ai`). Mismo Worker que WA media o uno separado — agregar `'openrouter.ai'` a `ALLOWED_HOST_SUFFIXES` en `tools/cf-worker-media-relay/worker.js`. Si falta, el módulo AI Agent conecta directo (puede fallar desde la VM por bloqueo del ISP) |
-| `AI_RELAY_SECRET` | (opcional) Secret compartido con el Worker para AI. Independiente de `WA_MEDIA_RELAY_SECRET` para permitir rotación/aislamiento |
+| `RELAY_URL` | (opcional) URL del Cloudflare Worker relay genérico — ver `tools/cf-worker-media-relay/`. Cuando está seteada, todas las llamadas a hosts externos (Meta `lookaside.fbsbx.com`, OpenRouter `openrouter.ai`) pasan por el Worker en vez de conectar directo. El Worker valida los hosts contra su `ALLOWED_HOST_SUFFIXES`. Imprescindible cuando el back corre en una VM con ISP que bloquea esos hosts (Venezuela). Acepta los nombres legacy `WA_MEDIA_RELAY_URL` como fallback durante la transición |
+| `RELAY_SECRET` | (opcional) Secret compartido con el Worker. Acepta el nombre legacy `WA_MEDIA_RELAY_SECRET` como fallback. Si la URL está seteada y el secret no, las llamadas se hacen directo (no se usa el relay) |
 
 > El `access_token` y `phone_number_id` de Meta Cloud API **no** son env vars: se
 > configuran por cuenta en la colección `WaSettings` (el token se guarda cifrado

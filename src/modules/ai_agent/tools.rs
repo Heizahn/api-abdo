@@ -1897,8 +1897,8 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         token,
     );
     if let (Some(url), Some(secret)) = (
-        ctx.state.config.wa_media_relay_url.as_ref(),
-        ctx.state.config.wa_media_relay_secret.as_ref(),
+        ctx.state.config.relay_url.as_ref(),
+        ctx.state.config.relay_secret.as_ref(),
     ) {
         svc = svc.with_media_relay(crate::modules::whatsapp::service::MediaRelay {
             url: url.clone(),

@@ -3654,8 +3654,8 @@ async fn resolve_service_for_phone(
 /// en el Config. No-op cuando no hay relay configurado (dev, o red arreglada).
 fn apply_media_relay(state: &Arc<AppState>, svc: WhatsAppService) -> WhatsAppService {
     match (
-        state.config.wa_media_relay_url.as_ref(),
-        state.config.wa_media_relay_secret.as_ref(),
+        state.config.relay_url.as_ref(),
+        state.config.relay_secret.as_ref(),
     ) {
         (Some(url), Some(secret)) => svc.with_media_relay(super::service::MediaRelay {
             url: url.clone(),

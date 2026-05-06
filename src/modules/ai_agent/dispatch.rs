@@ -1558,8 +1558,8 @@ async fn build_media_inputs(
         token,
     );
     if let (Some(url), Some(secret)) = (
-        state.config.wa_media_relay_url.as_ref(),
-        state.config.wa_media_relay_secret.as_ref(),
+        state.config.relay_url.as_ref(),
+        state.config.relay_secret.as_ref(),
     ) {
         svc = svc.with_media_relay(crate::modules::whatsapp::service::MediaRelay {
             url: url.clone(),
@@ -1604,8 +1604,8 @@ async fn send_live_response(
         token,
     );
     if let (Some(url), Some(secret)) = (
-        state.config.wa_media_relay_url.as_ref(),
-        state.config.wa_media_relay_secret.as_ref(),
+        state.config.relay_url.as_ref(),
+        state.config.relay_secret.as_ref(),
     ) {
         svc = svc.with_media_relay(crate::modules::whatsapp::service::MediaRelay {
             url: url.clone(),
