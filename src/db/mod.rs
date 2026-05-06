@@ -1,6 +1,6 @@
 pub mod mongo;
 use crate::models::ai_agent::{
-    AiAgent, AiAgentFaq, AiAgentPurpose, AiClientLookup, AiCoverageZone, AiConfig, AiInteraction, AiPlan,
+    AiAgent, AiAgentFaq, AiAgentPurpose, AiClientLookup, AiCoverageZone, AiConfig, AiInstallationConfig, AiInteraction, AiPlan, AiPromotion, ConnectionType,
 };
 use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
 use crate::models::whatsapp::{
@@ -1272,6 +1272,63 @@ pub struct AiAgentMetricsRaw {
 }
 
 // ============================================
+// 13. AiInstallationRepository — costos de instalación por tipo
+// ============================================
+
+#[async_trait::async_trait]
+pub trait AiInstallationRepository: Send + Sync {
+    /// Retorna el doc de instalación para ese tipo (`fibra`/`antena`), o `None`
+    /// si aún no se ha sembrado. El handler lo crea con valores 0 la primera vez.
+    async fn get_ai_installation(
+        &self,
+        connection_type: ConnectionType,
+    ) -> Result<Option<AiInstallationConfig>, String>;
+
+    /// Lista los docs de las 2 instalaciones (fibra + antena). La colección puede
+    /// tener 0, 1 o 2 docs; el caller maneja el caso vacío sembrando defaults.
+    async fn list_ai_installations(&self) -> Result<Vec<AiInstallationConfig>, String>;
+
+    /// Upsert idempotente por `connection_type`. El caller pasa los campos a
+    /// aplicar como un `AiInstallationConfig` ya mergeado. Siempre retorna el
+    /// doc post-escritura.
+    async fn upsert_ai_installation(
+        &self,
+        config: AiInstallationConfig,
+    ) -> Result<AiInstallationConfig, String>;
+}
+
+// ============================================
+// 14. AiPromotionRepository — promociones vigentes
+// ============================================
+
+#[async_trait::async_trait]
+pub trait AiPromotionRepository: Send + Sync {
+    async fn list_ai_promotions(&self) -> Result<Vec<AiPromotion>, String>;
+
+    /// Solo las activas: `is_active=true` AND `starts_at <= now <= ends_at`.
+    async fn list_active_ai_promotions(
+        &self,
+        now: mongodb::bson::DateTime,
+    ) -> Result<Vec<AiPromotion>, String>;
+
+    async fn find_ai_promotion_by_id(
+        &self,
+        id: &ObjectId,
+    ) -> Result<Option<AiPromotion>, String>;
+
+    async fn create_ai_promotion(&self, promo: AiPromotion) -> Result<AiPromotion, String>;
+
+    /// Replace full-doc (PUT semántica). Caller pasa el doc con `_id` ya seteado.
+    async fn replace_ai_promotion(
+        &self,
+        id: &ObjectId,
+        promo: AiPromotion,
+    ) -> Result<Option<AiPromotion>, String>;
+
+    async fn delete_ai_promotion(&self, id: &ObjectId) -> Result<bool, String>;
+}
+
+// ============================================
 // 12. AiConfigRepository — singleton de configuración global de AI
 // ============================================
 
@@ -1308,6 +1365,8 @@ pub trait Db:
     + WaTicketRepository
     + AiAgentRepository
     + AiConfigRepository
+    + AiInstallationRepository
+    + AiPromotionRepository
     + Clone
     + Send
     + Sync

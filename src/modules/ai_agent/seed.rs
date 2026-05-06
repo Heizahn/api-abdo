@@ -110,6 +110,7 @@ async fn seed_plans(state: &Arc<AppState>) -> Result<(), String> {
             benefits: p.benefits.iter().map(|b| b.to_string()).collect(),
             active: true,
             display_order: p.display_order,
+            price_usd: 0.0,
             created_at: now,
             updated_at: now,
         };
@@ -136,6 +137,7 @@ async fn seed_zones(state: &Arc<AppState>) -> Result<(), String> {
             parish: None,
             sector: None,
             aliases: vec![],
+            connection_types: vec![crate::models::ai_agent::ConnectionType::Fibra],
             is_active: true,
             needs_review: false,
             created_at: now,

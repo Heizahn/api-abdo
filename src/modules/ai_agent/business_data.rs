@@ -110,6 +110,7 @@ fn plan_to_item(p: AiPlan) -> AiPlanItem {
         benefits: p.benefits,
         active: p.active,
         display_order: p.display_order,
+        price_usd: p.price_usd,
         created_at: iso(p.created_at),
         updated_at: iso(p.updated_at),
     }
@@ -124,6 +125,7 @@ fn zone_to_item(z: AiCoverageZone) -> AiCoverageZoneItem {
         parish: z.parish,
         sector: z.sector,
         aliases: z.aliases,
+        connection_types: z.connection_types,
         is_active: z.is_active,
         needs_review: z.needs_review,
         created_at: iso(z.created_at),
@@ -302,6 +304,7 @@ pub async fn create_plan_handler(
         benefits,
         active: body.active.unwrap_or(true),
         display_order: body.display_order.unwrap_or(0),
+        price_usd: body.price_usd,
         created_at: now,
         updated_at: now,
     };
@@ -351,6 +354,7 @@ pub async fn update_plan_handler(
     }
     if let Some(v) = body.active { plan.active = v; }
     if let Some(v) = body.display_order { plan.display_order = v; }
+    if let Some(v) = body.price_usd { plan.price_usd = v; }
 
     validate_plan_input(&plan.name, &plan.devices_recommendation, &plan.benefits)?;
     plan.updated_at = BsonDateTime::now();
@@ -467,6 +471,15 @@ pub async fn create_coverage_zone_handler(
     let aliases = normalize_aliases(body.aliases)?;
     let is_active = body.is_active.unwrap_or(false);
 
+    // Validate connection_types: required, min 1 element.
+    if body.connection_types.is_empty() {
+        return Err(ApiError::ValidationError {
+            code: "missing_field".into(),
+            field: "connection_types".into(),
+            message: "'connection_types' es requerido (mínimo 1 elemento: 'fibra' o 'antena')".into(),
+        });
+    }
+
     // Activation gate on create: if admin wants is_active=true right away,
     // state + municipality are already validated above so it's fine.
     // needs_review is always false on fresh creates (design decision #4).
@@ -480,6 +493,7 @@ pub async fn create_coverage_zone_handler(
         parish,
         sector,
         aliases,
+        connection_types: body.connection_types,
         is_active,
         needs_review: false,
         created_at: now,
@@ -558,6 +572,17 @@ pub async fn update_coverage_zone_handler(
 
     if let Some(aliases_input) = body.aliases {
         zone.aliases = normalize_aliases(aliases_input)?;
+    }
+
+    if let Some(ref types) = body.connection_types {
+        if types.is_empty() {
+            return Err(ApiError::ValidationError {
+                code: "missing_field".into(),
+                field: "connection_types".into(),
+                message: "'connection_types' debe tener mínimo 1 elemento".into(),
+            });
+        }
+        zone.connection_types = types.clone();
     }
 
     // Activation gate

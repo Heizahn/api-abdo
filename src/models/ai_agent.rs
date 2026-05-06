@@ -172,6 +172,34 @@ pub enum AiAgentPurpose {
     Soporte,
 }
 
+/// Tipo de conexión disponible en una zona de cobertura.
+/// Una zona puede soportar uno o ambos tipos.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, ToSchema, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectionType {
+    Fibra,
+    Antena,
+}
+
+impl ConnectionType {
+    /// Slug stable usado en paths de URL y matching de la tool. Misma forma que el `Serialize`.
+    pub fn as_slug(&self) -> &'static str {
+        match self {
+            ConnectionType::Fibra => "fibra",
+            ConnectionType::Antena => "antena",
+        }
+    }
+
+    /// Parsea desde slug. Case-insensitive. Retorna `None` si no matchea.
+    pub fn from_slug(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "fibra" => Some(ConnectionType::Fibra),
+            "antena" => Some(ConnectionType::Antena),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum AiAgentMode {
@@ -397,6 +425,11 @@ pub struct AiPlan {
     /// Orden ascendente para `list_plans`. Default 0 — los nuevos van al final.
     #[serde(default)]
     pub display_order: i32,
+    /// Precio del plan en USD. La IA convierte a Bs (BCV + IVA) al cotizar.
+    /// Default 0 para docs legacy — el handler PATCH valida que se setee
+    /// antes de exponerlo al cliente.
+    #[serde(default)]
+    pub price_usd: f64,
     pub created_at: DateTime,
     pub updated_at: DateTime,
 }
@@ -410,6 +443,7 @@ pub struct AiPlanItem {
     pub benefits: Vec<String>,
     pub active: bool,
     pub display_order: i32,
+    pub price_usd: f64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -437,6 +471,8 @@ pub struct CreateAiPlanRequest {
     pub active: Option<bool>,
     #[serde(default)]
     pub display_order: Option<i32>,
+    /// Precio en USD. Required al crear: la IA cotiza con esto.
+    pub price_usd: f64,
 }
 
 #[derive(Debug, Deserialize, ToSchema, Default)]
@@ -453,6 +489,8 @@ pub struct UpdateAiPlanRequest {
     pub active: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_order: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_usd: Option<f64>,
 }
 
 // ============================================
@@ -478,6 +516,12 @@ pub struct AiCoverageZone {
     /// Aliases para tolerancia a typos. Máx 5, normalizados y deduplicados.
     #[serde(default)]
     pub aliases: Vec<String>,
+    /// Tipos de conexión disponibles en esta zona. Una zona puede soportar
+    /// uno o ambos. Default vacío en docs legacy — el migration script setea
+    /// `["fibra"]` en docs existentes; el handler PATCH valida ≥ 1 elemento
+    /// cuando el campo viene en el body.
+    #[serde(default)]
+    pub connection_types: Vec<ConnectionType>,
     pub is_active: bool,
     /// `true` para zonas migradas del esquema legacy que necesitan revisión
     /// del SUPERADMIN antes de activarse. Read-only en la API.
@@ -495,6 +539,7 @@ pub struct AiCoverageZoneItem {
     pub parish: Option<String>,
     pub sector: Option<String>,
     pub aliases: Vec<String>,
+    pub connection_types: Vec<ConnectionType>,
     pub is_active: bool,
     pub needs_review: bool,
     pub created_at: String,
@@ -524,6 +569,8 @@ pub struct CreateAiCoverageZoneRequest {
     pub sector: Option<String>,
     #[serde(default)]
     pub aliases: Vec<String>,
+    /// Tipos de conexión soportados. Required: mínimo 1.
+    pub connection_types: Vec<ConnectionType>,
     /// Default `false` — el admin opta explícitamente por activar.
     /// `needs_review` no se deserializa: es campo server-controlled.
     #[serde(default)]
@@ -545,6 +592,9 @@ pub struct UpdateAiCoverageZoneRequest {
     pub sector: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aliases: Option<Vec<String>>,
+    /// Si viene presente, debe tener ≥ 1 elemento (validado en el handler).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_types: Option<Vec<ConnectionType>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_active: Option<bool>,
 }
@@ -566,6 +616,168 @@ pub struct PoliticalDivisionsResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AiBusinessDataDeleteResponse {
     pub ok: bool,
+}
+
+// ============================================
+// AiInstallationConfig — costos de instalación por tipo de conexión
+// ============================================
+//
+// Colección `AiInstallationConfigs` — exactamente 2 docs (fibra y antena).
+// La colección se siembra lazy al primer GET si está vacía.
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AiInstallationConfig {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    /// Discriminante: `fibra` o `antena`. Único por colección.
+    pub connection_type: ConnectionType,
+    /// Costo base de la instalación en USD.
+    pub base_cost_usd: f64,
+    /// Texto libre con lo que incluye la instalación
+    /// (ej: "Router Wi-Fi, 150mt cable, instalación").
+    pub includes: String,
+    /// Costo por metro extra de cable. `None` = no aplica para este tipo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excedente_per_meter_usd: Option<f64>,
+    /// Texto libre con notas sobre el excedente
+    /// (ej: "Sin tope. Asesor confirma metros en sitio.").
+    #[serde(default)]
+    pub excedente_notes: String,
+    /// Notas adicionales (texto libre).
+    #[serde(default)]
+    pub notes: String,
+    pub updated_at: DateTime,
+    /// UUID del staff user que persistió este doc por última vez.
+    #[serde(default)]
+    pub editor_id: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiInstallationConfigItem {
+    pub connection_type: ConnectionType,
+    pub base_cost_usd: f64,
+    pub includes: String,
+    pub excedente_per_meter_usd: Option<f64>,
+    pub excedente_notes: String,
+    pub notes: String,
+    pub updated_at: String,
+    pub editor_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiInstallationConfigResponse {
+    pub ok: bool,
+    pub data: AiInstallationConfigItem,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiInstallationConfigsListResponse {
+    pub ok: bool,
+    pub data: Vec<AiInstallationConfigItem>,
+}
+
+/// Body de `PATCH /installations/:type`. Todo opcional (PATCH semántico).
+#[derive(Debug, Deserialize, ToSchema, Default)]
+pub struct UpdateAiInstallationConfigRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub includes: Option<String>,
+    /// Tri-state. `Some(Some(v))` → setear; `Some(None)` → limpiar (no aplica
+    /// excedente); `None` → no tocar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excedente_per_meter_usd: Option<Option<f64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excedente_notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+// ============================================
+// AiPromotion — promociones vigentes que la tool `get_active_promotions` expone
+// ============================================
+//
+// Colección `AiPromotions`. Texto libre para `description`/`conditions`/`benefit`
+// — la IA las cuenta literal al cliente. El back NO interpreta semánticamente
+// las condiciones; solo filtra por fecha + flag `is_active`.
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AiPromotion {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
+    /// Etiqueta corta para el listado del SUPERADMIN.
+    pub name: String,
+    /// Resumen de la promo (texto libre).
+    pub description: String,
+    /// Condiciones para que aplique
+    /// (ej: "Solo plan Conexión Avanzada", "Solo pago en USD").
+    pub conditions: String,
+    /// Beneficio (ej: "Instalación gratis", "10% off plan").
+    pub benefit: String,
+    pub starts_at: DateTime,
+    pub ends_at: DateTime,
+    /// Override manual del admin: `false` la apaga aunque las fechas estén OK.
+    pub is_active: bool,
+    pub created_at: DateTime,
+    pub updated_at: DateTime,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiPromotionItem {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub conditions: String,
+    pub benefit: String,
+    /// ISO8601 con timezone Caracas.
+    pub starts_at: String,
+    pub ends_at: String,
+    pub is_active: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiPromotionResponse {
+    pub ok: bool,
+    pub data: AiPromotionItem,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiPromotionsListResponse {
+    pub ok: bool,
+    pub data: Vec<AiPromotionItem>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateAiPromotionRequest {
+    pub name: String,
+    pub description: String,
+    pub conditions: String,
+    pub benefit: String,
+    /// ISO8601 con timezone (ej: `"2026-04-01T00:00:00-04:00"`).
+    pub starts_at: String,
+    pub ends_at: String,
+    #[serde(default)]
+    pub is_active: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, ToSchema, Default)]
+pub struct UpdateAiPromotionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benefit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starts_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ends_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_active: Option<bool>,
 }
 
 // ============================================
