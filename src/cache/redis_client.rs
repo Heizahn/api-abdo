@@ -384,6 +384,30 @@ impl RedisClient {
     }
 
     // ============================================
+    // AI Agent — cache de métodos de pago por owner
+    // ============================================
+    //
+    // TTL 60s — más corto que planes porque editar el método debe reflejarse
+    // rápido para el equipo admin. Sin invalidación explícita en MVP (TTL-only).
+
+    const AI_PAYMENT_METHODS_KEY_PREFIX: &str = "ai_agent:payment_methods:";
+
+    pub async fn get_ai_payment_methods_cache(&self, owner_id: &str) -> Option<String> {
+        let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;
+        let key = format!("{}{}", Self::AI_PAYMENT_METHODS_KEY_PREFIX, owner_id);
+        conn.get(&key).await.ok().flatten()
+    }
+
+    pub async fn set_ai_payment_methods_cache(&self, owner_id: &str, payload: &str, ttl_secs: u64) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let key = format!("{}{}", Self::AI_PAYMENT_METHODS_KEY_PREFIX, owner_id);
+        let _: Result<(), _> = conn.set_ex(&key, payload, ttl_secs).await;
+    }
+
+    // ============================================
     // AI Agent — configuración global (AiConfig)
     // ============================================
     //

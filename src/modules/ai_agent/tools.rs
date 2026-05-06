@@ -156,6 +156,7 @@ pub const T_CALCULATE_AMOUNT_BS: &str = "calculate_amount_bs";
 pub const T_REPORT_PAYMENT: &str = "report_payment";
 pub const T_GET_INSTALLATION_INFO: &str = "get_installation_info";
 pub const T_GET_ACTIVE_PROMOTIONS: &str = "get_active_promotions";
+pub const T_GET_PAYMENT_METHODS: &str = "get_payment_methods";
 
 /// Categoría operativa de un tool, usada por `dispatch.rs` para decidir si un
 /// turn cuenta como "resolución" (que resetea el counter) o sólo como "trabajo
@@ -298,6 +299,14 @@ const TOOL_CATALOG: &[ToolMeta] = &[
         default_enabled: false,
         operational_category: ToolCategory::Action,
     },
+    ToolMeta {
+        name: T_GET_PAYMENT_METHODS,
+        display_name: "Métodos de pago del proveedor",
+        ui_description: "Devuelve los datos de pago móvil del proveedor que atiende al cliente (banco, cédula, teléfono, titular). Llamar cuando el cliente pregunta '¿cómo pago?' o '¿a dónde transfiero?'.",
+        ui_category: "info",
+        default_enabled: false,
+        operational_category: ToolCategory::InfoLookup,
+    },
 ];
 
 /// Lista pública del catálogo de tools (orden estable).
@@ -351,6 +360,10 @@ pub fn tool_category(tool_name: &str) -> ToolCategory {
 /// Cache TTL para `list_plans` y `check_coverage`. Admins editan poco; en cada
 /// write se invalida explícitamente.
 const AI_BUSINESS_CACHE_TTL_SECS: u64 = 300;
+
+/// Cache TTL para `get_payment_methods`. Más corto que planes porque un admin
+/// que corrige el método de pago debe ver el efecto en < 1 min.
+const AI_PAYMENT_METHODS_CACHE_TTL_SECS: u64 = 60;
 
 /// Normaliza un string para matchear zonas: lowercase, sin tildes, trim.
 pub(crate) fn normalize_zone(s: &str) -> String {
@@ -518,6 +531,25 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                 "required": ["target_agent_id", "reason"]
             }),
         )),
+        T_GET_PAYMENT_METHODS => Some((
+            "Devuelve los métodos de pago del proveedor que atiende al cliente \
+             (banco, número de cédula, teléfono Pago Móvil, titular de la cuenta). \
+             PRECONDICIONES: (1) llamá `lookup_customer` ANTES y confirmá con el cliente \
+             cuál servicio si hay varios. (2) Pasá el `client_id` que el cliente CONFIRMÓ \
+             — si quedaron varios sin confirmar, preguntale antes. \
+             Si la respuesta viene con `items: []` o error `methods_not_configured`, \
+             decí al cliente que falta configurar los datos de pago y escalá a humano.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "client_id": {
+                        "type": "string",
+                        "description": "ObjectId hex del cliente devuelto por lookup_customer."
+                    }
+                },
+                "required": ["client_id"]
+            }),
+        )),
         T_REPORT_PAYMENT => Some((
             "Registra un reporte de pago del cliente (referencia + monto + comprobante). \
              PRECONDICIONES: (1) llamá `lookup_customer` ANTES y confirmá con el cliente \
@@ -678,6 +710,7 @@ pub async fn execute_tool(name: &str, args: Value, ctx: &ToolContext) -> ToolRes
         T_REPORT_PAYMENT => exec_report_payment(args, ctx, started).await,
         T_GET_INSTALLATION_INFO => exec_get_installation_info(args, ctx, started).await,
         T_GET_ACTIVE_PROMOTIONS => exec_get_active_promotions(args, ctx, started).await,
+        T_GET_PAYMENT_METHODS => exec_get_payment_methods(args, ctx, started).await,
         other => ToolResult::err(format!("unknown_tool:{}", other), started),
     }
 }
@@ -1375,6 +1408,127 @@ async fn exec_get_active_promotions(_args: Value, ctx: &ToolContext, started: In
         started,
     )
     .with_patches(vec![StatePatch::AddCompletedAction("get_active_promotions".into())])
+}
+
+// ============================================
+// Tool: get_payment_methods
+// ============================================
+
+async fn exec_get_payment_methods(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
+    #[derive(Deserialize)]
+    struct Args {
+        client_id: String,
+    }
+
+    let parsed: Args = match serde_json::from_value(args) {
+        Ok(v) => v,
+        Err(e) => return ToolResult::err(format!("invalid_args:{}", e), started),
+    };
+
+    // 1. Validate ObjectId format
+    let client_oid = match ObjectId::parse_str(parsed.client_id.trim()) {
+        Ok(o) => o,
+        Err(_) => return ToolResult::err("invalid_client_id", started),
+    };
+
+    // 2. Sandbox short-circuit (before any DB call)
+    if ctx.is_sandbox {
+        return ToolResult::ok(
+            json!({
+                "mode": "sandbox",
+                "items": [{
+                    "type": "pago_movil",
+                    "bank_name": "Banesco",
+                    "id_number": "V-12345678",
+                    "phone": "04141234567",
+                    "account_name": "Empresa Sandbox"
+                }],
+                "note": "datos de prueba"
+            }),
+            started,
+        )
+        .with_patches(vec![StatePatch::AddCompletedAction("get_payment_methods".into())]);
+    }
+
+    // 3. Find client → owner_id
+    let owner = match ctx.state.db.find_client_owner_by_id(&client_oid).await {
+        Ok(Some(o)) => o,
+        Ok(None) => return ToolResult::err("client_not_found", started),
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    };
+    let owner_id = owner.id_owner;
+
+    // 4. Redis cache hit?
+    if let Some(cached) = ctx.state.redis.get_ai_payment_methods_cache(&owner_id).await {
+        if let Ok(parsed_val) = serde_json::from_str::<Value>(&cached) {
+            tracing::info!("[ai_agent.get_payment_methods] cache hit for owner {}", owner_id);
+            return ToolResult::ok(parsed_val, started)
+                .with_patches(vec![StatePatch::AddCompletedAction("get_payment_methods".into())]);
+        }
+    }
+
+    // 5. Resolve owner → payment method ID
+    let user_info = match ctx.state.db.find_user_payment_info_by_id(&owner_id).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return ToolResult::err("methods_not_configured", started),
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    };
+
+    // 6. No payment method configured → return empty (not cached — transient state)
+    let pm_id = match user_info.id_payment_method {
+        Some(id) => id,
+        None => {
+            return ToolResult::ok(
+                json!({
+                    "items": [],
+                    "note": "El proveedor no tiene métodos de pago configurados, deriva a humano."
+                }),
+                started,
+            )
+            .with_patches(vec![StatePatch::AddCompletedAction("get_payment_methods".into())]);
+        }
+    };
+
+    // 7. Fetch payment method
+    let pm = match ctx.state.db.find_payment_method_by_id(&pm_id).await {
+        Ok(Some(p)) if p.is_active => p,
+        Ok(_) => {
+            // method missing or inactive — same response as no method
+            return ToolResult::ok(
+                json!({
+                    "items": [],
+                    "note": "El proveedor no tiene métodos de pago configurados, deriva a humano."
+                }),
+                started,
+            )
+            .with_patches(vec![StatePatch::AddCompletedAction("get_payment_methods".into())]);
+        }
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    };
+
+    // 8. Build response — never leak _id, owner_id, or bActive
+    let response = json!({
+        "items": [{
+            "type": "pago_movil",
+            "bank_name": pm.bank_name,
+            "id_number": pm.id_number,
+            "phone": pm.phone,
+            "account_name": pm.account_name
+        }],
+        "note": "Pago Móvil. Pedile al cliente la referencia y comprobante después de pagar para llamar `report_payment`."
+    });
+
+    // 9. Cache result
+    if let Ok(s) = serde_json::to_string(&response) {
+        ctx.state.redis.set_ai_payment_methods_cache(&owner_id, &s, AI_PAYMENT_METHODS_CACHE_TTL_SECS).await;
+    }
+
+    tracing::info!("[ai_agent.get_payment_methods] live result for owner {}", owner_id);
+    ToolResult::ok(response, started)
+        .with_patches(vec![
+            StatePatch::AddCompletedAction("get_payment_methods".into()),
+            StatePatch::SetCollectedData { key: "payment_methods_shown".into(), value: "true".into() },
+        ])
 }
 
 #[cfg(test)]
@@ -2156,6 +2310,80 @@ struct ReportPaymentArgs {
     payment_date: Option<String>,
 }
 
+// Crea un WaTicket en categoría `cobranzas_facturacion` sin cerrar la conversación.
+// Devuelve el ObjectId del ticket guardado, o un String de error.
+// IMPORTANTE: NO llama `close_conversation` — diferencia crítica vs `exec_create_ticket`.
+async fn create_cobranzas_ticket_internal(
+    ctx: &ToolContext,
+    payment_report_id: &ObjectId,
+    bank: &str,
+    reference: &str,
+    amount_bs: f64,
+    amount_usd: f64,
+) -> Result<ObjectId, String> {
+    let conv_id = ctx.conversation_id.ok_or_else(|| "conversation_id_missing".to_string())?;
+
+    let conv_doc = ctx.state.db.find_conversation_by_id(&conv_id).await
+        .map_err(|e| format!("db_error:{}", e))?
+        .ok_or_else(|| "conversation_not_found".to_string())?;
+
+    let report_id_hex = payment_report_id.to_hex();
+    let bank_display = if bank.is_empty() { "(no informado)" } else { bank };
+    let reason = format!(
+        "Reporte de pago pendiente de validación. Banco: {}, Ref: {}, Monto: {} Bs / {} USD. PaymentReport ID: {}",
+        bank_display, reference, amount_bs, amount_usd, report_id_hex
+    );
+
+    let now = BsonDateTime::now();
+    let timeline = vec![WaTicketTimelineEntry {
+        action: "created".into(),
+        actor_id: ctx.ai_user_id.clone(),
+        actor_name: ctx.ai_user_name.clone(),
+        from_status: None,
+        to_status: Some("open".into()),
+        assigned_to_id: None,
+        assigned_to_name: None,
+        note: Some(format!("Auto-creado por report_payment. PaymentReport: {}", report_id_hex)),
+        created_at: now,
+    }];
+
+    let ticket = WaTicket {
+        id: None,
+        conversation_id: conv_id,
+        customer_phone: conv_doc.phone.clone(),
+        customer_name: conv_doc.name.clone(),
+        customer_id: conv_doc.client_id,
+        business_phone: conv_doc.business_phone.clone(),
+        created_by_id: ctx.ai_user_id.clone(),
+        created_by_name: ctx.ai_user_name.clone(),
+        assigned_to_id: None,
+        assigned_to_name: None,
+        category_id: Some("cobranzas_facturacion".into()),
+        category_label: Some("Cobranzas y Facturación".into()),
+        reason,
+        status: "open".into(),
+        resolution: None,
+        resolved_at: None,
+        closed_at: None,
+        transferred_from_id: None,
+        transferred_from_name: None,
+        idempotency_key: None,
+        tags: vec![
+            "escalado_ia".into(),
+            "auto_payment_report".into(),
+            format!("payment_report:{}", report_id_hex),
+        ],
+        created_at: now,
+        updated_at: now,
+        timeline,
+    };
+
+    let saved = ctx.state.db.create_ticket(ticket).await
+        .map_err(|e| format!("db_error:{}", e))?;
+
+    saved.id.ok_or_else(|| "ticket_id_missing".to_string())
+}
+
 async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
     use chrono::{DateTime, Utc};
     use tokio::fs::File;
@@ -2206,6 +2434,8 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
                 "ok": true,
                 "mode": "sandbox",
                 "payment_id": "sandbox-fake-payment",
+                "ticket_id": "sandbox-fake-ticket",
+                "warning": null,
                 "already_registered": false,
                 "amount_bs": amount_input_bs,
                 "amount_usd": amount_input_usd,
@@ -2377,6 +2607,10 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         .unwrap_or_else(Utc::now);
 
     // 16. Build PaymentReport
+    // Clone trimmed_ref and bank before they move into the report struct so we
+    // can pass them to create_cobranzas_ticket_internal afterwards.
+    let trimmed_ref_for_ticket = trimmed_ref.clone();
+    let bank_for_ticket = parsed.bank.clone().unwrap_or_default();
     let report = crate::models::payment::PaymentReport {
         id: None,
         id_client: Some(client_oid),
@@ -2401,17 +2635,38 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         Ok(r) => r,
         Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
     };
-    let payment_id = inserted
-        .inserted_id
-        .as_object_id()
-        .map(|o| o.to_hex())
-        .unwrap_or_default();
+    let report_oid = inserted.inserted_id.as_object_id().unwrap_or_default();
+    let payment_id = report_oid.to_hex();
+
+    // 18. Best-effort ticket creation in cobranzas_facturacion.
+    // If the PaymentReport was saved successfully but ticket creation fails, we
+    // return ok=true with ticket_id=null and a warning. The orphaned PaymentReport
+    // (state="Pendiente") stays in DB for manual recovery — no rollback attempted.
+    let (ticket_id, ticket_warning) = match create_cobranzas_ticket_internal(
+        ctx,
+        &report_oid,
+        &bank_for_ticket,
+        &trimmed_ref_for_ticket,
+        amount_bs,
+        amount_usd,
+    ).await {
+        Ok(tid) => (Some(tid.to_hex()), None::<String>),
+        Err(e) => {
+            tracing::warn!(
+                "[ai_agent.report_payment] ticket auto-create failed (PaymentReport {} created): {}",
+                payment_id, e
+            );
+            (None::<String>, Some("ticket_creation_failed".to_string()))
+        }
+    };
 
     ToolResult::ok(
         json!({
             "ok": true,
             "mode": "live",
             "payment_id": payment_id,
+            "ticket_id": ticket_id,
+            "warning": ticket_warning,
             "already_registered": false,
             "amount_bs": amount_bs,
             "amount_usd": amount_usd,
