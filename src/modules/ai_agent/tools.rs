@@ -801,10 +801,18 @@ enum MatchTier {
 }
 
 /// Tokens cortos que filtramos al comparar nombres de zonas. Conjunciones,
-/// preposiciones, artículos. Si el cliente dice "centro de güigüe", el "de"
-/// no debería contar.
+/// preposiciones, artículos + palabras estructurales geográficas que la gente
+/// agrega para dar contexto pero NO son identificadoras (ej: "municipio
+/// Carlos Arvelo" — solo "carlos arvelo" identifica). Si el cliente dice
+/// "centro de güigüe", "de" tampoco debería contar.
 const TOKEN_STOPWORDS: &[&str] = &[
+    // Conectores
     "de", "del", "la", "el", "los", "las", "y", "o", "en",
+    // Estructurales geográficas (después de normalize_zone, sin tildes)
+    "municipio", "municip", "municipalidad", "estado", "estados",
+    "parroquia", "parroquias", "sector", "sectores", "barrio", "barrios",
+    "urbanizacion", "urbanizaciones", "urb", "zona", "zonas",
+    "calle", "avenida", "avenidas", "carretera", "vereda",
 ];
 const TOKEN_MIN_LEN: usize = 3;
 
@@ -816,6 +824,84 @@ fn tokenize_zone(s: &str) -> Vec<String> {
         .filter(|t| !TOKEN_STOPWORDS.contains(t))
         .map(|t| t.to_string())
         .collect()
+}
+
+/// Distancia Levenshtein clásica (DP iterativo). Cuenta inserciones,
+/// borrados y sustituciones para transformar `a` en `b`.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let m = a_chars.len();
+    let n = b_chars.len();
+    if m == 0 {
+        return n;
+    }
+    if n == 0 {
+        return m;
+    }
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr: Vec<usize> = vec![0; n + 1];
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+            curr[j] = (prev[j] + 1)
+                .min(curr[j - 1] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
+}
+
+/// Match tolerante a typos cortos comunes en WhatsApp venezolano.
+/// Reglas (afinadas para minimizar falsos positivos en zonas cortas):
+///   - Match exacto → true
+///   - Tokens < 4 chars → solo exacto
+///   - Plural/sufijo: uno es prefijo del otro y diferencia ≤ 2 chars
+///     (cubre "arvelo"/"arvelos", "centro"/"centros")
+///   - Levenshtein ≤ 1 si el token largo tiene ≥ 5 chars (1 typo)
+///   - Levenshtein ≤ 2 si el token largo tiene ≥ 6 chars (cubre "guigue"/"gugiue"
+///     y transposiciones)
+///
+/// Tokens de 4 chars exigen prefix-match o exacto. Eso evita falsos positivos
+/// como "loro"/"lora" — geografías chicas distintas que solo difieren en 1 char.
+pub(crate) fn fuzzy_token_match(query: &str, target: &str) -> bool {
+    if query == target {
+        return true;
+    }
+    let q_len = query.chars().count();
+    let t_len = target.chars().count();
+    if q_len < 4 || t_len < 4 {
+        return false;
+    }
+
+    // Prefix tolerance — captura plurales y sufijos "s", "es", "ito"
+    let (shorter, longer, short_len, long_len) = if q_len <= t_len {
+        (query, target, q_len, t_len)
+    } else {
+        (target, query, t_len, q_len)
+    };
+    if longer.starts_with(shorter) && long_len - short_len <= 2 {
+        return true;
+    }
+
+    // Levenshtein graduated thresholds — solo desde 5 chars para minimizar
+    // falsos positivos en geografías chicas.
+    let dist = levenshtein(query, target);
+    let max_len = q_len.max(t_len);
+    if max_len >= 6 && dist <= 2 {
+        return true;
+    }
+    if max_len >= 5 && dist <= 1 {
+        return true;
+    }
+    false
+}
+
+/// `true` si algún token en `tokens` matchea fuzzy con `query_token`.
+fn fuzzy_contains(tokens: &[String], query_token: &str) -> bool {
+    tokens.iter().any(|t| fuzzy_token_match(query_token, t))
 }
 
 /// Construye el "fingerprint" de la zona: union de tokens de TODOS sus campos
@@ -840,12 +926,18 @@ fn zone_fingerprint(z: &CachedZone) -> Vec<String> {
     tokens
 }
 
-/// `true` si todos los tokens del cliente aparecen en algún campo de la zona.
-/// Sin esto, una zona con sector="Centro" matchearía "centro de Güigüe"
-/// aunque "guigue" no exista en NINGÚN campo de esa zona — falso positivo.
+/// `true` si todos los tokens del cliente aparecen (con tolerancia a typos
+/// cortos vía `fuzzy_token_match`) en algún campo de la zona. Sin esto, una
+/// zona con sector="Centro" matchearía "centro de Güigüe" aunque "guigue"
+/// no exista en NINGÚN campo de esa zona — falso positivo.
+///
+/// El matcher tolera typos comunes en WhatsApp venezolano:
+/// - "arvelos" ↔ "arvelo" (plural/sufijo)
+/// - "guigue" ↔ "gugiue" (transposición)
+/// - "carabobo" ↔ "carabovo" (1 typo)
 fn zone_explains_all_query_tokens(z: &CachedZone, query_tokens: &[String]) -> bool {
     let fp = zone_fingerprint(z);
-    query_tokens.iter().all(|qt| fp.contains(qt))
+    query_tokens.iter().all(|qt| fuzzy_contains(&fp, qt))
 }
 
 /// Devuelve los tokens del campo que NO aparecen en `less_specific_tokens`.
@@ -894,7 +986,7 @@ fn zone_match_tier(z: &CachedZone, query_tokens: &[String]) -> Option<MatchTier>
     display_and_alias.extend(alias_tokens);
 
     let any_in_query = |tokens: &[String]| -> bool {
-        tokens.iter().any(|t| query_tokens.contains(t))
+        tokens.iter().any(|t| fuzzy_contains(query_tokens, t))
     };
 
     // SECTOR: tokens en sector pero no en parish/muni/state. (No restamos display
@@ -1403,6 +1495,78 @@ mod tests {
         let result = match_zones(&zones, &q);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].sector.as_deref(), Some("Loro Pedernales"));
+    }
+
+    // ─── Fuzzy matching: typos comunes en WhatsApp venezolano ─────────────
+
+    #[test]
+    fn test_fuzzy_plural_suffix() {
+        // Cliente escribe "Carlos Arvelos" (con "s" extra), DB tiene "Carlos Arvelo"
+        let zones = vec![
+            make_zone("Carlos Arvelo", "Carabobo", "Carlos Arvelo",
+                      Some("Güigüe"), Some("Centro Güigüe"), &[]),
+        ];
+        let q = normalize_zone("Carlos Arvelos");
+        let result = match_zones(&zones, &q);
+        assert_eq!(result.len(), 1, "Plural 'Arvelos' debe matchear 'Arvelo'");
+    }
+
+    #[test]
+    fn test_fuzzy_transposition_in_sector() {
+        // Bug real reportado: sector en DB tiene typo "Centro Gugiue"
+        // (i↔u swap) y cliente escribe "centro de guigue".
+        let zones = vec![
+            make_zone("Carlos Arvelo", "Carabobo", "Carlos Arvelo",
+                      Some("Guigue"), Some("Centro Gugiue"), &[]),
+        ];
+        let q = normalize_zone("centro de guigue");
+        let result = match_zones(&zones, &q);
+        assert_eq!(result.len(), 1, "guigue debe matchear gugiue (1-2 typos)");
+    }
+
+    #[test]
+    fn test_fuzzy_query_with_geographic_stopwords() {
+        // Cliente escribe "centro de guigue municip carlos arvelos" — la
+        // palabra "municip" debe ignorarse como stopword estructural.
+        let zones = vec![
+            make_zone("Carlos Arvelo", "Carabobo", "Carlos Arvelo",
+                      Some("Guigue"), Some("Centro Guigue"), &[]),
+        ];
+        let q = normalize_zone("centro de guigue municip carlos arvelos");
+        let result = match_zones(&zones, &q);
+        assert!(
+            !result.is_empty(),
+            "Query con 'municip' (stopword) + 'arvelos' (plural) debe matchear"
+        );
+    }
+
+    #[test]
+    fn test_fuzzy_does_not_match_unrelated() {
+        // Falsa amistad: "Valencia" vs "Valera" — son distintas zonas.
+        let zones = vec![
+            make_zone("Valencia Centro", "Carabobo", "Valencia", None, None, &[]),
+            make_zone("Valera", "Trujillo", "Valera", None, None, &[]),
+        ];
+        let q = normalize_zone("valencia");
+        let result = match_zones(&zones, &q);
+        assert_eq!(
+            result.len(), 1,
+            "valencia NO debe matchear valera por distancia (lev=3)"
+        );
+        assert_eq!(result[0].display_name, "Valencia Centro");
+    }
+
+    #[test]
+    fn test_fuzzy_token_match_thresholds() {
+        // Tests directos sobre la función helper.
+        assert!(fuzzy_token_match("arvelo", "arvelo"), "exacto");
+        assert!(fuzzy_token_match("arvelos", "arvelo"), "plural sufijo");
+        assert!(fuzzy_token_match("arvelo", "arvelos"), "plural sufijo invertido");
+        assert!(fuzzy_token_match("guigue", "gugiue"), "transposición lev=2");
+        assert!(fuzzy_token_match("carabobo", "carabovo"), "1 typo en palabra larga");
+        assert!(!fuzzy_token_match("loro", "lora"), "tokens cortos solo exacto");
+        assert!(!fuzzy_token_match("valencia", "valera"), "distancia 3 = no match");
+        assert!(!fuzzy_token_match("abc", "abd"), "menos de 4 chars = no fuzzy");
     }
 }
 
