@@ -18,14 +18,19 @@ use utoipa::ToSchema;
 
 use crate::{
     data::ve_political_divisions::STATE_INDEX,
-    db::AiAgentRepository,
+    db::{AiAgentRepository, AiInstallationRepository, AiPromotionRepository},
     error::ApiError,
     models::{
         ai_agent::{
             AiBusinessDataDeleteResponse, AiCoverageZone, AiCoverageZoneItem,
-            AiCoverageZoneResponse, AiCoverageZonesListResponse, AiPlan, AiPlanItem,
-            AiPlanResponse, AiPlansListResponse, CreateAiCoverageZoneRequest,
-            CreateAiPlanRequest, PoliticalDivisionItem, PoliticalDivisionsResponse,
+            AiCoverageZoneResponse, AiCoverageZonesListResponse,
+            AiInstallationConfig, AiInstallationConfigItem, AiInstallationConfigResponse,
+            AiInstallationConfigsListResponse, UpdateAiInstallationConfigRequest,
+            AiPlan, AiPlanItem, AiPlanResponse, AiPlansListResponse,
+            AiPromotion, AiPromotionItem, AiPromotionResponse, AiPromotionsListResponse,
+            CreateAiCoverageZoneRequest, CreateAiPlanRequest,
+            CreateAiPromotionRequest, UpdateAiPromotionRequest,
+            ConnectionType, PoliticalDivisionItem, PoliticalDivisionsResponse,
             UpdateAiCoverageZoneRequest, UpdateAiPlanRequest,
         },
         users::User,
@@ -774,6 +779,22 @@ pub async fn list_tools_handler(
             config_schema: None,
         },
         AiToolMetaItem {
+            name: "get_installation_info".into(),
+            display_name: "Info de instalación".into(),
+            description: "Retorna el costo base y detalles de instalación para un tipo de conexión (fibra o antena). Usar al cotizar instalación.".into(),
+            category: "info".into(),
+            default_enabled: false,
+            config_schema: None,
+        },
+        AiToolMetaItem {
+            name: "get_active_promotions".into(),
+            display_name: "Promociones activas".into(),
+            description: "Lista las promociones vigentes. Llamar al cotizar para informar al cliente de descuentos o beneficios actuales.".into(),
+            category: "info".into(),
+            default_enabled: false,
+            config_schema: None,
+        },
+        AiToolMetaItem {
             name: "transfer_to_agent".into(),
             display_name: "Transferir a otro agente IA".into(),
             description: "Deriva la conversación a otro agente IA del whitelist (Soporte, Pagos, etc).".into(),
@@ -796,6 +817,371 @@ pub async fn list_tools_handler(
     ];
 
     Ok(Json(AiToolsListResponse { ok: true, data }))
+}
+
+// ============================================
+// CRUD Installations
+// ============================================
+
+fn installation_to_item(c: AiInstallationConfig) -> AiInstallationConfigItem {
+    AiInstallationConfigItem {
+        connection_type: c.connection_type,
+        base_cost_usd: c.base_cost_usd,
+        includes: c.includes,
+        excedente_per_meter_usd: c.excedente_per_meter_usd,
+        excedente_notes: c.excedente_notes,
+        notes: c.notes,
+        updated_at: iso(c.updated_at),
+        editor_id: if c.editor_id.is_empty() { None } else { Some(c.editor_id) },
+    }
+}
+
+fn installation_not_found() -> ApiError {
+    ApiError::domain_simple(
+        StatusCode::NOT_FOUND,
+        "ai_installation_not_found",
+        "Configuración de instalación no encontrada",
+    )
+}
+
+/// Siembra un doc de instalación con valores 0 si no existe aún.
+async fn ensure_installation(
+    state: &Arc<AppState>,
+    connection_type: ConnectionType,
+    editor_id: &str,
+) -> Result<AiInstallationConfig, ApiError> {
+    if let Some(existing) = state
+        .db
+        .get_ai_installation(connection_type)
+        .await
+        .map_err(ApiError::DatabaseError)?
+    {
+        return Ok(existing);
+    }
+    let now = BsonDateTime::now();
+    let default_config = AiInstallationConfig {
+        id: None,
+        connection_type,
+        base_cost_usd: 0.0,
+        includes: String::new(),
+        excedente_per_meter_usd: None,
+        excedente_notes: String::new(),
+        notes: String::new(),
+        updated_at: now,
+        editor_id: editor_id.to_string(),
+    };
+    state
+        .db
+        .upsert_ai_installation(default_config)
+        .await
+        .map_err(ApiError::DatabaseError)
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/ai-agent/installations",
+    tag = "WhatsApp — AI Agent",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Configuraciones de instalación (fibra + antena)", body = AiInstallationConfigsListResponse),
+        (status = 403, description = "Requiere SUPERADMIN"),
+    )
+)]
+pub async fn list_installations_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user): Extension<User>,
+) -> Result<Json<AiInstallationConfigsListResponse>, ApiError> {
+    require_superadmin(&current_user)?;
+
+    let mut items = state
+        .db
+        .list_ai_installations()
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    // Si la colección está vacía o le faltan tipos, sembramos los defaults lazy.
+    let has_fibra = items.iter().any(|c| matches!(c.connection_type, ConnectionType::Fibra));
+    let has_antena = items.iter().any(|c| matches!(c.connection_type, ConnectionType::Antena));
+
+    if !has_fibra {
+        let seeded = ensure_installation(&state, ConnectionType::Fibra, &current_user.id).await?;
+        items.push(seeded);
+    }
+    if !has_antena {
+        let seeded = ensure_installation(&state, ConnectionType::Antena, &current_user.id).await?;
+        items.push(seeded);
+    }
+
+    // Ordenar estable: fibra primero.
+    items.sort_by_key(|c| c.connection_type.as_slug().to_string());
+
+    Ok(Json(AiInstallationConfigsListResponse {
+        ok: true,
+        data: items.into_iter().map(installation_to_item).collect(),
+    }))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/v1/auth-user/whatsapp/ai-agent/installations/{type}",
+    tag = "WhatsApp — AI Agent",
+    security(("bearerAuth" = [])),
+    params(("type" = String, Path, description = "Tipo de conexión: 'fibra' o 'antena'")),
+    request_body = UpdateAiInstallationConfigRequest,
+    responses(
+        (status = 200, description = "Configuración actualizada", body = AiInstallationConfigResponse),
+        (status = 422, description = "type inválido"),
+    )
+)]
+pub async fn update_installation_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user): Extension<User>,
+    Path(type_slug): Path<String>,
+    Json(body): Json<UpdateAiInstallationConfigRequest>,
+) -> Result<Json<AiInstallationConfigResponse>, ApiError> {
+    require_superadmin(&current_user)?;
+
+    let connection_type = ConnectionType::from_slug(&type_slug).ok_or_else(|| {
+        ApiError::ValidationError {
+            code: "invalid_connection_type".into(),
+            field: "type".into(),
+            message: format!("'{}' no es un tipo válido. Usar 'fibra' o 'antena'", type_slug),
+        }
+    })?;
+
+    // Asegurar que el doc existe (lazy seed si no).
+    let mut config = ensure_installation(&state, connection_type, &current_user.id).await?;
+
+    // Aplicar PATCH semántico.
+    if let Some(v) = body.base_cost_usd { config.base_cost_usd = v; }
+    if let Some(v) = body.includes { config.includes = v.trim().to_string(); }
+    if let Some(tri) = body.excedente_per_meter_usd {
+        config.excedente_per_meter_usd = tri;
+    }
+    if let Some(v) = body.excedente_notes { config.excedente_notes = v.trim().to_string(); }
+    if let Some(v) = body.notes { config.notes = v.trim().to_string(); }
+
+    config.editor_id = current_user.id.clone();
+    config.updated_at = BsonDateTime::now();
+
+    let saved = state
+        .db
+        .upsert_ai_installation(config)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    Ok(Json(AiInstallationConfigResponse {
+        ok: true,
+        data: installation_to_item(saved),
+    }))
+}
+
+// ============================================
+// CRUD Promotions
+// ============================================
+
+fn promotion_to_item(p: AiPromotion) -> AiPromotionItem {
+    AiPromotionItem {
+        id: p.id.map(|o| o.to_hex()).unwrap_or_default(),
+        name: p.name,
+        description: p.description,
+        conditions: p.conditions,
+        benefit: p.benefit,
+        starts_at: iso(p.starts_at),
+        ends_at: iso(p.ends_at),
+        is_active: p.is_active,
+        created_at: iso(p.created_at),
+        updated_at: iso(p.updated_at),
+    }
+}
+
+fn promotion_not_found() -> ApiError {
+    ApiError::domain_simple(
+        StatusCode::NOT_FOUND,
+        "ai_promotion_not_found",
+        "Promoción no encontrada",
+    )
+}
+
+/// Parsea una fecha ISO8601 con timezone a BsonDateTime.
+fn parse_iso_datetime(s: &str, field: &str) -> Result<mongodb::bson::DateTime, ApiError> {
+    chrono::DateTime::parse_from_rfc3339(s.trim())
+        .map(|dt| mongodb::bson::DateTime::from_millis(dt.timestamp_millis()))
+        .map_err(|_| ApiError::ValidationError {
+            code: "invalid_datetime".into(),
+            field: field.into(),
+            message: format!("'{}' debe ser ISO8601 con timezone (ej: 2026-04-01T00:00:00-04:00)", field),
+        })
+}
+
+fn validate_promotion_dates(
+    starts_at: mongodb::bson::DateTime,
+    ends_at: mongodb::bson::DateTime,
+) -> Result<(), ApiError> {
+    if ends_at <= starts_at {
+        return Err(ApiError::ValidationError {
+            code: "invalid_date_range".into(),
+            field: "ends_at".into(),
+            message: "'ends_at' debe ser posterior a 'starts_at'".into(),
+        });
+    }
+    Ok(())
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/ai-agent/promotions",
+    tag = "WhatsApp — AI Agent",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Lista de promociones", body = AiPromotionsListResponse),
+        (status = 403, description = "Requiere SUPERADMIN"),
+    )
+)]
+pub async fn list_promotions_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user): Extension<User>,
+) -> Result<Json<AiPromotionsListResponse>, ApiError> {
+    require_superadmin(&current_user)?;
+    let promos = state
+        .db
+        .list_ai_promotions()
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    Ok(Json(AiPromotionsListResponse {
+        ok: true,
+        data: promos.into_iter().map(promotion_to_item).collect(),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/ai-agent/promotions",
+    tag = "WhatsApp — AI Agent",
+    security(("bearerAuth" = [])),
+    request_body = CreateAiPromotionRequest,
+    responses(
+        (status = 201, description = "Promoción creada", body = AiPromotionResponse),
+        (status = 422, description = "Validación (fechas, campos requeridos)"),
+    )
+)]
+pub async fn create_promotion_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user): Extension<User>,
+    Json(body): Json<CreateAiPromotionRequest>,
+) -> Result<(StatusCode, Json<AiPromotionResponse>), ApiError> {
+    require_superadmin(&current_user)?;
+
+    validate_required(body.name.trim(), "name")?;
+    validate_required(body.description.trim(), "description")?;
+    validate_required(body.benefit.trim(), "benefit")?;
+
+    let starts_at = parse_iso_datetime(&body.starts_at, "starts_at")?;
+    let ends_at = parse_iso_datetime(&body.ends_at, "ends_at")?;
+    validate_promotion_dates(starts_at, ends_at)?;
+
+    let now = BsonDateTime::now();
+    let promo = AiPromotion {
+        id: None,
+        name: body.name.trim().to_string(),
+        description: body.description.trim().to_string(),
+        conditions: body.conditions.trim().to_string(),
+        benefit: body.benefit.trim().to_string(),
+        starts_at,
+        ends_at,
+        is_active: body.is_active.unwrap_or(true),
+        created_at: now,
+        updated_at: now,
+    };
+
+    let saved = state
+        .db
+        .create_ai_promotion(promo)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    Ok((StatusCode::CREATED, Json(AiPromotionResponse { ok: true, data: promotion_to_item(saved) })))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/v1/auth-user/whatsapp/ai-agent/promotions/{id}",
+    tag = "WhatsApp — AI Agent",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ObjectId hex")),
+    request_body = UpdateAiPromotionRequest,
+    responses(
+        (status = 200, description = "Promoción actualizada", body = AiPromotionResponse),
+        (status = 404, description = "ai_promotion_not_found"),
+        (status = 422, description = "Validación"),
+    )
+)]
+pub async fn update_promotion_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user): Extension<User>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateAiPromotionRequest>,
+) -> Result<Json<AiPromotionResponse>, ApiError> {
+    require_superadmin(&current_user)?;
+    let oid = parse_oid(&id, "id")?;
+    let mut promo = state
+        .db
+        .find_ai_promotion_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(promotion_not_found)?;
+
+    if let Some(v) = body.name { promo.name = v.trim().to_string(); }
+    if let Some(v) = body.description { promo.description = v.trim().to_string(); }
+    if let Some(v) = body.conditions { promo.conditions = v.trim().to_string(); }
+    if let Some(v) = body.benefit { promo.benefit = v.trim().to_string(); }
+    if let Some(v) = body.is_active { promo.is_active = v; }
+
+    if let Some(ref s) = body.starts_at {
+        promo.starts_at = parse_iso_datetime(s, "starts_at")?;
+    }
+    if let Some(ref e) = body.ends_at {
+        promo.ends_at = parse_iso_datetime(e, "ends_at")?;
+    }
+
+    validate_promotion_dates(promo.starts_at, promo.ends_at)?;
+    promo.updated_at = BsonDateTime::now();
+
+    let saved = state
+        .db
+        .replace_ai_promotion(&oid, promo)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(promotion_not_found)?;
+    Ok(Json(AiPromotionResponse { ok: true, data: promotion_to_item(saved) }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/auth-user/whatsapp/ai-agent/promotions/{id}",
+    tag = "WhatsApp — AI Agent",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ObjectId hex")),
+    responses(
+        (status = 200, description = "Promoción eliminada", body = AiBusinessDataDeleteResponse),
+        (status = 404, description = "ai_promotion_not_found"),
+    )
+)]
+pub async fn delete_promotion_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user): Extension<User>,
+    Path(id): Path<String>,
+) -> Result<Json<AiBusinessDataDeleteResponse>, ApiError> {
+    require_superadmin(&current_user)?;
+    let oid = parse_oid(&id, "id")?;
+    let ok = state
+        .db
+        .delete_ai_promotion(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    if !ok {
+        return Err(promotion_not_found());
+    }
+    Ok(Json(AiBusinessDataDeleteResponse { ok: true }))
 }
 
 // ============================================

@@ -29,7 +29,7 @@ pub(crate) fn ai_agent_secret() -> String {
 }
 
 use axum::{
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
     Router,
 };
 use std::sync::Arc;
@@ -124,5 +124,25 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/auth-user/whatsapp/ai/zones/political-divisions",
             get(business_data::list_political_divisions_handler),
+        )
+        // Instalaciones (costos por tipo de conexión)
+        .route(
+            "/v1/auth-user/whatsapp/ai-agent/installations",
+            get(business_data::list_installations_handler),
+        )
+        .route(
+            "/v1/auth-user/whatsapp/ai-agent/installations/:type",
+            patch(business_data::update_installation_handler),
+        )
+        // Promociones
+        .route(
+            "/v1/auth-user/whatsapp/ai-agent/promotions",
+            get(business_data::list_promotions_handler)
+                .post(business_data::create_promotion_handler),
+        )
+        .route(
+            "/v1/auth-user/whatsapp/ai-agent/promotions/:id",
+            patch(business_data::update_promotion_handler)
+                .delete(business_data::delete_promotion_handler),
         )
 }
