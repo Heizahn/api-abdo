@@ -840,7 +840,6 @@ fn apply_model(
     patch: Option<crate::models::ai_agent::AiModelConfigInput>,
 ) -> Result<(), ApiError> {
     let Some(p) = patch else { return Ok(()) };
-    if let Some(v) = p.provider { cur.provider = v; }
     if let Some(v) = p.model_id { cur.model_id = v; }
     if let Some(v) = p.temperature { cur.temperature = v; }
     if let Some(v) = p.max_tokens { cur.max_tokens = v; }

@@ -224,6 +224,11 @@ pub struct AiSchedule {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AiModelConfig {
+    /// DEPRECATED 2026-05-06: era el discriminante del proveedor (`gemini` /
+    /// `openrouter`) cuando había multi-provider. Hoy con OpenRouter como único
+    /// runtime, el campo es informativo y NO se valida. Nuevos docs se siembran
+    /// con `"openrouter"`. Ignorado en POST/PATCH del agente.
+    #[serde(default)]
     pub provider: String,
     pub model_id: String,
     pub temperature: f32,
@@ -1017,8 +1022,6 @@ pub struct AiScheduleInput {
 
 #[derive(Debug, Deserialize, ToSchema, Default)]
 pub struct AiModelConfigInput {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
