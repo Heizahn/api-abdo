@@ -111,7 +111,7 @@ impl MongoDB {
     // Estos helpers quedan listos para cuando implementes la lógica nueva
     #[allow(dead_code)]
     pub(crate) fn payment_methods(&self) -> Collection<PaymentMethod> {
-        self.db.collection::<PaymentMethod>("PaymentsMethods")
+        self.db.collection::<PaymentMethod>("PaymentMethods")
     }
 }
 
