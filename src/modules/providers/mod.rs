@@ -1,7 +1,7 @@
 pub mod handler;
 
-use axum::{routing::get, Router};
 use crate::state::AppState;
+use axum::{routing::get, Router};
 use std::sync::Arc;
 
 pub fn routes() -> Router<Arc<AppState>> {

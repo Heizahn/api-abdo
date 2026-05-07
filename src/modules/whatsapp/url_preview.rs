@@ -85,7 +85,12 @@ pub fn extract_first_url(text: &str) -> Option<String> {
     let re = url_regex();
     let m = re.find(text)?;
     let raw = m.as_str();
-    let trimmed = raw.trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '"' | '\''));
+    let trimmed = raw.trim_end_matches(|c: char| {
+        matches!(
+            c,
+            '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '"' | '\''
+        )
+    });
     if trimmed.is_empty() {
         None
     } else {
@@ -220,7 +225,9 @@ async fn read_capped_body(mut resp: reqwest::Response) -> anyhow::Result<Vec<u8>
 async fn ensure_public_host(url: &Url) -> anyhow::Result<()> {
     use std::net::IpAddr;
 
-    let host = url.host_str().ok_or_else(|| anyhow::anyhow!("URL sin host"))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("URL sin host"))?;
 
     // Host literal (IPv4/IPv6 sin DNS).
     if let Ok(ip) = host.parse::<IpAddr>() {
@@ -259,23 +266,46 @@ fn is_ip_public(ip: &std::net::IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let [a, b, _, _] = v4.octets();
-            if v4.is_loopback() || v4.is_unspecified() || v4.is_broadcast() || v4.is_link_local() || v4.is_multicast() {
+            if v4.is_loopback()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_link_local()
+                || v4.is_multicast()
+            {
                 return false;
             }
             // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-            if a == 10 { return false; }
-            if a == 172 && (16..32).contains(&b) { return false; }
-            if a == 192 && b == 168 { return false; }
+            if a == 10 {
+                return false;
+            }
+            if a == 172 && (16..32).contains(&b) {
+                return false;
+            }
+            if a == 192 && b == 168 {
+                return false;
+            }
             // 100.64.0.0/10 CGNAT
-            if a == 100 && (64..128).contains(&b) { return false; }
+            if a == 100 && (64..128).contains(&b) {
+                return false;
+            }
             // 198.18.0.0/15 benchmarking
-            if a == 198 && (b == 18 || b == 19) { return false; }
+            if a == 198 && (b == 18 || b == 19) {
+                return false;
+            }
             // 192.0.0.0/24, 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 documentación
-            if a == 192 && b == 0 { return false; }
-            if a == 198 && b == 51 { return false; }
-            if a == 203 && b == 0 { return false; }
+            if a == 192 && b == 0 {
+                return false;
+            }
+            if a == 198 && b == 51 {
+                return false;
+            }
+            if a == 203 && b == 0 {
+                return false;
+            }
             // 240.0.0.0/4 reservado
-            if a >= 240 { return false; }
+            if a >= 240 {
+                return false;
+            }
             true
         }
         IpAddr::V6(v6) => {
@@ -288,12 +318,18 @@ fn is_ip_public(ip: &std::net::IpAddr) -> bool {
             }
             let seg0 = v6.segments()[0];
             // fe80::/10 link-local
-            if seg0 & 0xffc0 == 0xfe80 { return false; }
+            if seg0 & 0xffc0 == 0xfe80 {
+                return false;
+            }
             // fc00::/7 ULA
-            if seg0 & 0xfe00 == 0xfc00 { return false; }
+            if seg0 & 0xfe00 == 0xfc00 {
+                return false;
+            }
             // 2001:db8::/32 documentación
             let segs = v6.segments();
-            if segs[0] == 0x2001 && segs[1] == 0x0db8 { return false; }
+            if segs[0] == 0x2001 && segs[1] == 0x0db8 {
+                return false;
+            }
             true
         }
     }

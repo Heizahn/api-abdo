@@ -80,7 +80,11 @@ pub async fn auto_escalate(
         ai_disabled: Some(true),
         ai_transfer_context: Some(None),
     };
-    if let Err(e) = state.db.update_conversation_ai_state(conversation_id, patch).await {
+    if let Err(e) = state
+        .db
+        .update_conversation_ai_state(conversation_id, patch)
+        .await
+    {
         tracing::warn!("[ai_agent.escalate] update_conversation_ai_state: {}", e);
     }
 
@@ -146,7 +150,8 @@ pub async fn auto_escalate(
                 let state_clone = Arc::clone(state);
                 let conv_id_for_assignment = *conversation_id;
                 tokio::spawn(async move {
-                    assignment::assign_conversation(state_clone, conv_id_for_assignment, agents).await;
+                    assignment::assign_conversation(state_clone, conv_id_for_assignment, agents)
+                        .await;
                     tracing::info!(
                         "[ai_agent.tools] human assigned for conv {}",
                         conv_id_for_assignment.to_hex()
@@ -168,7 +173,8 @@ pub async fn auto_escalate(
             Err(e) => {
                 tracing::warn!(
                     "[ai_agent.escalate] error cargando wa_settings para phone {}: {}",
-                    c.business_phone, e
+                    c.business_phone,
+                    e
                 );
             }
         }

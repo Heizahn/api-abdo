@@ -147,10 +147,7 @@ pub fn format_conversation_state(state: &WaConversationAiState) -> String {
             .iter()
             .map(|f| f.tool.clone())
             .collect();
-        lines.push(format!(
-            "recent_failed_attempts: [{}]",
-            recent.join(", ")
-        ));
+        lines.push(format!("recent_failed_attempts: [{}]", recent.join(", ")));
     }
 
     lines.join("\n")

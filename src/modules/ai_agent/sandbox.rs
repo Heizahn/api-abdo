@@ -32,7 +32,7 @@ use crate::{
 
 use super::{
     config_resolver::resolve_ai_api_key,
-    openrouter::{AiRelay, resolve_base_url},
+    openrouter::{resolve_base_url, AiRelay},
     runner::{run_turn, ConvRole, ConvTurn, PromptVariables},
     tools::{extract_allowed_transfer_targets, ToolContext},
 };
@@ -172,7 +172,10 @@ pub async fn sandbox_handler(
         return Err(ApiError::ValidationError {
             code: "field_too_long".into(),
             field: "message".into(),
-            message: format!("El mensaje no puede superar {} caracteres", MESSAGE_MAX_CHARS),
+            message: format!(
+                "El mensaje no puede superar {} caracteres",
+                MESSAGE_MAX_CHARS
+            ),
         });
     }
     if body.history.len() > HISTORY_MAX_TURNS {
@@ -206,7 +209,11 @@ pub async fn sandbox_handler(
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(|| {
-            ApiError::domain_simple(StatusCode::NOT_FOUND, "agent_not_found", "Agente no encontrado")
+            ApiError::domain_simple(
+                StatusCode::NOT_FOUND,
+                "agent_not_found",
+                "Agente no encontrado",
+            )
         })?;
 
     let wa_setting = state
@@ -251,8 +258,13 @@ pub async fn sandbox_handler(
         if allowed_transfer_targets.is_empty() {
             Vec::new()
         } else {
-            match state.db.find_ai_agents_by_ids(&allowed_transfer_targets).await {
-                Ok(agents) => agents.into_iter()
+            match state
+                .db
+                .find_ai_agents_by_ids(&allowed_transfer_targets)
+                .await
+            {
+                Ok(agents) => agents
+                    .into_iter()
                     .filter_map(|a| a.id.map(|id| (id, a.label)))
                     .collect(),
                 Err(_) => Vec::new(),
@@ -313,12 +325,12 @@ pub async fn sandbox_handler(
         &message,
         &[],
         faqs_inline.as_deref(),
-        None,            // customer_context
-        None,            // transfer_context
-        None,            // first_turn_note
-        None,            // agent_state
-        None,            // turn_state
-        None,            // conversation_state — sandbox is stateless (Phase 2)
+        None, // customer_context
+        None, // transfer_context
+        None, // first_turn_note
+        None, // agent_state
+        None, // turn_state
+        None, // conversation_state — sandbox is stateless (Phase 2)
         Some(&prompt_vars),
         &tool_ctx,
     )

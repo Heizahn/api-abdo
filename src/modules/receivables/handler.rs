@@ -158,7 +158,11 @@ pub async fn me_receivables_handler(
 
         let pending_usd_raw = debt_amount_rounded - total_paid_rounded;
 
-        let pending_usd = if pending_usd_raw < epsilon { 0.0 } else { pending_usd_raw };
+        let pending_usd = if pending_usd_raw < epsilon {
+            0.0
+        } else {
+            pending_usd_raw
+        };
 
         if pending_usd > epsilon || has_pending {
             let client_tax_rate = client_tax_map.get(&debt.id_client).cloned().unwrap_or(1.08);
@@ -192,7 +196,6 @@ pub async fn me_receivables_handler(
         receivables,
     }))
 }
-
 
 #[utoipa::path(
     get,
@@ -534,7 +537,11 @@ pub async fn get_rejected_payments_by_receivable_handler(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(debt_id): axum::extract::Path<String>,
 ) -> Result<Json<RejectedPaymentsResponse>, ApiError> {
-    tracing::info!("📋 GET /receivable/{}/payments/rejected for user: {}", debt_id, claims.sub);
+    tracing::info!(
+        "📋 GET /receivable/{}/payments/rejected for user: {}",
+        debt_id,
+        claims.sub
+    );
 
     let customer = AuthService::lookup_by_id(&state.db, &claims.sub)
         .await
@@ -559,8 +566,8 @@ pub async fn get_rejected_payments_by_receivable_handler(
         return Err(ApiError::Forbidden);
     }
 
-    let debt_oid = ObjectId::parse_str(&debt_id)
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let debt_oid =
+        ObjectId::parse_str(&debt_id).map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
     let rejected = state
         .db

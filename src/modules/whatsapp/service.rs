@@ -68,7 +68,12 @@ fn parse_meta_error(ctx: &str, status: reqwest::StatusCode, body: &str) -> anyho
             let message = err_obj["message"].as_str().unwrap_or("unknown").to_string();
             let error_subcode = err_obj["error_subcode"].as_i64();
             let error_user_msg = err_obj["error_user_msg"].as_str().map(|s| s.to_string());
-            return anyhow::Error::new(MetaApiError { code, message, error_subcode, error_user_msg });
+            return anyhow::Error::new(MetaApiError {
+                code,
+                message,
+                error_subcode,
+                error_user_msg,
+            });
         }
     }
     anyhow::anyhow!("{} error [{}]: {}", ctx, status, body)
@@ -79,11 +84,21 @@ fn parse_meta_error(ctx: &str, status: reqwest::StatusCode, body: &str) -> anyho
 /// del texto genérico "error sending request for url".
 fn describe_reqwest_error(ctx: &str, e: reqwest::Error) -> anyhow::Error {
     let mut flags = Vec::new();
-    if e.is_timeout() { flags.push("timeout"); }
-    if e.is_connect() { flags.push("connect"); }
-    if e.is_request() { flags.push("request"); }
-    if e.is_body() { flags.push("body"); }
-    if e.is_decode() { flags.push("decode"); }
+    if e.is_timeout() {
+        flags.push("timeout");
+    }
+    if e.is_connect() {
+        flags.push("connect");
+    }
+    if e.is_request() {
+        flags.push("request");
+    }
+    if e.is_body() {
+        flags.push("body");
+    }
+    if e.is_decode() {
+        flags.push("decode");
+    }
 
     let mut chain = format!("{}", e);
     let mut src: Option<&dyn StdError> = e.source();
@@ -93,7 +108,11 @@ fn describe_reqwest_error(ctx: &str, e: reqwest::Error) -> anyhow::Error {
         src = s.source();
     }
 
-    let flag_str = if flags.is_empty() { String::new() } else { format!(" [{}]", flags.join(",")) };
+    let flag_str = if flags.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", flags.join(","))
+    };
     anyhow::anyhow!("{}{}: {}", ctx, flag_str, chain)
 }
 
@@ -141,7 +160,12 @@ impl WhatsAppService {
     /// Construye el service con credenciales explícitas (provienen de `WaSettings`,
     /// cifrado descifrado in-memory).
     pub fn new(client: reqwest::Client, phone_number_id: String, access_token: String) -> Self {
-        Self { access_token, phone_number_id, client, media_relay: None }
+        Self {
+            access_token,
+            phone_number_id,
+            client,
+            media_relay: None,
+        }
     }
 
     /// Builder: activa el relay de Cloudflare para descargas de media.
@@ -157,7 +181,8 @@ impl WhatsAppService {
     /// Aplica a GET/POST/cualquier método.
     fn meta_request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
         match &self.media_relay {
-            Some(relay) => self.client
+            Some(relay) => self
+                .client
                 .request(method, &relay.url)
                 .query(&[("url", url)])
                 .header("x-relay-secret", &relay.secret),
@@ -203,21 +228,25 @@ impl WhatsAppService {
             self.meta_request(reqwest::Method::POST, &url)
                 .bearer_auth(&self.access_token)
                 .json(&payload)
-        }).await
-            .map_err(|e| describe_reqwest_error("send_text request", e))?;
+        })
+        .await
+        .map_err(|e| describe_reqwest_error("send_text request", e))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("WhatsApp send_text error [{}]: {}", status, body));
+            return Err(anyhow::anyhow!(
+                "WhatsApp send_text error [{}]: {}",
+                status,
+                body
+            ));
         }
 
-        let json: serde_json::Value = resp.json().await
+        let json: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| describe_reqwest_error("send_text response decode", e))?;
-        let wa_id = json["messages"][0]["id"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let wa_id = json["messages"][0]["id"].as_str().unwrap_or("").to_string();
 
         Ok(wa_id)
     }
@@ -254,21 +283,25 @@ impl WhatsAppService {
             self.meta_request(reqwest::Method::POST, &url)
                 .bearer_auth(&self.access_token)
                 .json(&payload)
-        }).await
-            .map_err(|e| describe_reqwest_error("send_template request", e))?;
+        })
+        .await
+        .map_err(|e| describe_reqwest_error("send_template request", e))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("WhatsApp send_template error [{}]: {}", status, body));
+            return Err(anyhow::anyhow!(
+                "WhatsApp send_template error [{}]: {}",
+                status,
+                body
+            ));
         }
 
-        let json: serde_json::Value = resp.json().await
+        let json: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| describe_reqwest_error("send_template response decode", e))?;
-        let wa_id = json["messages"][0]["id"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let wa_id = json["messages"][0]["id"].as_str().unwrap_or("").to_string();
 
         Ok(wa_id)
     }
@@ -279,27 +312,41 @@ impl WhatsAppService {
         let resp = send_with_retry("download_media info", || {
             self.meta_request(reqwest::Method::GET, &info_url)
                 .bearer_auth(&self.access_token)
-        }).await
-            .map_err(|e| describe_reqwest_error("download_media info", e))?;
+        })
+        .await
+        .map_err(|e| describe_reqwest_error("download_media info", e))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("WhatsApp media info error [{}]: {}", status, body));
+            return Err(anyhow::anyhow!(
+                "WhatsApp media info error [{}]: {}",
+                status,
+                body
+            ));
         }
 
-        let info: serde_json::Value = resp.json().await
+        let info: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| describe_reqwest_error("download_media info decode", e))?;
-        let url = info["url"].as_str()
+        let url = info["url"]
+            .as_str()
             .ok_or_else(|| anyhow::anyhow!("Meta media response sin campo `url`"))?
             .to_string();
-        let mime = info["mime_type"].as_str()
+        let mime = info["mime_type"]
+            .as_str()
             .unwrap_or("application/octet-stream")
             .to_string();
         let file_name = info["file_name"].as_str().map(|s| s.to_string());
         let file_size = info["file_size"].as_u64();
 
-        Ok(MediaInfo { url, mime, file_size, file_name })
+        Ok(MediaInfo {
+            url,
+            mime,
+            file_size,
+            file_name,
+        })
     }
 
     /// Descarga el binario desde la URL firmada que devolvió `download_media_info`.
@@ -315,16 +362,23 @@ impl WhatsAppService {
             self.meta_request(reqwest::Method::GET, url)
                 .bearer_auth(&self.access_token)
                 .header(reqwest::header::ACCEPT, "*/*")
-        }).await
-            .map_err(|e| describe_reqwest_error("download_media bytes", e))?;
+        })
+        .await
+        .map_err(|e| describe_reqwest_error("download_media bytes", e))?;
 
         if !bin.status().is_success() {
             let status = bin.status();
             let body = bin.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("WhatsApp media download error [{}]: {}", status, body));
+            return Err(anyhow::anyhow!(
+                "WhatsApp media download error [{}]: {}",
+                status,
+                body
+            ));
         }
 
-        let bytes = bin.bytes().await
+        let bytes = bin
+            .bytes()
+            .await
             .map_err(|e| describe_reqwest_error("download_media body", e))?;
 
         Ok(bytes.to_vec())
@@ -332,7 +386,10 @@ impl WhatsAppService {
 
     /// Descarga completa: info + body. Se mantiene para compatibilidad con
     /// callers que no necesitan chequear tamaño antes de bajar.
-    pub async fn download_media(&self, media_id: &str) -> Result<(Vec<u8>, String, Option<String>)> {
+    pub async fn download_media(
+        &self,
+        media_id: &str,
+    ) -> Result<(Vec<u8>, String, Option<String>)> {
         let info = self.download_media_info(media_id).await?;
         let bytes = self.download_media_body(&info.url).await?;
         Ok((bytes, info.mime, info.file_name))
@@ -350,16 +407,23 @@ impl WhatsAppService {
         let resp = send_with_retry("get_waba_id", || {
             self.meta_request(reqwest::Method::GET, &url)
                 .bearer_auth(&self.access_token)
-        }).await
-            .map_err(|e| describe_reqwest_error("get_waba_id request", e))?;
+        })
+        .await
+        .map_err(|e| describe_reqwest_error("get_waba_id request", e))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("WhatsApp get_waba_id error [{}]: {}", status, body));
+            return Err(anyhow::anyhow!(
+                "WhatsApp get_waba_id error [{}]: {}",
+                status,
+                body
+            ));
         }
 
-        let json: serde_json::Value = resp.json().await
+        let json: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| describe_reqwest_error("get_waba_id decode", e))?;
 
         let waba_id = json["whatsapp_business_account"]["id"]
@@ -398,21 +462,25 @@ impl WhatsAppService {
             self.meta_request(reqwest::Method::POST, &url)
                 .bearer_auth(&self.access_token)
                 .json(&payload)
-        }).await
-            .map_err(|e| describe_reqwest_error("send_interactive request", e))?;
+        })
+        .await
+        .map_err(|e| describe_reqwest_error("send_interactive request", e))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("WhatsApp send_interactive error [{}]: {}", status, body));
+            return Err(anyhow::anyhow!(
+                "WhatsApp send_interactive error [{}]: {}",
+                status,
+                body
+            ));
         }
 
-        let json: serde_json::Value = resp.json().await
+        let json: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| describe_reqwest_error("send_interactive response decode", e))?;
-        let wa_id = json["messages"][0]["id"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let wa_id = json["messages"][0]["id"].as_str().unwrap_or("").to_string();
 
         Ok(wa_id)
     }
@@ -441,7 +509,9 @@ impl WhatsAppService {
         // así que clonamos en cada intento. El tamaño máximo ya fue validado
         // en el handler, los clones son puntuales.
         let mime_owned = mime_type.to_string();
-        let filename_owned = filename.map(|s| s.to_string()).unwrap_or_else(|| "upload.bin".to_string());
+        let filename_owned = filename
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "upload.bin".to_string());
         let build = || {
             let part = reqwest::multipart::Part::bytes(bytes.clone())
                 .file_name(filename_owned.clone())
@@ -456,16 +526,23 @@ impl WhatsAppService {
                 .multipart(form)
         };
 
-        let resp = send_with_retry("upload_media", build).await
+        let resp = send_with_retry("upload_media", build)
+            .await
             .map_err(|e| describe_reqwest_error("upload_media request", e))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("WhatsApp upload_media error [{}]: {}", status, body));
+            return Err(anyhow::anyhow!(
+                "WhatsApp upload_media error [{}]: {}",
+                status,
+                body
+            ));
         }
 
-        let json: serde_json::Value = resp.json().await
+        let json: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| describe_reqwest_error("upload_media response decode", e))?;
         let media_id = json["id"]
             .as_str()
@@ -493,21 +570,26 @@ impl WhatsAppService {
             self.meta_request(reqwest::Method::POST, &url)
                 .bearer_auth(&self.access_token)
                 .json(&payload)
-        }).await
-            .map_err(|e| describe_reqwest_error(ctx, e))?;
+        })
+        .await
+        .map_err(|e| describe_reqwest_error(ctx, e))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("WhatsApp {} error [{}]: {}", ctx, status, body));
+            return Err(anyhow::anyhow!(
+                "WhatsApp {} error [{}]: {}",
+                ctx,
+                status,
+                body
+            ));
         }
 
-        let json: serde_json::Value = resp.json().await
+        let json: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| describe_reqwest_error(ctx, e))?;
-        let wa_id = json["messages"][0]["id"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let wa_id = json["messages"][0]["id"].as_str().unwrap_or("").to_string();
         Ok(wa_id)
     }
 
@@ -520,14 +602,19 @@ impl WhatsAppService {
         reply_to: Option<&str>,
     ) -> Result<String> {
         let mut image = json!({ "id": media_id });
-        if let Some(c) = caption { image["caption"] = json!(c); }
-        let payload = Self::with_reply_to(json!({
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": to,
-            "type": "image",
-            "image": image,
-        }), reply_to);
+        if let Some(c) = caption {
+            image["caption"] = json!(c);
+        }
+        let payload = Self::with_reply_to(
+            json!({
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to,
+                "type": "image",
+                "image": image,
+            }),
+            reply_to,
+        );
         self.post_message("send_image", payload).await
     }
 
@@ -540,14 +627,19 @@ impl WhatsAppService {
         reply_to: Option<&str>,
     ) -> Result<String> {
         let mut video = json!({ "id": media_id });
-        if let Some(c) = caption { video["caption"] = json!(c); }
-        let payload = Self::with_reply_to(json!({
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": to,
-            "type": "video",
-            "video": video,
-        }), reply_to);
+        if let Some(c) = caption {
+            video["caption"] = json!(c);
+        }
+        let payload = Self::with_reply_to(
+            json!({
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to,
+                "type": "video",
+                "video": video,
+            }),
+            reply_to,
+        );
         self.post_message("send_video", payload).await
     }
 
@@ -562,15 +654,22 @@ impl WhatsAppService {
         reply_to: Option<&str>,
     ) -> Result<String> {
         let mut document = json!({ "id": media_id });
-        if let Some(c) = caption { document["caption"] = json!(c); }
-        if let Some(f) = filename { document["filename"] = json!(f); }
-        let payload = Self::with_reply_to(json!({
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": to,
-            "type": "document",
-            "document": document,
-        }), reply_to);
+        if let Some(c) = caption {
+            document["caption"] = json!(c);
+        }
+        if let Some(f) = filename {
+            document["filename"] = json!(f);
+        }
+        let payload = Self::with_reply_to(
+            json!({
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to,
+                "type": "document",
+                "document": document,
+            }),
+            reply_to,
+        );
         self.post_message("send_document", payload).await
     }
 
@@ -581,13 +680,16 @@ impl WhatsAppService {
         media_id: &str,
         reply_to: Option<&str>,
     ) -> Result<String> {
-        let payload = Self::with_reply_to(json!({
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": to,
-            "type": "audio",
-            "audio": { "id": media_id },
-        }), reply_to);
+        let payload = Self::with_reply_to(
+            json!({
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to,
+                "type": "audio",
+                "audio": { "id": media_id },
+            }),
+            reply_to,
+        );
         self.post_message("send_audio", payload).await
     }
 
@@ -598,13 +700,16 @@ impl WhatsAppService {
         media_id: &str,
         reply_to: Option<&str>,
     ) -> Result<String> {
-        let payload = Self::with_reply_to(json!({
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": to,
-            "type": "sticker",
-            "sticker": { "id": media_id },
-        }), reply_to);
+        let payload = Self::with_reply_to(
+            json!({
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to,
+                "type": "sticker",
+                "sticker": { "id": media_id },
+            }),
+            reply_to,
+        );
         self.post_message("send_sticker", payload).await
     }
 
@@ -620,15 +725,22 @@ impl WhatsAppService {
         reply_to: Option<&str>,
     ) -> Result<String> {
         let mut location = json!({ "latitude": latitude, "longitude": longitude });
-        if let Some(n) = name { location["name"] = json!(n); }
-        if let Some(a) = address { location["address"] = json!(a); }
-        let payload = Self::with_reply_to(json!({
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": to,
-            "type": "location",
-            "location": location,
-        }), reply_to);
+        if let Some(n) = name {
+            location["name"] = json!(n);
+        }
+        if let Some(a) = address {
+            location["address"] = json!(a);
+        }
+        let payload = Self::with_reply_to(
+            json!({
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to,
+                "type": "location",
+                "location": location,
+            }),
+            reply_to,
+        );
         self.post_message("send_location", payload).await
     }
 
@@ -641,13 +753,16 @@ impl WhatsAppService {
         contacts: &[serde_json::Value],
         reply_to: Option<&str>,
     ) -> Result<String> {
-        let payload = Self::with_reply_to(json!({
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": to,
-            "type": "contacts",
-            "contacts": contacts,
-        }), reply_to);
+        let payload = Self::with_reply_to(
+            json!({
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to,
+                "type": "contacts",
+                "contacts": contacts,
+            }),
+            reply_to,
+        );
         self.post_message("send_contacts", payload).await
     }
 
@@ -666,13 +781,18 @@ impl WhatsAppService {
             self.meta_request(reqwest::Method::POST, &url)
                 .bearer_auth(&self.access_token)
                 .json(&payload)
-        }).await
-            .map_err(|e| describe_reqwest_error("mark_as_read request", e))?;
+        })
+        .await
+        .map_err(|e| describe_reqwest_error("mark_as_read request", e))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!("WhatsApp mark_as_read error [{}]: {}", status, body));
+            return Err(anyhow::anyhow!(
+                "WhatsApp mark_as_read error [{}]: {}",
+                status,
+                body
+            ));
         }
 
         Ok(())
@@ -716,11 +836,14 @@ impl WhatsAppService {
             self.meta_request(reqwest::Method::POST, &url)
                 .bearer_auth(&self.access_token)
                 .json(&payload)
-        }).await
-            .map_err(|e| describe_reqwest_error("create_template_meta request", e))?;
+        })
+        .await
+        .map_err(|e| describe_reqwest_error("create_template_meta request", e))?;
 
         let http_status = resp.status();
-        let body = resp.text().await
+        let body = resp
+            .text()
+            .await
             .map_err(|e| describe_reqwest_error("create_template_meta response read", e))?;
 
         if !http_status.is_success() {
@@ -734,13 +857,14 @@ impl WhatsAppService {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("create_template_meta: Meta response sin `id`"))?
             .to_string();
-        let status = json["status"]
-            .as_str()
-            .unwrap_or("PENDING")
-            .to_string();
+        let status = json["status"].as_str().unwrap_or("PENDING").to_string();
         let category = json["category"].as_str().map(|s| s.to_string());
 
-        Ok(MetaTemplateCreateResp { id, status, category })
+        Ok(MetaTemplateCreateResp {
+            id,
+            status,
+            category,
+        })
     }
 
     /// Edita el/los componentes de un template en Meta usando su `meta_template_id`
@@ -769,11 +893,14 @@ impl WhatsAppService {
             self.meta_request(reqwest::Method::POST, &url)
                 .bearer_auth(&self.access_token)
                 .json(&payload)
-        }).await
-            .map_err(|e| describe_reqwest_error("update_template_body_meta request", e))?;
+        })
+        .await
+        .map_err(|e| describe_reqwest_error("update_template_body_meta request", e))?;
 
         let http_status = resp.status();
-        let body = resp.text().await
+        let body = resp
+            .text()
+            .await
             .map_err(|e| describe_reqwest_error("update_template_body_meta response read", e))?;
 
         if http_status == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -801,7 +928,11 @@ impl WhatsAppService {
         }
 
         if !http_status.is_success() {
-            return Err(parse_meta_error("update_template_body_meta", http_status, &body));
+            return Err(parse_meta_error(
+                "update_template_body_meta",
+                http_status,
+                &body,
+            ));
         }
 
         Ok(())
@@ -871,13 +1002,16 @@ impl WhatsAppService {
         .map_err(|e| describe_reqwest_error("upload_to_meta_resumable step1 request", e))?;
 
         let status1 = resp1.status();
-        let body1 = resp1
-            .text()
-            .await
-            .map_err(|e| describe_reqwest_error("upload_to_meta_resumable step1 response read", e))?;
+        let body1 = resp1.text().await.map_err(|e| {
+            describe_reqwest_error("upload_to_meta_resumable step1 response read", e)
+        })?;
 
         if !status1.is_success() {
-            return Err(parse_meta_error("upload_to_meta_resumable step1", status1, &body1));
+            return Err(parse_meta_error(
+                "upload_to_meta_resumable step1",
+                status1,
+                &body1,
+            ));
         }
 
         let json1: serde_json::Value = serde_json::from_str(&body1)
@@ -885,7 +1019,9 @@ impl WhatsAppService {
 
         let upload_id = json1["id"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("upload_to_meta_resumable step1: Meta response sin `id`"))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("upload_to_meta_resumable step1: Meta response sin `id`")
+            })?
             .to_string();
 
         // ---------------------------------------------------------------
@@ -900,7 +1036,10 @@ impl WhatsAppService {
         // Es una excepción documentada en las Graph API docs para Resumable Upload.
         let resp2 = self
             .meta_request(reqwest::Method::POST, &upload_url)
-            .header(reqwest::header::AUTHORIZATION, format!("OAuth {}", self.access_token))
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("OAuth {}", self.access_token),
+            )
             .header("file_offset", "0")
             .header(reqwest::header::CONTENT_TYPE, mime)
             .body(bytes.to_vec())
@@ -909,13 +1048,16 @@ impl WhatsAppService {
             .map_err(|e| describe_reqwest_error("upload_to_meta_resumable step2 request", e))?;
 
         let status2 = resp2.status();
-        let body2 = resp2
-            .text()
-            .await
-            .map_err(|e| describe_reqwest_error("upload_to_meta_resumable step2 response read", e))?;
+        let body2 = resp2.text().await.map_err(|e| {
+            describe_reqwest_error("upload_to_meta_resumable step2 response read", e)
+        })?;
 
         if !status2.is_success() {
-            return Err(parse_meta_error("upload_to_meta_resumable step2", status2, &body2));
+            return Err(parse_meta_error(
+                "upload_to_meta_resumable step2",
+                status2,
+                &body2,
+            ));
         }
 
         let json2: serde_json::Value = serde_json::from_str(&body2)
@@ -923,7 +1065,9 @@ impl WhatsAppService {
 
         let handle = json2["h"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("upload_to_meta_resumable step2: Meta response sin `h`"))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("upload_to_meta_resumable step2: Meta response sin `h`")
+            })?
             .to_string();
 
         Ok(handle)
@@ -932,10 +1076,7 @@ impl WhatsAppService {
     /// Lee el estado actual de un template desde Meta. Usado para resync
     /// manual cuando se perdió un webhook de status update.
     /// Endpoint Meta: `GET /{meta_template_id}?fields=status,...`.
-    pub async fn get_template_meta(
-        &self,
-        meta_template_id: &str,
-    ) -> Result<MetaTemplateInfo> {
+    pub async fn get_template_meta(&self, meta_template_id: &str) -> Result<MetaTemplateInfo> {
         let url = format!(
             "https://graph.facebook.com/{}/{}?fields=status,rejected_reason,category,language,name",
             WA_API_VERSION, meta_template_id
@@ -944,11 +1085,14 @@ impl WhatsAppService {
         let resp = send_with_retry("get_template_meta", || {
             self.meta_request(reqwest::Method::GET, &url)
                 .bearer_auth(&self.access_token)
-        }).await
-            .map_err(|e| describe_reqwest_error("get_template_meta request", e))?;
+        })
+        .await
+        .map_err(|e| describe_reqwest_error("get_template_meta request", e))?;
 
         let http_status = resp.status();
-        let body = resp.text().await
+        let body = resp
+            .text()
+            .await
             .map_err(|e| describe_reqwest_error("get_template_meta response read", e))?;
 
         if !http_status.is_success() {
@@ -992,8 +1136,9 @@ impl WhatsAppService {
             self.meta_request(reqwest::Method::DELETE, &url)
                 .bearer_auth(&self.access_token)
                 .query(&[("hsm_id", hsm_id), ("name", name)])
-        }).await
-            .map_err(|e| describe_reqwest_error("delete_template_meta request", e))?;
+        })
+        .await
+        .map_err(|e| describe_reqwest_error("delete_template_meta request", e))?;
 
         let http_status = resp.status();
 

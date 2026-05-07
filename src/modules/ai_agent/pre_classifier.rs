@@ -267,17 +267,36 @@ mod tests {
     #[test]
     fn from_str_known_variants() {
         assert_eq!(PreClassResult::from_str("Spam"), PreClassResult::Spam);
-        assert_eq!(PreClassResult::from_str("GreetingOnly"), PreClassResult::GreetingOnly);
-        assert_eq!(PreClassResult::from_str("ClearVentas"), PreClassResult::ClearVentas);
-        assert_eq!(PreClassResult::from_str("ClearPagos"), PreClassResult::ClearPagos);
-        assert_eq!(PreClassResult::from_str("ClearSoporte"), PreClassResult::ClearSoporte);
-        assert_eq!(PreClassResult::from_str("Ambiguous"), PreClassResult::Ambiguous);
+        assert_eq!(
+            PreClassResult::from_str("GreetingOnly"),
+            PreClassResult::GreetingOnly
+        );
+        assert_eq!(
+            PreClassResult::from_str("ClearVentas"),
+            PreClassResult::ClearVentas
+        );
+        assert_eq!(
+            PreClassResult::from_str("ClearPagos"),
+            PreClassResult::ClearPagos
+        );
+        assert_eq!(
+            PreClassResult::from_str("ClearSoporte"),
+            PreClassResult::ClearSoporte
+        );
+        assert_eq!(
+            PreClassResult::from_str("Ambiguous"),
+            PreClassResult::Ambiguous
+        );
     }
 
     #[test]
     fn from_str_unknown_variant() {
-        assert_eq!(PreClassResult::from_str("Unknown"), PreClassResult::Ambiguous);
+        assert_eq!(
+            PreClassResult::from_str("Unknown"),
+            PreClassResult::Ambiguous
+        );
         assert_eq!(PreClassResult::from_str(""), PreClassResult::Ambiguous);
-        assert_eq!(PreClassResult::from_str("spam"), PreClassResult::Ambiguous); // case-sensitive
+        assert_eq!(PreClassResult::from_str("spam"), PreClassResult::Ambiguous);
+        // case-sensitive
     }
 }

@@ -49,10 +49,7 @@ pub async fn get_providers_handler(
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
 
-    let providers: Vec<ProviderResponse> = users
-        .into_iter()
-        .map(ProviderResponse::from)
-        .collect();
+    let providers: Vec<ProviderResponse> = users.into_iter().map(ProviderResponse::from).collect();
 
     Ok(Json(providers))
 }

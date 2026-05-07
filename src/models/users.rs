@@ -108,7 +108,6 @@ impl From<User> for ProviderResponse {
     fn from(user: User) -> Self {
         let tag_value = user.tag.unwrap_or(0);
 
-
         ProviderResponse {
             id: user.id,
             tag: format!("ABDO77-{}", tag_value),

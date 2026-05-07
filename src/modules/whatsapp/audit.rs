@@ -94,10 +94,7 @@ fn parse_iso_to_bson(s: &str, field: &str) -> Result<BsonDateTime, ApiError> {
 }
 
 /// Validación: `from_date <= to_date` y rango ≤ 90 días.
-fn validate_range(
-    from: Option<BsonDateTime>,
-    to: Option<BsonDateTime>,
-) -> Result<(), ApiError> {
+fn validate_range(from: Option<BsonDateTime>, to: Option<BsonDateTime>) -> Result<(), ApiError> {
     if let (Some(f), Some(t)) = (from, to) {
         let f_ms = f.timestamp_millis();
         let t_ms = t.timestamp_millis();
@@ -150,8 +147,16 @@ async fn resolve_customer_names(
         conv_phones.insert(*oid, c.phone.clone());
     }
 
-    let names_by_id = state.db.get_client_names_by_ids(&by_id).await.unwrap_or_default();
-    let names_by_phone = state.db.get_client_names_by_phones(&by_phone).await.unwrap_or_default();
+    let names_by_id = state
+        .db
+        .get_client_names_by_ids(&by_id)
+        .await
+        .unwrap_or_default();
+    let names_by_phone = state
+        .db
+        .get_client_names_by_phones(&by_phone)
+        .await
+        .unwrap_or_default();
 
     let mut out = HashMap::new();
     for (oid, c) in convs {
@@ -238,12 +243,11 @@ pub async fn audit_messages_handler(
     let now_ms = BsonDateTime::now().timestamp_millis();
     let (from_date, to_date) = match (from_raw, to_raw) {
         (Some(f), Some(t)) => (Some(f), Some(t)),
-        (Some(f), None) => (
-            Some(f),
-            Some(BsonDateTime::from_millis(now_ms)),
-        ),
+        (Some(f), None) => (Some(f), Some(BsonDateTime::from_millis(now_ms))),
         (None, Some(t)) => (
-            Some(BsonDateTime::from_millis(t.timestamp_millis() - AUDIT_DEFAULT_RANGE_MS)),
+            Some(BsonDateTime::from_millis(
+                t.timestamp_millis() - AUDIT_DEFAULT_RANGE_MS,
+            )),
             Some(t),
         ),
         (None, None) => (
@@ -259,22 +263,29 @@ pub async fn audit_messages_handler(
         .unwrap_or(AUDIT_DEFAULT_LIMIT);
 
     // 3. Si vienen filtros de teléfono, resolver primero los conversation_ids.
-    let conversation_ids: Option<Vec<ObjectId>> = if q.customer_phone.is_some() || q.business_phone.is_some() {
-        let ids = state.db
-            .find_conversation_ids_by_phones(
-                q.customer_phone.as_deref(),
-                q.business_phone.as_deref(),
-            )
-            .await
-            .map_err(ApiError::DatabaseError)?;
-        Some(ids)
-    } else {
-        None
-    };
+    let conversation_ids: Option<Vec<ObjectId>> =
+        if q.customer_phone.is_some() || q.business_phone.is_some() {
+            let ids = state
+                .db
+                .find_conversation_ids_by_phones(
+                    q.customer_phone.as_deref(),
+                    q.business_phone.as_deref(),
+                )
+                .await
+                .map_err(ApiError::DatabaseError)?;
+            Some(ids)
+        } else {
+            None
+        };
 
     // Si pidieron filtrar y no hay match, retornar lista vacía sin tocar WaMessages.
     if matches!(conversation_ids.as_deref(), Some(ids) if ids.is_empty()) {
-        return Ok(Json(AuditMessagesResponse { ok: true, data: vec![], next_cursor: None, total: None }));
+        return Ok(Json(AuditMessagesResponse {
+            ok: true,
+            data: vec![],
+            next_cursor: None,
+            total: None,
+        }));
     }
 
     // 4. Query principal sobre WaMessages.
@@ -290,7 +301,8 @@ pub async fn audit_messages_handler(
         cursor: q.cursor.as_deref(),
     };
 
-    let messages: Vec<WaMessage> = state.db
+    let messages: Vec<WaMessage> = state
+        .db
         .audit_list_messages(filter)
         .await
         .map_err(ApiError::DatabaseError)?;
@@ -303,7 +315,8 @@ pub async fn audit_messages_handler(
         .into_iter()
         .collect();
 
-    let convs = state.db
+    let convs = state
+        .db
         .find_conversations_by_ids(&conv_ids)
         .await
         .map_err(ApiError::DatabaseError)?;
@@ -315,7 +328,8 @@ pub async fn audit_messages_handler(
         .into_iter()
         .collect();
 
-    let workspace_names = state.db
+    let workspace_names = state
+        .db
         .get_workspace_names(&business_phones)
         .await
         .unwrap_or_default();
@@ -323,17 +337,15 @@ pub async fn audit_messages_handler(
     let customer_names = resolve_customer_names(&state, &convs).await;
 
     // Resolver nombres de agentes (sent_by + read_by_user_id) en una sola pasada.
-    let mut agent_ids: Vec<String> = messages
-        .iter()
-        .filter_map(|m| m.sent_by.clone())
-        .collect();
+    let mut agent_ids: Vec<String> = messages.iter().filter_map(|m| m.sent_by.clone()).collect();
     agent_ids.extend(messages.iter().filter_map(|m| m.read_by_user_id.clone()));
     let agent_names = resolve_agent_names(&state, &agent_ids).await;
 
     // 6. Armar el response item por mensaje.
-    let next_cursor = messages.last().and_then(|m| {
-        m.id.map(|oid| encode_cursor(m.timestamp, oid))
-    }).filter(|_| messages.len() as i64 == limit);
+    let next_cursor = messages
+        .last()
+        .and_then(|m| m.id.map(|oid| encode_cursor(m.timestamp, oid)))
+        .filter(|_| messages.len() as i64 == limit);
 
     let mut data: Vec<AuditMessageItem> = Vec::with_capacity(messages.len());
     for m in messages {
@@ -343,14 +355,21 @@ pub async fn audit_messages_handler(
             .unwrap_or_default();
         let customer_name = customer_names.get(&m.conversation_id).cloned();
         let workspace_name = workspace_names.get(&business_phone).cloned();
-        let from_user_name = m.sent_by.as_deref().and_then(|id| agent_names.get(id).cloned());
+        let from_user_name = m
+            .sent_by
+            .as_deref()
+            .and_then(|id| agent_names.get(id).cloned());
         let read_by_user_name = m
             .read_by_user_id
             .as_deref()
             .and_then(|id| agent_names.get(id).cloned());
         let read_at = m.read_at.map(iso8601);
 
-        let voice = if m.msg_type == "audio" { Some(m.voice) } else { None };
+        let voice = if m.msg_type == "audio" {
+            Some(m.voice)
+        } else {
+            None
+        };
 
         data.push(AuditMessageItem {
             id: m.id.map(|o| o.to_hex()).unwrap_or_default(),
@@ -430,11 +449,11 @@ pub async fn audit_conversation_messages_handler(
 ) -> Result<Json<AuditMessagesResponse>, ApiError> {
     require_superadmin(&state, &claims.id).await?;
 
-    let oid = ObjectId::parse_str(&id)
-        .map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
     // Verificar que la conversación existe (404 explícito).
-    let conv = state.db
+    let conv = state
+        .db
         .find_conversation_by_id(&oid)
         .await
         .map_err(ApiError::DatabaseError)?
@@ -459,12 +478,14 @@ pub async fn audit_conversation_messages_handler(
     };
 
     // Total real de la conversación (independiente del cursor/limit).
-    let total = state.db
+    let total = state
+        .db
         .audit_count_messages(&filter)
         .await
         .map_err(ApiError::DatabaseError)?;
 
-    let messages: Vec<WaMessage> = state.db
+    let messages: Vec<WaMessage> = state
+        .db
         .audit_list_messages(filter)
         .await
         .map_err(ApiError::DatabaseError)?;
@@ -474,33 +495,43 @@ pub async fn audit_conversation_messages_handler(
     conv_map.insert(oid, conv.clone());
     let customer_names = resolve_customer_names(&state, &conv_map).await;
     let business_phone = conv.business_phone.clone();
-    let workspace_name = state.db
+    let workspace_name = state
+        .db
         .get_workspace_names(&[business_phone.clone()])
         .await
         .ok()
         .and_then(|m| m.get(&business_phone).cloned());
 
-    let mut all_agent_ids: Vec<String> = messages.iter().filter_map(|m| m.sent_by.clone()).collect();
+    let mut all_agent_ids: Vec<String> =
+        messages.iter().filter_map(|m| m.sent_by.clone()).collect();
     all_agent_ids.extend(messages.iter().filter_map(|m| m.read_by_user_id.clone()));
     let agent_names = resolve_agent_names(&state, &all_agent_ids).await;
 
-    let next_cursor = messages.last().and_then(|m| {
-        m.id.map(|oid| encode_cursor(m.timestamp, oid))
-    }).filter(|_| messages.len() as i64 == limit);
+    let next_cursor = messages
+        .last()
+        .and_then(|m| m.id.map(|oid| encode_cursor(m.timestamp, oid)))
+        .filter(|_| messages.len() as i64 == limit);
 
     let customer_phone = conv.phone.clone();
     let customer_name = customer_names.get(&oid).cloned();
 
     let mut data: Vec<AuditMessageItem> = Vec::with_capacity(messages.len());
     for m in messages {
-        let from_user_name = m.sent_by.as_deref().and_then(|id| agent_names.get(id).cloned());
+        let from_user_name = m
+            .sent_by
+            .as_deref()
+            .and_then(|id| agent_names.get(id).cloned());
         let read_by_user_name = m
             .read_by_user_id
             .as_deref()
             .and_then(|id| agent_names.get(id).cloned());
         let read_at = m.read_at.map(iso8601);
 
-        let voice = if m.msg_type == "audio" { Some(m.voice) } else { None };
+        let voice = if m.msg_type == "audio" {
+            Some(m.voice)
+        } else {
+            None
+        };
 
         data.push(AuditMessageItem {
             id: m.id.map(|o| o.to_hex()).unwrap_or_default(),
@@ -565,24 +596,26 @@ pub async fn audit_conversation_timeline_handler(
 ) -> Result<Json<AuditConversationTimelineResponse>, ApiError> {
     require_superadmin(&state, &claims.id).await?;
 
-    let oid = ObjectId::parse_str(&id)
-        .map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
     // 1. Conversación.
-    let conv = state.db
+    let conv = state
+        .db
         .find_conversation_by_id(&oid)
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::NotFound)?;
 
     // 2. Eventos ordenados ASC (created_at).
-    let events: Vec<WaConversationEvent> = state.db
+    let events: Vec<WaConversationEvent> = state
+        .db
         .list_conversation_events(&oid)
         .await
         .map_err(ApiError::DatabaseError)?;
 
     // 3. Conteo de mensajes.
-    let message_count = state.db
+    let message_count = state
+        .db
         .count_messages_for_conversation(&oid)
         .await
         .unwrap_or(0);
@@ -608,7 +641,8 @@ pub async fn audit_conversation_timeline_handler(
     conv_map.insert(oid, conv.clone());
     let customer_names = resolve_customer_names(&state, &conv_map).await;
     let customer_name = customer_names.get(&oid).cloned();
-    let workspace_name = state.db
+    let workspace_name = state
+        .db
         .get_workspace_names(&[conv.business_phone.clone()])
         .await
         .ok()
@@ -621,15 +655,17 @@ pub async fn audit_conversation_timeline_handler(
             id: e.id.map(|o| o.to_hex()).unwrap_or_default(),
             event_type: e.event_type.clone(),
             actor_id: e.actor_id.clone(),
-            actor_name: e
-                .actor_name
-                .clone()
-                .or_else(|| e.actor_id.as_deref().and_then(|id| agent_names.get(id).cloned())),
+            actor_name: e.actor_name.clone().or_else(|| {
+                e.actor_id
+                    .as_deref()
+                    .and_then(|id| agent_names.get(id).cloned())
+            }),
             target_id: e.target_id.clone(),
-            target_name: e
-                .target_name
-                .clone()
-                .or_else(|| e.target_id.as_deref().and_then(|id| agent_names.get(id).cloned())),
+            target_name: e.target_name.clone().or_else(|| {
+                e.target_id
+                    .as_deref()
+                    .and_then(|id| agent_names.get(id).cloned())
+            }),
             note: e.note.clone(),
             created_at: iso8601(e.created_at),
         })
@@ -711,20 +747,28 @@ pub async fn audit_metrics_handler(
     require_superadmin(&state, &claims.id).await?;
 
     // 1. Fechas REQUERIDAS para metrics (a diferencia de /messages que defaultea).
-    let from_str = q.from_date.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| ApiError::Domain {
-        status: axum::http::StatusCode::BAD_REQUEST,
-        code: "invalid_date_range".into(),
-        field: Some("from_date".into()),
-        message: "from_date es requerido".into(),
-        details: None,
-    })?;
-    let to_str = q.to_date.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| ApiError::Domain {
-        status: axum::http::StatusCode::BAD_REQUEST,
-        code: "invalid_date_range".into(),
-        field: Some("to_date".into()),
-        message: "to_date es requerido".into(),
-        details: None,
-    })?;
+    let from_str = q
+        .from_date
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ApiError::Domain {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            code: "invalid_date_range".into(),
+            field: Some("from_date".into()),
+            message: "from_date es requerido".into(),
+            details: None,
+        })?;
+    let to_str = q
+        .to_date
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ApiError::Domain {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            code: "invalid_date_range".into(),
+            field: Some("to_date".into()),
+            message: "to_date es requerido".into(),
+            details: None,
+        })?;
     let from_date = parse_iso_to_bson(from_str, "from_date")?;
     let to_date = parse_iso_to_bson(to_str, "to_date")?;
     validate_range(Some(from_date), Some(to_date))?;
@@ -746,7 +790,8 @@ pub async fn audit_metrics_handler(
     //    matchea por ambos campos cuando los dos vienen).
     let needs_phone_resolution = q.business_phone.is_some() || q.customer_phone.is_some();
     let conversation_ids: Option<Vec<ObjectId>> = if needs_phone_resolution {
-        let ids = state.db
+        let ids = state
+            .db
             .find_conversation_ids_by_phones(
                 q.customer_phone.as_deref(),
                 q.business_phone.as_deref(),
@@ -790,8 +835,19 @@ pub async fn audit_metrics_handler(
         state.db.audit_messages_by_agent(&filter),
         state.db.audit_messages_by_type(&filter),
         state.db.audit_first_responses(&filter),
-        state.db.audit_lifecycle_by_day(from_date, to_date, business_phone, conversation_ids.as_deref(), granularity),
-        state.db.audit_resolution_times(from_date, to_date, business_phone, conversation_ids.as_deref()),
+        state.db.audit_lifecycle_by_day(
+            from_date,
+            to_date,
+            business_phone,
+            conversation_ids.as_deref(),
+            granularity
+        ),
+        state.db.audit_resolution_times(
+            from_date,
+            to_date,
+            business_phone,
+            conversation_ids.as_deref()
+        ),
     );
 
     let summary_raw = summary_res.map_err(ApiError::DatabaseError)?;
@@ -824,7 +880,11 @@ pub async fn audit_metrics_handler(
         .into_iter()
         .map(|a| {
             let avg = by_agent_avg.get(&a.agent_id).map(|(sum, n)| {
-                if *n == 0 { 0.0 } else { *sum as f64 / *n as f64 }
+                if *n == 0 {
+                    0.0
+                } else {
+                    *sum as f64 / *n as f64
+                }
             });
             AuditMetricsByAgent {
                 agent_name: agent_names.get(&a.agent_id).cloned().unwrap_or_default(),
@@ -851,13 +911,15 @@ pub async fn audit_metrics_handler(
         );
     }
     for b in lifecycle {
-        let entry = by_day_map.entry(b.date.clone()).or_insert(AuditMetricsByDay {
-            date: b.date,
-            inbound: 0,
-            outbound: 0,
-            new_conversations: 0,
-            closed_conversations: 0,
-        });
+        let entry = by_day_map
+            .entry(b.date.clone())
+            .or_insert(AuditMetricsByDay {
+                date: b.date,
+                inbound: 0,
+                outbound: 0,
+                new_conversations: 0,
+                closed_conversations: 0,
+            });
         entry.new_conversations = b.new_conversations;
         entry.closed_conversations = b.closed_conversations;
     }
@@ -866,7 +928,10 @@ pub async fn audit_metrics_handler(
 
     let by_message_type: Vec<AuditMetricsByType> = by_type_raw
         .into_iter()
-        .map(|t| AuditMetricsByType { msg_type: t.msg_type, count: t.count })
+        .map(|t| AuditMetricsByType {
+            msg_type: t.msg_type,
+            count: t.count,
+        })
         .collect();
 
     Ok(Json(AuditMetricsResponse {
@@ -981,7 +1046,9 @@ pub async fn audit_export_handler(
         (Some(f), Some(t)) => (Some(f), Some(t)),
         (Some(f), None) => (Some(f), Some(BsonDateTime::from_millis(now_ms))),
         (None, Some(t)) => (
-            Some(BsonDateTime::from_millis(t.timestamp_millis() - AUDIT_DEFAULT_RANGE_MS)),
+            Some(BsonDateTime::from_millis(
+                t.timestamp_millis() - AUDIT_DEFAULT_RANGE_MS,
+            )),
             Some(t),
         ),
         (None, None) => (
@@ -992,18 +1059,20 @@ pub async fn audit_export_handler(
     validate_range(from_date, to_date)?;
 
     // 2. Resolver conv ids por filtros de teléfono.
-    let conversation_ids: Option<Vec<ObjectId>> = if q.customer_phone.is_some() || q.business_phone.is_some() {
-        let ids = state.db
-            .find_conversation_ids_by_phones(
-                q.customer_phone.as_deref(),
-                q.business_phone.as_deref(),
-            )
-            .await
-            .map_err(ApiError::DatabaseError)?;
-        Some(ids)
-    } else {
-        None
-    };
+    let conversation_ids: Option<Vec<ObjectId>> =
+        if q.customer_phone.is_some() || q.business_phone.is_some() {
+            let ids = state
+                .db
+                .find_conversation_ids_by_phones(
+                    q.customer_phone.as_deref(),
+                    q.business_phone.as_deref(),
+                )
+                .await
+                .map_err(ApiError::DatabaseError)?;
+            Some(ids)
+        } else {
+            None
+        };
 
     // 3. Build filter sin cursor; limit alto para fetch completo (ya validado por count).
     let filter = AuditMessageFilter {
@@ -1019,7 +1088,8 @@ pub async fn audit_export_handler(
     };
 
     // 4. Count antes de materializar.
-    let total = state.db
+    let total = state
+        .db
         .audit_count_messages(&filter)
         .await
         .map_err(ApiError::DatabaseError)?;
@@ -1043,7 +1113,8 @@ pub async fn audit_export_handler(
         return Ok(build_csv_response(&from_date, &to_date, String::new(), 0));
     }
 
-    let messages: Vec<WaMessage> = state.db
+    let messages: Vec<WaMessage> = state
+        .db
         .audit_list_messages(filter)
         .await
         .map_err(ApiError::DatabaseError)?;
@@ -1055,7 +1126,8 @@ pub async fn audit_export_handler(
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
-    let convs = state.db
+    let convs = state
+        .db
         .find_conversations_by_ids(&conv_ids)
         .await
         .map_err(ApiError::DatabaseError)?;
@@ -1069,7 +1141,8 @@ pub async fn audit_export_handler(
     let customer_names = resolve_customer_names(&state, &convs).await;
 
     // 7. Resolver nombres de agentes — sent_by + read_by_user_id en una pasada.
-    let mut all_agent_ids: Vec<String> = messages.iter().filter_map(|m| m.sent_by.clone()).collect();
+    let mut all_agent_ids: Vec<String> =
+        messages.iter().filter_map(|m| m.sent_by.clone()).collect();
     all_agent_ids.extend(messages.iter().filter_map(|m| m.read_by_user_id.clone()));
     let agent_names = resolve_agent_names(&state, &all_agent_ids).await;
 
@@ -1084,7 +1157,10 @@ pub async fn audit_export_handler(
         let (customer_phone, business_phone) = conv
             .map(|c| (c.phone.as_str(), c.business_phone.as_str()))
             .unwrap_or(("", ""));
-        let customer_name = customer_names.get(&m.conversation_id).map(|s| s.as_str()).unwrap_or("");
+        let customer_name = customer_names
+            .get(&m.conversation_id)
+            .map(|s| s.as_str())
+            .unwrap_or("");
         let from_user_name = m
             .sent_by
             .as_deref()
@@ -1136,13 +1212,21 @@ pub async fn audit_export_handler(
         body.push('\n');
     }
 
-    Ok(build_csv_response(&from_date, &to_date, body, messages.len()))
+    Ok(build_csv_response(
+        &from_date,
+        &to_date,
+        body,
+        messages.len(),
+    ))
 }
 
 /// Escapa un campo CSV según RFC 4180: si contiene `,`, `"`, `\n` o `\r`
 /// se envuelve entre comillas y los `"` se duplican.
 fn csv_escape(field: &str) -> String {
-    if field.bytes().any(|b| b == b',' || b == b'"' || b == b'\n' || b == b'\r') {
+    if field
+        .bytes()
+        .any(|b| b == b',' || b == b'"' || b == b'\n' || b == b'\r')
+    {
         let escaped = field.replace('"', "\"\"");
         format!("\"{}\"", escaped)
     } else {
@@ -1186,12 +1270,11 @@ fn build_csv_response(
     );
     headers.insert(
         header::CONTENT_DISPOSITION,
-        format!("attachment; filename=\"{}\"", filename).parse().unwrap(),
+        format!("attachment; filename=\"{}\"", filename)
+            .parse()
+            .unwrap(),
     );
-    headers.insert(
-        "X-Audit-Row-Count",
-        row_count.to_string().parse().unwrap(),
-    );
+    headers.insert("X-Audit-Row-Count", row_count.to_string().parse().unwrap());
 
     let mut resp = Response::new(Body::from(final_body));
     *resp.headers_mut() = headers;
@@ -1242,11 +1325,8 @@ fn build_assigned_to_history(
                     .unwrap_or(false);
                 if !same_owner {
                     close_current(&mut out, &mut current_owner, &ev.created_at);
-                    current_owner = Some((
-                        new_owner,
-                        ev.target_name.clone(),
-                        ev.created_at.clone(),
-                    ));
+                    current_owner =
+                        Some((new_owner, ev.target_name.clone(), ev.created_at.clone()));
                 }
             }
             "closed" => {

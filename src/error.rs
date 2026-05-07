@@ -1,6 +1,6 @@
 use axum::{
     http::StatusCode,
-    response::{IntoResponse, Response, Json},
+    response::{IntoResponse, Json, Response},
 };
 use serde_json::json;
 
@@ -77,7 +77,11 @@ pub enum ApiError {
     /// Se sirve como 422 con
     /// `{ ok:false, error:"validation_error", code, field, message }`.
     #[error("Validation error [{code}] on {field}: {message}")]
-    ValidationError { code: String, field: String, message: String },
+    ValidationError {
+        code: String,
+        field: String,
+        message: String,
+    },
 
     /// Error de dominio con código estable + status HTTP arbitrario + payload
     /// estructurado opcional. Pensado para errores que necesitan más contexto que
@@ -109,13 +113,18 @@ pub enum ApiError {
     Internal(String),
 
     #[error("Error interno del servidor")]
-    InternalServerError
+    InternalServerError,
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         // ValidationError lleva payload extra (field + message), lo manejamos aparte.
-        if let ApiError::ValidationError { code, field, message } = &self {
+        if let ApiError::ValidationError {
+            code,
+            field,
+            message,
+        } = &self
+        {
             tracing::error!("API Error: {:?}", self);
             let body = Json(json!({
                 "ok": false,
@@ -128,16 +137,32 @@ impl IntoResponse for ApiError {
         }
 
         // Domain lleva status arbitrario + payload estructurado opcional.
-        if let ApiError::Domain { status, code, field, message, details } = self {
-            tracing::error!("API Error: Domain code={} field={:?} message={}", code, field, message);
+        if let ApiError::Domain {
+            status,
+            code,
+            field,
+            message,
+            details,
+        } = self
+        {
+            tracing::error!(
+                "API Error: Domain code={} field={:?} message={}",
+                code,
+                field,
+                message
+            );
             let mut body = serde_json::json!({
                 "ok": false,
                 "error": code,
                 "code": code,
                 "message": message,
             });
-            if let Some(f) = field { body["field"] = serde_json::Value::String(f); }
-            if let Some(d) = details { body["details"] = d; }
+            if let Some(f) = field {
+                body["field"] = serde_json::Value::String(f);
+            }
+            if let Some(d) = details {
+                body["details"] = d;
+            }
             return (status, Json(body)).into_response();
         }
 
@@ -153,7 +178,10 @@ impl IntoResponse for ApiError {
             ApiError::WindowExpired => (StatusCode::CONFLICT, "window_expired"),
             ApiError::WindowClosed => (StatusCode::CONFLICT, "window_closed"),
             ApiError::ConversationNotTakeable => (StatusCode::CONFLICT, "conversacion_no_tomable"),
-            ApiError::ClosedRequiresTemplate => (StatusCode::CONFLICT, "conversacion_cerrada_requiere_plantilla"),
+            ApiError::ClosedRequiresTemplate => (
+                StatusCode::CONFLICT,
+                "conversacion_cerrada_requiere_plantilla",
+            ),
             ApiError::MissingTemplateParams => (StatusCode::BAD_REQUEST, "missing_template_params"),
             ApiError::ValidationError { .. } => unreachable!(),
             ApiError::Domain { .. } => unreachable!(),
@@ -161,7 +189,9 @@ impl IntoResponse for ApiError {
             ApiError::CacheError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "cache_error"),
             ApiError::SmsError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "sms_error"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
-            ApiError::InternalServerError => (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error"),
+            ApiError::InternalServerError => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
+            }
         };
 
         // Log error details for debugging
@@ -178,7 +208,11 @@ impl IntoResponse for ApiError {
 }
 
 impl ApiError {
-    pub fn domain_simple(status: StatusCode, code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn domain_simple(
+        status: StatusCode,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         ApiError::Domain {
             status,
             code: code.into(),

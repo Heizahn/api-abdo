@@ -143,7 +143,9 @@ pub async fn calculate_handler(
     };
 
     if exchange_rate == 0.0 {
-        return Err(ApiError::Internal("La tasa de cambio es 0, no se puede calcular".to_string()));
+        return Err(ApiError::Internal(
+            "La tasa de cambio es 0, no se puede calcular".to_string(),
+        ));
     }
 
     let tax_oid = if let Some(tax_id_str) = payload.id_tax {
@@ -181,11 +183,11 @@ pub async fn calculate_handler(
         Currency::USD => {
             let result = payload.amount * exchange_rate * tax.iva;
             (result, Currency::BS)
-        },
+        }
         Currency::BS => {
             let result = payload.amount / (exchange_rate * tax.iva);
             (result, Currency::USD)
-        },
+        }
     };
 
     let amount_rounded = (calculated_amount * 100.0).round() / 100.0;

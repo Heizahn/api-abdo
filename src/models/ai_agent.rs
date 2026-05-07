@@ -43,11 +43,7 @@ impl AiConfig {
         AiConfigDto {
             has_api_key: !self.openrouter_api_key.is_empty(),
             default_model: self.default_model.clone(),
-            updated_at: Some(
-                self.updated_at
-                    .try_to_rfc3339_string()
-                    .unwrap_or_default(),
-            ),
+            updated_at: Some(self.updated_at.try_to_rfc3339_string().unwrap_or_default()),
             editor_id: if self.editor_id.is_empty() {
                 None
             } else {
@@ -1381,7 +1377,10 @@ mod tests {
             editor_id: "user-uuid-123".to_string(),
         };
         let dto = doc.to_dto();
-        assert!(dto.has_api_key, "has_api_key should be true when key is non-empty");
+        assert!(
+            dto.has_api_key,
+            "has_api_key should be true when key is non-empty"
+        );
         assert_eq!(dto.default_model, "openai/gpt-4o");
         assert!(dto.updated_at.is_some(), "updated_at should be present");
         assert_eq!(dto.editor_id, Some("user-uuid-123".to_string()));
@@ -1398,7 +1397,10 @@ mod tests {
         };
         let dto = doc.to_dto();
         assert!(dto.has_api_key);
-        assert!(dto.editor_id.is_none(), "empty editor_id should map to None");
+        assert!(
+            dto.editor_id.is_none(),
+            "empty editor_id should map to None"
+        );
     }
 
     #[test]
@@ -1411,7 +1413,10 @@ mod tests {
             editor_id: String::new(),
         };
         let dto = doc.to_dto();
-        assert!(!dto.has_api_key, "has_api_key should be false when key is empty");
+        assert!(
+            !dto.has_api_key,
+            "has_api_key should be false when key is empty"
+        );
     }
 
     #[test]
@@ -1430,7 +1435,12 @@ mod tests {
         // 1M input + 1M output → $0.15 + $0.60 = $0.75
         let cost = estimate_cost_usd("openai/gpt-4o-mini", 1_000_000, 0, 1_000_000, 0);
         let expected = RATES_GPT4O_MINI.input_per_m + RATES_GPT4O_MINI.output_per_m;
-        assert!((cost - expected).abs() < 1e-9, "cost={}, expected={}", cost, expected);
+        assert!(
+            (cost - expected).abs() < 1e-9,
+            "cost={}, expected={}",
+            cost,
+            expected
+        );
     }
 
     #[test]

@@ -1,18 +1,23 @@
+use crate::models::zabbix::{MonthlyTraffic, ZabbixTrafficResponse};
+use chrono::{Datelike, TimeZone, Utc};
 use reqwest::Client;
 use serde_json::{json, Value};
-use chrono::{Utc, TimeZone, Datelike};
 use std::error::Error;
-use std::pin::Pin;
 use std::future::Future;
-use crate::models::zabbix::{MonthlyTraffic, ZabbixTrafficResponse};
+use std::pin::Pin;
 
 const KEY_DOWNLOAD: &str = "onu.vol.download";
 const KEY_UPLOAD: &str = "onu.vol.upload";
 
 fn month_bounds(year: i32, month: u32) -> (i64, i64) {
     let start = Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).unwrap();
-    let (next_y, next_m) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
-    let end = Utc.with_ymd_and_hms(next_y, next_m, 1, 0, 0, 0).unwrap() - chrono::Duration::seconds(1);
+    let (next_y, next_m) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let end =
+        Utc.with_ymd_and_hms(next_y, next_m, 1, 0, 0, 0).unwrap() - chrono::Duration::seconds(1);
     (start.timestamp(), end.timestamp())
 }
 
@@ -24,7 +29,7 @@ async fn fetch_history_gb(
     history_mode: i32,
     time_from: i64,
     time_till: i64,
-    req_id: u64
+    req_id: u64,
 ) -> Result<f64, Box<dyn Error + Send + Sync>> {
     let payload = json!({
         "jsonrpc": "2.0", "method": "history.get",
@@ -35,7 +40,8 @@ async fn fetch_history_gb(
         "id": req_id
     });
 
-    let resp: Value = client.post(zabbix_url)
+    let resp: Value = client
+        .post(zabbix_url)
         .header("Authorization", format!("Bearer {}", zabbix_token))
         .header("Content-Type", "application/json-rpc")
         .json(&payload)
@@ -69,7 +75,6 @@ pub async fn get_client_traffic(
     client_zabbix_code: &str,
     olt_zabbix_name: &str,
 ) -> Result<ZabbixTrafficResponse, Box<dyn Error + Send + Sync>> {
-
     let search_payload = json!({
         "jsonrpc": "2.0", "method": "item.get",
         "params": {
@@ -83,17 +88,22 @@ pub async fn get_client_traffic(
         "id": 1
     });
 
-    let search_resp: Value = http_client.post(zabbix_url)
+    let search_resp: Value = http_client
+        .post(zabbix_url)
         .header("Authorization", format!("Bearer {}", zabbix_token))
         .header("Content-Type", "application/json-rpc")
         .json(&search_payload)
-        .send().await?.json().await?;
+        .send()
+        .await?
+        .json()
+        .await?;
 
     if let Some(error) = search_resp.get("error") {
         return Err(format!("Zabbix API Error: {}", error).into());
     }
 
-    let items = search_resp["result"].as_array()
+    let items = search_resp["result"]
+        .as_array()
         .ok_or("Error: No se pudo parsear el resultado de Zabbix")?;
 
     let mut down_info = None;
@@ -102,21 +112,32 @@ pub async fn get_client_traffic(
     for item in items {
         let full_name = item["name"].as_str().unwrap_or("");
 
-        if !full_name.ends_with(client_zabbix_code) && !full_name.contains(&format!("{} ", client_zabbix_code)) {
+        if !full_name.ends_with(client_zabbix_code)
+            && !full_name.contains(&format!("{} ", client_zabbix_code))
+        {
             continue;
         }
 
         let key = item["key_"].as_str().unwrap_or("");
         let item_id = item["itemid"].as_str().unwrap_or("").to_string();
-        let val_type = item["value_type"].as_str().unwrap_or("3").parse::<i32>().unwrap_or(3);
+        let val_type = item["value_type"]
+            .as_str()
+            .unwrap_or("3")
+            .parse::<i32>()
+            .unwrap_or(3);
         let hist_mode = if val_type == 0 { 0 } else { 3 };
 
-        if key.contains(KEY_DOWNLOAD) { down_info = Some((item_id, hist_mode)); }
-        else if key.contains(KEY_UPLOAD) { up_info = Some((item_id, hist_mode)); }
+        if key.contains(KEY_DOWNLOAD) {
+            down_info = Some((item_id, hist_mode));
+        } else if key.contains(KEY_UPLOAD) {
+            up_info = Some((item_id, hist_mode));
+        }
     }
 
     if down_info.is_none() && up_info.is_none() {
-        return Err("No se encontraron items de tráfico EXACTOS para este cliente en esta OLT".into());
+        return Err(
+            "No se encontraron items de tráfico EXACTOS para este cliente en esta OLT".into(),
+        );
     }
 
     let now = Utc::now();
@@ -139,13 +160,35 @@ pub async fn get_client_traffic(
 
         let (time_from, time_till) = month_bounds(current_year, current_month);
 
-        let down_fut: Pin<Box<dyn Future<Output = Result<f64, Box<dyn Error + Send + Sync>>> + Send>> = match &down_info {
-            Some((id, mode)) => Box::pin(fetch_history_gb(http_client, zabbix_url, zabbix_token, id, *mode, time_from, time_till, 100)),
+        let down_fut: Pin<
+            Box<dyn Future<Output = Result<f64, Box<dyn Error + Send + Sync>>> + Send>,
+        > = match &down_info {
+            Some((id, mode)) => Box::pin(fetch_history_gb(
+                http_client,
+                zabbix_url,
+                zabbix_token,
+                id,
+                *mode,
+                time_from,
+                time_till,
+                100,
+            )),
             None => Box::pin(async { Ok(0.0) }),
         };
 
-        let up_fut: Pin<Box<dyn Future<Output = Result<f64, Box<dyn Error + Send + Sync>>> + Send>> = match &up_info {
-            Some((id, mode)) => Box::pin(fetch_history_gb(http_client, zabbix_url, zabbix_token, id, *mode, time_from, time_till, 101)),
+        let up_fut: Pin<
+            Box<dyn Future<Output = Result<f64, Box<dyn Error + Send + Sync>>> + Send>,
+        > = match &up_info {
+            Some((id, mode)) => Box::pin(fetch_history_gb(
+                http_client,
+                zabbix_url,
+                zabbix_token,
+                id,
+                *mode,
+                time_from,
+                time_till,
+                101,
+            )),
             None => Box::pin(async { Ok(0.0) }),
         };
 

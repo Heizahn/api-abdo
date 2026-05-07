@@ -51,10 +51,7 @@ impl AiPromotionRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
-    async fn find_ai_promotion_by_id(
-        &self,
-        id: &ObjectId,
-    ) -> Result<Option<AiPromotion>, String> {
+    async fn find_ai_promotion_by_id(&self, id: &ObjectId) -> Result<Option<AiPromotion>, String> {
         self.ai_promotions()
             .find_one(doc! { "_id": id })
             .await

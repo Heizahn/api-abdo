@@ -1,6 +1,6 @@
+use anyhow::Result;
 use reqwest::Client;
 use serde_json::json;
-use anyhow::Result;
 
 use crate::crypto::aes::decrypt_payload;
 use crate::db::WhatsAppRepository;
@@ -14,7 +14,7 @@ fn normalize_phone(phone: &str) -> String {
     let digits: String = phone.chars().filter(|c| c.is_ascii_digit()).collect();
     match digits.strip_prefix('0') {
         Some(rest) => format!("58{}", rest),
-        None       => digits,
+        None => digits,
     }
 }
 
@@ -78,10 +78,16 @@ async fn try_send_otp_via(settings: &WaSettings, phone: &str, code: u32) -> Resu
 
     if !response.status().is_success() {
         let status = response.status();
-        let body   = response.text().await.unwrap_or_else(|_| "sin cuerpo".to_string());
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "sin cuerpo".to_string());
         tracing::error!(
             "WhatsApp API error enviando a {} via {}. Status: {}. Body: {}",
-            phone, settings.phone, status, body
+            phone,
+            settings.phone,
+            status,
+            body
         );
         return Err(anyhow::anyhow!("WhatsApp API error [{}]", status));
     }
@@ -116,7 +122,9 @@ pub async fn send_whatsapp_otp(state: &AppState, phone: &str, code: u32) -> Resu
         .map_err(|e| anyhow::anyhow!("DB error buscando WaSettings OTP: {}", e))?;
 
     if candidates.is_empty() {
-        return Err(anyhow::anyhow!("No hay WaSettings activos con purposes.otp configurado"));
+        return Err(anyhow::anyhow!(
+            "No hay WaSettings activos con purposes.otp configurado"
+        ));
     }
 
     let total = candidates.len();
@@ -128,7 +136,10 @@ pub async fn send_whatsapp_otp(state: &AppState, phone: &str, code: u32) -> Resu
             Err(e) => {
                 tracing::warn!(
                     "OTP via WaSettings {} ({}/{}) falló: {:?} — probando siguiente",
-                    settings.phone, i + 1, total, e
+                    settings.phone,
+                    i + 1,
+                    total,
+                    e
                 );
                 last_err = Some(e);
             }

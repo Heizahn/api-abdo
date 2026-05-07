@@ -16,7 +16,9 @@ use crate::db::{
     AiAgentMetricsDailyBucket, AiAgentMetricsRaw, AiAgentMetricsSummary, AiAgentRepository,
     MetricsGranularity,
 };
-use crate::models::ai_agent::{AiAgent, AiAgentFaq, AiAgentPurpose, AiCoverageZone, AiInteraction, AiPlan};
+use crate::models::ai_agent::{
+    AiAgent, AiAgentFaq, AiAgentPurpose, AiCoverageZone, AiInteraction, AiPlan,
+};
 use crate::models::whatsapp::WaMessage;
 
 impl MongoDB {
@@ -154,10 +156,7 @@ impl AiAgentRepository for MongoDB {
         Ok(res.deleted_count > 0)
     }
 
-    async fn list_ai_agent_faqs(
-        &self,
-        agent_id: &ObjectId,
-    ) -> Result<Vec<AiAgentFaq>, String> {
+    async fn list_ai_agent_faqs(&self, agent_id: &ObjectId) -> Result<Vec<AiAgentFaq>, String> {
         self.ai_agent_faqs()
             .find(doc! { "agent_id": agent_id })
             .sort(doc! { "created_at": -1 })
@@ -168,10 +167,7 @@ impl AiAgentRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
-    async fn find_ai_agent_faq_by_id(
-        &self,
-        id: &ObjectId,
-    ) -> Result<Option<AiAgentFaq>, String> {
+    async fn find_ai_agent_faq_by_id(&self, id: &ObjectId) -> Result<Option<AiAgentFaq>, String> {
         self.ai_agent_faqs()
             .find_one(doc! { "_id": id })
             .await
@@ -263,7 +259,11 @@ impl AiAgentRepository for MongoDB {
     // ─── AiPlans ────────────────────────────────────────────────────────────
 
     async fn list_ai_plans(&self, only_active: bool) -> Result<Vec<AiPlan>, String> {
-        let filter = if only_active { doc! { "active": true } } else { doc! {} };
+        let filter = if only_active {
+            doc! { "active": true }
+        } else {
+            doc! {}
+        };
         self.ai_plans()
             .find(filter)
             .sort(doc! { "display_order": 1, "mbps": 1 })
@@ -557,10 +557,7 @@ impl AiAgentRepository for MongoDB {
         // ── Parse Aggregate B ─────────────────────────────────────────────────
         let mut pre_class_breakdown: HashMap<String, u64> = HashMap::new();
         for doc in &docs_b {
-            let key = doc
-                .get_str("_id")
-                .unwrap_or("unknown")
-                .to_string();
+            let key = doc.get_str("_id").unwrap_or("unknown").to_string();
             let count = doc
                 .get_i64("count")
                 .or_else(|_| doc.get_i32("count").map(|n| n as i64))

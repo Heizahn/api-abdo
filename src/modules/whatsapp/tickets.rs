@@ -179,12 +179,20 @@ async fn resolve_customer_snapshot(
 
     if let Some(cid) = client_id {
         if let Ok(map) = state.db.get_client_names_by_ids(&[cid]).await {
-            if let Some(n) = map.get(&cid) { name = Some(n.clone()); }
+            if let Some(n) = map.get(&cid) {
+                name = Some(n.clone());
+            }
         }
     }
     if name.is_none() {
-        if let Ok(map) = state.db.get_client_names_by_phones(&[conv.phone.clone()]).await {
-            if let Some(n) = map.get(&conv.phone) { name = Some(n.clone()); }
+        if let Ok(map) = state
+            .db
+            .get_client_names_by_phones(&[conv.phone.clone()])
+            .await
+        {
+            if let Some(n) = map.get(&conv.phone) {
+                name = Some(n.clone());
+            }
         }
     }
     if name.is_none() {
@@ -301,9 +309,7 @@ fn extract_idempotency_key(headers: &HeaderMap) -> Result<Option<String>, ApiErr
 
 /// Resuelve y valida la categoría: si viene una key inválida devuelve 422.
 /// Si viene `None` o vacía, devuelve `(None, None)`.
-fn resolve_category(
-    raw: Option<&str>,
-) -> Result<(Option<String>, Option<String>), ApiError> {
+fn resolve_category(raw: Option<&str>) -> Result<(Option<String>, Option<String>), ApiError> {
     match raw.map(str::trim).filter(|s| !s.is_empty()) {
         None => Ok((None, None)),
         Some(id) => match category_label(id) {
@@ -319,10 +325,7 @@ fn resolve_category(
 
 /// Resuelve `(name, role)` del agente destino. Útil cuando además del nombre
 /// hay que validar que el rol esté permitido en `target_roles` de la categoría.
-async fn resolve_assignee(
-    state: &Arc<AppState>,
-    user_id: &str,
-) -> Result<(String, f32), ApiError> {
+async fn resolve_assignee(state: &Arc<AppState>, user_id: &str) -> Result<(String, f32), ApiError> {
     let u = state
         .db
         .find_user_by_id(user_id)
@@ -344,10 +347,7 @@ async fn resolve_assignee(
 /// La comparación es exacta sobre `f32` — `nRole` vive en valores
 /// determinados (0.0, 0.5, 1.0, 1.5, ...) que son representables sin
 /// pérdida en f32, así que `==` es seguro.
-fn validate_assignee_for_category(
-    category_id: &str,
-    assignee_role: f32,
-) -> Result<(), ApiError> {
+fn validate_assignee_for_category(category_id: &str, assignee_role: f32) -> Result<(), ApiError> {
     let cat = match find_category(category_id) {
         Some(c) => c,
         // Si la categoría no existe en el catálogo (probablemente legacy),
@@ -397,7 +397,10 @@ fn invalid_transition(current: &str, action: &str) -> ApiError {
     ApiError::domain_with_details(
         StatusCode::CONFLICT,
         "invalid_transition",
-        format!("La acción '{}' no es válida en estado '{}'", action, current),
+        format!(
+            "La acción '{}' no es válida en estado '{}'",
+            action, current
+        ),
         serde_json::json!({ "current": current, "action": action }),
     )
 }
@@ -426,9 +429,15 @@ async fn broadcast_ticket_updated(
     // Dedup: creador + asignado actual + SUPERADMINs.
     let mut recipients: std::collections::HashSet<String> = std::collections::HashSet::new();
     recipients.insert(ticket.created_by_id.clone());
-    if let Some(uid) = &ticket.assigned_to_id { recipients.insert(uid.clone()); }
+    if let Some(uid) = &ticket.assigned_to_id {
+        recipients.insert(uid.clone());
+    }
     match state.db.find_superadmin_ids().await {
-        Ok(ids) => for id in ids { recipients.insert(id); },
+        Ok(ids) => {
+            for id in ids {
+                recipients.insert(id);
+            }
+        }
         Err(e) => tracing::warn!("[ws] find_superadmin_ids: {}", e),
     }
 
@@ -473,26 +482,26 @@ async fn cascade_close_conversation(
         conversation_id: conv_id.to_hex(),
     };
     super::ws::broadcast_all(&state.ws_registry, &close_ev).await;
-    if let Err(e) = state.db.record_conversation_event(crate::models::whatsapp::WaConversationEventInput {
-        conversation_id: &conv_id,
-        business_phone: &conv.business_phone,
-        event_type: "closed",
-        actor_id: Some(actor_id),
-        actor_name: Some(actor_name),
-        target_id: None,
-        target_name: None,
-        note: Some(audit_note),
-    }).await {
+    if let Err(e) = state
+        .db
+        .record_conversation_event(crate::models::whatsapp::WaConversationEventInput {
+            conversation_id: &conv_id,
+            business_phone: &conv.business_phone,
+            event_type: "closed",
+            actor_id: Some(actor_id),
+            actor_name: Some(actor_name),
+            target_id: None,
+            target_name: None,
+            note: Some(audit_note),
+        })
+        .await
+    {
         tracing::warn!("[tickets] record_conversation_event(closed) failed: {}", e);
     }
 }
 
 /// Envía `TICKET_ASIGNADO` sólo al destino. Drop silencioso si no está conectado.
-async fn send_ticket_assigned(
-    state: &Arc<AppState>,
-    ticket: &TicketItem,
-    assigned_by_name: &str,
-) {
+async fn send_ticket_assigned(state: &Arc<AppState>, ticket: &TicketItem, assigned_by_name: &str) {
     let assignee = match ticket.assigned_to_id.as_deref() {
         Some(id) => id,
         None => return,
@@ -579,31 +588,39 @@ pub async fn create_ticket_handler(
     // mantenemos 201 para no obligar al front a discriminar).
     let idempotency_key = extract_idempotency_key(&headers)?;
     if let Some(key) = &idempotency_key {
-        if let Some(existing) = state.db
+        if let Some(existing) = state
+            .db
             .find_ticket_by_idempotency(&claims.id, key)
             .await
             .map_err(ApiError::DatabaseError)?
         {
-            return Ok((StatusCode::CREATED, Json(TicketResponse {
-                ok: true,
-                data: ticket_to_item(existing, true),
-            })));
+            return Ok((
+                StatusCode::CREATED,
+                Json(TicketResponse {
+                    ok: true,
+                    data: ticket_to_item(existing, true),
+                }),
+            ));
         }
     }
 
     // 1. Conversación existe.
-    let conv = state.db
+    let conv = state
+        .db
         .find_conversation_by_id(&conv_oid)
         .await
         .map_err(ApiError::DatabaseError)?
-        .ok_or_else(|| ApiError::domain_simple(
-            StatusCode::NOT_FOUND,
-            "conversation_not_found",
-            "Conversación no encontrada",
-        ))?;
+        .ok_or_else(|| {
+            ApiError::domain_simple(
+                StatusCode::NOT_FOUND,
+                "conversation_not_found",
+                "Conversación no encontrada",
+            )
+        })?;
 
     // 2. No hay ya un ticket abierto para la conversación.
-    if let Some(existing) = state.db
+    if let Some(existing) = state
+        .db
         .find_open_ticket_for_conversation(&conv_oid)
         .await
         .map_err(ApiError::DatabaseError)?
@@ -628,8 +645,14 @@ pub async fn create_ticket_handler(
 
     // 5. Construir doc.
     let now = BsonDateTime::now();
-    let initial_status = if body.assign_to_id.is_some() { "open" } else { "open" };
-    let timeline_note = body.transfer_note.as_deref()
+    let initial_status = if body.assign_to_id.is_some() {
+        "open"
+    } else {
+        "open"
+    };
+    let timeline_note = body
+        .transfer_note
+        .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
@@ -677,7 +700,8 @@ pub async fn create_ticket_handler(
         timeline: timeline_entries,
     };
 
-    let ticket = state.db
+    let ticket = state
+        .db
         .create_ticket(ticket)
         .await
         .map_err(ApiError::DatabaseError)?;
@@ -692,10 +716,13 @@ pub async fn create_ticket_handler(
         send_ticket_assigned(&state, &item, &creator.name).await;
     }
 
-    Ok((StatusCode::CREATED, Json(TicketResponse {
-        ok: true,
-        data: item,
-    })))
+    Ok((
+        StatusCode::CREATED,
+        Json(TicketResponse {
+            ok: true,
+            data: item,
+        }),
+    ))
 }
 
 // ============================================
@@ -827,7 +854,8 @@ pub async fn list_tickets_handler(
         cursor: q.cursor.as_deref().filter(|s| !s.is_empty()),
     };
 
-    let tickets = state.db
+    let tickets = state
+        .db
         .list_tickets(filter)
         .await
         .map_err(ApiError::DatabaseError)?;
@@ -841,8 +869,15 @@ pub async fn list_tickets_handler(
         None
     };
 
-    let data = tickets.into_iter().map(|t| ticket_to_item(t, false)).collect();
-    Ok(Json(TicketsListResponse { ok: true, data, next_cursor }))
+    let data = tickets
+        .into_iter()
+        .map(|t| ticket_to_item(t, false))
+        .collect();
+    Ok(Json(TicketsListResponse {
+        ok: true,
+        data,
+        next_cursor,
+    }))
 }
 
 // ============================================
@@ -870,7 +905,8 @@ pub async fn get_ticket_handler(
     let user = require_can_chat(&state, &claims.id).await?;
     let oid = parse_oid(&id, "id")?;
 
-    let ticket = state.db
+    let ticket = state
+        .db
         .find_ticket_by_id(&oid)
         .await
         .map_err(ApiError::DatabaseError)?
@@ -920,7 +956,8 @@ pub async fn update_ticket_handler(
     let is_super = user.role == 0.0;
     let oid = parse_oid(&id, "id")?;
 
-    let ticket = state.db
+    let ticket = state
+        .db
         .find_ticket_by_id(&oid)
         .await
         .map_err(ApiError::DatabaseError)?
@@ -935,19 +972,36 @@ pub async fn update_ticket_handler(
     // estados terminales (no permiten `reopen`) — un cierre formal o cancelación
     // explícita no se deshace; si el cliente vuelve a reportar el problema, se
     // crea un ticket nuevo. Solo `resolved` (cierre tentativo) admite reopen.
-    let (new_status, requires_assignee, requires_creator_or_super, expects_assign_to_id, set_resolved_at, set_closed_at, clear_assignment, change_assignment) =
-        match (current, action) {
-            ("open", "take")        => ("in_progress", false, false, false, false, false, false, true),
-            ("open", "transfer")    => ("open",        false, true,  true,  false, false, false, true),
-            ("open", "cancel")      => ("cancelled",   false, true,  false, false, false, true,  true),
-            ("in_progress", "transfer") => ("open",     true,  false, true,  false, false, false, true),
-            ("in_progress", "resolve")  => ("resolved", true,  false, false, true,  false, false, false),
-            ("in_progress", "close")    => ("closed",   true,  false, false, false, true,  true,  true),
-            ("resolved", "close")       => ("closed",   true,  false, false, false, true,  true,  true),
-            ("resolved", "reopen")      => ("open",     false, false, false, false, false, true,  true),
-            // `closed` y `cancelled` son terminales — no hay transición salida.
-            _ => return Err(invalid_transition(current, action)),
-        };
+    let (
+        new_status,
+        requires_assignee,
+        requires_creator_or_super,
+        expects_assign_to_id,
+        set_resolved_at,
+        set_closed_at,
+        clear_assignment,
+        change_assignment,
+    ) = match (current, action) {
+        ("open", "take") => (
+            "in_progress",
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+        ),
+        ("open", "transfer") => ("open", false, true, true, false, false, false, true),
+        ("open", "cancel") => ("cancelled", false, true, false, false, false, true, true),
+        ("in_progress", "transfer") => ("open", true, false, true, false, false, false, true),
+        ("in_progress", "resolve") => ("resolved", true, false, false, true, false, false, false),
+        ("in_progress", "close") => ("closed", true, false, false, false, true, true, true),
+        ("resolved", "close") => ("closed", true, false, false, false, true, true, true),
+        ("resolved", "reopen") => ("open", false, false, false, false, false, true, true),
+        // `closed` y `cancelled` son terminales — no hay transición salida.
+        _ => return Err(invalid_transition(current, action)),
+    };
 
     // Reglas de autorización:
     // - `requires_assignee` = la acción la ejecuta el asignado actual (o SUPERADMIN).
@@ -977,7 +1031,9 @@ pub async fn update_ticket_handler(
             new_assigned_name = Some(user.name.clone());
         }
         "transfer" => {
-            let target_id = body.assign_to_id.as_deref()
+            let target_id = body
+                .assign_to_id
+                .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| ApiError::ValidationError {
@@ -1004,13 +1060,17 @@ pub async fn update_ticket_handler(
     }
 
     // Resolución (sólo aplica a resolve/close).
-    let resolution_text = body.resolution.as_deref()
+    let resolution_text = body
+        .resolution
+        .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
     // Note del timeline.
-    let note = body.note.as_deref()
+    let note = body
+        .note
+        .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
@@ -1022,8 +1082,16 @@ pub async fn update_ticket_handler(
         actor_name: user.name.clone(),
         from_status: Some(current.into()),
         to_status: Some(new_status.into()),
-        assigned_to_id: if change_assignment { new_assigned_id.clone() } else { None },
-        assigned_to_name: if change_assignment { new_assigned_name.clone() } else { None },
+        assigned_to_id: if change_assignment {
+            new_assigned_id.clone()
+        } else {
+            None
+        },
+        assigned_to_name: if change_assignment {
+            new_assigned_name.clone()
+        } else {
+            None
+        },
         note,
         created_at: now,
     };
@@ -1040,7 +1108,8 @@ pub async fn update_ticket_handler(
         timeline_entry: entry,
     };
 
-    let updated = state.db
+    let updated = state
+        .db
         .update_ticket_action(&oid, patch)
         .await
         .map_err(ApiError::DatabaseError)?
@@ -1053,13 +1122,24 @@ pub async fn update_ticket_handler(
     // seguir necesitando atención. `transfer`, `take`, `reopen` tampoco
     // tocan la conv.
     if action == "close" || action == "resolve" {
-        match state.db.find_conversation_by_id(&ticket.conversation_id).await {
+        match state
+            .db
+            .find_conversation_by_id(&ticket.conversation_id)
+            .await
+        {
             Ok(Some(conv)) => {
-                let audit_note = if action == "close" { "ticket_closed" } else { "ticket_resolved" };
+                let audit_note = if action == "close" {
+                    "ticket_closed"
+                } else {
+                    "ticket_resolved"
+                };
                 cascade_close_conversation(&state, &conv, &claims.id, &user.name, audit_note).await;
             }
             Ok(None) => {
-                tracing::warn!("[tickets] cascade_close: conv {} no existe", ticket.conversation_id);
+                tracing::warn!(
+                    "[tickets] cascade_close: conv {} no existe",
+                    ticket.conversation_id
+                );
             }
             Err(e) => {
                 tracing::warn!("[tickets] cascade_close find_conversation failed: {}", e);
@@ -1073,7 +1153,10 @@ pub async fn update_ticket_handler(
     }
     broadcast_ticket_updated(&state, &item, current, &user.name).await;
 
-    Ok(Json(TicketResponse { ok: true, data: item }))
+    Ok(Json(TicketResponse {
+        ok: true,
+        data: item,
+    }))
 }
 
 fn action_to_timeline_label(action: &str) -> &'static str {
@@ -1120,15 +1203,18 @@ pub async fn transfer_and_ticket_handler(
     let reason = validate_reason(&body.reason)?;
     let (category_id, category_label) = resolve_category(body.category_id.as_deref())?;
 
-    let conv = state.db
+    let conv = state
+        .db
         .find_conversation_by_id(&conv_oid)
         .await
         .map_err(ApiError::DatabaseError)?
-        .ok_or_else(|| ApiError::domain_simple(
-            StatusCode::NOT_FOUND,
-            "conversation_not_found",
-            "Conversación no encontrada",
-        ))?;
+        .ok_or_else(|| {
+            ApiError::domain_simple(
+                StatusCode::NOT_FOUND,
+                "conversation_not_found",
+                "Conversación no encontrada",
+            )
+        })?;
 
     // Sólo asignado actual o SUPERADMIN puede transferir.
     let is_super = creator.role == 0.0;
@@ -1142,7 +1228,8 @@ pub async fn transfer_and_ticket_handler(
     }
 
     // Conflicto: ticket ya activo.
-    if let Some(existing) = state.db
+    if let Some(existing) = state
+        .db
         .find_open_ticket_for_conversation(&conv_oid)
         .await
         .map_err(ApiError::DatabaseError)?
@@ -1153,29 +1240,36 @@ pub async fn transfer_and_ticket_handler(
     // Idempotency-Key — mismo soporte que POST /tickets.
     let idempotency_key = extract_idempotency_key(&headers)?;
     if let Some(key) = &idempotency_key {
-        if let Some(existing) = state.db
+        if let Some(existing) = state
+            .db
             .find_ticket_by_idempotency(&claims.id, key)
             .await
             .map_err(ApiError::DatabaseError)?
         {
             // Construir conversation aún cuando reusamos ticket.
-            let conv_after = state.db
+            let conv_after = state
+                .db
                 .find_conversation_by_id(&conv_oid)
                 .await
                 .map_err(ApiError::DatabaseError)?
-                .ok_or_else(|| ApiError::domain_simple(
-                    StatusCode::NOT_FOUND,
-                    "conversation_not_found",
-                    "Conversación no encontrada",
-                ))?;
+                .ok_or_else(|| {
+                    ApiError::domain_simple(
+                        StatusCode::NOT_FOUND,
+                        "conversation_not_found",
+                        "Conversación no encontrada",
+                    )
+                })?;
             let conv_item = build_conversation_item(&state, conv_after, &claims.id).await?;
-            return Ok((StatusCode::CREATED, Json(TransferAndTicketResponse {
-                ok: true,
-                data: TransferAndTicketData {
-                    ticket: ticket_to_item(existing, true),
-                    conversation: conv_item,
-                },
-            })));
+            return Ok((
+                StatusCode::CREATED,
+                Json(TransferAndTicketResponse {
+                    ok: true,
+                    data: TransferAndTicketData {
+                        ticket: ticket_to_item(existing, true),
+                        conversation: conv_item,
+                    },
+                }),
+            ));
         }
     }
 
@@ -1187,7 +1281,9 @@ pub async fn transfer_and_ticket_handler(
     let (customer_name, customer_id) = resolve_customer_snapshot(&state, &conv).await;
 
     let now = BsonDateTime::now();
-    let timeline_note = body.note.as_deref()
+    let timeline_note = body
+        .note
+        .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
@@ -1232,31 +1328,48 @@ pub async fn transfer_and_ticket_handler(
         timeline,
     };
 
-    let ticket = state.db.create_ticket(ticket).await.map_err(ApiError::DatabaseError)?;
+    let ticket = state
+        .db
+        .create_ticket(ticket)
+        .await
+        .map_err(ApiError::DatabaseError)?;
 
     // Cierre de la conversación + auditoría + WS, mismo patrón que POST /tickets.
-    cascade_close_conversation(&state, &conv, &claims.id, &creator.name, "transfer_and_ticket").await;
+    cascade_close_conversation(
+        &state,
+        &conv,
+        &claims.id,
+        &creator.name,
+        "transfer_and_ticket",
+    )
+    .await;
 
     let item = ticket_to_item(ticket, true);
     send_ticket_assigned(&state, &item, &creator.name).await;
 
     // Cargar conv actualizada para la respuesta.
-    let conv_after = state.db
+    let conv_after = state
+        .db
         .find_conversation_by_id(&conv_oid)
         .await
         .map_err(ApiError::DatabaseError)?
-        .ok_or_else(|| ApiError::domain_simple(
-            StatusCode::NOT_FOUND,
-            "conversation_not_found",
-            "Conversación no encontrada",
-        ))?;
+        .ok_or_else(|| {
+            ApiError::domain_simple(
+                StatusCode::NOT_FOUND,
+                "conversation_not_found",
+                "Conversación no encontrada",
+            )
+        })?;
     let conv_item = build_conversation_item(&state, conv_after, &claims.id).await?;
 
-    Ok((StatusCode::CREATED, Json(TransferAndTicketResponse {
-        ok: true,
-        data: TransferAndTicketData {
-            ticket: item,
-            conversation: conv_item,
-        },
-    })))
+    Ok((
+        StatusCode::CREATED,
+        Json(TransferAndTicketResponse {
+            ok: true,
+            data: TransferAndTicketData {
+                ticket: item,
+                conversation: conv_item,
+            },
+        }),
+    ))
 }

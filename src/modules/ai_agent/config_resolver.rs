@@ -11,11 +11,7 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 
-use crate::{
-    db::AiConfigRepository,
-    error::ApiError,
-    state::AppState,
-};
+use crate::{db::AiConfigRepository, error::ApiError, state::AppState};
 
 use super::ai_agent_secret;
 
@@ -38,21 +34,21 @@ pub async fn resolve_ai_api_key(state: &Arc<AppState>) -> Result<String, ApiErro
     }
 
     // 2. Cache miss — leer de DB.
-    let cfg = state
-        .db
-        .get_ai_config()
-        .await
-        .map_err(|_| ApiError::domain_simple(
+    let cfg = state.db.get_ai_config().await.map_err(|_| {
+        ApiError::domain_simple(
             StatusCode::INTERNAL_SERVER_ERROR,
             "ai_invalid_response",
             "Error leyendo configuración global de AI",
-        ))?;
+        )
+    })?;
 
-    let cfg = cfg.ok_or_else(|| ApiError::domain_simple(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "ai_global_config_missing",
-        "Configuración global de AI no establecida",
-    ))?;
+    let cfg = cfg.ok_or_else(|| {
+        ApiError::domain_simple(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "ai_global_config_missing",
+            "Configuración global de AI no establecida",
+        )
+    })?;
 
     if cfg.openrouter_api_key.is_empty() {
         return Err(ApiError::domain_simple(
@@ -63,12 +59,15 @@ pub async fn resolve_ai_api_key(state: &Arc<AppState>) -> Result<String, ApiErro
     }
 
     // 3. Descifrar.
-    let cleartext = crate::crypto::aes::decrypt_payload(&ai_agent_secret(), &cfg.openrouter_api_key)
-        .ok_or_else(|| ApiError::domain_simple(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "ai_invalid_response",
-            "Error descifrando API key global — posible cambio de JWT_SECRET",
-        ))?;
+    let cleartext =
+        crate::crypto::aes::decrypt_payload(&ai_agent_secret(), &cfg.openrouter_api_key)
+            .ok_or_else(|| {
+                ApiError::domain_simple(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "ai_invalid_response",
+                    "Error descifrando API key global — posible cambio de JWT_SECRET",
+                )
+            })?;
 
     // 4. Poblar cache.
     state.redis.set_ai_config_cache(&cleartext, TTL_SECS).await;
@@ -100,8 +99,8 @@ mod tests {
         let secret = "test_secret_key_for_aes_gcm_test";
         let plain = "sk-or-test-key-12345";
         let cipher = encrypt_payload(secret, plain);
-        let decrypted = crate::crypto::aes::decrypt_payload(secret, &cipher)
-            .expect("decrypt should succeed");
+        let decrypted =
+            crate::crypto::aes::decrypt_payload(secret, &cipher).expect("decrypt should succeed");
         assert_eq!(decrypted, plain);
     }
 

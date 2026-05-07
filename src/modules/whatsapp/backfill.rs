@@ -1,10 +1,6 @@
 use std::sync::Arc;
 
-use crate::{
-    crypto::aes::decrypt_payload,
-    db::WhatsAppRepository,
-    state::AppState,
-};
+use crate::{crypto::aes::decrypt_payload, db::WhatsAppRepository, state::AppState};
 
 use super::service::WhatsAppService;
 
@@ -83,36 +79,22 @@ pub async fn run_waba_backfill(state: Arc<AppState>) {
             }
         };
 
-        let svc = WhatsAppService::new(
-            state.reqwest_client.clone(),
-            phone_number_id.clone(),
-            token,
-        );
+        let svc =
+            WhatsAppService::new(state.reqwest_client.clone(), phone_number_id.clone(), token);
 
         match svc.get_whatsapp_business_account_id().await {
             Ok(waba_id) if !waba_id.is_empty() => {
                 match state.db.set_wa_settings_waba_id(&id, &waba_id).await {
-                    Ok(()) => tracing::info!(
-                        "waba-backfill: {} WABA ID = {}",
-                        id.to_hex(),
-                        waba_id
-                    ),
-                    Err(e) => tracing::warn!(
-                        "waba-backfill: {} falló al persistir: {}",
-                        id.to_hex(),
-                        e
-                    ),
+                    Ok(()) => {
+                        tracing::info!("waba-backfill: {} WABA ID = {}", id.to_hex(), waba_id)
+                    }
+                    Err(e) => {
+                        tracing::warn!("waba-backfill: {} falló al persistir: {}", id.to_hex(), e)
+                    }
                 }
             }
-            Ok(_) => tracing::warn!(
-                "waba-backfill: {} Meta devolvió WABA vacío",
-                id.to_hex()
-            ),
-            Err(e) => tracing::warn!(
-                "waba-backfill: {} Meta error: {:#}",
-                id.to_hex(),
-                e
-            ),
+            Ok(_) => tracing::warn!("waba-backfill: {} Meta devolvió WABA vacío", id.to_hex()),
+            Err(e) => tracing::warn!("waba-backfill: {} Meta error: {:#}", id.to_hex(), e),
         }
     }
 

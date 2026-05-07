@@ -3,7 +3,10 @@ use crate::db::mongo::ResultGroupedByDate;
 use crate::db::ProfileRepository;
 use crate::domain::customer::{Customer, CustomerView};
 use crate::models::ai_agent::AiClientLookup;
-use crate::models::db::{ActiveClientBalance, Client, ClientDetail, ClientListItem, ClientOnu, ClientStatusHistoryItem, CustomerInfoItem, SolvencyCounts, Tax};
+use crate::models::db::{
+    ActiveClientBalance, Client, ClientDetail, ClientListItem, ClientOnu, ClientStatusHistoryItem,
+    CustomerInfoItem, SolvencyCounts, Tax,
+};
 use crate::utils::get_bson_amount::get_bson_amount;
 use crate::utils::timezone::VenezuelaDateTime;
 use async_trait::async_trait;
@@ -25,8 +28,16 @@ fn phone_core(phone: &str) -> Option<String> {
         return None;
     }
     // Últimos 10 dígitos.
-    Some(digits.chars().rev().take(10).collect::<Vec<_>>()
-        .into_iter().rev().collect())
+    Some(
+        digits
+            .chars()
+            .rev()
+            .take(10)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect(),
+    )
 }
 
 /// Format a raw DNI/RIF value into a prefixed string like `V-12345678` or `J-50001234`.
@@ -148,7 +159,10 @@ impl ProfileRepository for MongoDB {
             // local `0`, luego el core. `$` al final exige que sea el final
             // del string → evita falsos positivos con strings más largos.
             let pattern = format!(r"^\D*(\+?58|0)?\D*{}$", spaced_core);
-            let re = bson::Regex { pattern, options: String::new() };
+            let re = bson::Regex {
+                pattern,
+                options: String::new(),
+            };
             regex_bsons.push(bson::Bson::RegularExpression(re));
             core_to_input.entry(core).or_insert_with(|| p.clone());
         }
@@ -317,7 +331,7 @@ impl ProfileRepository for MongoDB {
                 "pipeline": [
                     doc! { "$match": {
                         "$expr": { "$eq": ["$idClient", "$$client_id"] },
-                        "sState": "Activo" 
+                        "sState": "Activo"
                     }},
                     doc! { "$project": {
                         "_id": 1, "sReason": 1, "nBs": 1, "sState": 1, "dCreation": 1,
@@ -333,7 +347,7 @@ impl ProfileRepository for MongoDB {
                 "pipeline": [
                     doc! { "$match": {
                         "$expr": { "$eq": ["$idClient", "$$client_id"] },
-                        "sState": "Pendiente" 
+                        "sState": "Pendiente"
                     }},
                     doc! { "$lookup": {
                         "from": "Debts",
@@ -427,7 +441,10 @@ impl ProfileRepository for MongoDB {
         ];
 
         let collection: Collection<Document> = self.db.collection("Clients");
-        let mut cursor = collection.aggregate(pipeline).await.map_err(|e| e.to_string())?;
+        let mut cursor = collection
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
 
         if let Some(Ok(doc)) = cursor.next().await {
             return Ok(SolvencyCounts {
@@ -437,20 +454,24 @@ impl ProfileRepository for MongoDB {
             });
         }
 
-        Ok(SolvencyCounts { solventes: 0, morosos: 0, suspendidos: 0 })
+        Ok(SolvencyCounts {
+            solventes: 0,
+            morosos: 0,
+            suspendidos: 0,
+        })
     }
 
-    async fn find_active_clients_for_closing(&self, owner_id: Option<&str>) -> Result<Vec<ActiveClientBalance>, String> {
+    async fn find_active_clients_for_closing(
+        &self,
+        owner_id: Option<&str>,
+    ) -> Result<Vec<ActiveClientBalance>, String> {
         let mut filter = doc! { "sState": "Activo" };
         if let Some(owner) = owner_id {
             filter.insert("idOwner", owner);
         }
         let collection: Collection<Document> = self.db.collection("Clients");
 
-        let mut cursor = collection
-            .find(filter)
-            .await
-            .map_err(|e| e.to_string())?;
+        let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
 
         let mut clients = Vec::new();
         while let Some(Ok(doc)) = cursor.next().await {
@@ -591,9 +612,7 @@ impl ProfileRepository for MongoDB {
                 .and_then(|id| plans.get(&id.to_hex()));
 
             let plan_name = plan_entry.map(|(name, _)| name.clone());
-            let plan_price = plan_entry
-                .map(|(_, price)| *price)
-                .filter(|&v| v > 0.0);
+            let plan_price = plan_entry.map(|(_, price)| *price).filter(|&v| v > 0.0);
 
             clients.push(ClientListItem {
                 id,
@@ -679,9 +698,18 @@ impl ProfileRepository for MongoDB {
             .and_then(|v| v.as_document())
             .cloned();
 
-        let plan_name = plan_doc.as_ref().and_then(|d| d.get_str("sName").ok()).map(|s| s.to_string());
-        let plan_price = plan_doc.as_ref().map(|d| get_bson_amount(d, "nAmount")).filter(|&v| v > 0.0);
-        let plan_mbps = plan_doc.as_ref().map(|d| get_bson_amount(d, "nMBPS")).filter(|&v| v > 0.0);
+        let plan_name = plan_doc
+            .as_ref()
+            .and_then(|d| d.get_str("sName").ok())
+            .map(|s| s.to_string());
+        let plan_price = plan_doc
+            .as_ref()
+            .map(|d| get_bson_amount(d, "nAmount"))
+            .filter(|&v| v > 0.0);
+        let plan_mbps = plan_doc
+            .as_ref()
+            .map(|d| get_bson_amount(d, "nMBPS"))
+            .filter(|&v| v > 0.0);
 
         // Sector
         let sector_name = raw
@@ -708,15 +736,34 @@ impl ProfileRepository for MongoDB {
             .and_then(|v| v.as_document())
             .cloned();
 
-        let onu_ip  = onu_doc.as_ref().and_then(|d| d.get_str("sIp").ok()).filter(|s| !s.is_empty()).map(|s| s.to_string());
-        let onu_sn  = onu_doc.as_ref().and_then(|d| d.get_str("sSn").ok()).filter(|s| !s.is_empty()).map(|s| s.to_string());
-        let onu_mac = onu_doc.as_ref().and_then(|d| d.get_str("sMac").ok()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+        let onu_ip = onu_doc
+            .as_ref()
+            .and_then(|d| d.get_str("sIp").ok())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let onu_sn = onu_doc
+            .as_ref()
+            .and_then(|d| d.get_str("sSn").ok())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let onu_mac = onu_doc
+            .as_ref()
+            .and_then(|d| d.get_str("sMac").ok())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
 
         // sn del cliente viene del documento Clients, no de Onus
-        let client_sn = raw.get_str("sSn").ok().filter(|s| !s.is_empty()).map(|s| s.to_string());
+        let client_sn = raw
+            .get_str("sSn")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
 
         let onu = onu_doc.as_ref().map(|d| ClientOnu {
-            id: d.get_object_id("_id").map(|o| o.to_hex()).unwrap_or_default(),
+            id: d
+                .get_object_id("_id")
+                .map(|o| o.to_hex())
+                .unwrap_or_default(),
             sn: onu_sn.clone(),
             mac: onu_mac.clone(),
             ip: onu_ip.clone(),
@@ -733,13 +780,23 @@ impl ProfileRepository for MongoDB {
         let tax_id = raw.get_object_id("idTax").ok().map(|o| o.to_hex());
 
         let detail = ClientDetail {
-            id: raw.get_object_id("_id").map(|o| o.to_hex()).unwrap_or_default(),
+            id: raw
+                .get_object_id("_id")
+                .map(|o| o.to_hex())
+                .unwrap_or_default(),
             name: raw.get_str("sName").unwrap_or_default().to_string(),
-            dni: raw.get_str("sDni").ok().filter(|s| !s.is_empty())
+            dni: raw
+                .get_str("sDni")
+                .ok()
+                .filter(|s| !s.is_empty())
                 .or_else(|| raw.get_str("sRif").ok().filter(|s| !s.is_empty()))
                 .map(|s| s.to_string()),
             phone: raw.get_str("sPhone").unwrap_or_default().to_string(),
-            email: raw.get_str("sEmail").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            email: raw
+                .get_str("sEmail")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
             status,
             balance,
             ip: onu_ip,
@@ -748,9 +805,21 @@ impl ProfileRepository for MongoDB {
             mac: onu_mac,
             client_type: raw.get_str("sType").ok().map(|s| s.to_string()),
             payment: Some(get_bson_amount(&raw, "nPayment")).filter(|&v| v != 0.0),
-            address: raw.get_str("sAddress").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
-            gps: raw.get_str("sGps").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
-            commentary: raw.get_str("sCommentary").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            address: raw
+                .get_str("sAddress")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
+            gps: raw
+                .get_str("sGps")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
+            commentary: raw
+                .get_str("sCommentary")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
             subscription_id,
             sector_id,
             owner_id: owner_id_val,
@@ -875,7 +944,9 @@ impl ProfileRepository for MongoDB {
             doc! { "$sort": { "_sortDate": -1 } },
         ];
 
-        let mut cursor = self.db.collection::<Document>("ClientStatusHistory")
+        let mut cursor = self
+            .db
+            .collection::<Document>("ClientStatusHistory")
             .aggregate(pipeline)
             .await
             .map_err(|e| e.to_string())?;
@@ -883,7 +954,8 @@ impl ProfileRepository for MongoDB {
         let mut results = Vec::new();
         while let Some(Ok(doc)) = cursor.next().await {
             let actor_name = doc
-                .get_array("actor").ok()
+                .get_array("actor")
+                .ok()
                 .and_then(|arr| arr.first())
                 .and_then(|v| v.as_document())
                 .and_then(|d| d.get_str("sName").ok())
@@ -891,10 +963,19 @@ impl ProfileRepository for MongoDB {
                 .unwrap_or_default();
 
             let item = ClientStatusHistoryItem {
-                id: doc.get_object_id("_id").map(|o| o.to_hex()).unwrap_or_default(),
-                client_id: doc.get_object_id("idClient").map(|o| o.to_hex()).unwrap_or_default(),
+                id: doc
+                    .get_object_id("_id")
+                    .map(|o| o.to_hex())
+                    .unwrap_or_default(),
+                client_id: doc
+                    .get_object_id("idClient")
+                    .map(|o| o.to_hex())
+                    .unwrap_or_default(),
                 state: doc.get_str("sState").unwrap_or_default().to_string(),
-                previous_state: doc.get_str("sPreviousState").unwrap_or_default().to_string(),
+                previous_state: doc
+                    .get_str("sPreviousState")
+                    .unwrap_or_default()
+                    .to_string(),
                 actor_name,
                 created_at: doc.get_str("dCreation").unwrap_or_default().to_string(),
             };
@@ -967,10 +1048,15 @@ impl ProfileRepository for MongoDB {
                 Err(_) => continue,
             };
             // Identification: sDni con `V-` preferido; fallback sRif con su prefijo.
-            let identification = doc.get_str("sDni").ok().filter(|s| !s.is_empty())
+            let identification = doc
+                .get_str("sDni")
+                .ok()
+                .filter(|s| !s.is_empty())
                 .map(|v| format_dni(v, "sDni"))
                 .or_else(|| {
-                    doc.get_str("sRif").ok().filter(|s| !s.is_empty())
+                    doc.get_str("sRif")
+                        .ok()
+                        .filter(|s| !s.is_empty())
                         .map(|v| format_dni(v, "sRif"))
                 });
             // Balance: get_bson_amount maneja int/double/decimal128 sin pérdida.
@@ -978,7 +1064,11 @@ impl ProfileRepository for MongoDB {
 
             out.push(AiClientLookup {
                 client_id: id_obj.to_hex(),
-                name: doc.get_str("sName").ok().filter(|s| !s.is_empty()).map(str::to_string),
+                name: doc
+                    .get_str("sName")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
                 identification,
                 phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
                 status: doc.get_str("sState").unwrap_or_default().to_string(),

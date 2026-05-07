@@ -6,11 +6,7 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::{
-    auth::user_jwt::UserJwtService,
-    db::UserRepository,
-    state::AppState,
-};
+use crate::{auth::user_jwt::UserJwtService, db::UserRepository, state::AppState};
 
 /// Rol sentinel para usuarios revocados: si `nRole == -1.0`, el user no puede
 /// autenticarse ni hacer requests, aunque tenga un JWT vivo. Diferente de

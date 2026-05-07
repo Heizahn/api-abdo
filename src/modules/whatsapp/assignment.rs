@@ -40,7 +40,10 @@ pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents
     }
 
     if agents.is_empty() {
-        tracing::warn!("[assignment] lista de agentes vacía para conv {}", conv_id_str);
+        tracing::warn!(
+            "[assignment] lista de agentes vacía para conv {}",
+            conv_id_str
+        );
         return;
     }
 
@@ -76,19 +79,22 @@ pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents
     }
 
     // Elegir el menos ocupado entre los candidatos
-    let (chosen_agent, _) = loads
-        .iter()
-        .min_by_key(|(_, load)| *load)
-        .cloned()
-        .unwrap();
+    let (chosen_agent, _) = loads.iter().min_by_key(|(_, load)| *load).cloned().unwrap();
 
     tracing::info!(
         "[assignment] asignando conv {} a agente {} (online_filter={}, cargas: {:?})",
-        conv_id_str, chosen_agent, used_online_filter, loads
+        conv_id_str,
+        chosen_agent,
+        used_online_filter,
+        loads
     );
 
     // Actualizar MongoDB
-    if let Err(e) = state.db.assign_conversation(&conv_id, Some(&chosen_agent)).await {
+    if let Err(e) = state
+        .db
+        .assign_conversation(&conv_id, Some(&chosen_agent))
+        .await
+    {
         tracing::error!("[assignment] error actualizando MongoDB: {}", e);
         return;
     }

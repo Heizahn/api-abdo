@@ -44,24 +44,40 @@ pub fn validate_quick_reply(qr: &ValidatedQuickReply<'_>) -> Result<(), ApiError
     // --- title ---
     let title_len = qr.title.chars().count();
     if title_len < 1 || title_len > 100 {
-        return Err(err("quick_reply_title_length", "title", "El título debe tener entre 1 y 100 caracteres"));
+        return Err(err(
+            "quick_reply_title_length",
+            "title",
+            "El título debe tener entre 1 y 100 caracteres",
+        ));
     }
 
     // --- content ---
     let content_len = qr.content.chars().count();
     if content_len < 1 || content_len > 1024 {
-        return Err(err("quick_reply_content_length", "content", "El contenido debe tener entre 1 y 1024 caracteres"));
+        return Err(err(
+            "quick_reply_content_length",
+            "content",
+            "El contenido debe tener entre 1 y 1024 caracteres",
+        ));
     }
 
     // --- workspace_ids ---
     if qr.workspace_ids_len == 0 {
-        return Err(err("quick_reply_workspace_required", "workspace_ids", "Debe seleccionar al menos un workspace"));
+        return Err(err(
+            "quick_reply_workspace_required",
+            "workspace_ids",
+            "Debe seleccionar al menos un workspace",
+        ));
     }
 
     // --- footer ---
     if let Some(f) = qr.footer {
         if f.chars().count() > 60 {
-            return Err(err("quick_reply_footer_length", "footer", "El footer no puede superar 60 caracteres"));
+            return Err(err(
+                "quick_reply_footer_length",
+                "footer",
+                "El footer no puede superar 60 caracteres",
+            ));
         }
     }
 
@@ -71,26 +87,46 @@ pub fn validate_quick_reply(qr: &ValidatedQuickReply<'_>) -> Result<(), ApiError
             QuickReplyHeader::Text { text } => {
                 let len = text.chars().count();
                 if len < 1 || len > 60 {
-                    return Err(err("quick_reply_header_text_length", "header.text", "El texto del header debe tener entre 1 y 60 caracteres"));
+                    return Err(err(
+                        "quick_reply_header_text_length",
+                        "header.text",
+                        "El texto del header debe tener entre 1 y 60 caracteres",
+                    ));
                 }
             }
             QuickReplyHeader::Image { link } => {
                 if !is_http_url(link) {
-                    return Err(err("quick_reply_header_link_invalid", "header.link", "El link del header debe ser una URL http(s)"));
+                    return Err(err(
+                        "quick_reply_header_link_invalid",
+                        "header.link",
+                        "El link del header debe ser una URL http(s)",
+                    ));
                 }
             }
             QuickReplyHeader::Video { link } => {
                 if !is_http_url(link) {
-                    return Err(err("quick_reply_header_link_invalid", "header.link", "El link del header debe ser una URL http(s)"));
+                    return Err(err(
+                        "quick_reply_header_link_invalid",
+                        "header.link",
+                        "El link del header debe ser una URL http(s)",
+                    ));
                 }
             }
             QuickReplyHeader::Document { link, filename } => {
                 if !is_http_url(link) {
-                    return Err(err("quick_reply_header_link_invalid", "header.link", "El link del header debe ser una URL http(s)"));
+                    return Err(err(
+                        "quick_reply_header_link_invalid",
+                        "header.link",
+                        "El link del header debe ser una URL http(s)",
+                    ));
                 }
                 if let Some(name) = filename {
                     if name.chars().count() > 255 {
-                        return Err(err("quick_reply_header_filename_length", "header.filename", "El nombre de archivo no puede superar 255 caracteres"));
+                        return Err(err(
+                            "quick_reply_header_filename_length",
+                            "header.filename",
+                            "El nombre de archivo no puede superar 255 caracteres",
+                        ));
                     }
                 }
             }
@@ -98,10 +134,14 @@ pub fn validate_quick_reply(qr: &ValidatedQuickReply<'_>) -> Result<(), ApiError
     }
 
     // --- mutual exclusivity: buttons / list / cta_url ---
-    let interactive_count = [qr.buttons.is_some(), qr.list.is_some(), qr.cta_url.is_some()]
-        .iter()
-        .filter(|x| **x)
-        .count();
+    let interactive_count = [
+        qr.buttons.is_some(),
+        qr.list.is_some(),
+        qr.cta_url.is_some(),
+    ]
+    .iter()
+    .filter(|x| **x)
+    .count();
     if interactive_count > 1 {
         return Err(err(
             "quick_reply_interactive_exclusive",
@@ -113,7 +153,11 @@ pub fn validate_quick_reply(qr: &ValidatedQuickReply<'_>) -> Result<(), ApiError
     // --- buttons ---
     if let Some(btns) = qr.buttons {
         if btns.is_empty() || btns.len() > 3 {
-            return Err(err("quick_reply_buttons_count", "buttons", "Debe haber entre 1 y 3 botones"));
+            return Err(err(
+                "quick_reply_buttons_count",
+                "buttons",
+                "Debe haber entre 1 y 3 botones",
+            ));
         }
         let mut seen = HashSet::new();
         for (i, b) in btns.iter().enumerate() {
@@ -147,10 +191,18 @@ pub fn validate_quick_reply(qr: &ValidatedQuickReply<'_>) -> Result<(), ApiError
     if let Some(l) = qr.list {
         let btn_len = l.button.chars().count();
         if btn_len < 1 || btn_len > 20 {
-            return Err(err("quick_reply_list_button_length", "list.button", "El botón de la lista debe tener entre 1 y 20 caracteres"));
+            return Err(err(
+                "quick_reply_list_button_length",
+                "list.button",
+                "El botón de la lista debe tener entre 1 y 20 caracteres",
+            ));
         }
         if l.sections.is_empty() || l.sections.len() > 10 {
-            return Err(err("quick_reply_list_sections_count", "list.sections", "Debe haber entre 1 y 10 secciones"));
+            return Err(err(
+                "quick_reply_list_sections_count",
+                "list.sections",
+                "Debe haber entre 1 y 10 secciones",
+            ));
         }
         let mut total_rows = 0usize;
         let mut seen_row_ids = HashSet::new();
@@ -207,7 +259,11 @@ pub fn validate_quick_reply(qr: &ValidatedQuickReply<'_>) -> Result<(), ApiError
             }
         }
         if total_rows > 10 {
-            return Err(err("quick_reply_list_rows_total", "list", "La lista no puede tener más de 10 filas en total"));
+            return Err(err(
+                "quick_reply_list_rows_total",
+                "list",
+                "La lista no puede tener más de 10 filas en total",
+            ));
         }
     }
 
@@ -215,10 +271,18 @@ pub fn validate_quick_reply(qr: &ValidatedQuickReply<'_>) -> Result<(), ApiError
     if let Some(c) = qr.cta_url {
         let dt_len = c.display_text.chars().count();
         if dt_len < 1 || dt_len > 20 {
-            return Err(err("quick_reply_cta_display_text_length", "cta_url.display_text", "El texto del botón debe tener entre 1 y 20 caracteres"));
+            return Err(err(
+                "quick_reply_cta_display_text_length",
+                "cta_url.display_text",
+                "El texto del botón debe tener entre 1 y 20 caracteres",
+            ));
         }
         if !is_http_url(&c.url) {
-            return Err(err("quick_reply_cta_url_invalid", "cta_url.url", "La URL del CTA debe ser http(s)"));
+            return Err(err(
+                "quick_reply_cta_url_invalid",
+                "cta_url.url",
+                "La URL del CTA debe ser http(s)",
+            ));
         }
     }
 

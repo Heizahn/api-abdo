@@ -1,6 +1,6 @@
+use ssh2::Session;
 use std::io::Read;
 use std::net::TcpStream;
-use ssh2::Session;
 use tracing::{debug, error, warn};
 
 pub fn get_ip_pppoe_mk(
@@ -11,7 +11,10 @@ pub fn get_ip_pppoe_mk(
     pass: &str,
 ) -> Result<String, String> {
     if sn.len() < 8 {
-        let msg = format!("SN '{}' demasiado corto (mínimo 8 caracteres), búsqueda omitida", sn);
+        let msg = format!(
+            "SN '{}' demasiado corto (mínimo 8 caracteres), búsqueda omitida",
+            sn
+        );
         warn!(target: "api_abdo::mikrotik", "{}", msg);
         return Err(msg);
     }
@@ -96,7 +99,10 @@ pub fn get_ip_pppoe_mk(
         debug!(target: "api_abdo::mikrotik", "SN {} localizado exitosamente con IP {}", sn, ip_result);
         Ok(ip_result.to_string())
     } else {
-        let msg = format!("El router {} devolvió datos corruptos o inesperados: {}", ip, ip_result);
+        let msg = format!(
+            "El router {} devolvió datos corruptos o inesperados: {}",
+            ip, ip_result
+        );
         error!(target: "api_abdo::mikrotik", "{}", msg);
         Err(msg)
     }

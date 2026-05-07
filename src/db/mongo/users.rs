@@ -79,10 +79,7 @@ impl UserRepository for MongoDB {
         // LB4 uses string IDs (UUIDs)
         let filter = doc! { "_id": id };
 
-        collection
-            .find_one(filter)
-            .await
-            .map_err(|e| e.to_string())
+        collection.find_one(filter).await.map_err(|e| e.to_string())
     }
 
     async fn create_user(&self, user: User) -> Result<(), String> {
@@ -190,43 +187,39 @@ impl UserRepository for MongoDB {
             // - Si el role actual es -1 (desactivado), restauramos desde
             //   `nRolePrev` (o 1.0 si no existe) y borramos `nRolePrev`.
             // - Si ya estaba activo (role != -1), no tocamos role ni nRolePrev.
-            vec![
-                doc! { "$set": {
-                    "visible": true,
-                    "nRole": {
-                        "$cond": {
-                            "if": { "$eq": ["$nRole", -1.0] },
-                            "then": { "$ifNull": ["$nRolePrev", 1.0] },
-                            "else": "$nRole",
-                        }
-                    },
-                    "nRolePrev": {
-                        "$cond": {
-                            "if": { "$eq": ["$nRole", -1.0] },
-                            "then": "$$REMOVE",
-                            "else": "$nRolePrev",
-                        }
-                    },
-                } },
-            ]
+            vec![doc! { "$set": {
+                "visible": true,
+                "nRole": {
+                    "$cond": {
+                        "if": { "$eq": ["$nRole", -1.0] },
+                        "then": { "$ifNull": ["$nRolePrev", 1.0] },
+                        "else": "$nRole",
+                    }
+                },
+                "nRolePrev": {
+                    "$cond": {
+                        "if": { "$eq": ["$nRole", -1.0] },
+                        "then": "$$REMOVE",
+                        "else": "$nRolePrev",
+                    }
+                },
+            } }]
         } else {
             // DESACTIVAR:
             // - Si el role actual NO es -1, guardamos el role en `nRolePrev`
             //   y seteamos role a -1 (sin acceso).
             // - Si ya era -1 (idempotente), conservamos el `nRolePrev` previo.
-            vec![
-                doc! { "$set": {
-                    "visible": false,
-                    "nRolePrev": {
-                        "$cond": {
-                            "if": { "$ne": ["$nRole", -1.0] },
-                            "then": "$nRole",
-                            "else": "$nRolePrev",
-                        }
-                    },
-                    "nRole": -1.0,
-                } },
-            ]
+            vec![doc! { "$set": {
+                "visible": false,
+                "nRolePrev": {
+                    "$cond": {
+                        "if": { "$ne": ["$nRole", -1.0] },
+                        "then": "$nRole",
+                        "else": "$nRolePrev",
+                    }
+                },
+                "nRole": -1.0,
+            } }]
         };
 
         let res = collection
@@ -236,7 +229,11 @@ impl UserRepository for MongoDB {
         Ok(res.matched_count > 0)
     }
 
-    async fn update_user_password(&self, user_id: &str, password_hash: &str) -> Result<bool, String> {
+    async fn update_user_password(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+    ) -> Result<bool, String> {
         let users: Collection<User> = self.db.collection("Users");
         // `count_documents` evita deserializar el User (una projection `_id: 1`
         // sobre una Collection tipada falla pidiendo los campos obligatorios).
@@ -265,11 +262,21 @@ impl UserRepository for MongoDB {
     async fn update_user(&self, id: &str, patch: UpdateUserPatch) -> Result<bool, String> {
         let collection: Collection<User> = self.db.collection("Users");
         let mut set = Document::new();
-        if let Some(n) = patch.name { set.insert("sName", n); }
-        if let Some(e) = patch.email { set.insert("email", e); }
-        if let Some(r) = patch.role { set.insert("nRole", r as f64); }
-        if let Some(c) = patch.can_chat { set.insert("bCanChat", c); }
-        if let Some(t) = patch.tag { set.insert("nTag", t as i64); }
+        if let Some(n) = patch.name {
+            set.insert("sName", n);
+        }
+        if let Some(e) = patch.email {
+            set.insert("email", e);
+        }
+        if let Some(r) = patch.role {
+            set.insert("nRole", r as f64);
+        }
+        if let Some(c) = patch.can_chat {
+            set.insert("bCanChat", c);
+        }
+        if let Some(t) = patch.tag {
+            set.insert("nTag", t as i64);
+        }
 
         // Si el patch vino vacío, evitamos round-trip de update y sólo
         // chequeamos existencia (sin deserializar el User con una projection
@@ -334,11 +341,19 @@ impl UserRepository for MongoDB {
         match or_groups.len() {
             0 => {}
             1 => {
-                q.insert("$or", or_groups.pop().unwrap()
-                    .into_iter().map(Bson::Document).collect::<Vec<_>>());
+                q.insert(
+                    "$or",
+                    or_groups
+                        .pop()
+                        .unwrap()
+                        .into_iter()
+                        .map(Bson::Document)
+                        .collect::<Vec<_>>(),
+                );
             }
             _ => {
-                let and_arr: Vec<Bson> = or_groups.into_iter()
+                let and_arr: Vec<Bson> = or_groups
+                    .into_iter()
                     .map(|g| {
                         let mut d = Document::new();
                         d.insert("$or", g.into_iter().map(Bson::Document).collect::<Vec<_>>());

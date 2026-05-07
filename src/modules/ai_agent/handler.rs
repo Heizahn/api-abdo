@@ -29,19 +29,21 @@ use std::sync::Arc;
 
 use crate::{
     crypto::aes::encrypt_payload,
-    db::{AiAgentRepository, AiConfigRepository, MetricsGranularity, UserRepository, WhatsAppRepository},
+    db::{
+        AiAgentRepository, AiConfigRepository, MetricsGranularity, UserRepository,
+        WhatsAppRepository,
+    },
     error::ApiError,
     models::{
         ai_agent::{
             AiAgent, AiAgentDeleteResponse, AiAgentFaq, AiAgentFaqItem, AiAgentFaqListResponse,
-            AiAgentFaqResponse, AiAgentItem, AiAgentMetricsData, AiAgentMetricsDailyBucketDto,
+            AiAgentFaqResponse, AiAgentItem, AiAgentMetricsDailyBucketDto, AiAgentMetricsData,
             AiAgentMetricsResponse, AiAgentMode, AiAgentModelItem, AiAgentModelsListResponse,
             AiAgentPreClassBreakdown, AiAgentResponse, AiAgentsListResponse, AiConfigDto,
-            AiConfigPatchRequest, AiConfigResponse, AiEscalationRules,
-            AiLimits, AiModelConfig, AiPersonality, AiSchedule, AiToolConfig,
-            CreateAiAgentFaqRequest, CreateAiAgentRequest, TestConnectionData,
-            TestConnectionRequest, TestConnectionResponse, TestConnectionSource,
-            UpdateAiAgentFaqRequest, UpdateAiAgentRequest,
+            AiConfigPatchRequest, AiConfigResponse, AiEscalationRules, AiLimits, AiModelConfig,
+            AiPersonality, AiSchedule, AiToolConfig, CreateAiAgentFaqRequest, CreateAiAgentRequest,
+            TestConnectionData, TestConnectionRequest, TestConnectionResponse,
+            TestConnectionSource, UpdateAiAgentFaqRequest, UpdateAiAgentRequest,
         },
         users::User,
     },
@@ -51,7 +53,7 @@ use crate::{
 use super::{
     ai_agent_secret,
     config_resolver::resolve_ai_api_key,
-    openrouter::{AiRelay, OpenRouterClient, resolve_base_url},
+    openrouter::{resolve_base_url, AiRelay, OpenRouterClient},
 };
 
 const SUPERADMIN_ROLE: f32 = 0.0;
@@ -243,7 +245,12 @@ fn faq_not_found() -> ApiError {
 // Defaults
 // ============================================
 
-fn default_agent(label: String, description: String, ai_user_id: String, now: BsonDateTime) -> AiAgent {
+fn default_agent(
+    label: String,
+    description: String,
+    ai_user_id: String,
+    now: BsonDateTime,
+) -> AiAgent {
     AiAgent {
         id: None,
         label,
@@ -284,16 +291,56 @@ fn default_agent(label: String, description: String, ai_user_id: String, now: Bs
         },
         system_prompt: String::new(),
         tools: vec![
-            AiToolConfig { name: "lookup_customer".into(),   enabled: true,  description_override: None, config: None },
-            AiToolConfig { name: "get_invoices".into(),      enabled: true,  description_override: None, config: None },
-            AiToolConfig { name: "request_human".into(),     enabled: true,  description_override: None, config: None },
-            AiToolConfig { name: "create_ticket".into(),     enabled: true,  description_override: None, config: None },
-            AiToolConfig { name: "transfer_to_agent".into(), enabled: false, description_override: None, config: None },
-            AiToolConfig { name: "list_plans".into(),        enabled: false, description_override: None, config: None },
-            AiToolConfig { name: "check_coverage".into(),    enabled: false, description_override: None, config: None },
+            AiToolConfig {
+                name: "lookup_customer".into(),
+                enabled: true,
+                description_override: None,
+                config: None,
+            },
+            AiToolConfig {
+                name: "get_invoices".into(),
+                enabled: true,
+                description_override: None,
+                config: None,
+            },
+            AiToolConfig {
+                name: "request_human".into(),
+                enabled: true,
+                description_override: None,
+                config: None,
+            },
+            AiToolConfig {
+                name: "create_ticket".into(),
+                enabled: true,
+                description_override: None,
+                config: None,
+            },
+            AiToolConfig {
+                name: "transfer_to_agent".into(),
+                enabled: false,
+                description_override: None,
+                config: None,
+            },
+            AiToolConfig {
+                name: "list_plans".into(),
+                enabled: false,
+                description_override: None,
+                config: None,
+            },
+            AiToolConfig {
+                name: "check_coverage".into(),
+                enabled: false,
+                description_override: None,
+                config: None,
+            },
         ],
         escalation: AiEscalationRules {
-            keywords: vec!["humano".into(), "operador".into(), "queja".into(), "reclamo".into()],
+            keywords: vec![
+                "humano".into(),
+                "operador".into(),
+                "queja".into(),
+                "reclamo".into(),
+            ],
             max_turns_without_resolution: 3,
             qualification_window_turns: 0,
             max_identification_attempts: 2,
@@ -419,24 +466,30 @@ async fn validate_tools_config(
         return Ok(());
     }
 
-    let cfg = transfer.config.as_ref().ok_or_else(|| ApiError::ValidationError {
-        code: "transfer_targets_required".into(),
-        field: "tools.transfer_to_agent.config.allowed_targets".into(),
-        message: "Seleccioná al menos un agente destino para habilitar transfer_to_agent".into(),
-    })?;
+    let cfg = transfer
+        .config
+        .as_ref()
+        .ok_or_else(|| ApiError::ValidationError {
+            code: "transfer_targets_required".into(),
+            field: "tools.transfer_to_agent.config.allowed_targets".into(),
+            message: "Seleccioná al menos un agente destino para habilitar transfer_to_agent"
+                .into(),
+        })?;
     let arr = cfg
         .get("allowed_targets")
         .and_then(|v| v.as_array())
         .ok_or_else(|| ApiError::ValidationError {
             code: "transfer_targets_required".into(),
             field: "tools.transfer_to_agent.config.allowed_targets".into(),
-            message: "Seleccioná al menos un agente destino para habilitar transfer_to_agent".into(),
+            message: "Seleccioná al menos un agente destino para habilitar transfer_to_agent"
+                .into(),
         })?;
     if arr.is_empty() {
         return Err(ApiError::ValidationError {
             code: "transfer_targets_required".into(),
             field: "tools.transfer_to_agent.config.allowed_targets".into(),
-            message: "Seleccioná al menos un agente destino para habilitar transfer_to_agent".into(),
+            message: "Seleccioná al menos un agente destino para habilitar transfer_to_agent"
+                .into(),
         });
     }
 
@@ -470,8 +523,7 @@ async fn validate_tools_config(
         .await
         .map_err(ApiError::DatabaseError)?;
     if found.len() != target_oids.len() {
-        let found_set: std::collections::HashSet<_> =
-            found.iter().filter_map(|a| a.id).collect();
+        let found_set: std::collections::HashSet<_> = found.iter().filter_map(|a| a.id).collect();
         let missing: Vec<String> = target_oids
             .iter()
             .filter(|o| !found_set.contains(o))
@@ -629,13 +681,23 @@ pub async fn create_ai_agent_handler(
     let mut agent = default_agent(label, description, ai_user_id, now);
     agent.workspace_ids = workspace_oids;
 
-    if let Some(v) = body.is_receptionist { agent.is_receptionist = v; }
-    if let Some(v) = body.enabled { agent.enabled = v; }
-    if let Some(v) = body.mode { agent.mode = v; }
+    if let Some(v) = body.is_receptionist {
+        agent.is_receptionist = v;
+    }
+    if let Some(v) = body.enabled {
+        agent.enabled = v;
+    }
+    if let Some(v) = body.mode {
+        agent.mode = v;
+    }
     apply_schedule(&mut agent.schedule, body.schedule);
     // I1: api_key en body es deprecated. Emitir warn, ignorar y persistir vacío.
     if let Some(ref m) = body.model {
-        if m.api_key.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
+        if m.api_key
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+        {
             tracing::warn!(
                 "[ai_agent.handler] create: api_key en body está deprecada y es ignorada. \
                  Configurar la key global en PATCH /v1/auth-user/whatsapp/ai-agent/config"
@@ -646,7 +708,9 @@ pub async fn create_ai_agent_handler(
     // Forzar api_key_encrypted a vacío (ignoramos cualquier valor que apply_model haya seteado).
     agent.model.api_key_encrypted = String::new();
     apply_personality(&mut agent.personality, body.personality);
-    if let Some(sp) = body.system_prompt { agent.system_prompt = sp; }
+    if let Some(sp) = body.system_prompt {
+        agent.system_prompt = sp;
+    }
     if let Some(tools) = body.tools {
         agent.tools = tools
             .into_iter()
@@ -744,18 +808,35 @@ pub async fn update_ai_agent_handler(
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(agent_not_found)?;
 
-    if let Some(v) = body.label { agent.label = v.trim().to_string(); }
-    if let Some(v) = body.description { agent.description = v.trim().to_string(); }
-    if let Some(v) = body.is_receptionist { agent.is_receptionist = v; }
-    if let Some(v) = new_workspace_oids { agent.workspace_ids = v; }
-    if let Some(v) = body.enabled { agent.enabled = v; }
-    if let Some(v) = body.mode { agent.mode = v; }
+    if let Some(v) = body.label {
+        agent.label = v.trim().to_string();
+    }
+    if let Some(v) = body.description {
+        agent.description = v.trim().to_string();
+    }
+    if let Some(v) = body.is_receptionist {
+        agent.is_receptionist = v;
+    }
+    if let Some(v) = new_workspace_oids {
+        agent.workspace_ids = v;
+    }
+    if let Some(v) = body.enabled {
+        agent.enabled = v;
+    }
+    if let Some(v) = body.mode {
+        agent.mode = v;
+    }
     apply_schedule(&mut agent.schedule, body.schedule);
     // Strippear api_key del model input antes de apply_model (deprecada — se ignora).
-    let model_without_key = body.model.map(|mut m| { m.api_key = None; m });
+    let model_without_key = body.model.map(|mut m| {
+        m.api_key = None;
+        m
+    });
     apply_model(&mut agent.model, model_without_key)?;
     apply_personality(&mut agent.personality, body.personality);
-    if let Some(sp) = body.system_prompt { agent.system_prompt = sp; }
+    if let Some(sp) = body.system_prompt {
+        agent.system_prompt = sp;
+    }
     if let Some(tools) = body.tools {
         agent.tools = tools
             .into_iter()
@@ -828,11 +909,21 @@ pub async fn delete_ai_agent_handler(
 
 fn apply_schedule(cur: &mut AiSchedule, patch: Option<crate::models::ai_agent::AiScheduleInput>) {
     let Some(p) = patch else { return };
-    if let Some(v) = p.timezone { cur.timezone = v; }
-    if let Some(v) = p.always_on { cur.always_on = v; }
-    if let Some(v) = p.weekdays { cur.weekdays = v; }
-    if let Some(v) = p.from_hour { cur.from_hour = v; }
-    if let Some(v) = p.to_hour { cur.to_hour = v; }
+    if let Some(v) = p.timezone {
+        cur.timezone = v;
+    }
+    if let Some(v) = p.always_on {
+        cur.always_on = v;
+    }
+    if let Some(v) = p.weekdays {
+        cur.weekdays = v;
+    }
+    if let Some(v) = p.from_hour {
+        cur.from_hour = v;
+    }
+    if let Some(v) = p.to_hour {
+        cur.to_hour = v;
+    }
 }
 
 fn apply_model(
@@ -840,10 +931,18 @@ fn apply_model(
     patch: Option<crate::models::ai_agent::AiModelConfigInput>,
 ) -> Result<(), ApiError> {
     let Some(p) = patch else { return Ok(()) };
-    if let Some(v) = p.model_id { cur.model_id = v; }
-    if let Some(v) = p.temperature { cur.temperature = v; }
-    if let Some(v) = p.max_tokens { cur.max_tokens = v; }
-    if let Some(v) = p.timeout_seconds { cur.timeout_seconds = v; }
+    if let Some(v) = p.model_id {
+        cur.model_id = v;
+    }
+    if let Some(v) = p.temperature {
+        cur.temperature = v;
+    }
+    if let Some(v) = p.max_tokens {
+        cur.max_tokens = v;
+    }
+    if let Some(v) = p.timeout_seconds {
+        cur.timeout_seconds = v;
+    }
     if let Some(raw) = p.api_key.as_deref() {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
@@ -858,22 +957,42 @@ fn apply_personality(
     patch: Option<crate::models::ai_agent::AiPersonalityInput>,
 ) {
     let Some(p) = patch else { return };
-    if let Some(v) = p.assistant_name { cur.assistant_name = v; }
-    if let Some(v) = p.locale { cur.locale = v; }
-    if let Some(v) = p.tone { cur.tone = v; }
-    if let Some(v) = p.greeting { cur.greeting = v; }
-    if let Some(v) = p.farewell { cur.farewell = v; }
-    if let Some(v) = p.farewell_to_human { cur.farewell_to_human = v; }
-    if let Some(v) = p.forbidden_phrases { cur.forbidden_phrases = v; }
+    if let Some(v) = p.assistant_name {
+        cur.assistant_name = v;
+    }
+    if let Some(v) = p.locale {
+        cur.locale = v;
+    }
+    if let Some(v) = p.tone {
+        cur.tone = v;
+    }
+    if let Some(v) = p.greeting {
+        cur.greeting = v;
+    }
+    if let Some(v) = p.farewell {
+        cur.farewell = v;
+    }
+    if let Some(v) = p.farewell_to_human {
+        cur.farewell_to_human = v;
+    }
+    if let Some(v) = p.forbidden_phrases {
+        cur.forbidden_phrases = v;
+    }
 }
 
 fn apply_escalation(
     cur: &mut AiEscalationRules,
     patch: Option<crate::models::ai_agent::AiEscalationRulesInput>,
 ) -> Result<(), ApiError> {
-    let Some(p) = patch else { return Ok(()); };
-    if let Some(v) = p.keywords { cur.keywords = v; }
-    if let Some(v) = p.max_turns_without_resolution { cur.max_turns_without_resolution = v; }
+    let Some(p) = patch else {
+        return Ok(());
+    };
+    if let Some(v) = p.keywords {
+        cur.keywords = v;
+    }
+    if let Some(v) = p.max_turns_without_resolution {
+        cur.max_turns_without_resolution = v;
+    }
     if let Some(v) = p.qualification_window_turns {
         if v > 10 {
             tracing::warn!(
@@ -883,16 +1002,23 @@ fn apply_escalation(
             return Err(ApiError::domain_simple(
                 axum::http::StatusCode::BAD_REQUEST,
                 "qualification_window_turns_out_of_range",
-                format!("qualification_window_turns must be between 0 and 10, got {}", v),
+                format!(
+                    "qualification_window_turns must be between 0 and 10, got {}",
+                    v
+                ),
             ));
         }
         cur.qualification_window_turns = v;
     }
-    if let Some(v) = p.max_identification_attempts { cur.max_identification_attempts = v; }
+    if let Some(v) = p.max_identification_attempts {
+        cur.max_identification_attempts = v;
+    }
     if let Some(v) = p.escalate_on_critical_tool_failure {
         cur.escalate_on_critical_tool_failure = v;
     }
-    if let Some(v) = p.always_escalate_when_asked { cur.always_escalate_when_asked = v; }
+    if let Some(v) = p.always_escalate_when_asked {
+        cur.always_escalate_when_asked = v;
+    }
     if p.default_ticket_category_id.is_some() {
         cur.default_ticket_category_id = p.default_ticket_category_id;
     }
@@ -901,10 +1027,18 @@ fn apply_escalation(
 
 fn apply_limits(cur: &mut AiLimits, patch: Option<crate::models::ai_agent::AiLimitsInput>) {
     let Some(p) = patch else { return };
-    if let Some(v) = p.max_turns_per_day { cur.max_turns_per_day = v; }
-    if let Some(v) = p.max_turns_per_conversation { cur.max_turns_per_conversation = v; }
-    if let Some(v) = p.max_tokens_per_day { cur.max_tokens_per_day = v; }
-    if let Some(v) = p.cost_alert_threshold_pct { cur.cost_alert_threshold_pct = v; }
+    if let Some(v) = p.max_turns_per_day {
+        cur.max_turns_per_day = v;
+    }
+    if let Some(v) = p.max_turns_per_conversation {
+        cur.max_turns_per_conversation = v;
+    }
+    if let Some(v) = p.max_tokens_per_day {
+        cur.max_tokens_per_day = v;
+    }
+    if let Some(v) = p.cost_alert_threshold_pct {
+        cur.cost_alert_threshold_pct = v;
+    }
 }
 
 // ============================================
@@ -1197,7 +1331,11 @@ pub async fn test_connection_for_agent_handler(
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(agent_not_found)?;
 
-    let body_key = body.api_key.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let body_key = body
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let (api_key, source) = match body_key {
         Some(k) => (k.to_string(), TestConnectionSource::Body),
         None => (
@@ -1377,18 +1515,16 @@ pub async fn get_ai_agent_metrics_handler(
     // Spec 30.2: invalid_date_range cubre todos los problemas de fechas
     // (parse fail de from, parse fail de to, o from > to). Front recibe un
     // único code en vez de tres distintos.
-    let from_dt = parse_iso(&params.from)
-        .map_err(|_| ApiError::ValidationError {
-            code: "invalid_date_range".into(),
-            field: "from".into(),
-            message: "'from' inválido — usa ISO-8601 UTC (ej. 2026-05-01T00:00:00Z)".into(),
-        })?;
-    let to_dt = parse_iso(&params.to)
-        .map_err(|_| ApiError::ValidationError {
-            code: "invalid_date_range".into(),
-            field: "to".into(),
-            message: "'to' inválido — usa ISO-8601 UTC (ej. 2026-05-31T23:59:59Z)".into(),
-        })?;
+    let from_dt = parse_iso(&params.from).map_err(|_| ApiError::ValidationError {
+        code: "invalid_date_range".into(),
+        field: "from".into(),
+        message: "'from' inválido — usa ISO-8601 UTC (ej. 2026-05-01T00:00:00Z)".into(),
+    })?;
+    let to_dt = parse_iso(&params.to).map_err(|_| ApiError::ValidationError {
+        code: "invalid_date_range".into(),
+        field: "to".into(),
+        message: "'to' inválido — usa ISO-8601 UTC (ej. 2026-05-31T23:59:59Z)".into(),
+    })?;
     if to_dt < from_dt {
         return Err(ApiError::ValidationError {
             code: "invalid_date_range".into(),
@@ -1400,11 +1536,13 @@ pub async fn get_ai_agent_metrics_handler(
     let granularity = match params.granularity.as_deref() {
         Some("daily") => MetricsGranularity::Daily,
         Some("summary") | None => MetricsGranularity::Summary,
-        Some(_) => return Err(ApiError::ValidationError {
-            code: "invalid_granularity".into(),
-            field: "granularity".into(),
-            message: "Valor inválido. Usa 'summary' o 'daily'".into(),
-        }),
+        Some(_) => {
+            return Err(ApiError::ValidationError {
+                code: "invalid_granularity".into(),
+                field: "granularity".into(),
+                message: "Valor inválido. Usa 'summary' o 'daily'".into(),
+            })
+        }
     };
 
     // 404 si el agente no existe.
@@ -1416,7 +1554,7 @@ pub async fn get_ai_agent_metrics_handler(
         .ok_or_else(agent_not_found)?;
 
     let from_bson = mongodb::bson::DateTime::from_millis(from_dt.timestamp_millis());
-    let to_bson   = mongodb::bson::DateTime::from_millis(to_dt.timestamp_millis());
+    let to_bson = mongodb::bson::DateTime::from_millis(to_dt.timestamp_millis());
 
     let raw = state
         .db
@@ -1427,12 +1565,12 @@ pub async fn get_ai_agent_metrics_handler(
     // Mapear breakdown: HashMap<String, u64> → AiAgentPreClassBreakdown.
     let bd = &raw.pre_class_breakdown;
     let breakdown = AiAgentPreClassBreakdown {
-        spam:          *bd.get("Spam").unwrap_or(&0),
+        spam: *bd.get("Spam").unwrap_or(&0),
         greeting_only: *bd.get("GreetingOnly").unwrap_or(&0),
-        clear_ventas:  *bd.get("ClearVentas").unwrap_or(&0),
-        clear_pagos:   *bd.get("ClearPagos").unwrap_or(&0),
+        clear_ventas: *bd.get("ClearVentas").unwrap_or(&0),
+        clear_pagos: *bd.get("ClearPagos").unwrap_or(&0),
         clear_soporte: *bd.get("ClearSoporte").unwrap_or(&0),
-        ambiguous:     *bd.get("Ambiguous").unwrap_or(&0),
+        ambiguous: *bd.get("Ambiguous").unwrap_or(&0),
     };
 
     // Mapear daily buckets si los hay.
@@ -1521,7 +1659,10 @@ pub async fn get_ai_config_handler(
         }
     };
 
-    Ok(Json(AiConfigResponse { ok: true, data: dto }))
+    Ok(Json(AiConfigResponse {
+        ok: true,
+        data: dto,
+    }))
 }
 
 /// `PATCH /v1/auth-user/whatsapp/ai-agent/config`
@@ -1599,15 +1740,19 @@ pub async fn patch_ai_config_handler(
         .db
         .upsert_ai_config(api_key_cipher, model_to_set, &current_user.id)
         .await
-        .map_err(|_| ApiError::domain_simple(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            "Error guardando configuración",
-        ))?;
+        .map_err(|_| {
+            ApiError::domain_simple(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Error guardando configuración",
+            )
+        })?;
 
     // Invalidar cache para que el próximo dispatch lea la key fresca.
     state.redis.invalidate_ai_config_cache().await;
 
-    Ok(Json(AiConfigResponse { ok: true, data: updated.to_dto() }))
+    Ok(Json(AiConfigResponse {
+        ok: true,
+        data: updated.to_dto(),
+    }))
 }
-

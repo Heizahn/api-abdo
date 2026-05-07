@@ -1,22 +1,26 @@
 use async_trait::async_trait;
-use mongodb::bson::{doc, oid::ObjectId, DateTime, Document};
-use mongodb::options::{FindOptions, UpdateOptions};
-use mongodb::gridfs::GridFsBucket;
 use futures::TryStreamExt;
 use futures::{AsyncReadExt, AsyncWriteExt};
+use mongodb::bson::{doc, oid::ObjectId, DateTime, Document};
+use mongodb::gridfs::GridFsBucket;
+use mongodb::options::{FindOptions, UpdateOptions};
 
 use std::collections::HashMap;
 
-use crate::db::{
-    AuditFirstResponse, AuditLifecycleByDayBucket, AuditMessageFilter,
-    AuditMessagesByAgentBucket, AuditMessagesByDayBucket, AuditMessagesByTypeBucket,
-    AuditMessagesSummary, AuditMetricsFilter, ConversationAiPatch, ConversationTouch,
-    StoreTemplateMediaInput, TicketActionUpdate, TicketListFilter, UpdateQuickReplyPatch,
-    WaTemplateListFilter, WaTemplateMediaRepository, WaTemplateMediaRef, WaTemplateRepository,
-    WaTemplateUpdatePatch, WaTicketRepository, WhatsAppRepository,
-};
 use crate::db::mongo::MongoDB;
-use crate::models::whatsapp::{ConversationStats, UrlPreview, WaConversation, WaConversationAiState, WaConversationEvent, WaConversationEventInput, WaConversationOpen, WaMessage, WaPurposesPatch, WaQuickReply, WaSettings, WaTemplate, WaTemplateStatus, WaPurposeUsage, WaTicket};
+use crate::db::{
+    AuditFirstResponse, AuditLifecycleByDayBucket, AuditMessageFilter, AuditMessagesByAgentBucket,
+    AuditMessagesByDayBucket, AuditMessagesByTypeBucket, AuditMessagesSummary, AuditMetricsFilter,
+    ConversationAiPatch, ConversationTouch, StoreTemplateMediaInput, TicketActionUpdate,
+    TicketListFilter, UpdateQuickReplyPatch, WaTemplateListFilter, WaTemplateMediaRef,
+    WaTemplateMediaRepository, WaTemplateRepository, WaTemplateUpdatePatch, WaTicketRepository,
+    WhatsAppRepository,
+};
+use crate::models::whatsapp::{
+    ConversationStats, UrlPreview, WaConversation, WaConversationAiState, WaConversationEvent,
+    WaConversationEventInput, WaConversationOpen, WaMessage, WaPurposeUsage, WaPurposesPatch,
+    WaQuickReply, WaSettings, WaTemplate, WaTemplateStatus, WaTicket,
+};
 
 impl MongoDB {
     pub(crate) fn wa_conversations(&self) -> mongodb::Collection<WaConversation> {
@@ -32,11 +36,13 @@ impl MongoDB {
     }
 
     pub(crate) fn wa_conversation_opens(&self) -> mongodb::Collection<WaConversationOpen> {
-        self.db.collection::<WaConversationOpen>("WaConversationOpens")
+        self.db
+            .collection::<WaConversationOpen>("WaConversationOpens")
     }
 
     pub(crate) fn wa_conversation_events(&self) -> mongodb::Collection<WaConversationEvent> {
-        self.db.collection::<WaConversationEvent>("WaConversationEvents")
+        self.db
+            .collection::<WaConversationEvent>("WaConversationEvents")
     }
 
     pub(crate) fn wa_quick_replies(&self) -> mongodb::Collection<WaQuickReply> {
@@ -74,7 +80,10 @@ impl WhatsAppRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
-    async fn find_conversation_by_id(&self, id: &ObjectId) -> Result<Option<WaConversation>, String> {
+    async fn find_conversation_by_id(
+        &self,
+        id: &ObjectId,
+    ) -> Result<Option<WaConversation>, String> {
         self.wa_conversations()
             .find_one(doc! { "_id": id })
             .await
@@ -147,16 +156,28 @@ impl WhatsAppRepository for MongoDB {
         let mut unset_doc = Document::new();
 
         match touch.status {
-            Some(s) => { set_doc.insert("last_message_status", s); }
-            None    => { unset_doc.insert("last_message_status", ""); }
+            Some(s) => {
+                set_doc.insert("last_message_status", s);
+            }
+            None => {
+                unset_doc.insert("last_message_status", "");
+            }
         }
         match touch.from_user_id {
-            Some(u) => { set_doc.insert("last_message_from_user_id", u); }
-            None    => { unset_doc.insert("last_message_from_user_id", ""); }
+            Some(u) => {
+                set_doc.insert("last_message_from_user_id", u);
+            }
+            None => {
+                unset_doc.insert("last_message_from_user_id", "");
+            }
         }
         match touch.media_filename {
-            Some(f) => { set_doc.insert("last_message_media_filename", f); }
-            None    => { unset_doc.insert("last_message_media_filename", ""); }
+            Some(f) => {
+                set_doc.insert("last_message_media_filename", f);
+            }
+            None => {
+                unset_doc.insert("last_message_media_filename", "");
+            }
         }
 
         let mut update_doc = doc! {
@@ -181,7 +202,8 @@ impl WhatsAppRepository for MongoDB {
         wa_message_id: &str,
         status: &str,
     ) -> Result<bool, String> {
-        let res = self.wa_conversations()
+        let res = self
+            .wa_conversations()
             .update_one(
                 doc! { "_id": id, "last_message_wa_id": wa_message_id },
                 doc! { "$set": { "last_message_status": status } },
@@ -191,11 +213,7 @@ impl WhatsAppRepository for MongoDB {
         Ok(res.modified_count > 0)
     }
 
-    async fn update_last_inbound_at(
-        &self,
-        id: &ObjectId,
-        when: DateTime,
-    ) -> Result<(), String> {
+    async fn update_last_inbound_at(&self, id: &ObjectId, when: DateTime) -> Result<(), String> {
         // El inbound libera cualquier engagement throttle (131049) activo:
         // el cliente acaba de responder, así que Meta deja de rate-limitar.
         self.wa_conversations()
@@ -211,11 +229,7 @@ impl WhatsAppRepository for MongoDB {
         Ok(())
     }
 
-    async fn set_meta_throttle_until(
-        &self,
-        id: &ObjectId,
-        until: DateTime,
-    ) -> Result<(), String> {
+    async fn set_meta_throttle_until(&self, id: &ObjectId, until: DateTime) -> Result<(), String> {
         self.wa_conversations()
             .update_one(
                 doc! { "_id": id },
@@ -251,7 +265,10 @@ impl WhatsAppRepository for MongoDB {
             doc! { "$group": { "_id": "$conversation_id", "maxTs": { "$max": "$timestamp" } } },
         ];
 
-        let mut cursor = messages.aggregate(pipeline).await.map_err(|e| e.to_string())?;
+        let mut cursor = messages
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
 
         let mut updated: u64 = 0;
         while let Some(doc) = cursor.try_next().await.map_err(|e| e.to_string())? {
@@ -390,7 +407,11 @@ impl WhatsAppRepository for MongoDB {
                 .and_then(|arr| arr.first())
                 .and_then(|v| v.as_document())
                 .and_then(|d| d.get("n"))
-                .and_then(|v| v.as_i32().map(|n| n as u64).or_else(|| v.as_i64().map(|n| n as u64)))
+                .and_then(|v| {
+                    v.as_i32()
+                        .map(|n| n as u64)
+                        .or_else(|| v.as_i64().map(|n| n as u64))
+                })
                 .unwrap_or(0)
         };
 
@@ -467,7 +488,8 @@ impl WhatsAppRepository for MongoDB {
     async fn reopen_conversation(&self, id: &ObjectId) -> Result<bool, String> {
         // Al reabrir limpiamos también el estado IA: el receptionist vuelve a
         // entrar y reclasifica desde cero.
-        let res = self.wa_conversations()
+        let res = self
+            .wa_conversations()
             .update_one(
                 doc! { "_id": id, "status": "closed" },
                 doc! {
@@ -483,7 +505,10 @@ impl WhatsAppRepository for MongoDB {
             .await
             .map_err(|e| e.to_string())?;
         if res.modified_count > 0 {
-            tracing::info!("[ai_agent] ai_conv_state cleared on reopen conv={}", id.to_hex());
+            tracing::info!(
+                "[ai_agent] ai_conv_state cleared on reopen conv={}",
+                id.to_hex()
+            );
         }
         Ok(res.modified_count > 0)
     }
@@ -522,8 +547,12 @@ impl WhatsAppRepository for MongoDB {
         let mut unset = Document::new();
         if let Some(active) = patch.ai_active_agent_id {
             match active {
-                Some(oid) => { set.insert("ai_active_agent_id", *oid); }
-                None => { unset.insert("ai_active_agent_id", ""); }
+                Some(oid) => {
+                    set.insert("ai_active_agent_id", *oid);
+                }
+                None => {
+                    unset.insert("ai_active_agent_id", "");
+                }
             }
         }
         if let Some(d) = patch.ai_disabled {
@@ -531,8 +560,12 @@ impl WhatsAppRepository for MongoDB {
         }
         if let Some(ctx) = patch.ai_transfer_context {
             match ctx {
-                Some(s) => { set.insert("ai_transfer_context", s); }
-                None => { unset.insert("ai_transfer_context", ""); }
+                Some(s) => {
+                    set.insert("ai_transfer_context", s);
+                }
+                None => {
+                    unset.insert("ai_transfer_context", "");
+                }
             }
         }
         if set.is_empty() && unset.is_empty() {
@@ -545,7 +578,8 @@ impl WhatsAppRepository for MongoDB {
         if !unset.is_empty() {
             update.insert("$unset", unset);
         }
-        let res = self.wa_conversations()
+        let res = self
+            .wa_conversations()
             .update_one(doc! { "_id": id }, update)
             .await
             .map_err(|e| e.to_string())?;
@@ -596,8 +630,8 @@ impl WhatsAppRepository for MongoDB {
         id: &ObjectId,
         agent_id: &str,
     ) -> Result<Option<WaConversation>, String> {
-        use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
         use mongodb::options::UpdateModifications;
+        use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
         let opts = FindOneAndUpdateOptions::builder()
             .return_document(ReturnDocument::After)
             .build();
@@ -607,21 +641,20 @@ impl WhatsAppRepository for MongoDB {
         // - Si era `closed`:   asigna el agente y fuerza `status = "in_progress"`.
         // Idempotente: tomar mi propia conv `pending` devuelve el doc sin cambios.
         let filter = doc! { "_id": id, "status": { "$in": ["pending", "closed"] } };
-        let pipeline = vec![
-            doc! {
-                "$set": {
-                    "assigned_to": agent_id,
-                    "status": {
-                        "$cond": [
-                            { "$eq": ["$status", "closed"] },
-                            "in_progress",
-                            "$status"
-                        ]
-                    }
+        let pipeline = vec![doc! {
+            "$set": {
+                "assigned_to": agent_id,
+                "status": {
+                    "$cond": [
+                        { "$eq": ["$status", "closed"] },
+                        "in_progress",
+                        "$status"
+                    ]
                 }
             }
-        ];
-        let res = self.wa_conversations()
+        }];
+        let res = self
+            .wa_conversations()
             .find_one_and_update(filter, UpdateModifications::Pipeline(pipeline))
             .with_options(opts)
             .await
@@ -668,7 +701,8 @@ impl WhatsAppRepository for MongoDB {
             .build();
 
         let mut ids = Vec::new();
-        let mut cursor = self.db
+        let mut cursor = self
+            .db
             .collection::<MsgIdProj>("WaMessages")
             .find(filter.clone())
             .with_options(projection)
@@ -769,25 +803,30 @@ impl WhatsAppRepository for MongoDB {
         if wa_ids.is_empty() {
             return Ok(HashMap::new());
         }
-        let cursor = self.wa_messages()
+        let cursor = self
+            .wa_messages()
             .find(doc! { "wa_message_id": { "$in": wa_ids } })
             .await
             .map_err(|e| e.to_string())?;
         let msgs: Vec<WaMessage> = cursor.try_collect().await.map_err(|e| e.to_string())?;
-        Ok(msgs.into_iter().map(|m| (m.wa_message_id.clone(), m)).collect())
+        Ok(msgs
+            .into_iter()
+            .map(|m| (m.wa_message_id.clone(), m))
+            .collect())
     }
 
-    async fn find_message_by_media_id(
-        &self,
-        media_id: &str,
-    ) -> Result<Option<WaMessage>, String> {
+    async fn find_message_by_media_id(&self, media_id: &str) -> Result<Option<WaMessage>, String> {
         self.wa_messages()
             .find_one(doc! { "media_id": media_id })
             .await
             .map_err(|e| e.to_string())
     }
 
-    async fn update_message_status(&self, wa_message_id: &str, status: &str) -> Result<Option<WaMessage>, String> {
+    async fn update_message_status(
+        &self,
+        wa_message_id: &str,
+        status: &str,
+    ) -> Result<Option<WaMessage>, String> {
         use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
         let opts = FindOneAndUpdateOptions::builder()
             .return_document(ReturnDocument::After)
@@ -816,7 +855,10 @@ impl WhatsAppRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
-    async fn get_workspace_names(&self, phones: &[String]) -> Result<HashMap<String, String>, String> {
+    async fn get_workspace_names(
+        &self,
+        phones: &[String],
+    ) -> Result<HashMap<String, String>, String> {
         if phones.is_empty() {
             return Ok(HashMap::new());
         }
@@ -829,7 +871,8 @@ impl WhatsAppRepository for MongoDB {
             workspace_name: String,
         }
 
-        let mut cursor = self.db
+        let mut cursor = self
+            .db
             .collection::<WorkspaceProj>("WaSettings")
             .find(doc! { "phone": { "$in": phones } })
             .with_options(
@@ -861,7 +904,8 @@ impl WhatsAppRepository for MongoDB {
     }
 
     async fn create_wa_settings(&self, settings: WaSettings) -> Result<WaSettings, String> {
-        let result = self.wa_settings()
+        let result = self
+            .wa_settings()
             .insert_one(&settings)
             .await
             .map_err(|e| e.to_string())?;
@@ -918,7 +962,9 @@ impl WhatsAppRepository for MongoDB {
             // OTP
             match p.otp {
                 None => {}
-                Some(None) => { unset_doc.insert("purposes.otp", ""); }
+                Some(None) => {
+                    unset_doc.insert("purposes.otp", "");
+                }
                 Some(Some(cfg)) => {
                     set_doc.insert(
                         "purposes.otp",
@@ -929,7 +975,9 @@ impl WhatsAppRepository for MongoDB {
             // Notifications
             match p.notifications {
                 None => {}
-                Some(None) => { unset_doc.insert("purposes.notifications", ""); }
+                Some(None) => {
+                    unset_doc.insert("purposes.notifications", "");
+                }
                 Some(Some(cfg)) => {
                     set_doc.insert(
                         "purposes.notifications",
@@ -940,7 +988,9 @@ impl WhatsAppRepository for MongoDB {
             // Payment reminder
             match p.payment_reminder {
                 None => {}
-                Some(None) => { unset_doc.insert("purposes.payment_reminder", ""); }
+                Some(None) => {
+                    unset_doc.insert("purposes.payment_reminder", "");
+                }
                 Some(Some(cfg)) => {
                     set_doc.insert(
                         "purposes.payment_reminder",
@@ -978,10 +1028,7 @@ impl WhatsAppRepository for MongoDB {
         Ok(())
     }
 
-    async fn find_wa_settings_for_purpose(
-        &self,
-        purpose: &str,
-    ) -> Result<Vec<WaSettings>, String> {
+    async fn find_wa_settings_for_purpose(&self, purpose: &str) -> Result<Vec<WaSettings>, String> {
         let field = match purpose {
             "otp" => "purposes.otp",
             "notifications" => "purposes.notifications",
@@ -1001,7 +1048,10 @@ impl WhatsAppRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
-    async fn find_wa_settings_by_phone_number_id(&self, phone_number_id: &str) -> Result<Option<WaSettings>, String> {
+    async fn find_wa_settings_by_phone_number_id(
+        &self,
+        phone_number_id: &str,
+    ) -> Result<Option<WaSettings>, String> {
         self.wa_settings()
             .find_one(doc! { "phone_number_id": phone_number_id })
             .await
@@ -1103,14 +1153,11 @@ impl WhatsAppRepository for MongoDB {
             #[serde(rename = "_id")]
             id: ObjectId,
         }
-        let mut cursor = self.db
+        let mut cursor = self
+            .db
             .collection::<IdOnly>("WaSettings")
             .find(doc! { "agents": user_id })
-            .with_options(
-                FindOptions::builder()
-                    .projection(doc! { "_id": 1 })
-                    .build(),
-            )
+            .with_options(FindOptions::builder().projection(doc! { "_id": 1 }).build())
             .await
             .map_err(|e| e.to_string())?;
         let mut out = Vec::new();
@@ -1124,7 +1171,8 @@ impl WhatsAppRepository for MongoDB {
         if ids.is_empty() {
             return Ok(false);
         }
-        let count = self.wa_settings()
+        let count = self
+            .wa_settings()
             .count_documents(doc! { "_id": { "$in": ids } })
             .await
             .map_err(|e| e.to_string())?;
@@ -1163,11 +1211,15 @@ impl WhatsAppRepository for MongoDB {
     }
 
     async fn create_quick_reply(&self, doc: WaQuickReply) -> Result<WaQuickReply, String> {
-        let result = self.wa_quick_replies()
+        let result = self
+            .wa_quick_replies()
             .insert_one(&doc)
             .await
             .map_err(|e| e.to_string())?;
-        let id = result.inserted_id.as_object_id().ok_or_else(|| "insert sin ObjectId".to_string())?;
+        let id = result
+            .inserted_id
+            .as_object_id()
+            .ok_or_else(|| "insert sin ObjectId".to_string())?;
         self.wa_quick_replies()
             .find_one(doc! { "_id": id })
             .await
@@ -1192,7 +1244,10 @@ impl WhatsAppRepository for MongoDB {
             set_doc.insert("content", c);
         }
         if let Some(ws) = patch.workspace_ids {
-            set_doc.insert("workspace_ids", mongodb::bson::to_bson(&ws).map_err(|e| e.to_string())?);
+            set_doc.insert(
+                "workspace_ids",
+                mongodb::bson::to_bson(&ws).map_err(|e| e.to_string())?,
+            );
         }
         if let Some(a) = patch.active {
             set_doc.insert("active", a);
@@ -1200,28 +1255,60 @@ impl WhatsAppRepository for MongoDB {
 
         // Campos nullable: Some(Some(v)) → $set, Some(None) → $unset, None → ignorar.
         match patch.header {
-            Some(Some(h)) => { set_doc.insert("header", mongodb::bson::to_bson(&h).map_err(|e| e.to_string())?); }
-            Some(None) => { unset_doc.insert("header", ""); }
+            Some(Some(h)) => {
+                set_doc.insert(
+                    "header",
+                    mongodb::bson::to_bson(&h).map_err(|e| e.to_string())?,
+                );
+            }
+            Some(None) => {
+                unset_doc.insert("header", "");
+            }
             None => {}
         }
         match patch.footer {
-            Some(Some(f)) => { set_doc.insert("footer", f); }
-            Some(None) => { unset_doc.insert("footer", ""); }
+            Some(Some(f)) => {
+                set_doc.insert("footer", f);
+            }
+            Some(None) => {
+                unset_doc.insert("footer", "");
+            }
             None => {}
         }
         match patch.buttons {
-            Some(Some(b)) => { set_doc.insert("buttons", mongodb::bson::to_bson(&b).map_err(|e| e.to_string())?); }
-            Some(None) => { unset_doc.insert("buttons", ""); }
+            Some(Some(b)) => {
+                set_doc.insert(
+                    "buttons",
+                    mongodb::bson::to_bson(&b).map_err(|e| e.to_string())?,
+                );
+            }
+            Some(None) => {
+                unset_doc.insert("buttons", "");
+            }
             None => {}
         }
         match patch.list {
-            Some(Some(l)) => { set_doc.insert("list", mongodb::bson::to_bson(&l).map_err(|e| e.to_string())?); }
-            Some(None) => { unset_doc.insert("list", ""); }
+            Some(Some(l)) => {
+                set_doc.insert(
+                    "list",
+                    mongodb::bson::to_bson(&l).map_err(|e| e.to_string())?,
+                );
+            }
+            Some(None) => {
+                unset_doc.insert("list", "");
+            }
             None => {}
         }
         match patch.cta_url {
-            Some(Some(c)) => { set_doc.insert("cta_url", mongodb::bson::to_bson(&c).map_err(|e| e.to_string())?); }
-            Some(None) => { unset_doc.insert("cta_url", ""); }
+            Some(Some(c)) => {
+                set_doc.insert(
+                    "cta_url",
+                    mongodb::bson::to_bson(&c).map_err(|e| e.to_string())?,
+                );
+            }
+            Some(None) => {
+                unset_doc.insert("cta_url", "");
+            }
             None => {}
         }
 
@@ -1271,7 +1358,8 @@ impl WhatsAppRepository for MongoDB {
     }
 
     async fn delete_quick_reply(&self, id: &ObjectId) -> Result<bool, String> {
-        let res = self.wa_quick_replies()
+        let res = self
+            .wa_quick_replies()
             .delete_one(doc! { "_id": id })
             .await
             .map_err(|e| e.to_string())?;
@@ -1359,10 +1447,7 @@ impl WhatsAppRepository for MongoDB {
             // Regex case-insensitive sobre `body` — escape básico de los
             // metacaracteres más comunes para evitar regex injection.
             let escaped = regex_escape(s);
-            q.insert(
-                "body",
-                doc! { "$regex": escaped, "$options": "i" },
-            );
+            q.insert("body", doc! { "$regex": escaped, "$options": "i" });
         }
 
         // Cursor descendente por (timestamp, _id).
@@ -1393,10 +1478,7 @@ impl WhatsAppRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
-    async fn audit_count_messages(
-        &self,
-        filter: &AuditMessageFilter<'_>,
-    ) -> Result<u64, String> {
+    async fn audit_count_messages(&self, filter: &AuditMessageFilter<'_>) -> Result<u64, String> {
         // Reusamos la misma lógica de armado de filtro que `audit_list_messages`,
         // pero ignoramos cursor/limit (no aplican para count).
         let mut q = Document::new();
@@ -1459,9 +1541,7 @@ impl WhatsAppRepository for MongoDB {
             id: ObjectId,
         }
 
-        let projection = FindOptions::builder()
-            .projection(doc! { "_id": 1 })
-            .build();
+        let projection = FindOptions::builder().projection(doc! { "_id": 1 }).build();
 
         let mut ids = Vec::new();
         let mut cursor = self
@@ -1529,13 +1609,19 @@ impl WhatsAppRepository for MongoDB {
             },
         ];
 
-        let mut cursor = self.wa_messages()
+        let mut cursor = self
+            .wa_messages()
             .aggregate(pipeline)
             .await
             .map_err(|e| e.to_string())?;
 
         let doc = cursor.try_next().await.map_err(|e| e.to_string())?;
-        let mut summary = AuditMessagesSummary { total: 0, inbound: 0, outbound: 0, distinct_conversations: 0 };
+        let mut summary = AuditMessagesSummary {
+            total: 0,
+            inbound: 0,
+            outbound: 0,
+            distinct_conversations: 0,
+        };
         if let Some(d) = doc {
             if let Ok(by_dir) = d.get_array("by_dir") {
                 for item in by_dir {
@@ -1580,7 +1666,8 @@ impl WhatsAppRepository for MongoDB {
             doc! { "$sort": { "_id.date": 1 } },
         ];
 
-        let mut cursor = self.wa_messages()
+        let mut cursor = self
+            .wa_messages()
             .aggregate(pipeline)
             .await
             .map_err(|e| e.to_string())?;
@@ -1591,11 +1678,13 @@ impl WhatsAppRepository for MongoDB {
             let date = id.get_str("date").unwrap_or_default().to_string();
             let dir = id.get_str("direction").unwrap_or_default().to_string();
             let n = read_count(&d, "n");
-            let entry = buckets.entry(date.clone()).or_insert_with(|| AuditMessagesByDayBucket {
-                date,
-                inbound: 0,
-                outbound: 0,
-            });
+            let entry = buckets
+                .entry(date.clone())
+                .or_insert_with(|| AuditMessagesByDayBucket {
+                    date,
+                    inbound: 0,
+                    outbound: 0,
+                });
             match dir.as_str() {
                 "in" => entry.inbound += n,
                 "out" => entry.outbound += n,
@@ -1639,7 +1728,8 @@ impl WhatsAppRepository for MongoDB {
             doc! { "$sort": { "messages_sent": -1 } },
         ];
 
-        let mut cursor = self.wa_messages()
+        let mut cursor = self
+            .wa_messages()
             .aggregate(pipeline)
             .await
             .map_err(|e| e.to_string())?;
@@ -1666,7 +1756,8 @@ impl WhatsAppRepository for MongoDB {
             doc! { "$sort": { "n": -1 } },
         ];
 
-        let mut cursor = self.wa_messages()
+        let mut cursor = self
+            .wa_messages()
             .aggregate(pipeline)
             .await
             .map_err(|e| e.to_string())?;
@@ -1718,7 +1809,8 @@ impl WhatsAppRepository for MongoDB {
             },
         ];
 
-        let mut cursor = self.wa_messages()
+        let mut cursor = self
+            .wa_messages()
             .aggregate(pipeline)
             .await
             .map_err(|e| e.to_string())?;
@@ -1813,7 +1905,8 @@ impl WhatsAppRepository for MongoDB {
             doc! { "$sort": { "_id.date": 1 } },
         ];
 
-        let mut cursor = self.wa_conversation_events()
+        let mut cursor = self
+            .wa_conversation_events()
             .aggregate(pipeline)
             .await
             .map_err(|e| e.to_string())?;
@@ -1824,11 +1917,13 @@ impl WhatsAppRepository for MongoDB {
             let date = id.get_str("date").unwrap_or_default().to_string();
             let etype = id.get_str("type").unwrap_or_default().to_string();
             let n = read_count(&d, "n");
-            let entry = buckets.entry(date.clone()).or_insert_with(|| AuditLifecycleByDayBucket {
-                date,
-                new_conversations: 0,
-                closed_conversations: 0,
-            });
+            let entry = buckets
+                .entry(date.clone())
+                .or_insert_with(|| AuditLifecycleByDayBucket {
+                    date,
+                    new_conversations: 0,
+                    closed_conversations: 0,
+                });
             match etype.as_str() {
                 "created" => entry.new_conversations += n,
                 "closed" => entry.closed_conversations += n,
@@ -1871,7 +1966,8 @@ impl WhatsAppRepository for MongoDB {
             },
         ];
 
-        let mut cursor = self.wa_conversation_events()
+        let mut cursor = self
+            .wa_conversation_events()
             .aggregate(pipeline)
             .await
             .map_err(|e| e.to_string())?;
@@ -1915,10 +2011,7 @@ impl WhatsAppRepository for MongoDB {
         let convs_col = self.wa_conversations();
         let events_col = self.wa_conversation_events();
 
-        let mut cursor = convs_col
-            .find(doc! {})
-            .await
-            .map_err(|e| e.to_string())?;
+        let mut cursor = convs_col.find(doc! {}).await.map_err(|e| e.to_string())?;
 
         let mut inserted: u64 = 0;
         while let Some(conv) = cursor.try_next().await.map_err(|e| e.to_string())? {
@@ -2035,7 +2128,8 @@ impl WaTemplateRepository for MongoDB {
         let col = self.wa_templates();
         match col.insert_one(&template).await {
             Ok(res) => {
-                let inserted_id = res.inserted_id
+                let inserted_id = res
+                    .inserted_id
                     .as_object_id()
                     .ok_or_else(|| "inserted_id is not ObjectId".to_string())?;
                 col.find_one(doc! { "_id": inserted_id })
@@ -2045,9 +2139,10 @@ impl WaTemplateRepository for MongoDB {
             }
             Err(e) => {
                 // Detectar violación de índice único (código 11000)
-                if let mongodb::error::ErrorKind::Write(
-                    mongodb::error::WriteFailure::WriteError(ref we)
-                ) = *e.kind {
+                if let mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
+                    ref we,
+                )) = *e.kind
+                {
                     if we.code == 11000 {
                         return Err("name_already_exists".into());
                     }
@@ -2138,7 +2233,11 @@ impl WaTemplateRepository for MongoDB {
                     .filter_map(|b| b.as_document().cloned())
                     .collect();
                 and_clauses.push(search_clause);
-                query.insert("$and", mongodb::bson::to_bson(&and_clauses).unwrap_or(mongodb::bson::Bson::Array(vec![])));
+                query.insert(
+                    "$and",
+                    mongodb::bson::to_bson(&and_clauses)
+                        .unwrap_or(mongodb::bson::Bson::Array(vec![])),
+                );
             }
         }
 
@@ -2159,7 +2258,11 @@ impl WaTemplateRepository for MongoDB {
                     .filter_map(|b| b.as_document().cloned())
                     .collect();
                 and_clauses.push(cursor_clause);
-                query.insert("$and", mongodb::bson::to_bson(&and_clauses).unwrap_or(mongodb::bson::Bson::Array(vec![])));
+                query.insert(
+                    "$and",
+                    mongodb::bson::to_bson(&and_clauses)
+                        .unwrap_or(mongodb::bson::Bson::Array(vec![])),
+                );
             }
         }
 
@@ -2224,14 +2327,22 @@ impl WaTemplateRepository for MongoDB {
 
         // Campos nullable (tri-state)
         match patch.rejection_reason {
-            Some(Some(r)) => { set_doc.insert("rejection_reason", r); }
-            Some(None)    => { unset_doc.insert("rejection_reason", ""); }
-            None          => {}
+            Some(Some(r)) => {
+                set_doc.insert("rejection_reason", r);
+            }
+            Some(None) => {
+                unset_doc.insert("rejection_reason", "");
+            }
+            None => {}
         }
         match patch.meta_template_id {
-            Some(Some(m)) => { set_doc.insert("meta_template_id", m); }
-            Some(None)    => { unset_doc.insert("meta_template_id", ""); }
-            None          => {}
+            Some(Some(m)) => {
+                set_doc.insert("meta_template_id", m);
+            }
+            Some(None) => {
+                unset_doc.insert("meta_template_id", "");
+            }
+            None => {}
         }
 
         let mut update = doc! { "$set": set_doc };
@@ -2259,7 +2370,8 @@ impl WaTemplateRepository for MongoDB {
         use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 
         // 1. Leer el doc actual para capturar el status previo
-        let existing = self.wa_templates()
+        let existing = self
+            .wa_templates()
             .find_one(doc! { "meta_template_id": meta_template_id })
             .await
             .map_err(|e| e.to_string())?;
@@ -2278,8 +2390,12 @@ impl WaTemplateRepository for MongoDB {
         let mut unset_doc = Document::new();
 
         match rejection_reason {
-            Some(r) => { set_doc.insert("rejection_reason", r); }
-            None    => { unset_doc.insert("rejection_reason", ""); }
+            Some(r) => {
+                set_doc.insert("rejection_reason", r);
+            }
+            None => {
+                unset_doc.insert("rejection_reason", "");
+            }
         }
 
         let mut update = doc! { "$set": set_doc };
@@ -2291,7 +2407,8 @@ impl WaTemplateRepository for MongoDB {
             .return_document(ReturnDocument::After)
             .build();
 
-        let updated = self.wa_templates()
+        let updated = self
+            .wa_templates()
             .find_one_and_update(doc! { "meta_template_id": meta_template_id }, update)
             .with_options(opts)
             .await
@@ -2301,7 +2418,8 @@ impl WaTemplateRepository for MongoDB {
     }
 
     async fn delete_template(&self, id: &ObjectId) -> Result<bool, String> {
-        let res = self.wa_templates()
+        let res = self
+            .wa_templates()
             .delete_one(doc! { "_id": id })
             .await
             .map_err(|e| e.to_string())?;
@@ -2314,7 +2432,8 @@ impl WaTemplateRepository for MongoDB {
         name: &str,
     ) -> Result<Vec<WaPurposeUsage>, String> {
         // Buscar el WaSettings del phone_number_id
-        let settings = self.wa_settings()
+        let settings = self
+            .wa_settings()
             .find_one(doc! { "phone_number_id": phone_number_id })
             .await
             .map_err(|e| e.to_string())?;
@@ -2361,7 +2480,10 @@ impl WaTemplateRepository for MongoDB {
 fn regex_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() * 2);
     for ch in s.chars() {
-        if matches!(ch, '\\' | '^' | '$' | '.' | '|' | '?' | '*' | '+' | '(' | ')' | '[' | ']' | '{' | '}') {
+        if matches!(
+            ch,
+            '\\' | '^' | '$' | '.' | '|' | '?' | '*' | '+' | '(' | ')' | '[' | ']' | '{' | '}'
+        ) {
             out.push('\\');
         }
         out.push(ch);
@@ -2460,18 +2582,15 @@ impl WaTemplateMediaRepository for MongoDB {
             .await
             .map_err(|e| format!("store_template_media write_all: {e}"))?;
 
-        stream
-            .close()
-            .await
-            .map_err(|e| {
-                // Race condition: duplicate key en índice único → re-query y devolver existente
-                let msg = e.to_string();
-                if msg.contains("11000") || msg.contains("duplicate key") {
-                    "store_template_media_duplicate_key".to_string()
-                } else {
-                    format!("store_template_media close: {e}")
-                }
-            })?;
+        stream.close().await.map_err(|e| {
+            // Race condition: duplicate key en índice único → re-query y devolver existente
+            let msg = e.to_string();
+            if msg.contains("11000") || msg.contains("duplicate key") {
+                "store_template_media_duplicate_key".to_string()
+            } else {
+                format!("store_template_media close: {e}")
+            }
+        })?;
 
         Ok(WaTemplateMediaRef {
             id: file_id,
@@ -2560,15 +2679,9 @@ impl WaTemplateMediaRepository for MongoDB {
         Ok(Some((bytes, mime_type)))
     }
 
-    async fn delete_template_media(
-        &self,
-        id: &ObjectId,
-    ) -> Result<bool, String> {
+    async fn delete_template_media(&self, id: &ObjectId) -> Result<bool, String> {
         let bucket = self.wa_template_media_bucket();
-        match bucket
-            .delete(mongodb::bson::Bson::ObjectId(*id))
-            .await
-        {
+        match bucket.delete(mongodb::bson::Bson::ObjectId(*id)).await {
             Ok(()) => Ok(true),
             Err(e) => {
                 let msg = e.to_string();
@@ -2635,10 +2748,7 @@ impl WaTicketRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
-    async fn list_tickets(
-        &self,
-        filter: TicketListFilter<'_>,
-    ) -> Result<Vec<WaTicket>, String> {
+    async fn list_tickets(&self, filter: TicketListFilter<'_>) -> Result<Vec<WaTicket>, String> {
         let mut q = Document::new();
 
         if let Some(s) = filter.status {
@@ -2650,19 +2760,23 @@ impl WaTicketRepository for MongoDB {
         // uno, filtramos por ese campo exacto.
         match (filter.assigned_to_id, filter.created_by_id) {
             (Some(a), Some(c)) if a == c => {
-                q.insert("$or", vec![
-                    doc! { "assigned_to_id": a },
-                    doc! { "created_by_id": c },
-                ]);
+                q.insert(
+                    "$or",
+                    vec![doc! { "assigned_to_id": a }, doc! { "created_by_id": c }],
+                );
             }
             (Some(a), Some(c)) => {
-                q.insert("$or", vec![
-                    doc! { "assigned_to_id": a },
-                    doc! { "created_by_id": c },
-                ]);
+                q.insert(
+                    "$or",
+                    vec![doc! { "assigned_to_id": a }, doc! { "created_by_id": c }],
+                );
             }
-            (Some(a), None) => { q.insert("assigned_to_id", a); }
-            (None, Some(c)) => { q.insert("created_by_id", c); }
+            (Some(a), None) => {
+                q.insert("assigned_to_id", a);
+            }
+            (None, Some(c)) => {
+                q.insert("created_by_id", c);
+            }
             (None, None) => {}
         }
 
@@ -2677,8 +2791,12 @@ impl WaTicketRepository for MongoDB {
         }
 
         let mut date_range = Document::new();
-        if let Some(f) = filter.from_date { date_range.insert("$gte", f); }
-        if let Some(t) = filter.to_date { date_range.insert("$lte", t); }
+        if let Some(f) = filter.from_date {
+            date_range.insert("$gte", f);
+        }
+        if let Some(t) = filter.to_date {
+            date_range.insert("$lte", t);
+        }
         if !date_range.is_empty() {
             q.insert("created_at", date_range);
         }
@@ -2686,10 +2804,13 @@ impl WaTicketRepository for MongoDB {
         if let Some(s) = filter.search.filter(|s| !s.is_empty()) {
             let escaped = regex_escape(s);
             // OR sobre `reason` y `resolution`.
-            q.insert("$or", vec![
-                doc! { "reason": { "$regex": &escaped, "$options": "i" } },
-                doc! { "resolution": { "$regex": &escaped, "$options": "i" } },
-            ]);
+            q.insert(
+                "$or",
+                vec![
+                    doc! { "reason": { "$regex": &escaped, "$options": "i" } },
+                    doc! { "resolution": { "$regex": &escaped, "$options": "i" } },
+                ],
+            );
         }
 
         if let Some(tags) = filter.tags.filter(|ts| !ts.is_empty()) {

@@ -167,7 +167,11 @@ pub struct WaConversation {
     /// Estado IA persistido de esta conversación. Se lee al inicio del dispatch
     /// y se escribe al final del chain. `None` en convs legacy o sin turno IA.
     /// Ver `WaConversationAiState`.
-    #[serde(rename = "aiConvState", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "aiConvState",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub ai_conv_state: Option<WaConversationAiState>,
 }
 
@@ -1132,6 +1136,17 @@ pub struct SettingsItem {
     pub active: bool,
     /// Propósitos configurados (OTP, notificaciones, recordatorios).
     pub purposes: WaPurposes,
+    /// Phase 1 — guardrails server-side para los agentes IA del workspace.
+    pub enable_guardrails: bool,
+    /// Phase 2 — persistencia de `ai_conv_state` para los agentes IA del workspace.
+    pub enable_conversation_state: bool,
+    /// Phase 3a — opt-in pre-classifier antes de Sofía.
+    pub pre_classifier_enabled: bool,
+    /// Phase 3a — plantillas de respuesta rápida (spam, greeting).
+    pub trivial_responses: Vec<TrivialResponse>,
+    /// ISO-8601 (RFC 3339) UTC. `None` si nunca se sincronizaron templates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub templates_synced_at: Option<String>,
     /// ISO-8601 (RFC 3339) UTC
     pub created_at: String,
     /// ISO-8601 (RFC 3339) UTC
@@ -1182,10 +1197,20 @@ pub struct TransferableAgentsResponse {
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum QuickReplyHeader {
-    Text { text: String },
-    Image { link: String },
-    Video { link: String },
-    Document { link: String, #[serde(default, skip_serializing_if = "Option::is_none")] filename: Option<String> },
+    Text {
+        text: String,
+    },
+    Image {
+        link: String,
+    },
+    Video {
+        link: String,
+    },
+    Document {
+        link: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+    },
 }
 
 /// Un botón de "reply button" (respuesta rápida). Máx 1..3 por mensaje.
@@ -1278,7 +1303,9 @@ pub struct WaQuickReply {
     pub last_used_at: Option<DateTime>,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct QuickReplyItem {

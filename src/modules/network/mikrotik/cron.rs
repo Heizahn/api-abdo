@@ -1,5 +1,5 @@
-use crate::db::OnuRepository;
 use super::{parser as mikrotik_parse_update, service as mikrotik_service};
+use crate::db::OnuRepository;
 use crate::state::AppState;
 use std::fs;
 use std::path::Path;

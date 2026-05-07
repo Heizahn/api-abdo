@@ -14,7 +14,6 @@ pub struct AccessClaims {
     pub jti: String,
 }
 
-
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefreshClaims {

@@ -208,9 +208,9 @@ impl RunnerOutput {
         // sumamos sus tokens y costo al registro del turno completo para que las
         // métricas sean exactas (un row = un turno inbound, incluyendo todo el
         // gasto del gate).
-        let pc_in    = pre_class.map_or(0u32, |p| p.tokens.input);
-        let pc_out   = pre_class.map_or(0u32, |p| p.tokens.output);
-        let pc_cost  = pre_class.map_or(0.0_f64, |p| {
+        let pc_in = pre_class.map_or(0u32, |p| p.tokens.input);
+        let pc_out = pre_class.map_or(0u32, |p| p.tokens.output);
+        let pc_cost = pre_class.map_or(0.0_f64, |p| {
             // Pre-classifier usando openai/gpt-4o-mini — costo trivial, no rastrear.
             crate::models::ai_agent::estimate_cost_usd(
                 "openai/gpt-4o-mini",
@@ -220,7 +220,7 @@ impl RunnerOutput {
                 0,
             )
         });
-        let pc_lat   = pre_class.map_or(0u32, |p| p.latency_ms);
+        let pc_lat = pre_class.map_or(0u32, |p| p.latency_ms);
 
         AiInteraction {
             id: None,
@@ -230,7 +230,7 @@ impl RunnerOutput {
             agent_id,
             turn_index,
             model_id: model_id.to_string(),
-            input_tokens:  self.input_tokens.saturating_add(pc_in),
+            input_tokens: self.input_tokens.saturating_add(pc_in),
             output_tokens: self.output_tokens.saturating_add(pc_out),
             cost_usd_estimate: self.cost_usd_estimate + pc_cost,
             latency_ms: self.latency_ms.saturating_add(pc_lat),
@@ -259,7 +259,7 @@ fn build_system_instruction(
     first_turn_note: Option<&str>,
     agent_state: Option<&str>,
     turn_state: Option<&str>,
-    conversation_state: Option<&str>,   // NEW — Phase 2
+    conversation_state: Option<&str>, // NEW — Phase 2
     vars: Option<&PromptVariables>,
 ) -> String {
     // El back solo pasa DATOS etiquetados — el SUPERADMIN decide el
@@ -400,7 +400,7 @@ pub async fn run_turn(
     first_turn_note: Option<&str>,
     agent_state: Option<&str>,
     turn_state: Option<&str>,
-    conversation_state: Option<&str>,   // NEW — Phase 2
+    conversation_state: Option<&str>, // NEW — Phase 2
     prompt_vars: Option<&PromptVariables>,
     tool_ctx: &ToolContext,
 ) -> Result<RunnerOutput, ApiError> {
@@ -413,7 +413,7 @@ pub async fn run_turn(
         first_turn_note,
         agent_state,
         turn_state,
-        conversation_state,  // NEW — Phase 2
+        conversation_state, // NEW — Phase 2
         prompt_vars,
     );
 
@@ -463,7 +463,9 @@ pub async fn run_turn(
     // Nuevo turno del usuario: texto + adjuntos.
     let mut user_blocks: Vec<ContentBlock> = Vec::new();
     if !user_message.trim().is_empty() {
-        user_blocks.push(ContentBlock::Text { text: user_message.to_string() });
+        user_blocks.push(ContentBlock::Text {
+            text: user_message.to_string(),
+        });
     }
     for m in user_media {
         user_blocks.push(m.to_content_block());
@@ -487,7 +489,11 @@ pub async fn run_turn(
 
     // Tools del agente.
     let tool_list = build_function_declarations(agent, &tool_ctx.transfer_target_labels);
-    let tools_option = if tool_list.is_empty() { None } else { Some(tool_list) };
+    let tools_option = if tool_list.is_empty() {
+        None
+    } else {
+        Some(tool_list)
+    };
     let tool_choice_option = tools_option.as_ref().map(|_| ToolChoice::Auto);
 
     // Construir el cliente OpenRouter.
@@ -563,7 +569,13 @@ pub async fn run_turn(
                 Some(MessageContent::Text(s)) => s,
                 Some(MessageContent::Blocks(blocks)) => blocks
                     .into_iter()
-                    .filter_map(|b| if let ContentBlock::Text { text } = b { Some(text) } else { None })
+                    .filter_map(|b| {
+                        if let ContentBlock::Text { text } = b {
+                            Some(text)
+                        } else {
+                            None
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(""),
                 None => String::new(),
@@ -582,7 +594,8 @@ pub async fn run_turn(
 
         // Ejecutar cada tool call y agregar mensaje {role:"tool"} por call.
         for tc in &tool_calls {
-            let is_escalation = tc.function.name == "request_human" || tc.function.name == "create_ticket";
+            let is_escalation =
+                tc.function.name == "request_human" || tc.function.name == "create_ticket";
 
             tracing::info!(
                 "[ai_agent.runner] tool_call: id={} name={} args={}",
@@ -597,14 +610,17 @@ pub async fn run_turn(
                 Err(e) => {
                     tracing::warn!(
                         "[ai_agent.runner] tool_call id={} args parse error: {} | raw='{}'",
-                        tc.id, e, tc.function.arguments
+                        tc.id,
+                        e,
+                        tc.function.arguments
                     );
                     serde_json::json!({ "error": "invalid_args", "details": e.to_string() })
                 }
             };
 
             // Detectar si es args de error — no ejecutar la tool en ese caso.
-            let result = if args_value.get("error").is_some() && args_value.get("details").is_some() {
+            let result = if args_value.get("error").is_some() && args_value.get("details").is_some()
+            {
                 // Args inválidos: devolver error como resultado sin llamar la tool.
                 super::tools::ToolResult {
                     success: false,
@@ -636,7 +652,10 @@ pub async fn run_turn(
                 );
                 state_patches_acc.push(crate::models::whatsapp::StatePatch::AddFailedAttempt {
                     tool: tc.function.name.clone(),
-                    error: result.error.clone().unwrap_or_else(|| "unknown_error".into()),
+                    error: result
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "unknown_error".into()),
                 });
             }
 
@@ -756,4 +775,3 @@ fn truncate_summary(value: &serde_json::Value) -> String {
         format!("{}…(truncated)", &s[..500])
     }
 }
-

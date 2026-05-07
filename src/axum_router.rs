@@ -12,7 +12,10 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
     middleware::{auth::jwt_auth_middleware, auth_user::user_jwt_auth_middleware, rate_limit},
-    modules::{ai_agent, api_utils, auth_client, auth_user, calculations, clients, dashboard, payments, profile, providers, receivables, users, whatsapp},
+    modules::{
+        ai_agent, api_utils, auth_client, auth_user, calculations, clients, dashboard, payments,
+        profile, providers, receivables, users, whatsapp,
+    },
     openapi::ApiDoc,
     state::AppState,
 };

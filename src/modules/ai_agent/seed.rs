@@ -30,42 +30,66 @@ const SEED_PLANS: &[SeedPlan] = &[
         name: "Conexión Esencial",
         mbps: 80,
         devices_recommendation: "1 a 3 dispositivos",
-        benefits: &["Internet ilimitado", "Router Wi-Fi incluido", "IPv6 público"],
+        benefits: &[
+            "Internet ilimitado",
+            "Router Wi-Fi incluido",
+            "IPv6 público",
+        ],
         display_order: 10,
     },
     SeedPlan {
         name: "Conexión Avanzada",
         mbps: 100,
         devices_recommendation: "6 a 8 dispositivos",
-        benefits: &["Internet ilimitado", "Router Wi-Fi incluido", "IPv6 público"],
+        benefits: &[
+            "Internet ilimitado",
+            "Router Wi-Fi incluido",
+            "IPv6 público",
+        ],
         display_order: 20,
     },
     SeedPlan {
         name: "Conexión Élite 120",
         mbps: 120,
         devices_recommendation: "Más de 10 dispositivos",
-        benefits: &["Internet ilimitado", "Router Wi-Fi incluido", "IPv6 público"],
+        benefits: &[
+            "Internet ilimitado",
+            "Router Wi-Fi incluido",
+            "IPv6 público",
+        ],
         display_order: 30,
     },
     SeedPlan {
         name: "Conexión Élite 250",
         mbps: 250,
         devices_recommendation: "Más de 10 dispositivos",
-        benefits: &["Internet ilimitado", "Router Wi-Fi incluido", "IPv6 público"],
+        benefits: &[
+            "Internet ilimitado",
+            "Router Wi-Fi incluido",
+            "IPv6 público",
+        ],
         display_order: 40,
     },
     SeedPlan {
         name: "Conexión Élite 500",
         mbps: 500,
         devices_recommendation: "Más de 10 dispositivos",
-        benefits: &["Internet ilimitado", "Router Wi-Fi incluido", "IPv6 público"],
+        benefits: &[
+            "Internet ilimitado",
+            "Router Wi-Fi incluido",
+            "IPv6 público",
+        ],
         display_order: 50,
     },
     SeedPlan {
         name: "Conexión Élite 1000",
         mbps: 1000,
         devices_recommendation: "Más de 10 dispositivos",
-        benefits: &["Internet ilimitado", "Router Wi-Fi incluido", "IPv6 público"],
+        benefits: &[
+            "Internet ilimitado",
+            "Router Wi-Fi incluido",
+            "IPv6 público",
+        ],
         display_order: 60,
     },
 ];
@@ -79,12 +103,36 @@ struct SeedZone {
 
 /// 6 zonas de Carabobo — seed inicial. Todas activas, sin revisión pendiente.
 const SEED_ZONES: &[SeedZone] = &[
-    SeedZone { display_name: "Carlos Arvelo", state: "Carabobo", municipality: "Carlos Arvelo" },
-    SeedZone { display_name: "Guacara",       state: "Carabobo", municipality: "Guacara"       },
-    SeedZone { display_name: "Los Guayos",    state: "Carabobo", municipality: "Los Guayos"    },
-    SeedZone { display_name: "Valencia",      state: "Carabobo", municipality: "Valencia"      },
-    SeedZone { display_name: "San Diego",     state: "Carabobo", municipality: "San Diego"     },
-    SeedZone { display_name: "Libertador",    state: "Carabobo", municipality: "Libertador"    },
+    SeedZone {
+        display_name: "Carlos Arvelo",
+        state: "Carabobo",
+        municipality: "Carlos Arvelo",
+    },
+    SeedZone {
+        display_name: "Guacara",
+        state: "Carabobo",
+        municipality: "Guacara",
+    },
+    SeedZone {
+        display_name: "Los Guayos",
+        state: "Carabobo",
+        municipality: "Los Guayos",
+    },
+    SeedZone {
+        display_name: "Valencia",
+        state: "Carabobo",
+        municipality: "Valencia",
+    },
+    SeedZone {
+        display_name: "San Diego",
+        state: "Carabobo",
+        municipality: "San Diego",
+    },
+    SeedZone {
+        display_name: "Libertador",
+        state: "Carabobo",
+        municipality: "Libertador",
+    },
 ];
 
 pub async fn run(state: Arc<AppState>) {
@@ -144,7 +192,11 @@ async fn seed_zones(state: &Arc<AppState>) -> Result<(), String> {
             updated_at: now,
         };
         if let Err(e) = state.db.create_ai_coverage_zone(zone).await {
-            tracing::warn!("[ai_agent.seed] insert zone {} falló: {}", z.display_name, e);
+            tracing::warn!(
+                "[ai_agent.seed] insert zone {} falló: {}",
+                z.display_name,
+                e
+            );
         }
     }
     state.redis.invalidate_ai_coverage_cache_v2().await;

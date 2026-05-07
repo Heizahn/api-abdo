@@ -1,14 +1,17 @@
+use crate::auth::claims::AccessClaims;
+use crate::auth::user_jwt::UserProfileClaims;
 use axum::body::Body;
 use axum::extract::Path;
 use axum::response::{Html, Response};
 use axum::{extract::State, Extension, Json};
 use hyper::header;
 use std::sync::Arc;
-use crate::auth::claims::AccessClaims;
-use crate::auth::user_jwt::UserProfileClaims;
 
 use crate::db::UtilsRepository;
 use crate::models::db::{BcvResponse, LatestVersionResponse};
+use crate::models::zabbix::ZabbixTrafficResponse;
+use crate::modules::network::mikrotik::ip_pppoe::get_ip_pppoe_mk;
+use crate::modules::zabbix::service as zabbix_service;
 use crate::{
     db::SalesRepository,
     error::ApiError,
@@ -16,9 +19,6 @@ use crate::{
     models::payment::{Bank, BankListResponse},
     state::AppState,
 };
-use crate::modules::network::mikrotik::ip_pppoe::get_ip_pppoe_mk;
-use crate::models::zabbix::ZabbixTrafficResponse;
-use crate::modules::zabbix::service as zabbix_service;
 
 #[utoipa::path(
     get,
@@ -228,7 +228,13 @@ pub async fn get_ip_pppoe(
         let mut last_error = String::new();
 
         for router_ip in routers {
-            match get_ip_pppoe_mk(&sn, router_ip, port_mk.as_str(), "rust_api", pass_mk.as_str()) {
+            match get_ip_pppoe_mk(
+                &sn,
+                router_ip,
+                port_mk.as_str(),
+                "rust_api",
+                pass_mk.as_str(),
+            ) {
                 Ok(ip) => return Ok(ip),
                 Err(e) => {
                     last_error = e;
@@ -239,8 +245,8 @@ pub async fn get_ip_pppoe(
 
         Err(last_error)
     })
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     match ip_pppoe_result {
         Ok(ip) => Ok(Json(ip)),
@@ -268,17 +274,23 @@ pub async fn get_ip_pppoe(
 )]
 pub async fn get_zabbix(
     Path(id_client): Path<String>,
-    State(state): State<Arc<AppState>>
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<ZabbixTrafficResponse>, ApiError> {
-    let (client_zabbix_code, olt_zabbix_name) = state.db.find_client_olt_position(&id_client).await.map_err(|_| ApiError::NotFound)?;
+    let (client_zabbix_code, olt_zabbix_name) = state
+        .db
+        .find_client_olt_position(&id_client)
+        .await
+        .map_err(|_| ApiError::NotFound)?;
 
     let traffic_data = zabbix_service::get_client_traffic(
         &state.reqwest_client,
         &state.config.zabbix_url,
         &state.config.zabbix_token,
         &client_zabbix_code,
-        &olt_zabbix_name
-    ).await.map_err(|e| {
+        &olt_zabbix_name,
+    )
+    .await
+    .map_err(|e| {
         eprintln!("Error en Zabbix Service: {}", e);
         ApiError::Internal("Error al consultar el tráfico histórico".to_string())
     })?;

@@ -24,7 +24,10 @@ use std::sync::Arc;
 use crate::{
     auth::user_jwt::UserProfileClaims,
     crypto::aes::{decrypt_payload, encrypt_payload},
-    db::{WaTemplateRepository, WaTemplateListFilter, WaTemplateUpdatePatch, WhatsAppRepository, WaTemplateMediaRepository, StoreTemplateMediaInput},
+    db::{
+        StoreTemplateMediaInput, WaTemplateListFilter, WaTemplateMediaRepository,
+        WaTemplateRepository, WaTemplateUpdatePatch, WhatsAppRepository,
+    },
     error::ApiError,
     models::whatsapp::*,
     state::AppState,
@@ -34,9 +37,8 @@ use super::assignment::assign_conversation;
 
 use super::service::WhatsAppService;
 use super::ws::{
-    broadcast_all, broadcast_except, WsServerEvent,
-    emit_to_phone_number_agents,
-    build_template_created_event, build_template_updated_event, build_template_deleted_event,
+    broadcast_all, broadcast_except, build_template_created_event, build_template_deleted_event,
+    build_template_updated_event, emit_to_phone_number_agents, WsServerEvent,
 };
 
 /// Cooldown que aplica el back cuando Meta rebota con error 131049
@@ -71,9 +73,7 @@ pub struct WebhookVerifyParams {
 
 /// GET /v1/webhook/whatsapp
 /// Verificación del webhook por parte de Meta.
-pub async fn verify_webhook(
-    Query(params): Query<WebhookVerifyParams>,
-) -> impl IntoResponse {
+pub async fn verify_webhook(Query(params): Query<WebhookVerifyParams>) -> impl IntoResponse {
     let expected = std::env::var("WHATSAPP_VERIFY_TOKEN").unwrap_or_default();
 
     if params.mode.as_deref() == Some("subscribe")
@@ -92,7 +92,9 @@ pub async fn verify_webhook(
 pub async fn debug_last_webhook_handler() -> Json<serde_json::Value> {
     let store = last_payload_store().lock().await;
     match store.as_ref() {
-        Some(payload) => Json(serde_json::json!({ "ok": true, "received": true, "payload": payload })),
+        Some(payload) => {
+            Json(serde_json::json!({ "ok": true, "received": true, "payload": payload }))
+        }
         None => Json(serde_json::json!({ "ok": true, "received": false, "payload": null })),
     }
 }
@@ -123,8 +125,8 @@ pub async fn receive_webhook(
     // incluso cuando el shape no matchea nuestros structs (Meta agrega/cambia
     // campos sin avisar; queremos verlos para poder ajustar).
     {
-        let raw: serde_json::Value = serde_json::from_slice(&body)
-            .unwrap_or(serde_json::Value::Null);
+        let raw: serde_json::Value =
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
         *last_payload_store().lock().await = Some(raw);
     }
 
@@ -151,13 +153,21 @@ pub async fn receive_webhook(
                 Some("messages") => {}
                 Some("message_template_status_update") => {
                     if let Some(value) = &change.value {
-                        if let (Some(meta_id), Some(event)) = (&value.message_template_id, &value.event) {
+                        if let (Some(meta_id), Some(event)) =
+                            (&value.message_template_id, &value.event)
+                        {
                             let state_cl = state.clone();
                             let meta_id_cl = meta_id.clone();
                             let event_cl = event.clone();
                             let reason_cl = value.reason.clone();
                             tokio::spawn(async move {
-                                process_template_status(&state_cl, &meta_id_cl, &event_cl, reason_cl.as_deref()).await;
+                                process_template_status(
+                                    &state_cl,
+                                    &meta_id_cl,
+                                    &event_cl,
+                                    reason_cl.as_deref(),
+                                )
+                                .await;
                             });
                         }
                     }
@@ -181,7 +191,10 @@ pub async fn receive_webhook(
                             for e in errs {
                                 tracing::warn!(
                                     "[webhook] mensaje {} falló: code={:?} title={:?} message={:?}",
-                                    s.id, e.code, e.title, e.message
+                                    s.id,
+                                    e.code,
+                                    e.title,
+                                    e.message
                                 );
                             }
                         } else {
@@ -192,7 +205,8 @@ pub async fn receive_webhook(
                         Ok(Some(updated)) => {
                             // Si este mensaje era el último de la conversación, propagar el
                             // nuevo status al preview del listado (checkmarks en vivo).
-                            match state.db
+                            match state
+                                .db
                                 .update_conversation_status_if_last(
                                     &updated.conversation_id,
                                     &updated.wa_message_id,
@@ -202,11 +216,13 @@ pub async fn receive_webhook(
                             {
                                 Ok(true) => tracing::debug!(
                                     "[webhook] last_message_status={} propagado a conv {}",
-                                    s.status, updated.conversation_id.to_hex()
+                                    s.status,
+                                    updated.conversation_id.to_hex()
                                 ),
                                 Ok(false) => {} // no era el último — sin propagar
                                 Err(e) => tracing::warn!(
-                                    "[webhook] update_conversation_status_if_last error: {}", e
+                                    "[webhook] update_conversation_status_if_last error: {}",
+                                    e
                                 ),
                             }
 
@@ -226,33 +242,39 @@ pub async fn receive_webhook(
                             // bloqueado en el back y el front pueda mostrarlo.
                             // El cooldown se libera al recibir un inbound (ver
                             // `update_last_inbound_at`) o al expirar `until`.
-                            let has_131049 = s.errors.as_ref().is_some_and(|errs| {
-                                errs.iter().any(|e| e.code == Some(131049))
-                            });
+                            let has_131049 = s
+                                .errors
+                                .as_ref()
+                                .is_some_and(|errs| errs.iter().any(|e| e.code == Some(131049)));
                             if s.status == "failed" && has_131049 {
                                 let until = DateTime::from_millis(
                                     DateTime::now().timestamp_millis() + META_THROTTLE_COOLDOWN_MS,
                                 );
-                                if let Err(e) = state.db
+                                if let Err(e) = state
+                                    .db
                                     .set_meta_throttle_until(&updated.conversation_id, until)
                                     .await
                                 {
                                     tracing::warn!(
                                         "[webhook] set_meta_throttle_until error (conv={}): {}",
-                                        updated.conversation_id.to_hex(), e
+                                        updated.conversation_id.to_hex(),
+                                        e
                                     );
                                 } else {
                                     tracing::warn!(
                                         "[webhook] meta_throttle_until seteado por 131049 (conv={}, until={})",
                                         updated.conversation_id.to_hex(), iso8601(until)
                                     );
-                                    let conv_now = state.db
+                                    let conv_now = state
+                                        .db
                                         .find_conversation_by_id(&updated.conversation_id)
                                         .await
                                         .ok()
                                         .flatten();
                                     let (can_send_freeform, freeform_expires_at) =
-                                        compute_freeform_state(conv_now.as_ref().and_then(|c| c.last_inbound_at));
+                                        compute_freeform_state(
+                                            conv_now.as_ref().and_then(|c| c.last_inbound_at),
+                                        );
                                     let last_inbound_iso = conv_now
                                         .as_ref()
                                         .and_then(|c| c.last_inbound_at)
@@ -272,13 +294,16 @@ pub async fn receive_webhook(
                         Ok(None) => {
                             tracing::debug!(
                                 "[webhook] status {} para wa_id={} sin doc en DB (ignorado)",
-                                s.status, s.id
+                                s.status,
+                                s.id
                             );
                         }
                         Err(e) => {
                             tracing::error!(
                                 "[webhook] update_message_status error (wa_id={}, status={}): {}",
-                                s.id, s.status, e
+                                s.id,
+                                s.status,
+                                e
                             );
                         }
                     }
@@ -290,7 +315,8 @@ pub async fn receive_webhook(
                 let contacts = value.contacts.unwrap_or_default();
 
                 // El número del negocio que recibió el mensaje (normalizado a E.164 sin "+")
-                let business_phone_raw = value.metadata
+                let business_phone_raw = value
+                    .metadata
                     .as_ref()
                     .and_then(|m| m.display_phone_number.clone())
                     .unwrap_or_default();
@@ -302,7 +328,8 @@ pub async fn receive_webhook(
                     Ok(None) => {
                         tracing::info!(
                             "[webhook] número de negocio no configurado o inactivo: raw={} norm={}",
-                            business_phone_raw, business_phone
+                            business_phone_raw,
+                            business_phone
                         );
                         continue;
                     }
@@ -313,16 +340,20 @@ pub async fn receive_webhook(
                 };
 
                 for msg in messages {
-
                     let agents = settings.agents.clone();
 
-                    let name = contacts.iter()
+                    let name = contacts
+                        .iter()
                         .find(|c| c.wa_id.as_deref() == Some(&msg.from))
                         .and_then(|c| c.profile.as_ref())
                         .and_then(|p| p.name.clone());
 
                     // Upsert conversación (clave compuesta: contacto + número de negocio)
-                    let (conv, conv_created) = match state.db.upsert_conversation(&msg.from, &business_phone, name).await {
+                    let (conv, conv_created) = match state
+                        .db
+                        .upsert_conversation(&msg.from, &business_phone, name)
+                        .await
+                    {
                         Ok(v) => v,
                         Err(e) => {
                             tracing::error!("upsert_conversation error: {}", e);
@@ -337,16 +368,20 @@ pub async fn receive_webhook(
                     // Conversación nueva → registrar `created` (actor=None: lo
                     // disparó un inbound, no un agente humano).
                     if conv_created {
-                        record_conv_event(&state, WaConversationEventInput {
-                            conversation_id: &conv_id,
-                            business_phone: &conv.business_phone,
-                            event_type: "created",
-                            actor_id: None,
-                            actor_name: None,
-                            target_id: None,
-                            target_name: None,
-                            note: Some("inbound"),
-                        }).await;
+                        record_conv_event(
+                            &state,
+                            WaConversationEventInput {
+                                conversation_id: &conv_id,
+                                business_phone: &conv.business_phone,
+                                event_type: "created",
+                                actor_id: None,
+                                actor_name: None,
+                                target_id: None,
+                                target_name: None,
+                                note: Some("inbound"),
+                            },
+                        )
+                        .await;
                     }
 
                     // Si la conversación estaba cerrada, reabrirla en pending (sin dueño).
@@ -364,38 +399,57 @@ pub async fn receive_webhook(
                     };
 
                     if was_reopened {
-                        record_conv_event(&state, WaConversationEventInput {
-                            conversation_id: &conv_id,
-                            business_phone: &conv.business_phone,
-                            event_type: "reopened",
-                            actor_id: None,
-                            actor_name: None,
-                            target_id: None,
-                            target_name: None,
-                            note: Some("inbound"),
-                        }).await;
+                        record_conv_event(
+                            &state,
+                            WaConversationEventInput {
+                                conversation_id: &conv_id,
+                                business_phone: &conv.business_phone,
+                                event_type: "reopened",
+                                actor_id: None,
+                                actor_name: None,
+                                target_id: None,
+                                target_name: None,
+                                note: Some("inbound"),
+                            },
+                        )
+                        .await;
                     }
 
                     // Extraer contenido según tipo (body, media_id, mime, filename)
-                    let extract_media = |m: Option<&InboundMedia>| m
-                        .map(|x| (x.caption.clone(), x.id.clone(), x.mime_type.clone(), x.filename.clone()))
-                        .unwrap_or((None, None, None, None));
-                    let (body, media_id, media_mime_type, media_filename) = match msg.msg_type.as_str() {
+                    let extract_media = |m: Option<&InboundMedia>| {
+                        m.map(|x| {
+                            (
+                                x.caption.clone(),
+                                x.id.clone(),
+                                x.mime_type.clone(),
+                                x.filename.clone(),
+                            )
+                        })
+                        .unwrap_or((None, None, None, None))
+                    };
+                    let (body, media_id, media_mime_type, media_filename) = match msg
+                        .msg_type
+                        .as_str()
+                    {
                         "text" => (msg.text.as_ref().map(|t| t.body.clone()), None, None, None),
                         "image" => extract_media(msg.image.as_ref()),
                         "document" => extract_media(msg.document.as_ref()),
                         "audio" => extract_media(msg.audio.as_ref()),
                         "video" => extract_media(msg.video.as_ref()),
-                        "sticker" => msg.sticker.as_ref()
+                        "sticker" => msg
+                            .sticker
+                            .as_ref()
                             .map(|m| (None, m.id.clone(), m.mime_type.clone(), None))
                             .unwrap_or((None, None, None, None)),
                         "location" => {
                             // Preview: nombre del lugar → dirección → "Ubicación" genérico.
                             // Las coordenadas ya van en el campo `location`
                             // estructurado; no las ponemos en el preview.
-                            let label = msg.location.as_ref().and_then(|l| {
-                                l.name.clone().or_else(|| l.address.clone())
-                            }).unwrap_or_else(|| "Ubicación".to_string());
+                            let label = msg
+                                .location
+                                .as_ref()
+                                .and_then(|l| l.name.clone().or_else(|| l.address.clone()))
+                                .unwrap_or_else(|| "Ubicación".to_string());
                             (Some(label), None, None, None)
                         }
                         // Respuesta a botón/lista interactivo: Meta envía
@@ -406,7 +460,8 @@ pub async fn receive_webhook(
                         // front pueda renderizar el contexto completo.
                         "interactive" => {
                             let txt = msg.interactive.as_ref().and_then(|v| {
-                                v.get("button_reply").and_then(|b| b.get("title"))
+                                v.get("button_reply")
+                                    .and_then(|b| b.get("title"))
                                     .or_else(|| v.get("list_reply").and_then(|l| l.get("title")))
                                     .and_then(|t| t.as_str())
                                     .map(|s| s.to_string())
@@ -416,14 +471,19 @@ pub async fn receive_webhook(
                         // Legacy: botón de template (quick-reply de template).
                         // Meta envía `button.text` con el label tapped.
                         "button" => {
-                            let txt = msg.button.as_ref()
-                                .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()));
+                            let txt = msg.button.as_ref().and_then(|v| {
+                                v.get("text")
+                                    .and_then(|t| t.as_str())
+                                    .map(|s| s.to_string())
+                            });
                             (txt, None, None, None)
                         }
                         // Tarjeta de contacto: Meta manda un array; usamos el
                         // nombre del primero para el preview del listado.
                         "contacts" => {
-                            let name = msg.contacts.as_ref()
+                            let name = msg
+                                .contacts
+                                .as_ref()
                                 .and_then(|v| v.as_array())
                                 .and_then(|arr| arr.first())
                                 .and_then(|c| c.get("name"))
@@ -443,7 +503,9 @@ pub async fn receive_webhook(
                     let voice = msg.msg_type == "audio"
                         && msg.audio.as_ref().and_then(|a| a.voice).unwrap_or(false);
 
-                    let preview = body.clone().unwrap_or_else(|| format!("[{}]", msg.msg_type));
+                    let preview = body
+                        .clone()
+                        .unwrap_or_else(|| format!("[{}]", msg.msg_type));
 
                     tracing::info!(
                         "[webhook] guardando mensaje de cliente registrado: {} | tipo: {} | preview: {}",
@@ -451,7 +513,9 @@ pub async fn receive_webhook(
                     );
 
                     // Timestamp real desde Meta (Unix seconds en string), fallback a ahora.
-                    let msg_ts = msg.timestamp.as_deref()
+                    let msg_ts = msg
+                        .timestamp
+                        .as_deref()
                         .and_then(parse_unix_seconds_to_bson)
                         .unwrap_or_else(DateTime::now);
 
@@ -476,17 +540,19 @@ pub async fn receive_webhook(
                     // renderice el mapa (iframe de OSM/Google, img estática,
                     // o link a maps — lo decide el front).
                     let location_payload = if msg.msg_type == "location" {
-                        msg.location.as_ref().and_then(|l| {
-                            match (l.latitude, l.longitude) {
-                                (Some(lat), Some(lng)) => Some(crate::models::whatsapp::LocationPayload {
-                                    latitude: lat,
-                                    longitude: lng,
-                                    name: l.name.clone(),
-                                    address: l.address.clone(),
-                                }),
+                        msg.location
+                            .as_ref()
+                            .and_then(|l| match (l.latitude, l.longitude) {
+                                (Some(lat), Some(lng)) => {
+                                    Some(crate::models::whatsapp::LocationPayload {
+                                        latitude: lat,
+                                        longitude: lng,
+                                        name: l.name.clone(),
+                                        address: l.address.clone(),
+                                    })
+                                }
                                 _ => None,
-                            }
-                        })
+                            })
                     } else {
                         None
                     };
@@ -572,12 +638,20 @@ pub async fn receive_webhook(
 
                     // Si la conversación es nueva, avisar al front antes del mensaje.
                     if conv_created {
-                        let ws_name = Some(settings.workspace_name.clone())
-                            .filter(|w| !w.is_empty());
+                        let ws_name =
+                            Some(settings.workspace_name.clone()).filter(|w| !w.is_empty());
                         let resolved = resolve_customer_name(&state, &conv_now).await;
                         // Conv recién creada → assigned_to siempre null acá.
                         let new_ev = WsServerEvent::ConversacionNueva {
-                            conversation: conv_to_item(conv_now.clone(), false, None, ws_name, resolved, None, None),
+                            conversation: conv_to_item(
+                                conv_now.clone(),
+                                false,
+                                None,
+                                ws_name,
+                                resolved,
+                                None,
+                                None,
+                            ),
                         };
                         broadcast_all(&state.ws_registry, &new_ev).await;
                     } else if was_reopened {
@@ -712,7 +786,10 @@ pub async fn conversations_stats_handler(
         .await
         .map_err(ApiError::DatabaseError)?;
 
-    Ok(Json(ConversationStatsResponse { ok: true, data: stats }))
+    Ok(Json(ConversationStatsResponse {
+        ok: true,
+        data: stats,
+    }))
 }
 
 #[utoipa::path(
@@ -740,7 +817,8 @@ pub async fn list_conversations_handler(
     let limit = q.limit.unwrap_or(20).clamp(1, 100);
     let business_phone_norm = q.business_phone.as_deref().map(normalize_to_e164);
 
-    let convs = state.db
+    let convs = state
+        .db
         .get_conversations(
             q.status.as_deref(),
             q.assigned_to.as_deref(),
@@ -765,7 +843,8 @@ pub async fn list_conversations_handler(
 
     // Batch-fetch last_opened_at del agente actual para todas las conversaciones.
     let ids: Vec<ObjectId> = convs.iter().filter_map(|c| c.id).collect();
-    let opens = state.db
+    let opens = state
+        .db
         .get_conversation_opens(&claims.id, &ids)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
@@ -774,7 +853,8 @@ pub async fn list_conversations_handler(
     let mut unique_phones: Vec<String> = convs.iter().map(|c| c.business_phone.clone()).collect();
     unique_phones.sort();
     unique_phones.dedup();
-    let workspaces = state.db
+    let workspaces = state
+        .db
         .get_workspace_names(&unique_phones)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
@@ -784,7 +864,8 @@ pub async fn list_conversations_handler(
     let (names_by_id, names_by_phone) = {
         use crate::db::ProfileRepository;
         let client_ids: Vec<ObjectId> = convs.iter().filter_map(|c| c.client_id).collect();
-        let mut customer_phones: Vec<String> = convs.iter()
+        let mut customer_phones: Vec<String> = convs
+            .iter()
             .filter(|c| c.client_id.is_none())
             .map(|c| c.phone.clone())
             .collect();
@@ -809,20 +890,35 @@ pub async fn list_conversations_handler(
         .map(|c| {
             let last_opened = c.id.and_then(|id| opens.get(&id).copied());
             let ws = workspaces.get(&c.business_phone).cloned();
-            let resolved = c.client_id
+            let resolved = c
+                .client_id
                 .and_then(|id| names_by_id.get(&id).cloned())
                 .or_else(|| names_by_phone.get(&c.phone).cloned());
-            let agent_name = c.last_message_from_user_id
+            let agent_name = c
+                .last_message_from_user_id
                 .as_ref()
                 .and_then(|id| agent_names.get(id).cloned());
-            let assigned_name = c.assigned_to
+            let assigned_name = c
+                .assigned_to
                 .as_ref()
                 .and_then(|id| assigned_names.get(id).cloned());
-            conv_to_item(c, false, last_opened, ws, resolved, agent_name, assigned_name)
+            conv_to_item(
+                c,
+                false,
+                last_opened,
+                ws,
+                resolved,
+                agent_name,
+                assigned_name,
+            )
         })
         .collect();
 
-    Ok(Json(ConversationsListResponse { ok: true, data, next_cursor }))
+    Ok(Json(ConversationsListResponse {
+        ok: true,
+        data,
+        next_cursor,
+    }))
 }
 
 #[utoipa::path(
@@ -843,13 +939,15 @@ pub async fn get_conversation_handler(
     Path(id): Path<String>,
 ) -> Result<Json<ConversationDetailResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
-    let conv = state.db
+    let conv = state
+        .db
         .find_conversation_by_id(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
-    let opens = state.db
+    let opens = state
+        .db
         .get_conversation_opens(&claims.id, &[oid])
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
@@ -861,7 +959,15 @@ pub async fn get_conversation_handler(
 
     Ok(Json(ConversationDetailResponse {
         ok: true,
-        data: conv_to_item(conv, true, last_opened, workspace_name, resolved, agent_name, assigned_name),
+        data: conv_to_item(
+            conv,
+            true,
+            last_opened,
+            workspace_name,
+            resolved,
+            agent_name,
+            assigned_name,
+        ),
     }))
 }
 
@@ -889,7 +995,8 @@ pub async fn get_conversation_messages_handler(
 ) -> Result<Json<ConversationMessagesResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
-    let conv = state.db
+    let conv = state
+        .db
         .find_conversation_by_id(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
@@ -898,7 +1005,8 @@ pub async fn get_conversation_messages_handler(
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let is_first_page = q.cursor.is_none();
 
-    let messages = state.db
+    let messages = state
+        .db
         .get_messages(&oid, q.cursor.as_deref(), limit)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
@@ -931,7 +1039,11 @@ pub async fn get_conversation_messages_handler(
         && conv.status == "pending"
         && conv.assigned_to.as_deref() == Some(claims.id.as_str())
     {
-        if let Err(e) = state.db.update_conversation_status(&oid, "in_progress").await {
+        if let Err(e) = state
+            .db
+            .update_conversation_status(&oid, "in_progress")
+            .await
+        {
             tracing::warn!("update_conversation_status error: {}", e);
         } else {
             let ev = WsServerEvent::ChatEstadoCambio {
@@ -947,8 +1059,13 @@ pub async fn get_conversation_messages_handler(
         data: messages
             .into_iter()
             .map(|m| {
-                let name = m.sent_by.as_deref().and_then(|id| agent_names.get(id).cloned());
-                let rto = m.reply_to_wa_message_id.as_deref()
+                let name = m
+                    .sent_by
+                    .as_deref()
+                    .and_then(|id| agent_names.get(id).cloned());
+                let rto = m
+                    .reply_to_wa_message_id
+                    .as_deref()
                     .and_then(|wid| reply_items.get(wid).cloned());
                 msg_to_item(m, name, rto)
             })
@@ -978,7 +1095,8 @@ pub async fn send_message_handler(
 ) -> Result<Json<SendMessageResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
-    let mut conv = state.db
+    let mut conv = state
+        .db
         .find_conversation_by_id(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
@@ -996,7 +1114,8 @@ pub async fn send_message_handler(
         match &mode {
             SendMode::Template { .. } => {
                 // Reabrir + asignar atómicamente al caller.
-                let taken = state.db
+                let taken = state
+                    .db
                     .take_conversation(&oid, &claims.id)
                     .await
                     .map_err(|e| ApiError::DatabaseError(e))?;
@@ -1031,7 +1150,8 @@ pub async fn send_message_handler(
     // - failed               → reintentar envío, actualizar `wa_message_id` + status.
     // - None (sin status)    → devolver como está (estado intermedio, no reenviamos).
     if let Some(key) = payload.idempotency_key.as_deref() {
-        if let Some(existing) = state.db
+        if let Some(existing) = state
+            .db
             .find_message_by_idempotency(&oid, key)
             .await
             .map_err(|e| ApiError::DatabaseError(e))?
@@ -1047,7 +1167,10 @@ pub async fn send_message_handler(
                 let item = msg_to_item(existing, name, rto);
                 return Ok(Json(SendMessageResponse {
                     ok: true,
-                    data: SendMessageData { message_id: item.id.clone(), message: item },
+                    data: SendMessageData {
+                        message_id: item.id.clone(),
+                        message: item,
+                    },
                 }));
             }
 
@@ -1059,21 +1182,36 @@ pub async fn send_message_handler(
             // Auto-fill del HEADER si la plantilla tiene IMAGE/VIDEO y el front no lo mandó.
             if let SendMode::Template { tpl } = &mut mode {
                 auto_fill_template_header_media(
-                    &state, &mut tpl.components, &tpl.name, &tpl.language,
-                    &conv.business_phone, &wa,
-                ).await?;
+                    &state,
+                    &mut tpl.components,
+                    &tpl.name,
+                    &tpl.language,
+                    &conv.business_phone,
+                    &wa,
+                )
+                .await?;
             }
-            let sent = dispatch_send(&mode, &wa, &conv.phone, retry_reply_to.as_deref(), preview_url_flag).await?;
+            let sent = dispatch_send(
+                &mode,
+                &wa,
+                &conv.phone,
+                retry_reply_to.as_deref(),
+                preview_url_flag,
+            )
+            .await?;
             let new_wa_id = sent.wa_id.clone();
             let preview = sent.preview.clone();
 
-            let msg_oid = existing_id
-                .ok_or_else(|| ApiError::Internal("mensaje previo sin _id".into()))?;
-            let updated = state.db
+            let msg_oid =
+                existing_id.ok_or_else(|| ApiError::Internal("mensaje previo sin _id".into()))?;
+            let updated = state
+                .db
                 .update_message_retry(&msg_oid, &new_wa_id, "sent")
                 .await
                 .map_err(|e| ApiError::DatabaseError(e))?
-                .ok_or_else(|| ApiError::Internal("no se pudo actualizar mensaje tras reintento".into()))?;
+                .ok_or_else(|| {
+                    ApiError::Internal("no se pudo actualizar mensaje tras reintento".into())
+                })?;
 
             let touch = crate::db::ConversationTouch {
                 preview: &preview,
@@ -1086,7 +1224,8 @@ pub async fn send_message_handler(
                 increment_unread: false,
                 last_message_at: None,
             };
-            state.db
+            state
+                .db
                 .touch_conversation(&oid, touch)
                 .await
                 .map_err(|e| ApiError::DatabaseError(e))?;
@@ -1103,7 +1242,10 @@ pub async fn send_message_handler(
 
             return Ok(Json(SendMessageResponse {
                 ok: true,
-                data: SendMessageData { message_id: item.id.clone(), message: item },
+                data: SendMessageData {
+                    message_id: item.id.clone(),
+                    message: item,
+                },
             }));
         }
     }
@@ -1115,11 +1257,23 @@ pub async fn send_message_handler(
     // Auto-fill del HEADER si la plantilla tiene IMAGE/VIDEO y el front no lo mandó.
     if let SendMode::Template { tpl } = &mut mode {
         auto_fill_template_header_media(
-            &state, &mut tpl.components, &tpl.name, &tpl.language,
-            &conv.business_phone, &wa,
-        ).await?;
+            &state,
+            &mut tpl.components,
+            &tpl.name,
+            &tpl.language,
+            &conv.business_phone,
+            &wa,
+        )
+        .await?;
     }
-    let sent = dispatch_send(&mode, &wa, &conv.phone, payload.reply_to.as_deref(), preview_url_flag).await?;
+    let sent = dispatch_send(
+        &mode,
+        &wa,
+        &conv.phone,
+        payload.reply_to.as_deref(),
+        preview_url_flag,
+    )
+    .await?;
 
     let is_text_mode = matches!(mode, SendMode::Text { .. });
     let preview = sent.preview.clone();
@@ -1152,7 +1306,11 @@ pub async fn send_message_handler(
         timestamp: DateTime::now(),
     };
 
-    let saved = state.db.save_message(msg).await.map_err(|e| ApiError::DatabaseError(e))?;
+    let saved = state
+        .db
+        .save_message(msg)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
     let touch = crate::db::ConversationTouch {
         preview: &preview,
         msg_type: &saved.msg_type,
@@ -1164,7 +1322,11 @@ pub async fn send_message_handler(
         increment_unread: false,
         last_message_at: None,
     };
-    state.db.touch_conversation(&oid, touch).await.map_err(|e| ApiError::DatabaseError(e))?;
+    state
+        .db
+        .touch_conversation(&oid, touch)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
 
     // Si el mensaje nació de un quick-reply guardado, bumpear el contador de uso.
     // Best-effort: no bloquea la respuesta ni la afecta si falla.
@@ -1173,7 +1335,11 @@ pub async fn send_message_handler(
             let db = state.db.clone();
             tokio::spawn(async move {
                 if let Err(e) = db.increment_quick_reply_use(&qr_oid).await {
-                    tracing::warn!("[send_message] increment_quick_reply_use falló id={}: {}", qr_oid, e);
+                    tracing::warn!(
+                        "[send_message] increment_quick_reply_use falló id={}: {}",
+                        qr_oid,
+                        e
+                    );
                 }
             });
         }
@@ -1195,33 +1361,55 @@ pub async fn send_message_handler(
     // usuario pueda escribir de forma libre.
     if is_text_mode {
         if let Some(msg_oid) = saved_oid {
-            super::url_preview::spawn_preview_job(
-                state.clone(),
-                msg_oid,
-                oid,
-                preview.clone(),
-            );
+            super::url_preview::spawn_preview_job(state.clone(), msg_oid, oid, preview.clone());
         }
     }
 
     Ok(Json(SendMessageResponse {
         ok: true,
-        data: SendMessageData { message_id: item.id.clone(), message: item },
+        data: SendMessageData {
+            message_id: item.id.clone(),
+            message: item,
+        },
     }))
 }
 
 /// Decide el modo de envío según el payload y la ventana de 24h.
 enum SendMode {
-    Text { content: String },
-    Template { tpl: SendTemplatePayload },
-    Interactive { payload: serde_json::Value },
-    Image { media_id: String, caption: Option<String> },
-    Video { media_id: String, caption: Option<String> },
-    Document { media_id: String, caption: Option<String>, filename: Option<String> },
-    Audio { media_id: String },
-    Sticker { media_id: String },
-    Location { loc: LocationPayload },
-    Contacts { list: Vec<serde_json::Value> },
+    Text {
+        content: String,
+    },
+    Template {
+        tpl: SendTemplatePayload,
+    },
+    Interactive {
+        payload: serde_json::Value,
+    },
+    Image {
+        media_id: String,
+        caption: Option<String>,
+    },
+    Video {
+        media_id: String,
+        caption: Option<String>,
+    },
+    Document {
+        media_id: String,
+        caption: Option<String>,
+        filename: Option<String>,
+    },
+    Audio {
+        media_id: String,
+    },
+    Sticker {
+        media_id: String,
+    },
+    Location {
+        loc: LocationPayload,
+    },
+    Contacts {
+        list: Vec<serde_json::Value>,
+    },
 }
 
 struct TemplateFields {
@@ -1247,7 +1435,8 @@ fn resolve_send_mode(
                 field: None,
                 message: "Meta bloqueó los envíos a este contacto temporalmente \
                     (recibió demasiados mensajes sin responder). Espera a que \
-                    responda o vuelve a intentarlo más tarde.".into(),
+                    responda o vuelve a intentarlo más tarde."
+                    .into(),
                 details: Some(serde_json::json!({
                     "meta_throttle_until": iso8601(until),
                 })),
@@ -1257,12 +1446,17 @@ fn resolve_send_mode(
 
     // Activamos modo template si viene `type="template"` o si `template` está
     // presente. Ambos caminos requieren el objeto `template`.
-    let template_mode = payload.msg_type.as_deref().map(|t| t.eq_ignore_ascii_case("template"))
+    let template_mode = payload
+        .msg_type
+        .as_deref()
+        .map(|t| t.eq_ignore_ascii_case("template"))
         .unwrap_or(false)
         || payload.template.is_some();
 
     if template_mode {
-        let tpl = payload.template.as_ref()
+        let tpl = payload
+            .template
+            .as_ref()
             .ok_or(ApiError::MissingTemplateParams)?;
 
         let name = tpl.name.trim();
@@ -1274,19 +1468,24 @@ fn resolve_send_mode(
     }
 
     // Interactive: requiere ventana de 24h abierta (igual que texto freeform).
-    let interactive_mode = payload.msg_type.as_deref().map(|t| t.eq_ignore_ascii_case("interactive"))
+    let interactive_mode = payload
+        .msg_type
+        .as_deref()
+        .map(|t| t.eq_ignore_ascii_case("interactive"))
         .unwrap_or(false)
         || payload.interactive.is_some();
 
     if interactive_mode {
-        let inter = payload.interactive.as_ref().ok_or_else(|| ApiError::BadRequest(
-            "interactive requerido cuando type=interactive".into(),
-        ))?;
+        let inter = payload.interactive.as_ref().ok_or_else(|| {
+            ApiError::BadRequest("interactive requerido cuando type=interactive".into())
+        })?;
 
         if !is_within_24h(conv.last_inbound_at) {
             return Err(ApiError::WindowClosed);
         }
-        return Ok(SendMode::Interactive { payload: inter.clone() });
+        return Ok(SendMode::Interactive {
+            payload: inter.clone(),
+        });
     }
 
     // Tipos ricos (media + location + contacts). Todos son freeform de cara a
@@ -1295,21 +1494,41 @@ fn resolve_send_mode(
     let explicit = |t: &str| type_hint.as_deref() == Some(t);
 
     if explicit("image") || (type_hint.is_none() && payload.image.is_some()) {
-        let m = payload.image.as_ref().ok_or_else(|| ApiError::BadRequest("image requerido cuando type=image".into()))?;
+        let m = payload
+            .image
+            .as_ref()
+            .ok_or_else(|| ApiError::BadRequest("image requerido cuando type=image".into()))?;
         validate_media_id(&m.media_id)?;
-        if !is_within_24h(conv.last_inbound_at) { return Err(ApiError::WindowExpired); }
-        return Ok(SendMode::Image { media_id: m.media_id.clone(), caption: nonempty(&m.caption) });
+        if !is_within_24h(conv.last_inbound_at) {
+            return Err(ApiError::WindowExpired);
+        }
+        return Ok(SendMode::Image {
+            media_id: m.media_id.clone(),
+            caption: nonempty(&m.caption),
+        });
     }
     if explicit("video") || (type_hint.is_none() && payload.video.is_some()) {
-        let m = payload.video.as_ref().ok_or_else(|| ApiError::BadRequest("video requerido cuando type=video".into()))?;
+        let m = payload
+            .video
+            .as_ref()
+            .ok_or_else(|| ApiError::BadRequest("video requerido cuando type=video".into()))?;
         validate_media_id(&m.media_id)?;
-        if !is_within_24h(conv.last_inbound_at) { return Err(ApiError::WindowExpired); }
-        return Ok(SendMode::Video { media_id: m.media_id.clone(), caption: nonempty(&m.caption) });
+        if !is_within_24h(conv.last_inbound_at) {
+            return Err(ApiError::WindowExpired);
+        }
+        return Ok(SendMode::Video {
+            media_id: m.media_id.clone(),
+            caption: nonempty(&m.caption),
+        });
     }
     if explicit("document") || (type_hint.is_none() && payload.document.is_some()) {
-        let m = payload.document.as_ref().ok_or_else(|| ApiError::BadRequest("document requerido cuando type=document".into()))?;
+        let m = payload.document.as_ref().ok_or_else(|| {
+            ApiError::BadRequest("document requerido cuando type=document".into())
+        })?;
         validate_media_id(&m.media_id)?;
-        if !is_within_24h(conv.last_inbound_at) { return Err(ApiError::WindowExpired); }
+        if !is_within_24h(conv.last_inbound_at) {
+            return Err(ApiError::WindowExpired);
+        }
         return Ok(SendMode::Document {
             media_id: m.media_id.clone(),
             caption: nonempty(&m.caption),
@@ -1317,33 +1536,56 @@ fn resolve_send_mode(
         });
     }
     if explicit("audio") || (type_hint.is_none() && payload.audio.is_some()) {
-        let m = payload.audio.as_ref().ok_or_else(|| ApiError::BadRequest("audio requerido cuando type=audio".into()))?;
+        let m = payload
+            .audio
+            .as_ref()
+            .ok_or_else(|| ApiError::BadRequest("audio requerido cuando type=audio".into()))?;
         validate_media_id(&m.media_id)?;
-        if !is_within_24h(conv.last_inbound_at) { return Err(ApiError::WindowExpired); }
-        return Ok(SendMode::Audio { media_id: m.media_id.clone() });
+        if !is_within_24h(conv.last_inbound_at) {
+            return Err(ApiError::WindowExpired);
+        }
+        return Ok(SendMode::Audio {
+            media_id: m.media_id.clone(),
+        });
     }
     if explicit("sticker") || (type_hint.is_none() && payload.sticker.is_some()) {
-        let m = payload.sticker.as_ref().ok_or_else(|| ApiError::BadRequest("sticker requerido cuando type=sticker".into()))?;
+        let m = payload
+            .sticker
+            .as_ref()
+            .ok_or_else(|| ApiError::BadRequest("sticker requerido cuando type=sticker".into()))?;
         validate_media_id(&m.media_id)?;
-        if !is_within_24h(conv.last_inbound_at) { return Err(ApiError::WindowExpired); }
-        return Ok(SendMode::Sticker { media_id: m.media_id.clone() });
+        if !is_within_24h(conv.last_inbound_at) {
+            return Err(ApiError::WindowExpired);
+        }
+        return Ok(SendMode::Sticker {
+            media_id: m.media_id.clone(),
+        });
     }
     if explicit("location") || (type_hint.is_none() && payload.location.is_some()) {
-        let loc = payload.location.as_ref().ok_or_else(|| ApiError::BadRequest("location requerido cuando type=location".into()))?;
-        if !loc.latitude.is_finite() || !loc.longitude.is_finite()
-            || loc.latitude.abs() > 90.0 || loc.longitude.abs() > 180.0
+        let loc = payload.location.as_ref().ok_or_else(|| {
+            ApiError::BadRequest("location requerido cuando type=location".into())
+        })?;
+        if !loc.latitude.is_finite()
+            || !loc.longitude.is_finite()
+            || loc.latitude.abs() > 90.0
+            || loc.longitude.abs() > 180.0
         {
             return Err(ApiError::ValidationError {
                 code: "location_out_of_range".into(),
                 field: "location".into(),
-                message: "La latitud debe estar entre -90 y 90, y la longitud entre -180 y 180.".into(),
+                message: "La latitud debe estar entre -90 y 90, y la longitud entre -180 y 180."
+                    .into(),
             });
         }
-        if !is_within_24h(conv.last_inbound_at) { return Err(ApiError::WindowExpired); }
+        if !is_within_24h(conv.last_inbound_at) {
+            return Err(ApiError::WindowExpired);
+        }
         return Ok(SendMode::Location { loc: loc.clone() });
     }
     if explicit("contacts") || (type_hint.is_none() && payload.contacts.is_some()) {
-        let list = payload.contacts.as_ref().ok_or_else(|| ApiError::BadRequest("contacts requerido cuando type=contacts".into()))?;
+        let list = payload.contacts.as_ref().ok_or_else(|| {
+            ApiError::BadRequest("contacts requerido cuando type=contacts".into())
+        })?;
         if list.is_empty() {
             return Err(ApiError::ValidationError {
                 code: "contacts_empty".into(),
@@ -1352,7 +1594,12 @@ fn resolve_send_mode(
             });
         }
         for (i, c) in list.iter().enumerate() {
-            let fname = c.get("name").and_then(|n| n.get("formatted_name")).and_then(|s| s.as_str()).unwrap_or("").trim();
+            let fname = c
+                .get("name")
+                .and_then(|n| n.get("formatted_name"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .trim();
             if fname.is_empty() {
                 return Err(ApiError::ValidationError {
                     code: "contact_name_required".into(),
@@ -1361,7 +1608,9 @@ fn resolve_send_mode(
                 });
             }
         }
-        if !is_within_24h(conv.last_inbound_at) { return Err(ApiError::WindowExpired); }
+        if !is_within_24h(conv.last_inbound_at) {
+            return Err(ApiError::WindowExpired);
+        }
         return Ok(SendMode::Contacts { list: list.clone() });
     }
 
@@ -1376,11 +1625,16 @@ fn resolve_send_mode(
         return Err(ApiError::WindowExpired);
     }
 
-    Ok(SendMode::Text { content: content.to_string() })
+    Ok(SendMode::Text {
+        content: content.to_string(),
+    })
 }
 
 fn nonempty(opt: &Option<String>) -> Option<String> {
-    opt.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| s.to_string())
+    opt.as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
 }
 
 fn validate_media_id(id: &str) -> Result<(), ApiError> {
@@ -1434,7 +1688,8 @@ async fn auto_fill_template_header_media(
 ) -> Result<(), ApiError> {
     // ¿Ya tiene HEADER? Passthrough — el front quiso personalizar.
     let has_header = components.as_deref().unwrap_or(&[]).iter().any(|c| {
-        c.get("type").and_then(|v| v.as_str())
+        c.get("type")
+            .and_then(|v| v.as_str())
             .map(|t| t.eq_ignore_ascii_case("HEADER"))
             .unwrap_or(false)
     });
@@ -1443,7 +1698,10 @@ async fn auto_fill_template_header_media(
     }
 
     // Resolver phone_number_id desde business_phone
-    let settings = match state.db.find_wa_settings_by_phone(business_phone).await
+    let settings = match state
+        .db
+        .find_wa_settings_by_phone(business_phone)
+        .await
         .map_err(ApiError::DatabaseError)?
     {
         Some(s) => s,
@@ -1451,8 +1709,13 @@ async fn auto_fill_template_header_media(
     };
 
     // Buscar plantilla en nuestra DB
-    let doc = match state.db
-        .find_template_by_phone_name_lang(&settings.phone_number_id, template_name, template_language)
+    let doc = match state
+        .db
+        .find_template_by_phone_name_lang(
+            &settings.phone_number_id,
+            template_name,
+            template_language,
+        )
         .await
         .map_err(ApiError::DatabaseError)?
     {
@@ -1462,7 +1725,8 @@ async fn auto_fill_template_header_media(
 
     // Buscar componente HEADER en los components guardados
     let header_comp = match doc.components.iter().find(|c| {
-        c.get("type").and_then(|v| v.as_str())
+        c.get("type")
+            .and_then(|v| v.as_str())
             .map(|t| t.eq_ignore_ascii_case("HEADER"))
             .unwrap_or(false)
     }) {
@@ -1471,7 +1735,11 @@ async fn auto_fill_template_header_media(
     };
 
     // Sólo IMAGE y VIDEO se auto-rellenan
-    let format = header_comp.get("format").and_then(|v| v.as_str()).unwrap_or("").to_uppercase();
+    let format = header_comp
+        .get("format")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_uppercase();
     let media_kind: &str = match format.as_str() {
         "IMAGE" => "image",
         "VIDEO" => "video",
@@ -1479,7 +1747,10 @@ async fn auto_fill_template_header_media(
     };
 
     // Extraer ObjectId nuestro de example.header_handle[0]
-    let our_media_id = match header_comp.pointer("/example/header_handle/0").and_then(|v| v.as_str()) {
+    let our_media_id = match header_comp
+        .pointer("/example/header_handle/0")
+        .and_then(|v| v.as_str())
+    {
         Some(s) => s,
         None => return Ok(()),
     };
@@ -1489,23 +1760,28 @@ async fn auto_fill_template_header_media(
     };
 
     // Leer binario del GridFS
-    let (bytes, mime) = match state.db.read_template_media_bytes(&oid)
+    let (bytes, mime) = match state
+        .db
+        .read_template_media_bytes(&oid)
         .await
         .map_err(ApiError::DatabaseError)?
     {
         Some(t) => t,
-        None => return Err(ApiError::Internal(format!(
-            "Template {} tiene header media {} pero el binario no existe en GridFS",
-            template_name, our_media_id
-        ))),
+        None => {
+            return Err(ApiError::Internal(format!(
+                "Template {} tiene header media {} pero el binario no existe en GridFS",
+                template_name, our_media_id
+            )))
+        }
     };
 
     // Upload a la Cloud Media API de Meta (≠ Resumable Upload del approval)
-    let meta_media_id = wa.upload_media(bytes, &mime, None)
-        .await
-        .map_err(|e| ApiError::Internal(format!(
-            "auto-fill: falló upload del header media a Meta: {}", e
-        )))?;
+    let meta_media_id = wa.upload_media(bytes, &mime, None).await.map_err(|e| {
+        ApiError::Internal(format!(
+            "auto-fill: falló upload del header media a Meta: {}",
+            e
+        ))
+    })?;
 
     // Construir el componente HEADER. La estructura es:
     //   { type: "HEADER", parameters: [{ type: "image", image: { id: "..." } }] }
@@ -1515,7 +1791,10 @@ async fn auto_fill_template_header_media(
     media_obj.insert("id".to_string(), serde_json::Value::String(meta_media_id));
 
     let mut param = serde_json::Map::new();
-    param.insert("type".to_string(), serde_json::Value::String(media_kind.to_string()));
+    param.insert(
+        "type".to_string(),
+        serde_json::Value::String(media_kind.to_string()),
+    );
     param.insert(media_kind.to_string(), serde_json::Value::Object(media_obj));
 
     let header_param = serde_json::json!({
@@ -1542,136 +1821,239 @@ async fn dispatch_send(
     let internal = |e: anyhow::Error| ApiError::Internal(e.to_string());
     let res = match mode {
         SendMode::Text { content } => {
-            let wa_id = wa.send_text(to, content, reply_to, preview_url_flag).await.map_err(internal)?;
+            let wa_id = wa
+                .send_text(to, content, reply_to, preview_url_flag)
+                .await
+                .map_err(internal)?;
             SentData {
-                wa_id, preview: content.clone(), msg_type: "text",
+                wa_id,
+                preview: content.clone(),
+                msg_type: "text",
                 body: Some(content.clone()),
-                media_id: None, media_filename: None, media_mime_type: None,
-                template_fields: None, interactive_payload: None,
-                contacts_payload: None, location: None,
+                media_id: None,
+                media_filename: None,
+                media_mime_type: None,
+                template_fields: None,
+                interactive_payload: None,
+                contacts_payload: None,
+                location: None,
             }
         }
         SendMode::Template { tpl } => {
-            let components_value = tpl.components.as_ref().map(|v| serde_json::Value::Array(v.clone()));
-            let wa_id = wa.send_template(to, &tpl.name, &tpl.language, components_value.as_ref()).await.map_err(internal)?;
+            let components_value = tpl
+                .components
+                .as_ref()
+                .map(|v| serde_json::Value::Array(v.clone()));
+            let wa_id = wa
+                .send_template(to, &tpl.name, &tpl.language, components_value.as_ref())
+                .await
+                .map_err(internal)?;
             let prev = template_preview(tpl);
             let body = tpl.rendered_text.clone().or_else(|| Some(prev.clone()));
             let fields = TemplateFields {
                 name: tpl.name.clone(),
                 language: tpl.language.clone(),
-                components: tpl.components.as_ref().map(|v| serde_json::Value::Array(v.clone())),
+                components: tpl
+                    .components
+                    .as_ref()
+                    .map(|v| serde_json::Value::Array(v.clone())),
             };
             SentData {
-                wa_id, preview: prev, msg_type: "template", body,
-                media_id: None, media_filename: None, media_mime_type: None,
-                template_fields: Some(fields), interactive_payload: None,
-                contacts_payload: None, location: None,
+                wa_id,
+                preview: prev,
+                msg_type: "template",
+                body,
+                media_id: None,
+                media_filename: None,
+                media_mime_type: None,
+                template_fields: Some(fields),
+                interactive_payload: None,
+                contacts_payload: None,
+                location: None,
             }
         }
         SendMode::Interactive { payload: inter } => {
-            let wa_id = wa.send_interactive(to, inter, reply_to).await.map_err(internal)?;
+            let wa_id = wa
+                .send_interactive(to, inter, reply_to)
+                .await
+                .map_err(internal)?;
             let prev = interactive_preview(inter);
             SentData {
-                wa_id, preview: prev.clone(), msg_type: "interactive",
+                wa_id,
+                preview: prev.clone(),
+                msg_type: "interactive",
                 body: Some(prev),
-                media_id: None, media_filename: None, media_mime_type: None,
-                template_fields: None, interactive_payload: Some(inter.clone()),
-                contacts_payload: None, location: None,
+                media_id: None,
+                media_filename: None,
+                media_mime_type: None,
+                template_fields: None,
+                interactive_payload: Some(inter.clone()),
+                contacts_payload: None,
+                location: None,
             }
         }
         SendMode::Image { media_id, caption } => {
-            let wa_id = wa.send_image(to, media_id, caption.as_deref(), reply_to).await.map_err(internal)?;
+            let wa_id = wa
+                .send_image(to, media_id, caption.as_deref(), reply_to)
+                .await
+                .map_err(internal)?;
             SentData {
                 wa_id,
                 preview: caption.clone().unwrap_or_else(|| "[imagen]".into()),
                 msg_type: "image",
                 body: caption.clone(),
                 media_id: Some(media_id.clone()),
-                media_filename: None, media_mime_type: None,
-                template_fields: None, interactive_payload: None,
-                contacts_payload: None, location: None,
+                media_filename: None,
+                media_mime_type: None,
+                template_fields: None,
+                interactive_payload: None,
+                contacts_payload: None,
+                location: None,
             }
         }
         SendMode::Video { media_id, caption } => {
-            let wa_id = wa.send_video(to, media_id, caption.as_deref(), reply_to).await.map_err(internal)?;
+            let wa_id = wa
+                .send_video(to, media_id, caption.as_deref(), reply_to)
+                .await
+                .map_err(internal)?;
             SentData {
                 wa_id,
                 preview: caption.clone().unwrap_or_else(|| "[video]".into()),
                 msg_type: "video",
                 body: caption.clone(),
                 media_id: Some(media_id.clone()),
-                media_filename: None, media_mime_type: None,
-                template_fields: None, interactive_payload: None,
-                contacts_payload: None, location: None,
+                media_filename: None,
+                media_mime_type: None,
+                template_fields: None,
+                interactive_payload: None,
+                contacts_payload: None,
+                location: None,
             }
         }
-        SendMode::Document { media_id, caption, filename } => {
-            let wa_id = wa.send_document(to, media_id, caption.as_deref(), filename.as_deref(), reply_to).await.map_err(internal)?;
-            let prev = caption.clone()
+        SendMode::Document {
+            media_id,
+            caption,
+            filename,
+        } => {
+            let wa_id = wa
+                .send_document(
+                    to,
+                    media_id,
+                    caption.as_deref(),
+                    filename.as_deref(),
+                    reply_to,
+                )
+                .await
+                .map_err(internal)?;
+            let prev = caption
+                .clone()
                 .or_else(|| filename.clone())
                 .unwrap_or_else(|| "[documento]".into());
             SentData {
-                wa_id, preview: prev, msg_type: "document",
+                wa_id,
+                preview: prev,
+                msg_type: "document",
                 body: caption.clone(),
                 media_id: Some(media_id.clone()),
                 media_filename: filename.clone(),
                 media_mime_type: None,
-                template_fields: None, interactive_payload: None,
-                contacts_payload: None, location: None,
+                template_fields: None,
+                interactive_payload: None,
+                contacts_payload: None,
+                location: None,
             }
         }
         SendMode::Audio { media_id } => {
-            let wa_id = wa.send_audio(to, media_id, reply_to).await.map_err(internal)?;
+            let wa_id = wa
+                .send_audio(to, media_id, reply_to)
+                .await
+                .map_err(internal)?;
             SentData {
-                wa_id, preview: "[audio]".into(), msg_type: "audio",
+                wa_id,
+                preview: "[audio]".into(),
+                msg_type: "audio",
                 body: None,
                 media_id: Some(media_id.clone()),
-                media_filename: None, media_mime_type: None,
-                template_fields: None, interactive_payload: None,
-                contacts_payload: None, location: None,
+                media_filename: None,
+                media_mime_type: None,
+                template_fields: None,
+                interactive_payload: None,
+                contacts_payload: None,
+                location: None,
             }
         }
         SendMode::Sticker { media_id } => {
-            let wa_id = wa.send_sticker(to, media_id, reply_to).await.map_err(internal)?;
+            let wa_id = wa
+                .send_sticker(to, media_id, reply_to)
+                .await
+                .map_err(internal)?;
             SentData {
-                wa_id, preview: "[sticker]".into(), msg_type: "sticker",
+                wa_id,
+                preview: "[sticker]".into(),
+                msg_type: "sticker",
                 body: None,
                 media_id: Some(media_id.clone()),
-                media_filename: None, media_mime_type: None,
-                template_fields: None, interactive_payload: None,
-                contacts_payload: None, location: None,
+                media_filename: None,
+                media_mime_type: None,
+                template_fields: None,
+                interactive_payload: None,
+                contacts_payload: None,
+                location: None,
             }
         }
         SendMode::Location { loc } => {
-            let wa_id = wa.send_location(
-                to, loc.latitude, loc.longitude,
-                loc.name.as_deref(), loc.address.as_deref(), reply_to,
-            ).await.map_err(internal)?;
-            let prev = loc.name.clone()
+            let wa_id = wa
+                .send_location(
+                    to,
+                    loc.latitude,
+                    loc.longitude,
+                    loc.name.as_deref(),
+                    loc.address.as_deref(),
+                    reply_to,
+                )
+                .await
+                .map_err(internal)?;
+            let prev = loc
+                .name
+                .clone()
                 .or_else(|| loc.address.clone())
                 .unwrap_or_else(|| "Ubicación".into());
             SentData {
-                wa_id, preview: prev, msg_type: "location",
+                wa_id,
+                preview: prev,
+                msg_type: "location",
                 body: None,
-                media_id: None, media_filename: None, media_mime_type: None,
-                template_fields: None, interactive_payload: None,
+                media_id: None,
+                media_filename: None,
+                media_mime_type: None,
+                template_fields: None,
+                interactive_payload: None,
                 contacts_payload: None,
                 location: Some(loc.clone()),
             }
         }
         SendMode::Contacts { list } => {
-            let wa_id = wa.send_contacts(to, list, reply_to).await.map_err(internal)?;
-            let prev = list.first()
+            let wa_id = wa
+                .send_contacts(to, list, reply_to)
+                .await
+                .map_err(internal)?;
+            let prev = list
+                .first()
                 .and_then(|c| c.get("name"))
                 .and_then(|n| n.get("formatted_name").or_else(|| n.get("first_name")))
                 .and_then(|s| s.as_str())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "[contacto]".into());
             SentData {
-                wa_id, preview: prev, msg_type: "contacts",
+                wa_id,
+                preview: prev,
+                msg_type: "contacts",
                 body: None,
-                media_id: None, media_filename: None, media_mime_type: None,
-                template_fields: None, interactive_payload: None,
+                media_id: None,
+                media_filename: None,
+                media_mime_type: None,
+                template_fields: None,
+                interactive_payload: None,
                 contacts_payload: Some(serde_json::Value::Array(list.clone())),
                 location: None,
             }
@@ -1685,13 +2067,21 @@ async fn dispatch_send(
 /// validación — si el payload viene mal armado, devuelve un fallback genérico.
 fn interactive_preview(payload: &serde_json::Value) -> String {
     // Preferimos el texto del body, luego del header, luego un fallback.
-    if let Some(b) = payload.get("body").and_then(|b| b.get("text")).and_then(|t| t.as_str()) {
+    if let Some(b) = payload
+        .get("body")
+        .and_then(|b| b.get("text"))
+        .and_then(|t| t.as_str())
+    {
         let t = b.trim();
         if !t.is_empty() {
             return t.to_string();
         }
     }
-    if let Some(h) = payload.get("header").and_then(|h| h.get("text")).and_then(|t| t.as_str()) {
+    if let Some(h) = payload
+        .get("header")
+        .and_then(|h| h.get("text"))
+        .and_then(|t| t.as_str())
+    {
         let t = h.trim();
         if !t.is_empty() {
             return t.to_string();
@@ -1729,7 +2119,8 @@ pub async fn mark_read_handler(
 ) -> Result<Json<MarkReadResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
-    let conv = state.db
+    let conv = state
+        .db
         .find_conversation_by_id(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
@@ -1738,7 +2129,8 @@ pub async fn mark_read_handler(
     // Actualizar status de inbound en DB y obtener los que cambiaron.
     // El `agent_id` queda persistido en `read_by_user_id` (first-read-wins)
     // para que la auditoría pueda atribuir el inbound a quien lo atendió.
-    let changed_ids = state.db
+    let changed_ids = state
+        .db
         .mark_inbound_as_read(&oid, &claims.id)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
@@ -1767,14 +2159,19 @@ pub async fn mark_read_handler(
                                 err += 1;
                                 tracing::warn!(
                                     "[mark-read] Meta mark_as_read falló conv={} wamid={}: {}",
-                                    conv_hex, wamid, e
+                                    conv_hex,
+                                    wamid,
+                                    e
                                 );
                             }
                         }
                     }
                     tracing::info!(
                         "[mark-read] Meta ACK conv={} total={} ok={} err={}",
-                        conv_hex, ids_to_ack.len(), ok, err
+                        conv_hex,
+                        ids_to_ack.len(),
+                        ok,
+                        err
                     );
                 });
             }
@@ -1794,7 +2191,12 @@ pub async fn mark_read_handler(
         broadcast_all(&state.ws_registry, &ev).await;
     }
 
-    Ok(Json(MarkReadResponse { ok: true, data: MarkReadData { message_ids: changed_ids } }))
+    Ok(Json(MarkReadResponse {
+        ok: true,
+        data: MarkReadData {
+            message_ids: changed_ids,
+        },
+    }))
 }
 
 #[utoipa::path(
@@ -1819,7 +2221,8 @@ pub async fn take_conversation_handler(
 
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
-    let existing = state.db
+    let existing = state
+        .db
         .find_conversation_by_id(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
@@ -1835,7 +2238,8 @@ pub async fn take_conversation_handler(
     }
 
     // `take_conversation` acepta `pending` (toma/reasignación) y `closed` (reopen+take).
-    let taken = state.db
+    let taken = state
+        .db
         .take_conversation(&oid, &claims.id)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
@@ -1858,7 +2262,8 @@ pub async fn take_conversation_handler(
 
     // Resolver datos adicionales que van tanto en la respuesta HTTP como en el
     // evento WS (para que el resto de agentes vea la conversación actualizada).
-    let opens = state.db
+    let opens = state
+        .db
         .get_conversation_opens(&claims.id, &[oid])
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
@@ -1884,16 +2289,20 @@ pub async fn take_conversation_handler(
             previous_status: "closed".to_string(),
         };
         broadcast_all(&state.ws_registry, &ev).await;
-        record_conv_event(&state, WaConversationEventInput {
-            conversation_id: &oid,
-            business_phone: &conv.business_phone,
-            event_type: "taken",
-            actor_id: Some(claims.id.as_str()),
-            actor_name: Some(claims.name.as_str()),
-            target_id: Some(claims.id.as_str()),
-            target_name: Some(claims.name.as_str()),
-            note: Some("after_reopen"),
-        }).await;
+        record_conv_event(
+            &state,
+            WaConversationEventInput {
+                conversation_id: &oid,
+                business_phone: &conv.business_phone,
+                event_type: "taken",
+                actor_id: Some(claims.id.as_str()),
+                actor_name: Some(claims.name.as_str()),
+                target_id: Some(claims.id.as_str()),
+                target_name: Some(claims.name.as_str()),
+                note: Some("after_reopen"),
+            },
+        )
+        .await;
     } else if !was_already_mine {
         let conv_item = conv_to_item(
             conv.clone(),
@@ -1922,21 +2331,33 @@ pub async fn take_conversation_handler(
             }
         };
         broadcast_except(&state.ws_registry, &claims.id, &ev).await;
-        record_conv_event(&state, WaConversationEventInput {
-            conversation_id: &oid,
-            business_phone: &conv.business_phone,
-            event_type: if is_takeover { "transferred" } else { "taken" },
-            actor_id: Some(claims.id.as_str()),
-            actor_name: Some(claims.name.as_str()),
-            target_id: Some(claims.id.as_str()),
-            target_name: Some(claims.name.as_str()),
-            note: None,
-        }).await;
+        record_conv_event(
+            &state,
+            WaConversationEventInput {
+                conversation_id: &oid,
+                business_phone: &conv.business_phone,
+                event_type: if is_takeover { "transferred" } else { "taken" },
+                actor_id: Some(claims.id.as_str()),
+                actor_name: Some(claims.name.as_str()),
+                target_id: Some(claims.id.as_str()),
+                target_name: Some(claims.name.as_str()),
+                note: None,
+            },
+        )
+        .await;
     }
 
     Ok(Json(TakeConversationResponse {
         ok: true,
-        data: conv_to_item(conv, true, last_opened, workspace_name, resolved, agent_name, assigned_name),
+        data: conv_to_item(
+            conv,
+            true,
+            last_opened,
+            workspace_name,
+            resolved,
+            agent_name,
+            assigned_name,
+        ),
     }))
 }
 
@@ -1961,7 +2382,8 @@ pub async fn transfer_conversation_handler(
 ) -> Result<Json<ConversationDetailResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
-    let conv = state.db
+    let conv = state
+        .db
         .find_conversation_by_id(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
@@ -1969,7 +2391,8 @@ pub async fn transfer_conversation_handler(
 
     // Validar que el usuario destino exista.
     use crate::db::UserRepository;
-    let target = state.db
+    let target = state
+        .db
         .find_user_by_id(&payload.user_id)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
@@ -1977,7 +2400,9 @@ pub async fn transfer_conversation_handler(
 
     let from_agent = conv.assigned_to.clone();
 
-    state.db.assign_conversation(&oid, Some(&payload.user_id))
+    state
+        .db
+        .assign_conversation(&oid, Some(&payload.user_id))
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
 
@@ -1991,17 +2416,24 @@ pub async fn transfer_conversation_handler(
     if let Some(note) = payload.note.as_deref() {
         tracing::info!(
             "[transfer] conv={} de {:?} → {} por {} ({}): {}",
-            id, from_agent, payload.user_id, claims.id, claims.name, note
+            id,
+            from_agent,
+            payload.user_id,
+            claims.id,
+            claims.name,
+            note
         );
     }
 
-    let conv_after = state.db
+    let conv_after = state
+        .db
         .find_conversation_by_id(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
-    let opens = state.db
+    let opens = state
+        .db
         .get_conversation_opens(&claims.id, &[oid])
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
@@ -2010,7 +2442,15 @@ pub async fn transfer_conversation_handler(
     let resolved = resolve_customer_name(&state, &conv_after).await;
     let agent_name = resolve_last_message_agent_name_one(&state, &conv_after).await;
     let assigned_name = resolve_assigned_agent_name_one(&state, &conv_after).await;
-    let conv_item = conv_to_item(conv_after, true, last_opened, workspace_name, resolved, agent_name, assigned_name);
+    let conv_item = conv_to_item(
+        conv_after,
+        true,
+        last_opened,
+        workspace_name,
+        resolved,
+        agent_name,
+        assigned_name,
+    );
 
     // Emitir tras tener el item listo — incluye el estado actualizado con workspace_name y assigned_to nuevo.
     let ev = WsServerEvent::ChatTransferido {
@@ -2021,16 +2461,20 @@ pub async fn transfer_conversation_handler(
     };
     broadcast_all(&state.ws_registry, &ev).await;
 
-    record_conv_event(&state, WaConversationEventInput {
-        conversation_id: &oid,
-        business_phone: &conv.business_phone,
-        event_type: "transferred",
-        actor_id: Some(claims.id.as_str()),
-        actor_name: Some(claims.name.as_str()),
-        target_id: Some(payload.user_id.as_str()),
-        target_name: Some(target.name.as_str()),
-        note: payload.note.as_deref(),
-    }).await;
+    record_conv_event(
+        &state,
+        WaConversationEventInput {
+            conversation_id: &oid,
+            business_phone: &conv.business_phone,
+            event_type: "transferred",
+            actor_id: Some(claims.id.as_str()),
+            actor_name: Some(claims.name.as_str()),
+            target_id: Some(payload.user_id.as_str()),
+            target_name: Some(target.name.as_str()),
+            note: payload.note.as_deref(),
+        },
+    )
+    .await;
 
     Ok(Json(ConversationDetailResponse {
         ok: true,
@@ -2057,7 +2501,8 @@ pub async fn close_conversation_handler(
 ) -> Result<Json<ConversationDetailResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
-    let conv = state.db
+    let conv = state
+        .db
         .find_conversation_by_id(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
@@ -2066,7 +2511,9 @@ pub async fn close_conversation_handler(
     // Capturar al agente ANTES de cerrar — `close_conversation` desasigna.
     let prev_agent = conv.assigned_to.clone();
 
-    state.db.close_conversation(&oid)
+    state
+        .db
+        .close_conversation(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
 
@@ -2077,27 +2524,35 @@ pub async fn close_conversation_handler(
     // Limpieza de counters AI por conversación al cerrar.
     state.redis.clear_ai_conv_counters(&id).await;
 
-    let ev = WsServerEvent::ChatCerrado { conversation_id: id.clone() };
+    let ev = WsServerEvent::ChatCerrado {
+        conversation_id: id.clone(),
+    };
     broadcast_all(&state.ws_registry, &ev).await;
 
-    record_conv_event(&state, WaConversationEventInput {
-        conversation_id: &oid,
-        business_phone: &conv.business_phone,
-        event_type: "closed",
-        actor_id: Some(claims.id.as_str()),
-        actor_name: Some(claims.name.as_str()),
-        target_id: None,
-        target_name: None,
-        note: None,
-    }).await;
+    record_conv_event(
+        &state,
+        WaConversationEventInput {
+            conversation_id: &oid,
+            business_phone: &conv.business_phone,
+            event_type: "closed",
+            actor_id: Some(claims.id.as_str()),
+            actor_name: Some(claims.name.as_str()),
+            target_id: None,
+            target_name: None,
+            note: None,
+        },
+    )
+    .await;
 
-    let conv_after = state.db
+    let conv_after = state
+        .db
         .find_conversation_by_id(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
-    let opens = state.db
+    let opens = state
+        .db
         .get_conversation_opens(&claims.id, &[oid])
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
@@ -2109,7 +2564,15 @@ pub async fn close_conversation_handler(
 
     Ok(Json(ConversationDetailResponse {
         ok: true,
-        data: conv_to_item(conv_after, true, last_opened, workspace_name, resolved, agent_name, assigned_name),
+        data: conv_to_item(
+            conv_after,
+            true,
+            last_opened,
+            workspace_name,
+            resolved,
+            agent_name,
+            assigned_name,
+        ),
     }))
 }
 
@@ -2137,7 +2600,9 @@ pub async fn reopen_conversation_handler(
 
     // Pre-check de existencia: `reopen_conversation` sólo actúa si status==closed.
     // Distinguir "no existe" (404) de "ya abierta" (idempotente) requiere este paso.
-    if state.db.find_conversation_by_id(&oid)
+    if state
+        .db
+        .find_conversation_by_id(&oid)
         .await
         .map_err(ApiError::DatabaseError)?
         .is_none()
@@ -2145,17 +2610,21 @@ pub async fn reopen_conversation_handler(
         return Err(ApiError::NotFound);
     }
 
-    let reopened = state.db.reopen_conversation(&oid)
+    let reopened = state
+        .db
+        .reopen_conversation(&oid)
         .await
         .map_err(ApiError::DatabaseError)?;
 
-    let conv_after = state.db
+    let conv_after = state
+        .db
         .find_conversation_by_id(&oid)
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::NotFound)?;
 
-    let opens = state.db
+    let opens = state
+        .db
         .get_conversation_opens(&claims.id, &[oid])
         .await
         .map_err(ApiError::DatabaseError)?;
@@ -2166,7 +2635,13 @@ pub async fn reopen_conversation_handler(
     let assigned_name = resolve_assigned_agent_name_one(&state, &conv_after).await;
     let business_phone_for_audit = conv_after.business_phone.clone();
     let conversation_item = conv_to_item(
-        conv_after, true, last_opened, workspace_name, resolved, agent_name, assigned_name,
+        conv_after,
+        true,
+        last_opened,
+        workspace_name,
+        resolved,
+        agent_name,
+        assigned_name,
     );
 
     // Sólo emitimos el evento si realmente se reabrió (transición real).
@@ -2189,16 +2664,20 @@ pub async fn reopen_conversation_handler(
         };
         broadcast_all(&state.ws_registry, &ev_ia).await;
 
-        record_conv_event(&state, WaConversationEventInput {
-            conversation_id: &oid,
-            business_phone: &business_phone_for_audit,
-            event_type: "reopened",
-            actor_id: Some(claims.id.as_str()),
-            actor_name: Some(claims.name.as_str()),
-            target_id: None,
-            target_name: None,
-            note: None,
-        }).await;
+        record_conv_event(
+            &state,
+            WaConversationEventInput {
+                conversation_id: &oid,
+                business_phone: &business_phone_for_audit,
+                event_type: "reopened",
+                actor_id: Some(claims.id.as_str()),
+                actor_name: Some(claims.name.as_str()),
+                target_id: None,
+                target_name: None,
+                note: None,
+            },
+        )
+        .await;
     }
 
     Ok(Json(ConversationDetailResponse {
@@ -2235,7 +2714,8 @@ pub async fn initiate_conversation_handler(
     let workspace_oid = ObjectId::parse_str(payload.business_phone_id.trim())
         .map_err(|_| ApiError::BadRequest("business_phone_id inválido".into()))?;
 
-    let settings = state.db
+    let settings = state
+        .db
         .find_wa_settings_by_id(&workspace_oid)
         .await
         .map_err(ApiError::DatabaseError)?
@@ -2278,7 +2758,8 @@ pub async fn initiate_conversation_handler(
     // sirve para mostrar datos del cliente en la UI, no bloquea el envío).
     let client_id = {
         use crate::db::ProfileRepository;
-        state.db
+        state
+            .db
             .find_clients_by_phone(&to)
             .await
             .ok()
@@ -2287,25 +2768,31 @@ pub async fn initiate_conversation_handler(
 
     // Upsert conversación. El nombre lo dejamos en None — si hay inbound
     // posterior, Meta lo trae y se actualiza automáticamente.
-    let (conv, conv_created) = state.db
+    let (conv, conv_created) = state
+        .db
         .upsert_conversation(&to, &settings.phone, None)
         .await
         .map_err(ApiError::DatabaseError)?;
-    let conv_id = conv.id
+    let conv_id = conv
+        .id
         .ok_or_else(|| ApiError::Internal("conversación sin _id tras upsert".into()))?;
 
     // Outbound first → registrar `created` con el agente como actor.
     if conv_created {
-        record_conv_event(&state, WaConversationEventInput {
-            conversation_id: &conv_id,
-            business_phone: &conv.business_phone,
-            event_type: "created",
-            actor_id: Some(claims.id.as_str()),
-            actor_name: Some(claims.name.as_str()),
-            target_id: None,
-            target_name: None,
-            note: Some("outbound_initiate"),
-        }).await;
+        record_conv_event(
+            &state,
+            WaConversationEventInput {
+                conversation_id: &conv_id,
+                business_phone: &conv.business_phone,
+                event_type: "created",
+                actor_id: Some(claims.id.as_str()),
+                actor_name: Some(claims.name.as_str()),
+                target_id: None,
+                target_name: None,
+                note: Some("outbound_initiate"),
+            },
+        )
+        .await;
     }
 
     // Engagement throttle (Meta error 131049): si la conversación ya está en
@@ -2320,7 +2807,8 @@ pub async fn initiate_conversation_handler(
                 field: None,
                 message: "Meta bloqueó los envíos a este contacto temporalmente \
                     (recibió demasiados mensajes sin responder). Espera a que \
-                    responda o vuelve a intentarlo más tarde.".into(),
+                    responda o vuelve a intentarlo más tarde."
+                    .into(),
                 details: Some(serde_json::json!({
                     "meta_throttle_until": iso8601(until),
                 })),
@@ -2342,7 +2830,11 @@ pub async fn initiate_conversation_handler(
     // el auto-assign la reasigne a otro agente al primer inbound.
     let needs_assign = conv.assigned_to.is_none();
     if needs_assign {
-        if let Err(e) = state.db.assign_conversation(&conv_id, Some(&claims.id)).await {
+        if let Err(e) = state
+            .db
+            .assign_conversation(&conv_id, Some(&claims.id))
+            .await
+        {
             tracing::warn!("initiate: assign_conversation error: {}", e);
         } else {
             state.redis.incr_agent_load(&claims.id).await;
@@ -2351,7 +2843,8 @@ pub async fn initiate_conversation_handler(
 
     // Idempotencia: si ya existe un mensaje con la misma key para esta
     // conversación, devolverlo sin re-enviar (salvo que esté `failed`).
-    if let Some(existing) = state.db
+    if let Some(existing) = state
+        .db
         .find_message_by_idempotency(&conv_id, &idempotency_key)
         .await
         .map_err(ApiError::DatabaseError)?
@@ -2362,7 +2855,10 @@ pub async fn initiate_conversation_handler(
             let item = msg_to_item(existing, Some(claims.name.clone()), rto);
             return Ok(Json(SendMessageResponse {
                 ok: true,
-                data: SendMessageData { message_id: item.id.clone(), message: item },
+                data: SendMessageData {
+                    message_id: item.id.clone(),
+                    message: item,
+                },
             }));
         }
     }
@@ -2378,17 +2874,27 @@ pub async fn initiate_conversation_handler(
 
     // Auto-fill del HEADER si la plantilla tiene IMAGE/VIDEO y el front no lo mandó.
     auto_fill_template_header_media(
-        &state, &mut tpl.components, &tpl_name, &tpl_lang,
-        &settings.phone, &wa,
-    ).await?;
+        &state,
+        &mut tpl.components,
+        &tpl_name,
+        &tpl_lang,
+        &settings.phone,
+        &wa,
+    )
+    .await?;
 
-    let components_value = tpl.components.as_ref()
+    let components_value = tpl
+        .components
+        .as_ref()
         .map(|v| serde_json::Value::Array(v.clone()));
-    let wa_id = wa.send_template(&to, &tpl_name, &tpl_lang, components_value.as_ref())
+    let wa_id = wa
+        .send_template(&to, &tpl_name, &tpl_lang, components_value.as_ref())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let preview = tpl.rendered_text.as_deref()
+    let preview = tpl
+        .rendered_text
+        .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
@@ -2422,7 +2928,11 @@ pub async fn initiate_conversation_handler(
         timestamp: DateTime::now(),
     };
 
-    let saved = state.db.save_message(msg).await.map_err(ApiError::DatabaseError)?;
+    let saved = state
+        .db
+        .save_message(msg)
+        .await
+        .map_err(ApiError::DatabaseError)?;
     let touch = crate::db::ConversationTouch {
         preview: &preview,
         msg_type: &saved.msg_type,
@@ -2434,13 +2944,16 @@ pub async fn initiate_conversation_handler(
         increment_unread: false,
         last_message_at: None,
     };
-    state.db.touch_conversation(&conv_id, touch)
+    state
+        .db
+        .touch_conversation(&conv_id, touch)
         .await
         .map_err(ApiError::DatabaseError)?;
 
     // Releer para emitir `ConversacionNueva` con el estado final (assigned_to,
     // client_id, etc).
-    let conv_now = state.db
+    let conv_now = state
+        .db
         .find_conversation_by_id(&conv_id)
         .await
         .map_err(ApiError::DatabaseError)?
@@ -2458,7 +2971,15 @@ pub async fn initiate_conversation_handler(
         // assigned_to acá es claims.id (template envía con el agente como dueño).
         let assigned_name = conv_now.assigned_to.as_ref().map(|_| claims.name.clone());
         let new_ev = WsServerEvent::ConversacionNueva {
-            conversation: conv_to_item(conv_now, false, None, ws_name, resolved, agent_name, assigned_name),
+            conversation: conv_to_item(
+                conv_now,
+                false,
+                None,
+                ws_name,
+                resolved,
+                agent_name,
+                assigned_name,
+            ),
         };
         broadcast_all(&state.ws_registry, &new_ev).await;
     }
@@ -2471,7 +2992,10 @@ pub async fn initiate_conversation_handler(
 
     Ok(Json(SendMessageResponse {
         ok: true,
-        data: SendMessageData { message_id: item.id.clone(), message: item },
+        data: SendMessageData {
+            message_id: item.id.clone(),
+            message: item,
+        },
     }))
 }
 
@@ -2493,7 +3017,11 @@ pub async fn list_transferable_agents_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<TransferableAgentsResponse>, ApiError> {
     use crate::db::UserRepository;
-    let users = state.db.find_chat_agents().await.map_err(|e| ApiError::DatabaseError(e))?;
+    let users = state
+        .db
+        .find_chat_agents()
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
     let data = users
         .into_iter()
         .map(|u| TransferableAgentItem {
@@ -2524,7 +3052,11 @@ pub async fn list_transferable_agents_handler(
 pub async fn list_settings_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SettingsListResponse>, ApiError> {
-    let items = state.db.get_all_wa_settings().await.map_err(|e| ApiError::DatabaseError(e))?;
+    let items = state
+        .db
+        .get_all_wa_settings()
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
     Ok(Json(SettingsListResponse {
         ok: true,
         data: items.into_iter().map(settings_to_item).collect(),
@@ -2556,7 +3088,9 @@ pub async fn create_settings_handler(
     }
     let waba_id = payload.whatsapp_business_account_id.trim().to_string();
     if waba_id.is_empty() {
-        return Err(ApiError::BadRequest("whatsapp_business_account_id requerido".into()));
+        return Err(ApiError::BadRequest(
+            "whatsapp_business_account_id requerido".into(),
+        ));
     }
 
     let encrypted = encrypt_payload(&settings_secret(), access_token);
@@ -2580,8 +3114,15 @@ pub async fn create_settings_handler(
         updated_at: now,
     };
 
-    let created = state.db.create_wa_settings(doc).await.map_err(|e| ApiError::DatabaseError(e))?;
-    Ok(Json(SettingsResponse { ok: true, data: settings_to_item(created) }))
+    let created = state
+        .db
+        .create_wa_settings(doc)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
+    Ok(Json(SettingsResponse {
+        ok: true,
+        data: settings_to_item(created),
+    }))
 }
 
 #[utoipa::path(
@@ -2614,13 +3155,17 @@ pub async fn update_settings_handler(
     };
 
     // WABA id: `Some("")` se ignora (permitir payloads sin borrar el campo).
-    let waba = payload.whatsapp_business_account_id
-        .and_then(|v| {
-            let t = v.trim().to_string();
-            if t.is_empty() { None } else { Some(t) }
-        });
+    let waba = payload.whatsapp_business_account_id.and_then(|v| {
+        let t = v.trim().to_string();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
+    });
 
-    state.db
+    state
+        .db
         .update_wa_settings(
             &oid,
             payload.workspace_name,
@@ -2656,7 +3201,11 @@ pub async fn delete_settings_handler(
     Path(id): Path<String>,
 ) -> Result<Json<UpdateResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
-    state.db.delete_wa_settings(&oid).await.map_err(|e| ApiError::DatabaseError(e))?;
+    state
+        .db
+        .delete_wa_settings(&oid)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
     Ok(Json(UpdateResponse { ok: true }))
 }
 
@@ -2690,28 +3239,33 @@ pub async fn get_media_handler(
     Path(media_id): Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
     // 1. Mensaje que contiene el media.
-    let msg = state.db
+    let msg = state
+        .db
         .find_message_by_media_id(&media_id)
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::NotFound)?;
 
     // 2. Conversación → business_phone.
-    let conv = state.db
+    let conv = state
+        .db
         .find_conversation_by_id(&msg.conversation_id)
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::NotFound)?;
 
     // 3. Settings del negocio (auth del agente).
-    let settings = state.db
+    let settings = state
+        .db
         .find_wa_settings_by_phone(&conv.business_phone)
         .await
         .map_err(ApiError::DatabaseError)?
-        .ok_or_else(|| ApiError::Internal(format!(
-            "wa_settings inactivo o no encontrado para {}",
-            conv.business_phone
-        )))?;
+        .ok_or_else(|| {
+            ApiError::Internal(format!(
+                "wa_settings inactivo o no encontrado para {}",
+                conv.business_phone
+            ))
+        })?;
 
     if !settings.agents.iter().any(|id| id == &claims.id) {
         return Err(ApiError::Forbidden);
@@ -2723,9 +3277,13 @@ pub async fn get_media_handler(
     if let Some((bytes, mime, remote_filename)) = state.redis.get_media_cache(&media_id).await {
         tracing::info!(
             "[media] HIT {} ({} bytes, {}) redis={}ms",
-            media_id, bytes.len(), mime, t0.elapsed().as_millis()
+            media_id,
+            bytes.len(),
+            mime,
+            t0.elapsed().as_millis()
         );
-        let filename = msg.media_filename
+        let filename = msg
+            .media_filename
             .clone()
             .or(remote_filename)
             .unwrap_or_else(|| media_id.clone());
@@ -2736,15 +3294,24 @@ pub async fn get_media_handler(
     // hay otra tarea bajándolo. Esperamos ~2s en polls de 100ms a ver si
     // aparece en cache antes de disparar una segunda descarga al Worker.
     if !state.redis.try_lock_media_prefetch(&media_id).await {
-        tracing::info!("[media] MISS→WAIT {} — prefetch en vuelo, esperando", media_id);
+        tracing::info!(
+            "[media] MISS→WAIT {} — prefetch en vuelo, esperando",
+            media_id
+        );
         for _ in 0..20 {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            if let Some((bytes, mime, remote_filename)) = state.redis.get_media_cache(&media_id).await {
+            if let Some((bytes, mime, remote_filename)) =
+                state.redis.get_media_cache(&media_id).await
+            {
                 tracing::info!(
                     "[media] WAIT→HIT {} ({} bytes, {}) wait={}ms",
-                    media_id, bytes.len(), mime, t0.elapsed().as_millis()
+                    media_id,
+                    bytes.len(),
+                    mime,
+                    t0.elapsed().as_millis()
                 );
-                let filename = msg.media_filename
+                let filename = msg
+                    .media_filename
                     .clone()
                     .or(remote_filename)
                     .unwrap_or_else(|| media_id.clone());
@@ -2752,7 +3319,10 @@ pub async fn get_media_handler(
             }
         }
         // El otro task tardó demasiado o falló — seguimos con descarga propia.
-        tracing::warn!("[media] MISS→WAIT timeout para {} — bajando por nuestra cuenta", media_id);
+        tracing::warn!(
+            "[media] MISS→WAIT timeout para {} — bajando por nuestra cuenta",
+            media_id
+        );
     } else {
         tracing::warn!(
             "[media] MISS {} — cayendo a Meta (prefetch no completó a tiempo o falló)",
@@ -2776,22 +3346,29 @@ pub async fn get_media_handler(
         .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
     let wa = apply_media_relay(
         &state,
-        WhatsAppService::new(state.reqwest_client.clone(), settings.phone_number_id, token),
+        WhatsAppService::new(
+            state.reqwest_client.clone(),
+            settings.phone_number_id,
+            token,
+        ),
     );
 
     let t_meta = std::time::Instant::now();
-    let (bytes, mime, remote_filename) = wa.download_media(&media_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "[media] download_media falló para {} tras {}ms: {}",
-                media_id, t_meta.elapsed().as_millis(), e
-            );
-            ApiError::Internal(e.to_string())
-        })?;
+    let (bytes, mime, remote_filename) = wa.download_media(&media_id).await.map_err(|e| {
+        tracing::error!(
+            "[media] download_media falló para {} tras {}ms: {}",
+            media_id,
+            t_meta.elapsed().as_millis(),
+            e
+        );
+        ApiError::Internal(e.to_string())
+    })?;
     tracing::info!(
         "[media] MISS→FETCH {} ({} bytes, {}) meta={}ms",
-        media_id, bytes.len(), mime, t_meta.elapsed().as_millis()
+        media_id,
+        bytes.len(),
+        mime,
+        t_meta.elapsed().as_millis()
     );
 
     // Guardar en cache fire-and-forget para la próxima request (y para los
@@ -2803,16 +3380,15 @@ pub async fn get_media_handler(
         let mime_cl = mime.clone();
         let filename_cl = remote_filename.clone();
         tokio::spawn(async move {
-            state_cl.redis.set_media_cache(
-                &mid_cl,
-                &bytes_cl,
-                &mime_cl,
-                filename_cl.as_deref(),
-            ).await;
+            state_cl
+                .redis
+                .set_media_cache(&mid_cl, &bytes_cl, &mime_cl, filename_cl.as_deref())
+                .await;
         });
     }
 
-    let filename = msg.media_filename
+    let filename = msg
+        .media_filename
         .clone()
         .or(remote_filename)
         .unwrap_or_else(|| media_id.clone());
@@ -2821,9 +3397,15 @@ pub async fn get_media_handler(
 
 // Mime types aceptados por Meta Cloud API para cada tipo de upload.
 // Referencia: https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media
-const MIME_IMAGE:    &[&str] = &["image/jpeg", "image/png"];
-const MIME_VIDEO:    &[&str] = &["video/mp4", "video/3gpp"];
-const MIME_AUDIO:    &[&str] = &["audio/aac", "audio/mp4", "audio/mpeg", "audio/amr", "audio/ogg"];
+const MIME_IMAGE: &[&str] = &["image/jpeg", "image/png"];
+const MIME_VIDEO: &[&str] = &["video/mp4", "video/3gpp"];
+const MIME_AUDIO: &[&str] = &[
+    "audio/aac",
+    "audio/mp4",
+    "audio/mpeg",
+    "audio/amr",
+    "audio/ogg",
+];
 const MIME_DOCUMENT: &[&str] = &[
     "application/pdf",
     "application/vnd.ms-powerpoint",
@@ -2834,18 +3416,18 @@ const MIME_DOCUMENT: &[&str] = &[
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "text/plain",
 ];
-const MIME_STICKER:  &[&str] = &["image/webp"];
+const MIME_STICKER: &[&str] = &["image/webp"];
 
 // Tamaños máximos por tipo — son los límites oficiales de Meta Cloud API
 // (protocolo, iguales para todas las cuentas). Hardcoded aquí porque no hay
 // caso de uso real para tunearlos por deploy/workspace.
 // Sticker a 500 KB cubre tanto estáticos (Meta: 100 KB) como animados (500 KB);
 // Meta rechaza server-side si el static supera su sub-límite interno.
-const MAX_IMAGE_BYTES:    u64 = 5  * 1024 * 1024;
-const MAX_VIDEO_BYTES:    u64 = 16 * 1024 * 1024;
-const MAX_AUDIO_BYTES:    u64 = 16 * 1024 * 1024;
+const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+const MAX_VIDEO_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_AUDIO_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_DOCUMENT_BYTES: u64 = 100 * 1024 * 1024;
-const MAX_STICKER_BYTES:  u64 = 500 * 1024;
+const MAX_STICKER_BYTES: u64 = 500 * 1024;
 
 /// Convierte bytes a texto human-readable ("16 MB", "100 KB", "800 B").
 /// Usa 1 decimal solo si aporta (no muestra "16.0 MB").
@@ -2870,23 +3452,23 @@ fn human_bytes(n: u64) -> String {
 /// Usado al formatear mensajes de error user-facing.
 fn media_type_label(type_str: &str) -> (&'static str, &'static str) {
     match type_str {
-        "image"    => ("imagen",    "jpeg, png"),
-        "video"    => ("video",     "mp4, 3gp"),
-        "audio"    => ("audio",     "aac, amr, mp3, m4a, ogg"),
+        "image" => ("imagen", "jpeg, png"),
+        "video" => ("video", "mp4, 3gp"),
+        "audio" => ("audio", "aac, amr, mp3, m4a, ogg"),
         "document" => ("documento", "pdf, doc(x), ppt(x), xls(x), txt"),
-        "sticker"  => ("sticker",   "webp"),
-        _          => ("archivo",   ""),
+        "sticker" => ("sticker", "webp"),
+        _ => ("archivo", ""),
     }
 }
 
 /// Resuelve `(max_bytes, mime_allowlist)` para un string de tipo.
 fn media_type_limits(type_str: &str) -> Option<(u64, &'static [&'static str])> {
     match type_str {
-        "image"    => Some((MAX_IMAGE_BYTES,    MIME_IMAGE)),
-        "video"    => Some((MAX_VIDEO_BYTES,    MIME_VIDEO)),
-        "audio"    => Some((MAX_AUDIO_BYTES,    MIME_AUDIO)),
+        "image" => Some((MAX_IMAGE_BYTES, MIME_IMAGE)),
+        "video" => Some((MAX_VIDEO_BYTES, MIME_VIDEO)),
+        "audio" => Some((MAX_AUDIO_BYTES, MIME_AUDIO)),
         "document" => Some((MAX_DOCUMENT_BYTES, MIME_DOCUMENT)),
-        "sticker"  => Some((MAX_STICKER_BYTES,  MIME_STICKER)),
+        "sticker" => Some((MAX_STICKER_BYTES, MIME_STICKER)),
         _ => None,
     }
 }
@@ -2896,12 +3478,22 @@ fn media_type_limits(type_str: &str) -> Option<(u64, &'static [&'static str])> {
 /// `image/webp` → `sticker` (Meta sólo acepta webp en stickers, no en image).
 /// `application/octet-stream` o mimes raros → `document` (catch-all).
 fn infer_type_from_mime(mime: &str) -> Option<&'static str> {
-    if mime == "image/webp" { return Some("sticker"); }
-    if mime.starts_with("image/") { return Some("image"); }
-    if mime.starts_with("video/") { return Some("video"); }
-    if mime.starts_with("audio/") { return Some("audio"); }
+    if mime == "image/webp" {
+        return Some("sticker");
+    }
+    if mime.starts_with("image/") {
+        return Some("image");
+    }
+    if mime.starts_with("video/") {
+        return Some("video");
+    }
+    if mime.starts_with("audio/") {
+        return Some("audio");
+    }
     // PDFs, Word/Excel/PowerPoint, text/plain — todo cae en document.
-    if MIME_DOCUMENT.iter().any(|m| *m == mime) { return Some("document"); }
+    if MIME_DOCUMENT.iter().any(|m| *m == mime) {
+        return Some("document");
+    }
     None
 }
 
@@ -2958,16 +3550,35 @@ pub async fn upload_media_handler(
             "file" => {
                 file_mime = field.content_type().map(|s| s.to_string());
                 file_name = field.file_name().map(|s| s.to_string());
-                let data = field.bytes().await.map_err(|_| ApiError::BadRequest("error leyendo file".into()))?;
+                let data = field
+                    .bytes()
+                    .await
+                    .map_err(|_| ApiError::BadRequest("error leyendo file".into()))?;
                 file_bytes = Some(data.to_vec());
             }
             "type" => {
-                type_str = Some(field.text().await.map_err(|_| ApiError::BadRequest("type inválido".into()))?.trim().to_lowercase());
+                type_str = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|_| ApiError::BadRequest("type inválido".into()))?
+                        .trim()
+                        .to_lowercase(),
+                );
             }
             "conversation_id" => {
-                conv_id_str = Some(field.text().await.map_err(|_| ApiError::BadRequest("conversation_id inválido".into()))?.trim().to_string());
+                conv_id_str = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|_| ApiError::BadRequest("conversation_id inválido".into()))?
+                        .trim()
+                        .to_string(),
+                );
             }
-            _ => { let _ = field.bytes().await; }
+            _ => {
+                let _ = field.bytes().await;
+            }
         }
     }
 
@@ -2991,7 +3602,10 @@ pub async fn upload_media_handler(
 
     // Si el front no mandó `type`, lo inferimos del Content-Type del file part.
     // Útil para clientes simples que no quieren replicar la taxonomía de Meta.
-    let mime_lower = file_mime.as_deref().unwrap_or("application/octet-stream").to_lowercase();
+    let mime_lower = file_mime
+        .as_deref()
+        .unwrap_or("application/octet-stream")
+        .to_lowercase();
     let type_str = match type_str {
         Some(t) => t,
         None => infer_type_from_mime(&mime_lower).ok_or_else(|| ApiError::ValidationError {
@@ -3001,8 +3615,8 @@ pub async fn upload_media_handler(
         })?.to_string(),
     };
 
-    let (max_bytes, allowed_mimes) = media_type_limits(&type_str)
-        .ok_or_else(|| ApiError::ValidationError {
+    let (max_bytes, allowed_mimes) =
+        media_type_limits(&type_str).ok_or_else(|| ApiError::ValidationError {
             code: "invalid_media_type".into(),
             field: "type".into(),
             message: "El tipo debe ser image, video, document, audio o sticker.".into(),
@@ -3015,7 +3629,9 @@ pub async fn upload_media_handler(
             field: "file".into(),
             message: format!(
                 "El {} supera el límite de {} (recibido {}). Comprimilo o usá uno más liviano.",
-                label, human_bytes(max_bytes), human_bytes(bytes.len() as u64)
+                label,
+                human_bytes(max_bytes),
+                human_bytes(bytes.len() as u64)
             ),
         });
     }
@@ -3035,16 +3651,23 @@ pub async fn upload_media_handler(
     // Autorización: resolver conversación y validar membresía en WaSettings.
     let conv_oid = ObjectId::parse_str(&conv_id_str)
         .map_err(|_| ApiError::BadRequest("conversation_id inválido".into()))?;
-    let conv = state.db
-        .find_conversation_by_id(&conv_oid).await
+    let conv = state
+        .db
+        .find_conversation_by_id(&conv_oid)
+        .await
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::NotFound)?;
-    let settings = state.db
-        .find_wa_settings_by_phone(&conv.business_phone).await
+    let settings = state
+        .db
+        .find_wa_settings_by_phone(&conv.business_phone)
+        .await
         .map_err(ApiError::DatabaseError)?
-        .ok_or_else(|| ApiError::Internal(format!(
-            "wa_settings no encontrado para {}", conv.business_phone
-        )))?;
+        .ok_or_else(|| {
+            ApiError::Internal(format!(
+                "wa_settings no encontrado para {}",
+                conv.business_phone
+            ))
+        })?;
     if !settings.agents.iter().any(|id| id == &claims.id) {
         return Err(ApiError::Forbidden);
     }
@@ -3061,12 +3684,18 @@ pub async fn upload_media_handler(
 
     // Subir a Meta (sin relay — el relay sólo aplica a downloads desde lookaside).
     let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
-    let media_id = wa.upload_media(bytes, &mime_lower, file_name.as_deref()).await
+    let media_id = wa
+        .upload_media(bytes, &mime_lower, file_name.as_deref())
+        .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     tracing::info!(
         "[upload_media] OK media_id={} size={}B type={} mime={} conv={}",
-        media_id, size, type_str, mime_lower, conv_id_str
+        media_id,
+        size,
+        type_str,
+        mime_lower,
+        conv_id_str
     );
 
     Ok(Json(MediaUploadResponse {
@@ -3099,11 +3728,26 @@ pub async fn get_media_limits_handler() -> Json<MediaLimitsResponse> {
     let as_vec = |slice: &[&str]| slice.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     Json(MediaLimitsResponse {
         ok: true,
-        image:    MediaTypeLimit { max_bytes: MAX_IMAGE_BYTES,    mime_types: as_vec(MIME_IMAGE) },
-        video:    MediaTypeLimit { max_bytes: MAX_VIDEO_BYTES,    mime_types: as_vec(MIME_VIDEO) },
-        audio:    MediaTypeLimit { max_bytes: MAX_AUDIO_BYTES,    mime_types: as_vec(MIME_AUDIO) },
-        document: MediaTypeLimit { max_bytes: MAX_DOCUMENT_BYTES, mime_types: as_vec(MIME_DOCUMENT) },
-        sticker:  MediaTypeLimit { max_bytes: MAX_STICKER_BYTES,  mime_types: as_vec(MIME_STICKER) },
+        image: MediaTypeLimit {
+            max_bytes: MAX_IMAGE_BYTES,
+            mime_types: as_vec(MIME_IMAGE),
+        },
+        video: MediaTypeLimit {
+            max_bytes: MAX_VIDEO_BYTES,
+            mime_types: as_vec(MIME_VIDEO),
+        },
+        audio: MediaTypeLimit {
+            max_bytes: MAX_AUDIO_BYTES,
+            mime_types: as_vec(MIME_AUDIO),
+        },
+        document: MediaTypeLimit {
+            max_bytes: MAX_DOCUMENT_BYTES,
+            mime_types: as_vec(MIME_DOCUMENT),
+        },
+        sticker: MediaTypeLimit {
+            max_bytes: MAX_STICKER_BYTES,
+            mime_types: as_vec(MIME_STICKER),
+        },
     })
 }
 
@@ -3168,7 +3812,9 @@ pub async fn list_quick_replies_handler(
     Query(q): Query<QuickRepliesQuery>,
 ) -> Result<Json<QuickRepliesListResponse>, ApiError> {
     let caller = require_can_chat(&state, &claims.id).await?;
-    let caller_workspaces = state.db.get_user_workspaces(&caller.id)
+    let caller_workspaces = state
+        .db
+        .get_user_workspaces(&caller.id)
         .await
         .map_err(ApiError::DatabaseError)?;
 
@@ -3180,14 +3826,16 @@ pub async fn list_quick_replies_handler(
         None => None,
     };
 
-    let docs = state.db
+    let docs = state
+        .db
         .list_quick_replies(filter_oid.as_ref(), q.active)
         .await
         .map_err(ApiError::DatabaseError)?;
 
     Ok(Json(QuickRepliesListResponse {
         ok: true,
-        data: docs.into_iter()
+        data: docs
+            .into_iter()
             .map(|q| quick_reply_to_item(q, &caller, &caller_workspaces))
             .collect(),
     }))
@@ -3214,7 +3862,9 @@ pub async fn create_quick_reply_handler(
     use super::quick_reply_validation::{validate_quick_reply, ValidatedQuickReply};
 
     let caller = require_can_chat(&state, &claims.id).await?;
-    let caller_workspaces = state.db.get_user_workspaces(&caller.id)
+    let caller_workspaces = state
+        .db
+        .get_user_workspaces(&caller.id)
         .await
         .map_err(ApiError::DatabaseError)?;
 
@@ -3255,7 +3905,9 @@ pub async fn create_quick_reply_handler(
         last_used_at: None,
     };
 
-    let saved = state.db.create_quick_reply(doc)
+    let saved = state
+        .db
+        .create_quick_reply(doc)
         .await
         .map_err(ApiError::DatabaseError)?;
 
@@ -3290,12 +3942,16 @@ pub async fn update_quick_reply_handler(
     use crate::db::UpdateQuickReplyPatch;
 
     let caller = require_can_chat(&state, &claims.id).await?;
-    let caller_workspaces = state.db.get_user_workspaces(&caller.id)
+    let caller_workspaces = state
+        .db
+        .get_user_workspaces(&caller.id)
         .await
         .map_err(ApiError::DatabaseError)?;
 
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
-    let existing = state.db.find_quick_reply_by_id(&oid)
+    let existing = state
+        .db
+        .find_quick_reply_by_id(&oid)
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::NotFound)?;
@@ -3307,13 +3963,16 @@ pub async fn update_quick_reply_handler(
         Some(list) => Some(parse_and_validate_workspaces(&state, list).await?),
         None => None,
     };
-    let footer_patch: Option<Option<String>> = payload.footer.as_ref().map(|opt| {
-        opt.as_ref().map(|s| s.trim().to_string())
-    });
+    let footer_patch: Option<Option<String>> = payload
+        .footer
+        .as_ref()
+        .map(|opt| opt.as_ref().map(|s| s.trim().to_string()));
 
     // Merge patch + existing → estado final, para validar el doc completo.
     let merged_title = title_new.clone().unwrap_or_else(|| existing.title.clone());
-    let merged_content = content_new.clone().unwrap_or_else(|| existing.content.clone());
+    let merged_content = content_new
+        .clone()
+        .unwrap_or_else(|| existing.content.clone());
     let merged_ws_len = workspace_oids
         .as_ref()
         .map(|v| v.len())
@@ -3369,7 +4028,8 @@ pub async fn update_quick_reply_handler(
         cta_url: payload.cta_url,
     };
 
-    let updated = state.db
+    let updated = state
+        .db
         .update_quick_reply(&oid, patch)
         .await
         .map_err(ApiError::DatabaseError)?
@@ -3400,13 +4060,17 @@ pub async fn delete_quick_reply_handler(
     Path(id): Path<String>,
 ) -> Result<Json<UpdateResponse>, ApiError> {
     let caller = require_can_chat(&state, &claims.id).await?;
-    let caller_workspaces = state.db.get_user_workspaces(&caller.id)
+    let caller_workspaces = state
+        .db
+        .get_user_workspaces(&caller.id)
         .await
         .map_err(ApiError::DatabaseError)?;
 
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
-    let existing = state.db.find_quick_reply_by_id(&oid)
+    let existing = state
+        .db
+        .find_quick_reply_by_id(&oid)
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::NotFound)?;
@@ -3414,7 +4078,9 @@ pub async fn delete_quick_reply_handler(
         return Err(ApiError::Forbidden);
     }
 
-    let deleted = state.db.delete_quick_reply(&oid)
+    let deleted = state
+        .db
+        .delete_quick_reply(&oid)
         .await
         .map_err(ApiError::DatabaseError)?;
     if !deleted {
@@ -3444,13 +4110,17 @@ pub async fn set_quick_reply_active_handler(
     Json(payload): Json<ToggleActiveRequest>,
 ) -> Result<Json<QuickReplyResponse>, ApiError> {
     let caller = require_can_chat(&state, &claims.id).await?;
-    let caller_workspaces = state.db.get_user_workspaces(&caller.id)
+    let caller_workspaces = state
+        .db
+        .get_user_workspaces(&caller.id)
         .await
         .map_err(ApiError::DatabaseError)?;
 
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
-    let updated = state.db.set_quick_reply_active(&oid, payload.active)
+    let updated = state
+        .db
+        .set_quick_reply_active(&oid, payload.active)
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::NotFound)?;
@@ -3483,12 +4153,16 @@ pub async fn duplicate_quick_reply_handler(
     Json(payload): Json<DuplicateQuickReplyRequest>,
 ) -> Result<Json<QuickReplyResponse>, ApiError> {
     let caller = require_can_chat(&state, &claims.id).await?;
-    let caller_workspaces = state.db.get_user_workspaces(&caller.id)
+    let caller_workspaces = state
+        .db
+        .get_user_workspaces(&caller.id)
         .await
         .map_err(ApiError::DatabaseError)?;
 
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
-    let original = state.db.find_quick_reply_by_id(&oid)
+    let original = state
+        .db
+        .find_quick_reply_by_id(&oid)
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::NotFound)?;
@@ -3540,7 +4214,9 @@ pub async fn duplicate_quick_reply_handler(
         last_used_at: None,
     };
 
-    let saved = state.db.create_quick_reply(doc)
+    let saved = state
+        .db
+        .create_quick_reply(doc)
         .await
         .map_err(ApiError::DatabaseError)?;
 
@@ -3609,7 +4285,9 @@ fn validate_access_token(raw: &str) -> Result<&str, ApiError> {
     if t.is_empty() {
         return Err(ApiError::BadRequest("access_token requerido".into()));
     }
-    if t.chars().any(|c| c.is_whitespace() || c == '"' || c == '\'') {
+    if t.chars()
+        .any(|c| c.is_whitespace() || c == '"' || c == '\'')
+    {
         return Err(ApiError::BadRequest(
             "access_token inválido: contiene espacios o comillas".into(),
         ));
@@ -3628,10 +4306,12 @@ async fn resolve_service_for_phone(
         .find_wa_settings_by_phone(business_phone)
         .await
         .map_err(ApiError::DatabaseError)?
-        .ok_or_else(|| ApiError::Internal(format!(
-            "wa_settings inactivo o no encontrado para {}",
-            business_phone
-        )))?;
+        .ok_or_else(|| {
+            ApiError::Internal(format!(
+                "wa_settings inactivo o no encontrado para {}",
+                business_phone
+            ))
+        })?;
 
     if settings.phone_number_id.is_empty() || settings.access_token.is_empty() {
         return Err(ApiError::Internal(
@@ -3674,7 +4354,10 @@ const MEDIA_PREFETCH_MAX_BYTES: u64 = 5 * 1024 * 1024; // 5 MB
 /// Todos los tipos con media están incluidos — documentos también, pero el
 /// límite de 5 MB (`MEDIA_PREFETCH_MAX_BYTES`) deja fuera los PDFs pesados.
 fn should_prefetch_media(msg_type: &str) -> bool {
-    matches!(msg_type, "audio" | "image" | "sticker" | "video" | "document")
+    matches!(
+        msg_type,
+        "audio" | "image" | "sticker" | "video" | "document"
+    )
 }
 
 /// Guard que libera el lock de prefetch al salir de `prefetch_media`,
@@ -3700,11 +4383,7 @@ impl Drop for MediaPrefetchGuard {
 /// Fire-and-forget: se spawnea desde el webhook apenas llega el mensaje,
 /// para que cuando el agente abra el chat el `GET /media/:id` encuentre
 /// hit en Redis y responda en milisegundos.
-pub(crate) async fn prefetch_media(
-    state: Arc<AppState>,
-    business_phone: String,
-    media_id: String,
-) {
+pub(crate) async fn prefetch_media(state: Arc<AppState>, business_phone: String, media_id: String) {
     // Skip si ya está cacheado (puede pasar si el mismo media llega dos veces).
     if state.redis.get_media_cache(&media_id).await.is_some() {
         return;
@@ -3713,7 +4392,10 @@ pub(crate) async fn prefetch_media(
     // Lock para evitar descarga duplicada: si el endpoint ya está bajando
     // este media (race con el agente que abre el chat al instante), lo dejamos.
     if !state.redis.try_lock_media_prefetch(&media_id).await {
-        tracing::debug!("prefetch_media({}): ya hay otra tarea descargándolo", media_id);
+        tracing::debug!(
+            "prefetch_media({}): ya hay otra tarea descargándolo",
+            media_id
+        );
         return;
     }
     // RAII manual: liberamos el lock al final.
@@ -3725,7 +4407,11 @@ pub(crate) async fn prefetch_media(
     let wa = match resolve_service_for_phone(&state, &business_phone).await {
         Ok(w) => w,
         Err(e) => {
-            tracing::warn!("prefetch_media({}): no pude resolver service: {:?}", media_id, e);
+            tracing::warn!(
+                "prefetch_media({}): no pude resolver service: {:?}",
+                media_id,
+                e
+            );
             return;
         }
     };
@@ -3744,7 +4430,9 @@ pub(crate) async fn prefetch_media(
         if size > MEDIA_PREFETCH_MAX_BYTES {
             tracing::debug!(
                 "prefetch_media({}): skip ({} bytes > {} max)",
-                media_id, size, MEDIA_PREFETCH_MAX_BYTES
+                media_id,
+                size,
+                MEDIA_PREFETCH_MAX_BYTES
             );
             return;
         }
@@ -3764,10 +4452,15 @@ pub(crate) async fn prefetch_media(
         return;
     }
 
-    state.redis.set_media_cache(&media_id, &bytes, &info.mime, info.file_name.as_deref()).await;
+    state
+        .redis
+        .set_media_cache(&media_id, &bytes, &info.mime, info.file_name.as_deref())
+        .await;
     tracing::info!(
         "prefetch_media({}): cacheado {} bytes ({})",
-        media_id, bytes.len(), info.mime
+        media_id,
+        bytes.len(),
+        info.mime
     );
 }
 
@@ -3804,9 +4497,7 @@ fn conv_to_item(
     let (meta_throttled, meta_throttle_until_iso) =
         compute_meta_throttle_state(c.meta_throttle_until);
     // Prioridad: DB (Clients.sName) → WhatsApp profile (c.name) → null
-    let customer_name = resolved_name
-        .filter(|s| !s.trim().is_empty())
-        .or(c.name);
+    let customer_name = resolved_name.filter(|s| !s.trim().is_empty()).or(c.name);
     ConversationItem {
         id: c.id.map(|o| o.to_hex()).unwrap_or_default(),
         customer_phone: c.phone,
@@ -3826,7 +4517,11 @@ fn conv_to_item(
         last_message_from_user_name,
         unread_count: c.unread_count,
         created_at: iso8601(c.created_at),
-        client_id: if include_client_id { c.client_id.map(|o| o.to_hex()) } else { None },
+        client_id: if include_client_id {
+            c.client_id.map(|o| o.to_hex())
+        } else {
+            None
+        },
         last_opened_at: last_opened_at.map(iso8601),
         last_inbound_at: c.last_inbound_at.map(iso8601),
         can_send_freeform,
@@ -3868,7 +4563,8 @@ async fn resolve_customer_name(state: &Arc<AppState>, conv: &WaConversation) -> 
             return Some(n);
         }
     }
-    let map = state.db
+    let map = state
+        .db
         .get_client_names_by_phones(&[conv.phone.clone()])
         .await
         .ok()?;
@@ -3924,6 +4620,11 @@ fn settings_to_item(s: WaSettings) -> SettingsItem {
         agents: s.agents,
         active: s.active,
         purposes: s.purposes,
+        enable_guardrails: s.enable_guardrails,
+        enable_conversation_state: s.enable_conversation_state,
+        pre_classifier_enabled: s.pre_classifier_enabled,
+        trivial_responses: s.trivial_responses,
+        templates_synced_at: s.templates_synced_at.map(iso8601),
         created_at: iso8601(s.created_at),
         updated_at: iso8601(s.updated_at),
     }
@@ -3969,7 +4670,13 @@ fn msg_to_item(
 pub async fn build_message_item(state: &Arc<AppState>, m: WaMessage) -> MessageItem {
     use crate::db::UserRepository;
     let name = match m.sent_by.as_deref() {
-        Some(id) => state.db.find_user_by_id(id).await.ok().flatten().map(|u| u.name),
+        Some(id) => state
+            .db
+            .find_user_by_id(id)
+            .await
+            .ok()
+            .flatten()
+            .map(|u| u.name),
         None => None,
     };
     let reply_to = resolve_reply_to_for_one(state, &m).await;
@@ -3982,7 +4689,10 @@ pub async fn build_message_item(state: &Arc<AppState>, m: WaMessage) -> MessageI
 fn preview_truncate(s: &str, max_chars: usize) -> String {
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
-        if i >= max_chars { out.push('…'); break; }
+        if i >= max_chars {
+            out.push('…');
+            break;
+        }
         out.push(c);
     }
     out
@@ -3990,10 +4700,7 @@ fn preview_truncate(s: &str, max_chars: usize) -> String {
 
 /// Atajo para un solo mensaje: reusa el helper batch y devuelve el `ReplyToItem`
 /// correspondiente si existe.
-async fn resolve_reply_to_for_one(
-    state: &Arc<AppState>,
-    m: &WaMessage,
-) -> Option<ReplyToItem> {
+async fn resolve_reply_to_for_one(state: &Arc<AppState>, m: &WaMessage) -> Option<ReplyToItem> {
     let wid = m.reply_to_wa_message_id.as_ref()?;
     let items = resolve_reply_to_items(state, std::slice::from_ref(m)).await;
     items.get(wid).cloned()
@@ -4027,13 +4734,17 @@ async fn resolve_reply_to_items(
     let originals = match state.db.find_messages_by_wa_ids(&wa_ids).await {
         Ok(m) => m,
         Err(e) => {
-            tracing::warn!("resolve_reply_to_items find_messages_by_wa_ids error: {}", e);
+            tracing::warn!(
+                "resolve_reply_to_items find_messages_by_wa_ids error: {}",
+                e
+            );
             return std::collections::HashMap::new();
         }
     };
 
     // Nombres de agentes para los originales outbound — un batch sobre Users.
-    let mut sender_ids: Vec<String> = originals.values()
+    let mut sender_ids: Vec<String> = originals
+        .values()
         .filter_map(|m| m.sent_by.clone())
         .collect();
     sender_ids.sort();
@@ -4046,20 +4757,25 @@ async fn resolve_reply_to_items(
     }
 
     // Ensamblar ReplyToItems.
-    originals.into_iter().map(|(wa_id, m)| {
-        let preview_content = m.body.as_deref()
-            .filter(|s| !s.is_empty())
-            .map(|s| preview_truncate(s, 80));
-        let from_user_name = m.sent_by.as_deref().and_then(|id| names.get(id).cloned());
-        let item = ReplyToItem {
-            wa_message_id: wa_id.clone(),
-            preview_content,
-            preview_type: m.msg_type,
-            direction: m.direction,
-            from_user_name,
-        };
-        (wa_id, item)
-    }).collect()
+    originals
+        .into_iter()
+        .map(|(wa_id, m)| {
+            let preview_content = m
+                .body
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| preview_truncate(s, 80));
+            let from_user_name = m.sent_by.as_deref().and_then(|id| names.get(id).cloned());
+            let item = ReplyToItem {
+                wa_message_id: wa_id.clone(),
+                preview_content,
+                preview_type: m.msg_type,
+                direction: m.direction,
+                from_user_name,
+            };
+            (wa_id, item)
+        })
+        .collect()
 }
 
 /// Convierte un timestamp de Meta (Unix seconds en string) a `bson::DateTime`.
@@ -4076,10 +4792,7 @@ async fn resolve_sent_by_names(
 ) -> std::collections::HashMap<String, String> {
     use crate::db::UserRepository;
 
-    let mut ids: Vec<String> = messages
-        .iter()
-        .filter_map(|m| m.sent_by.clone())
-        .collect();
+    let mut ids: Vec<String> = messages.iter().filter_map(|m| m.sent_by.clone()).collect();
     ids.sort();
     ids.dedup();
 
@@ -4124,7 +4837,13 @@ async fn resolve_last_message_agent_name_one(
 ) -> Option<String> {
     use crate::db::UserRepository;
     let id = conv.last_message_from_user_id.as_deref()?;
-    state.db.find_user_by_id(id).await.ok().flatten().map(|u| u.name)
+    state
+        .db
+        .find_user_by_id(id)
+        .await
+        .ok()
+        .flatten()
+        .map(|u| u.name)
 }
 
 /// Batch-resolución de nombres de agentes asignados (`assigned_to`) para
@@ -4135,10 +4854,7 @@ async fn resolve_assigned_agent_names(
 ) -> std::collections::HashMap<String, String> {
     use crate::db::UserRepository;
 
-    let mut ids: Vec<String> = convs
-        .iter()
-        .filter_map(|c| c.assigned_to.clone())
-        .collect();
+    let mut ids: Vec<String> = convs.iter().filter_map(|c| c.assigned_to.clone()).collect();
     ids.sort();
     ids.dedup();
 
@@ -4159,20 +4875,29 @@ async fn resolve_assigned_agent_name_one(
 ) -> Option<String> {
     use crate::db::UserRepository;
     let id = conv.assigned_to.as_deref()?;
-    state.db.find_user_by_id(id).await.ok().flatten().map(|u| u.name)
+    state
+        .db
+        .find_user_by_id(id)
+        .await
+        .ok()
+        .flatten()
+        .map(|u| u.name)
 }
 
 /// Resuelve el nombre de un único user_id (UUID). Útil para los eventos WS
 /// que necesitan inyectar el nombre del actor (CHAT_TOMADO -> taken_by_name).
-async fn resolve_user_name_by_id(
-    state: &Arc<AppState>,
-    user_id: &str,
-) -> Option<String> {
+async fn resolve_user_name_by_id(state: &Arc<AppState>, user_id: &str) -> Option<String> {
     use crate::db::UserRepository;
     if user_id.trim().is_empty() {
         return None;
     }
-    state.db.find_user_by_id(user_id).await.ok().flatten().map(|u| u.name)
+    state
+        .db
+        .find_user_by_id(user_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|u| u.name)
 }
 
 // ============================================
@@ -4192,9 +4917,14 @@ async fn resolve_user_name_by_id(
 /// `require_can_chat(&state, &claims.id).await?;` y el valor se descarta. Los
 /// que además necesitan el rol (`can_edit`, auditoría, etc.) lo capturan con
 /// `let caller = require_can_chat(...).await?;`.
-pub(super) async fn require_can_chat(state: &Arc<AppState>, user_id: &str) -> Result<crate::models::users::User, ApiError> {
+pub(super) async fn require_can_chat(
+    state: &Arc<AppState>,
+    user_id: &str,
+) -> Result<crate::models::users::User, ApiError> {
     use crate::db::UserRepository;
-    let user = state.db.find_user_by_id(user_id)
+    let user = state
+        .db
+        .find_user_by_id(user_id)
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::Forbidden)?;
@@ -4213,7 +4943,8 @@ pub(super) async fn build_conversation_item(
     caller_id: &str,
 ) -> Result<ConversationItem, ApiError> {
     let oid = conv.id.unwrap_or_default();
-    let opens = state.db
+    let opens = state
+        .db
         .get_conversation_opens(caller_id, &[oid])
         .await
         .map_err(ApiError::DatabaseError)?;
@@ -4222,10 +4953,20 @@ pub(super) async fn build_conversation_item(
     let resolved = resolve_customer_name(state, &conv).await;
     let agent_name = resolve_last_message_agent_name_one(state, &conv).await;
     let assigned_name = resolve_assigned_agent_name_one(state, &conv).await;
-    Ok(conv_to_item(conv, true, last_opened, workspace_name, resolved, agent_name, assigned_name))
+    Ok(conv_to_item(
+        conv,
+        true,
+        last_opened,
+        workspace_name,
+        resolved,
+        agent_name,
+        assigned_name,
+    ))
 }
 
-pub(super) fn iso8601_pub(dt: DateTime) -> String { iso8601(dt) }
+pub(super) fn iso8601_pub(dt: DateTime) -> String {
+    iso8601(dt)
+}
 
 /// Regla de `can_edit` (controla el botón de **eliminar** una quick reply):
 ///
@@ -4245,7 +4986,9 @@ fn compute_can_edit(
     if caller_role == 0.0 {
         return true;
     }
-    qr_workspace_ids.iter().any(|w| caller_workspaces.contains(w))
+    qr_workspace_ids
+        .iter()
+        .any(|w| caller_workspaces.contains(w))
 }
 
 /// Gate para crear (y duplicate). El caller debe ser superadmin, o agente en
@@ -4287,7 +5030,12 @@ async fn parse_and_validate_workspaces(
     oids.sort();
     oids.dedup();
 
-    if !state.db.wa_settings_exist(&oids).await.map_err(ApiError::DatabaseError)? {
+    if !state
+        .db
+        .wa_settings_exist(&oids)
+        .await
+        .map_err(ApiError::DatabaseError)?
+    {
         return Err(ApiError::BadRequest("algún workspace_id no existe".into()));
     }
     Ok(oids)
@@ -4338,7 +5086,10 @@ fn count_placeholders(text: &str) -> u32 {
                 j += 1;
             }
             if j > start && j + 1 < bytes.len() && bytes[j] == b'}' && bytes[j + 1] == b'}' {
-                if let Ok(n) = std::str::from_utf8(&bytes[start..j]).unwrap_or("").parse::<u32>() {
+                if let Ok(n) = std::str::from_utf8(&bytes[start..j])
+                    .unwrap_or("")
+                    .parse::<u32>()
+                {
                     if n > max_idx {
                         max_idx = n;
                     }
@@ -4392,7 +5143,8 @@ fn slugify(s: &str) -> String {
     let ascii_only: String = s.chars().filter(|c| c.is_ascii()).collect();
     let lower = ascii_only.to_lowercase();
     // Reemplazar todo lo que no sea alphanumeric con `_`
-    let replaced: String = lower.chars()
+    let replaced: String = lower
+        .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
     // Colapsar `_` consecutivos
@@ -4416,7 +5168,8 @@ fn slugify(s: &str) -> String {
         &trimmed[..512]
     } else {
         trimmed
-    }.to_string()
+    }
+    .to_string()
 }
 
 /// Genera el `name` Meta a partir del `name_input` y el flag `is_system`.
@@ -4506,7 +5259,8 @@ fn flat_to_components(
 
 fn validate_components(comps: &[serde_json::Value]) -> Result<u32, ApiError> {
     let has_body = comps.iter().any(|c| {
-        c.get("type").and_then(|v| v.as_str())
+        c.get("type")
+            .and_then(|v| v.as_str())
             .map(|t| t.eq_ignore_ascii_case("BODY"))
             .unwrap_or(false)
     });
@@ -4522,7 +5276,8 @@ fn validate_components(comps: &[serde_json::Value]) -> Result<u32, ApiError> {
     let mut body_placeholders: u32 = 0;
 
     for (idx, comp) in comps.iter().enumerate() {
-        let comp_type = comp.get("type")
+        let comp_type = comp
+            .get("type")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_uppercase();
@@ -4561,7 +5316,11 @@ fn validate_components(comps: &[serde_json::Value]) -> Result<u32, ApiError> {
                 }
             }
             "HEADER" => {
-                let format = comp.get("format").and_then(|v| v.as_str()).unwrap_or("").to_uppercase();
+                let format = comp
+                    .get("format")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_uppercase();
                 let valid_formats = ["NONE", "TEXT", "IMAGE", "VIDEO", "DOCUMENT"];
                 if !valid_formats.contains(&format.as_str()) {
                     return Err(ApiError::domain_with_details(
@@ -4590,7 +5349,8 @@ fn validate_components(comps: &[serde_json::Value]) -> Result<u32, ApiError> {
                     None => continue,
                 };
                 // Recopilar tipos
-                let types: Vec<String> = buttons.iter()
+                let types: Vec<String> = buttons
+                    .iter()
                     .filter_map(|b| b.get("type").and_then(|v| v.as_str()))
                     .map(|s| s.to_uppercase())
                     .collect();
@@ -4669,9 +5429,14 @@ fn map_meta_error(err: &anyhow::Error, default_msg: &str) -> ApiError {
 }
 
 /// Exige `nRole == 0` (SUPERADMIN). Devuelve `403` si no se cumple.
-pub(super) async fn require_superadmin(state: &Arc<AppState>, user_id: &str) -> Result<crate::models::users::User, ApiError> {
+pub(super) async fn require_superadmin(
+    state: &Arc<AppState>,
+    user_id: &str,
+) -> Result<crate::models::users::User, ApiError> {
     use crate::db::UserRepository;
-    let user = state.db.find_user_by_id(user_id)
+    let user = state
+        .db
+        .find_user_by_id(user_id)
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::Forbidden)?;
@@ -4740,16 +5505,19 @@ pub async fn create_template_handler(
     }
 
     // 2. Resolver WaSettings por phone_number_id
-    let settings = state.db
+    let settings = state
+        .db
         .find_wa_settings_by_phone_number_id(&body.phone_number_id)
         .await
         .map_err(ApiError::DatabaseError)?
-        .ok_or_else(|| ApiError::domain_with_field(
-            StatusCode::NOT_FOUND,
-            "phone_number_not_found",
-            "phone_number_id",
-            "El número de WhatsApp no está configurado",
-        ))?;
+        .ok_or_else(|| {
+            ApiError::domain_with_field(
+                StatusCode::NOT_FOUND,
+                "phone_number_not_found",
+                "phone_number_id",
+                "El número de WhatsApp no está configurado",
+            )
+        })?;
 
     // 3. Generar `name`
     let name = generate_template_name(&body.name_input, body.is_system);
@@ -4781,7 +5549,8 @@ pub async fn create_template_handler(
     let created_by_name = creator.name.clone();
 
     // 8. Verificar unicidad (phone_number_id, name, language)
-    let existing = state.db
+    let existing = state
+        .db
         .find_template_by_phone_name_lang(&body.phone_number_id, &name, &body.language)
         .await
         .map_err(ApiError::DatabaseError)?;
@@ -4801,7 +5570,9 @@ pub async fn create_template_handler(
     // 9. Si submit_to_meta == true: crear en Meta
     if body.submit_to_meta {
         if settings.access_token.is_empty() {
-            return Err(ApiError::Internal("workspace sin access_token configurado".into()));
+            return Err(ApiError::Internal(
+                "workspace sin access_token configurado".into(),
+            ));
         }
         let token = decrypt_payload(&settings_secret(), &settings.access_token)
             .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
@@ -4831,7 +5602,16 @@ pub async fn create_template_handler(
             token,
         );
 
-        match wa.create_template_meta(&waba_id, &name, &body.language, category_str, &components_val).await {
+        match wa
+            .create_template_meta(
+                &waba_id,
+                &name,
+                &body.language,
+                category_str,
+                &components_val,
+            )
+            .await
+        {
             Ok(resp) => {
                 status = WaTemplateStatus::Pending;
                 meta_template_id = Some(resp.id);
@@ -4884,7 +5664,10 @@ pub async fn create_template_handler(
     let ws_payload = build_template_created_event(&item);
     emit_to_phone_number_agents(&state, &body.phone_number_id, ws_payload).await;
 
-    Ok(Json(WaTemplateResponse { ok: true, data: item }))
+    Ok(Json(WaTemplateResponse {
+        ok: true,
+        data: item,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -4930,16 +5713,19 @@ pub async fn list_templates_handler(
     }
 
     // Verificar que el WaSettings existe
-    state.db
+    state
+        .db
         .find_wa_settings_by_phone_number_id(&phone_number_id)
         .await
         .map_err(ApiError::DatabaseError)?
-        .ok_or_else(|| ApiError::domain_with_field(
-            StatusCode::NOT_FOUND,
-            "phone_number_not_found",
-            "phone_number_id",
-            "El número de WhatsApp no está configurado",
-        ))?;
+        .ok_or_else(|| {
+            ApiError::domain_with_field(
+                StatusCode::NOT_FOUND,
+                "phone_number_not_found",
+                "phone_number_id",
+                "El número de WhatsApp no está configurado",
+            )
+        })?;
 
     // Parsear status CSV
     let status_vec: Option<Vec<WaTemplateStatus>> = if let Some(s) = &q.status {
@@ -4963,7 +5749,11 @@ pub async fn list_templates_handler(
             };
             parsed.push(st);
         }
-        if parsed.is_empty() { None } else { Some(parsed) }
+        if parsed.is_empty() {
+            None
+        } else {
+            Some(parsed)
+        }
     } else {
         None
     };
@@ -4998,7 +5788,8 @@ pub async fn list_templates_handler(
         cursor: q.cursor.as_deref(),
     };
 
-    let templates = state.db
+    let templates = state
+        .db
         .list_templates_filtered(filter)
         .await
         .map_err(ApiError::DatabaseError)?;
@@ -5007,15 +5798,17 @@ pub async fn list_templates_handler(
         None
     } else {
         templates.last().and_then(|t| {
-            t.id.map(|id| {
-                format!("{}_{}", t.created_at.timestamp_millis(), id.to_hex())
-            })
+            t.id.map(|id| format!("{}_{}", t.created_at.timestamp_millis(), id.to_hex()))
         })
     };
 
     let data: Vec<WaTemplateItem> = templates.into_iter().map(to_template_item).collect();
 
-    Ok(Json(WaTemplatesListResponse { ok: true, data, next_cursor }))
+    Ok(Json(WaTemplatesListResponse {
+        ok: true,
+        data,
+        next_cursor,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -5044,13 +5837,17 @@ pub async fn get_template_handler(
 
     let oid = ObjectId::parse_str(&id).map_err(|_| template_not_found())?;
 
-    let doc = state.db
+    let doc = state
+        .db
         .find_template_by_id(&oid)
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(template_not_found)?;
 
-    Ok(Json(WaTemplateResponse { ok: true, data: to_template_item(doc) }))
+    Ok(Json(WaTemplateResponse {
+        ok: true,
+        data: to_template_item(doc),
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -5086,7 +5883,8 @@ pub async fn update_template_handler(
     let oid = ObjectId::parse_str(&id).map_err(|_| template_not_found())?;
 
     // 1. Cargar doc
-    let doc = state.db
+    let doc = state
+        .db
         .find_template_by_id(&oid)
         .await
         .map_err(ApiError::DatabaseError)?
@@ -5105,12 +5903,14 @@ pub async fn update_template_handler(
         || body.buttons.is_some();
 
     let new_components_opt: Option<Vec<serde_json::Value>> = if any_flat_components {
-        let body_text = body.body.as_deref().ok_or_else(|| ApiError::domain_with_field(
-            StatusCode::BAD_REQUEST,
-            "body_required",
-            "body",
-            "Para editar componentes (header/footer/buttons) debes incluir también el body",
-        ))?;
+        let body_text = body.body.as_deref().ok_or_else(|| {
+            ApiError::domain_with_field(
+                StatusCode::BAD_REQUEST,
+                "body_required",
+                "body",
+                "Para editar componentes (header/footer/buttons) debes incluir también el body",
+            )
+        })?;
         Some(flat_to_components(
             body.header.as_ref(),
             body_text,
@@ -5133,9 +5933,8 @@ pub async fn update_template_handler(
         }
         WaTemplateStatus::Approved => {
             // Solo BODY editable. Verificar que no trae cambios prohibidos.
-            let has_forbidden = body.name_input.is_some()
-                || body.category.is_some()
-                || body.is_system.is_some();
+            let has_forbidden =
+                body.name_input.is_some() || body.category.is_some() || body.is_system.is_some();
             if has_forbidden {
                 return Err(ApiError::domain_simple(
                     StatusCode::FORBIDDEN,
@@ -5146,7 +5945,8 @@ pub async fn update_template_handler(
             // Si hay components nuevos, validar que son solo BODY
             if let Some(ref new_comps) = new_components_opt {
                 let has_non_body = new_comps.iter().any(|c| {
-                    c.get("type").and_then(|v| v.as_str())
+                    c.get("type")
+                        .and_then(|v| v.as_str())
                         .map(|t| !t.eq_ignore_ascii_case("BODY"))
                         .unwrap_or(false)
                 });
@@ -5202,7 +6002,8 @@ pub async fn update_template_handler(
         }
         // Verificar unicidad si el nombre cambió
         if new_name != doc.name {
-            let existing = state.db
+            let existing = state
+                .db
                 .find_template_by_phone_name_lang(&doc.phone_number_id, &new_name, &doc.language)
                 .await
                 .map_err(ApiError::DatabaseError)?;
@@ -5222,16 +6023,19 @@ pub async fn update_template_handler(
 
     // 5. Si submit_to_meta pasa de false a true (DRAFT → PENDING)
     if body.submit_to_meta == Some(true) && !doc.submit_to_meta {
-        let settings = state.db
+        let settings = state
+            .db
             .find_wa_settings_by_phone_number_id(&doc.phone_number_id)
             .await
             .map_err(ApiError::DatabaseError)?
-            .ok_or_else(|| ApiError::domain_with_field(
-                StatusCode::NOT_FOUND,
-                "phone_number_not_found",
-                "phone_number_id",
-                "El número de WhatsApp no está configurado",
-            ))?;
+            .ok_or_else(|| {
+                ApiError::domain_with_field(
+                    StatusCode::NOT_FOUND,
+                    "phone_number_not_found",
+                    "phone_number_id",
+                    "El número de WhatsApp no está configurado",
+                )
+            })?;
 
         let token = decrypt_payload(&settings_secret(), &settings.access_token)
             .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
@@ -5254,7 +6058,16 @@ pub async fn update_template_handler(
             token,
         );
 
-        match wa.create_template_meta(&waba_id, name_for_meta, &doc.language, category_str, &comps_val).await {
+        match wa
+            .create_template_meta(
+                &waba_id,
+                name_for_meta,
+                &doc.language,
+                category_str,
+                &comps_val,
+            )
+            .await
+        {
             Ok(resp) => {
                 patch.status = Some(WaTemplateStatus::Pending);
                 patch.meta_template_id = Some(Some(resp.id));
@@ -5269,16 +6082,19 @@ pub async fn update_template_handler(
     // 6. Si cambió BODY de un Approved: llamar update_template_body_meta
     if prev_status == WaTemplateStatus::Approved {
         if let Some(ref new_comps) = new_components_opt {
-            let settings = state.db
+            let settings = state
+                .db
                 .find_wa_settings_by_phone_number_id(&doc.phone_number_id)
                 .await
                 .map_err(ApiError::DatabaseError)?
-                .ok_or_else(|| ApiError::domain_with_field(
-                    StatusCode::NOT_FOUND,
-                    "phone_number_not_found",
-                    "phone_number_id",
-                    "El número de WhatsApp no está configurado",
-                ))?;
+                .ok_or_else(|| {
+                    ApiError::domain_with_field(
+                        StatusCode::NOT_FOUND,
+                        "phone_number_not_found",
+                        "phone_number_id",
+                        "El número de WhatsApp no está configurado",
+                    )
+                })?;
             let token = decrypt_payload(&settings_secret(), &settings.access_token)
                 .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
 
@@ -5311,7 +6127,8 @@ pub async fn update_template_handler(
     }
 
     // Ejecutar update en DB
-    let updated = state.db
+    let updated = state
+        .db
         .update_template(&oid, patch)
         .await
         .map_err(|e| {
@@ -5331,11 +6148,18 @@ pub async fn update_template_handler(
     let item = to_template_item(updated);
 
     // Emitir WS (prev_status si cambió)
-    let prev_for_ws = if item.status != prev_status { Some(prev_status) } else { None };
+    let prev_for_ws = if item.status != prev_status {
+        Some(prev_status)
+    } else {
+        None
+    };
     let ws_payload = build_template_updated_event(&item, prev_for_ws);
     emit_to_phone_number_agents(&state, &item.phone_number_id, ws_payload).await;
 
-    Ok(Json(WaTemplateResponse { ok: true, data: item }))
+    Ok(Json(WaTemplateResponse {
+        ok: true,
+        data: item,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -5367,14 +6191,16 @@ pub async fn delete_template_handler(
     let oid = ObjectId::parse_str(&id).map_err(|_| template_not_found())?;
 
     // 1. Cargar doc
-    let doc = state.db
+    let doc = state
+        .db
         .find_template_by_id(&oid)
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(template_not_found)?;
 
     // 2. Verificar si está en uso en propósitos
-    let in_use = state.db
+    let in_use = state
+        .db
         .count_templates_in_purposes(&doc.phone_number_id, &doc.name)
         .await
         .map_err(ApiError::DatabaseError)?;
@@ -5390,16 +6216,19 @@ pub async fn delete_template_handler(
 
     // 3/4. Si tiene meta_template_id: borrar en Meta
     if let Some(ref meta_id) = doc.meta_template_id {
-        let settings = state.db
+        let settings = state
+            .db
             .find_wa_settings_by_phone_number_id(&doc.phone_number_id)
             .await
             .map_err(ApiError::DatabaseError)?
-            .ok_or_else(|| ApiError::domain_with_field(
-                StatusCode::NOT_FOUND,
-                "phone_number_not_found",
-                "phone_number_id",
-                "El número de WhatsApp no está configurado",
-            ))?;
+            .ok_or_else(|| {
+                ApiError::domain_with_field(
+                    StatusCode::NOT_FOUND,
+                    "phone_number_not_found",
+                    "phone_number_id",
+                    "El número de WhatsApp no está configurado",
+                )
+            })?;
         let token = decrypt_payload(&settings_secret(), &settings.access_token)
             .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
         let waba_id = settings.whatsapp_business_account_id.trim().to_string();
@@ -5417,7 +6246,8 @@ pub async fn delete_template_handler(
     }
 
     // 5. Borrar en DB
-    state.db
+    state
+        .db
         .delete_template(&oid)
         .await
         .map_err(ApiError::DatabaseError)?;
@@ -5469,29 +6299,35 @@ pub async fn resync_template_handler(
 
     let oid = ObjectId::parse_str(&id).map_err(|_| template_not_found())?;
 
-    let doc = state.db
+    let doc = state
+        .db
         .find_template_by_id(&oid)
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(template_not_found)?;
 
-    let meta_id = doc.meta_template_id.as_deref().ok_or_else(|| ApiError::domain_simple(
+    let meta_id = doc.meta_template_id.as_deref().ok_or_else(|| {
+        ApiError::domain_simple(
         StatusCode::BAD_REQUEST,
         "draft_cannot_resync",
         "La plantilla está en DRAFT — todavía no fue enviada a Meta, no hay nada que sincronizar",
-    ))?;
+    )
+    })?;
 
     // Resolver WaSettings + token
-    let settings = state.db
+    let settings = state
+        .db
         .find_wa_settings_by_phone_number_id(&doc.phone_number_id)
         .await
         .map_err(ApiError::DatabaseError)?
-        .ok_or_else(|| ApiError::domain_with_field(
-            StatusCode::NOT_FOUND,
-            "phone_number_not_found",
-            "phone_number_id",
-            "El número de WhatsApp no está configurado",
-        ))?;
+        .ok_or_else(|| {
+            ApiError::domain_with_field(
+                StatusCode::NOT_FOUND,
+                "phone_number_not_found",
+                "phone_number_id",
+                "El número de WhatsApp no está configurado",
+            )
+        })?;
 
     let token = decrypt_payload(&settings_secret(), &settings.access_token)
         .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
@@ -5503,26 +6339,34 @@ pub async fn resync_template_handler(
     );
 
     // Leer estado real de Meta
-    let info = wa.get_template_meta(meta_id).await
+    let info = wa
+        .get_template_meta(meta_id)
+        .await
         .map_err(|e| map_meta_error(&e, "Meta no devolvió el template"))?;
 
     // Mapear status Meta → WaTemplateStatus (mismo mapping que el webhook)
-    let (new_status, rejection_reason): (WaTemplateStatus, Option<String>) = match info.status.to_uppercase().as_str() {
-        "APPROVED" => (WaTemplateStatus::Approved, None),
-        "REJECTED" => (WaTemplateStatus::Rejected, info.rejected_reason),
-        "FLAGGED" => (WaTemplateStatus::Rejected, Some("flagged_by_meta_quality".to_string())),
-        "PAUSED" => (WaTemplateStatus::Paused, info.rejected_reason),
-        "DISABLED" => (WaTemplateStatus::Disabled, info.rejected_reason),
-        "PENDING" | "IN_REVIEW" | "" => (WaTemplateStatus::Pending, None),
-        other => {
-            return Err(ApiError::Internal(format!(
-                "Meta devolvió un status desconocido: '{}'", other
-            )));
-        }
-    };
+    let (new_status, rejection_reason): (WaTemplateStatus, Option<String>) =
+        match info.status.to_uppercase().as_str() {
+            "APPROVED" => (WaTemplateStatus::Approved, None),
+            "REJECTED" => (WaTemplateStatus::Rejected, info.rejected_reason),
+            "FLAGGED" => (
+                WaTemplateStatus::Rejected,
+                Some("flagged_by_meta_quality".to_string()),
+            ),
+            "PAUSED" => (WaTemplateStatus::Paused, info.rejected_reason),
+            "DISABLED" => (WaTemplateStatus::Disabled, info.rejected_reason),
+            "PENDING" | "IN_REVIEW" | "" => (WaTemplateStatus::Pending, None),
+            other => {
+                return Err(ApiError::Internal(format!(
+                    "Meta devolvió un status desconocido: '{}'",
+                    other
+                )));
+            }
+        };
 
     // Update DB y capturar prev_status
-    let result = state.db
+    let result = state
+        .db
         .update_template_status(meta_id, new_status, rejection_reason)
         .await
         .map_err(ApiError::DatabaseError)?;
@@ -5532,7 +6376,7 @@ pub async fn resync_template_handler(
         None => {
             // No debería pasar: existe el doc en DB y tiene meta_template_id
             return Err(ApiError::Internal(
-                "update_template_status retornó None pese a tener doc en DB".into()
+                "update_template_status retornó None pese a tener doc en DB".into(),
             ));
         }
     };
@@ -5545,7 +6389,10 @@ pub async fn resync_template_handler(
         emit_to_phone_number_agents(&state, &item.phone_number_id, payload).await;
     }
 
-    Ok(Json(WaTemplateResponse { ok: true, data: item }))
+    Ok(Json(WaTemplateResponse {
+        ok: true,
+        data: item,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -5562,24 +6409,33 @@ async fn process_template_status(
     reason: Option<&str>,
 ) {
     // 1. Mapear event Meta → (WaTemplateStatus, rejection_reason)
-    let (new_status, rejection_reason): (WaTemplateStatus, Option<String>) = match event.to_uppercase().as_str() {
-        "APPROVED" => (WaTemplateStatus::Approved, None),
-        "REJECTED" => (WaTemplateStatus::Rejected, reason.map(|s| s.to_string())),
-        "FLAGGED" => (WaTemplateStatus::Rejected, Some("flagged_by_meta_quality".to_string())),
-        "PAUSED" => (WaTemplateStatus::Paused, reason.map(|s| s.to_string())),
-        "DISABLED" => (WaTemplateStatus::Disabled, reason.map(|s| s.to_string())),
-        "PENDING" | "IN_REVIEW" => (WaTemplateStatus::Pending, None),
-        other => {
-            tracing::warn!(
-                "[webhook] process_template_status: evento desconocido '{}' para meta_id={}",
-                other, meta_template_id
-            );
-            return;
-        }
-    };
+    let (new_status, rejection_reason): (WaTemplateStatus, Option<String>) =
+        match event.to_uppercase().as_str() {
+            "APPROVED" => (WaTemplateStatus::Approved, None),
+            "REJECTED" => (WaTemplateStatus::Rejected, reason.map(|s| s.to_string())),
+            "FLAGGED" => (
+                WaTemplateStatus::Rejected,
+                Some("flagged_by_meta_quality".to_string()),
+            ),
+            "PAUSED" => (WaTemplateStatus::Paused, reason.map(|s| s.to_string())),
+            "DISABLED" => (WaTemplateStatus::Disabled, reason.map(|s| s.to_string())),
+            "PENDING" | "IN_REVIEW" => (WaTemplateStatus::Pending, None),
+            other => {
+                tracing::warn!(
+                    "[webhook] process_template_status: evento desconocido '{}' para meta_id={}",
+                    other,
+                    meta_template_id
+                );
+                return;
+            }
+        };
 
     // 2. Actualizar en DB
-    match state.db.update_template_status(meta_template_id, new_status, rejection_reason).await {
+    match state
+        .db
+        .update_template_status(meta_template_id, new_status, rejection_reason)
+        .await
+    {
         Ok(None) => {
             tracing::warn!(
                 "[webhook] process_template_status: template con meta_id={} no encontrado en DB",
@@ -5597,7 +6453,8 @@ async fn process_template_status(
         Err(e) => {
             tracing::error!(
                 "[webhook] process_template_status: DB error para meta_id={}: {}",
-                meta_template_id, e
+                meta_template_id,
+                e
             );
         }
     }
@@ -5643,20 +6500,31 @@ async fn swap_header_handles_in_components(
     let mut needs_swap = false;
     // Primer pase: detectar si hay algo que swapear (ObjectIds nuestros)
     for c in components.iter() {
-        let is_header = c.get("type").and_then(|v| v.as_str())
+        let is_header = c
+            .get("type")
+            .and_then(|v| v.as_str())
             .map(|t| t.eq_ignore_ascii_case("HEADER"))
             .unwrap_or(false);
-        if !is_header { continue; }
+        if !is_header {
+            continue;
+        }
         let format = c.get("format").and_then(|v| v.as_str()).unwrap_or("");
-        if format.eq_ignore_ascii_case("TEXT") || format.is_empty() { continue; }
-        if let Some(id_str) = c.pointer("/example/header_handle/0").and_then(|v| v.as_str()) {
+        if format.eq_ignore_ascii_case("TEXT") || format.is_empty() {
+            continue;
+        }
+        if let Some(id_str) = c
+            .pointer("/example/header_handle/0")
+            .and_then(|v| v.as_str())
+        {
             if ObjectId::parse_str(id_str).is_ok() {
                 needs_swap = true;
                 break;
             }
         }
     }
-    if !needs_swap { return Ok(()); }
+    if !needs_swap {
+        return Ok(());
+    }
 
     // Requerido sólo cuando hay algo que subir
     let app_id = state.config.whatsapp_app_id.as_deref().ok_or_else(|| {
@@ -5674,14 +6542,27 @@ async fn swap_header_handles_in_components(
     );
 
     for (idx, c) in components.iter_mut().enumerate() {
-        let is_header = c.get("type").and_then(|v| v.as_str())
+        let is_header = c
+            .get("type")
+            .and_then(|v| v.as_str())
             .map(|t| t.eq_ignore_ascii_case("HEADER"))
             .unwrap_or(false);
-        if !is_header { continue; }
-        let format = c.get("format").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        if format.eq_ignore_ascii_case("TEXT") || format.is_empty() { continue; }
+        if !is_header {
+            continue;
+        }
+        let format = c
+            .get("format")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if format.eq_ignore_ascii_case("TEXT") || format.is_empty() {
+            continue;
+        }
 
-        let id_str = match c.pointer("/example/header_handle/0").and_then(|v| v.as_str()) {
+        let id_str = match c
+            .pointer("/example/header_handle/0")
+            .and_then(|v| v.as_str())
+        {
             Some(s) => s.to_string(),
             None => continue,
         };
@@ -5703,13 +6584,17 @@ async fn swap_header_handles_in_components(
             ))?;
 
         // Upload-resumable a Meta
-        let handle = wa.upload_to_meta_resumable(app_id, &mime, &bytes)
+        let handle = wa
+            .upload_to_meta_resumable(app_id, &mime, &bytes)
             .await
             .map_err(|e| map_meta_error(&e, "Meta rechazó el upload del header media"))?;
 
         // Swap: example.header_handle[0] = handle
         if let Some(example) = c.get_mut("example") {
-            if let Some(arr) = example.get_mut("header_handle").and_then(|v| v.as_array_mut()) {
+            if let Some(arr) = example
+                .get_mut("header_handle")
+                .and_then(|v| v.as_array_mut())
+            {
                 if let Some(first) = arr.get_mut(0) {
                     *first = serde_json::Value::String(handle);
                 }
@@ -5769,41 +6654,65 @@ pub async fn upload_template_header_media_handler(
         match field.name().unwrap_or("") {
             "file" => {
                 file_mime = field.content_type().map(|s| s.to_string());
-                let data = field.bytes().await.map_err(|_| ApiError::domain_with_field(
-                    StatusCode::BAD_REQUEST,
-                    "file_required",
-                    "file",
-                    "No se pudo leer el archivo adjunto",
-                ))?;
+                let data = field.bytes().await.map_err(|_| {
+                    ApiError::domain_with_field(
+                        StatusCode::BAD_REQUEST,
+                        "file_required",
+                        "file",
+                        "No se pudo leer el archivo adjunto",
+                    )
+                })?;
                 file_bytes = Some(data.to_vec());
             }
             "phone_number_id" => {
-                phone_number_id = Some(field.text().await.map_err(|_| ApiError::domain_with_field(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_field",
-                    "phone_number_id",
-                    "phone_number_id inválido",
-                ))?.trim().to_string());
+                phone_number_id = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|_| {
+                            ApiError::domain_with_field(
+                                StatusCode::BAD_REQUEST,
+                                "invalid_field",
+                                "phone_number_id",
+                                "phone_number_id inválido",
+                            )
+                        })?
+                        .trim()
+                        .to_string(),
+                );
             }
             "format" => {
-                format = Some(field.text().await.map_err(|_| ApiError::domain_with_field(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_field",
-                    "format",
-                    "format inválido",
-                ))?.trim().to_uppercase());
+                format = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|_| {
+                            ApiError::domain_with_field(
+                                StatusCode::BAD_REQUEST,
+                                "invalid_field",
+                                "format",
+                                "format inválido",
+                            )
+                        })?
+                        .trim()
+                        .to_uppercase(),
+                );
             }
-            _ => { let _ = field.bytes().await; }
+            _ => {
+                let _ = field.bytes().await;
+            }
         }
     }
 
     // Validar fields requeridos
-    let bytes = file_bytes.ok_or_else(|| ApiError::domain_with_field(
-        StatusCode::BAD_REQUEST,
-        "file_required",
-        "file",
-        "Adjuntá el archivo a subir",
-    ))?;
+    let bytes = file_bytes.ok_or_else(|| {
+        ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            "file_required",
+            "file",
+            "Adjuntá el archivo a subir",
+        )
+    })?;
     if bytes.is_empty() {
         return Err(ApiError::domain_with_field(
             StatusCode::BAD_REQUEST,
@@ -5812,28 +6721,37 @@ pub async fn upload_template_header_media_handler(
             "El archivo está vacío",
         ));
     }
-    let phone_number_id = phone_number_id.ok_or_else(|| ApiError::domain_with_field(
-        StatusCode::BAD_REQUEST,
-        "missing_field",
-        "phone_number_id",
-        "phone_number_id es requerido",
-    ))?;
-    let format = format.ok_or_else(|| ApiError::domain_with_field(
-        StatusCode::BAD_REQUEST,
-        "missing_field",
-        "format",
-        "format es requerido",
-    ))?;
+    let phone_number_id = phone_number_id.ok_or_else(|| {
+        ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            "missing_field",
+            "phone_number_id",
+            "phone_number_id es requerido",
+        )
+    })?;
+    let format = format.ok_or_else(|| {
+        ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            "missing_field",
+            "format",
+            "format es requerido",
+        )
+    })?;
 
     // Validar format + mime + size
-    let (allowed_mimes, max_size) = header_media_limits(&format).ok_or_else(|| ApiError::domain_with_details(
-        StatusCode::BAD_REQUEST,
-        "invalid_format",
-        "Formato no soportado. Usa IMAGE, VIDEO o DOCUMENT",
-        serde_json::json!({ "field": "format", "received": format }),
-    ))?;
+    let (allowed_mimes, max_size) = header_media_limits(&format).ok_or_else(|| {
+        ApiError::domain_with_details(
+            StatusCode::BAD_REQUEST,
+            "invalid_format",
+            "Formato no soportado. Usa IMAGE, VIDEO o DOCUMENT",
+            serde_json::json!({ "field": "format", "received": format }),
+        )
+    })?;
 
-    let mime = file_mime.as_deref().unwrap_or("application/octet-stream").to_lowercase();
+    let mime = file_mime
+        .as_deref()
+        .unwrap_or("application/octet-stream")
+        .to_lowercase();
     if !allowed_mimes.iter().any(|m| *m == mime.as_str()) {
         return Err(ApiError::domain_with_details(
             StatusCode::BAD_REQUEST,
@@ -5853,20 +6771,24 @@ pub async fn upload_template_header_media_handler(
     }
 
     // Validar que phone_number_id existe
-    let _settings = state.db
+    let _settings = state
+        .db
         .find_wa_settings_by_phone_number_id(&phone_number_id)
         .await
         .map_err(ApiError::DatabaseError)?
-        .ok_or_else(|| ApiError::domain_with_field(
-            StatusCode::NOT_FOUND,
-            "phone_number_not_found",
-            "phone_number_id",
-            "El número de WhatsApp no está configurado",
-        ))?;
+        .ok_or_else(|| {
+            ApiError::domain_with_field(
+                StatusCode::NOT_FOUND,
+                "phone_number_not_found",
+                "phone_number_id",
+                "El número de WhatsApp no está configurado",
+            )
+        })?;
 
     // SHA-256 + persistencia (con dedup)
     let sha = sha256_hex(&bytes);
-    let stored = state.db
+    let stored = state
+        .db
         .store_template_media(StoreTemplateMediaInput {
             phone_number_id: &phone_number_id,
             format: &format,
@@ -5946,24 +6868,25 @@ pub async fn reset_ai_conv_state_handler(
     }
 
     // Borrar el estado IA INSIDE the lock window.
-    let write_result = state
-        .db
-        .update_conversation_ai_conv_state(&oid, None)
-        .await;
+    let write_result = state.db.update_conversation_ai_conv_state(&oid, None).await;
 
     // Auditoría también dentro del lock (mejor consistencia: si el write falló, no auditamos
     // un reset que no ocurrió).
     if write_result.is_ok() {
-        record_conv_event(&state, WaConversationEventInput {
-            conversation_id: &oid,
-            business_phone: &conv.business_phone,
-            event_type: "ai_state_reset",
-            actor_id: Some(claims.id.as_str()),
-            actor_name: Some(claims.name.as_str()),
-            target_id: None,
-            target_name: None,
-            note: Some("Reset manual del estado IA por supervisor"),
-        }).await;
+        record_conv_event(
+            &state,
+            WaConversationEventInput {
+                conversation_id: &oid,
+                business_phone: &conv.business_phone,
+                event_type: "ai_state_reset",
+                actor_id: Some(claims.id.as_str()),
+                actor_name: Some(claims.name.as_str()),
+                target_id: None,
+                target_name: None,
+                note: Some("Reset manual del estado IA por supervisor"),
+            },
+        )
+        .await;
     }
 
     // Liberar el lock antes del broadcast (broadcast es best-effort, no necesita exclusión).

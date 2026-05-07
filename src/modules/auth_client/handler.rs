@@ -1,7 +1,4 @@
-use axum::{
-    extract::State,
-    Json,
-};
+use axum::{extract::State, Json};
 use std::sync::Arc;
 
 use crate::{
@@ -12,10 +9,8 @@ use crate::{
     models::auth::*,
     state::AppState,
     utils::{
-        generate_verification_code,
-        sms::send_sms,
+        generate_verification_code, sms::send_sms, timezone::VenezuelaDateTime,
         whatsapp::send_whatsapp_otp,
-        timezone::VenezuelaDateTime,
     },
 };
 
@@ -76,12 +71,14 @@ pub async fn verify_number_handler(
             Err(wa_err) => {
                 tracing::warn!(
                     "WhatsApp OTP falló para {} ({:?}). Usando fallback SMS...",
-                    phone_clone, wa_err
+                    phone_clone,
+                    wa_err
                 );
                 if let Err(sms_err) = send_sms(&phone_clone, code).await {
                     tracing::error!(
                         "Fallback SMS también falló para {}: {:?}",
-                        phone_clone, sms_err
+                        phone_clone,
+                        sms_err
                     );
                 }
             }
@@ -125,18 +122,15 @@ pub async fn login_handler(
             ApiError::Unauthorized("invalid_phone_number".to_string())
         })?;
 
-    let verification = AuthService::lookup_verification_code(
-        &state.db,
-        &payload.phone,
-        &payload.code,
-    )
-    .await
-    .ok_or_else(|| {
-        tracing::warn!("Invalid verification code for phone: {}", payload.phone);
-        ApiError::Unauthorized("invalid_verification_code".to_string())
-    })?;
+    let verification =
+        AuthService::lookup_verification_code(&state.db, &payload.phone, &payload.code)
+            .await
+            .ok_or_else(|| {
+                tracing::warn!("Invalid verification code for phone: {}", payload.phone);
+                ApiError::Unauthorized("invalid_verification_code".to_string())
+            })?;
 
-    if AuthService::is_code_expired(&verification){
+    if AuthService::is_code_expired(&verification) {
         let expires_vz = VenezuelaDateTime::from_utc(verification.expires_at);
         tracing::warn!(
             "Código expirado para {}: expiró el {} (hora Venezuela)",
@@ -162,11 +156,8 @@ pub async fn login_handler(
 
     let jwt = JwtService::new(JwtCfg::from_env());
 
-    let (access_token, access_exp) = jwt.issue_encrypted_access(
-        &customer.id,
-        None,
-        &["me:read", "payments:create"],
-    );
+    let (access_token, access_exp) =
+        jwt.issue_encrypted_access(&customer.id, None, &["me:read", "payments:create"]);
 
     let family = uuid::Uuid::new_v4().to_string();
     let (refresh_token, refresh_exp, _jti) = jwt.issue_encrypted_refresh(&customer.id, &family);
@@ -218,11 +209,8 @@ pub async fn refresh_handler(
             ApiError::Unauthorized("invalid_refresh_token".to_string())
         })?;
 
-    let (access_token, access_exp) = jwt.issue_encrypted_access(
-        &refresh_claims.sub,
-        None,
-        &["me:read", "payments:create"],
-    );
+    let (access_token, access_exp) =
+        jwt.issue_encrypted_access(&refresh_claims.sub, None, &["me:read", "payments:create"]);
 
     let (new_refresh_token, refresh_exp, _new_jti) =
         jwt.issue_encrypted_refresh(&refresh_claims.sub, &refresh_claims.fam);

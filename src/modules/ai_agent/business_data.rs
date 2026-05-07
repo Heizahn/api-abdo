@@ -23,15 +23,14 @@ use crate::{
     models::{
         ai_agent::{
             AiBusinessDataDeleteResponse, AiCoverageZone, AiCoverageZoneItem,
-            AiCoverageZoneResponse, AiCoverageZonesListResponse,
-            AiInstallationConfig, AiInstallationConfigItem, AiInstallationConfigResponse,
-            AiInstallationConfigsListResponse, UpdateAiInstallationConfigRequest,
-            AiPlan, AiPlanItem, AiPlanResponse, AiPlansListResponse,
-            AiPromotion, AiPromotionItem, AiPromotionResponse, AiPromotionsListResponse,
-            CreateAiCoverageZoneRequest, CreateAiPlanRequest,
-            CreateAiPromotionRequest, UpdateAiPromotionRequest,
-            ConnectionType, PoliticalDivisionItem, PoliticalDivisionsResponse,
-            UpdateAiCoverageZoneRequest, UpdateAiPlanRequest,
+            AiCoverageZoneResponse, AiCoverageZonesListResponse, AiInstallationConfig,
+            AiInstallationConfigItem, AiInstallationConfigResponse,
+            AiInstallationConfigsListResponse, AiPlan, AiPlanItem, AiPlanResponse,
+            AiPlansListResponse, AiPromotion, AiPromotionItem, AiPromotionResponse,
+            AiPromotionsListResponse, ConnectionType, CreateAiCoverageZoneRequest,
+            CreateAiPlanRequest, CreateAiPromotionRequest, PoliticalDivisionItem,
+            PoliticalDivisionsResponse, UpdateAiCoverageZoneRequest,
+            UpdateAiInstallationConfigRequest, UpdateAiPlanRequest, UpdateAiPromotionRequest,
         },
         users::User,
     },
@@ -95,7 +94,11 @@ fn iso(d: BsonDateTime) -> String {
 }
 
 fn plan_not_found() -> ApiError {
-    ApiError::domain_simple(StatusCode::NOT_FOUND, "ai_plan_not_found", "Plan no encontrado")
+    ApiError::domain_simple(
+        StatusCode::NOT_FOUND,
+        "ai_plan_not_found",
+        "Plan no encontrado",
+    )
 }
 
 fn zone_not_found() -> ApiError {
@@ -138,11 +141,7 @@ fn zone_to_item(z: AiCoverageZone) -> AiCoverageZoneItem {
     }
 }
 
-fn validate_plan_input(
-    name: &str,
-    devices: &str,
-    benefits: &[String],
-) -> Result<(), ApiError> {
+fn validate_plan_input(name: &str, devices: &str, benefits: &[String]) -> Result<(), ApiError> {
     validate_required(name, "name")?;
     validate_max_len(name, "name", PLAN_NAME_MAX)?;
     validate_required(devices, "devices_recommendation")?;
@@ -195,11 +194,13 @@ fn validate_municipality<'a>(state: &str, m: &'a str) -> Result<&'a str, ApiErro
             message: "'municipality' es requerido".into(),
         });
     }
-    let munis = STATE_INDEX.get(state).ok_or_else(|| ApiError::ValidationError {
-        code: "invalid_state".into(),
-        field: "state".into(),
-        message: format!("'{}' no es un estado válido de Venezuela", state),
-    })?;
+    let munis = STATE_INDEX
+        .get(state)
+        .ok_or_else(|| ApiError::ValidationError {
+            code: "invalid_state".into(),
+            field: "state".into(),
+            message: format!("'{}' no es un estado válido de Venezuela", state),
+        })?;
     if munis.iter().any(|x| *x == trimmed) {
         Ok(trimmed)
     } else {
@@ -231,7 +232,10 @@ fn normalize_aliases(input: Vec<String>) -> Result<Vec<String>, ApiError> {
             return Err(ApiError::ValidationError {
                 code: "field_too_long".into(),
                 field: "aliases".into(),
-                message: format!("Cada alias debe tener máximo {} caracteres", ZONE_ALIAS_MAX_LEN),
+                message: format!(
+                    "Cada alias debe tener máximo {} caracteres",
+                    ZONE_ALIAS_MAX_LEN
+                ),
             });
         }
         let key = normalize_zone(trimmed);
@@ -313,9 +317,19 @@ pub async fn create_plan_handler(
         created_at: now,
         updated_at: now,
     };
-    let saved = state.db.create_ai_plan(plan).await.map_err(ApiError::DatabaseError)?;
+    let saved = state
+        .db
+        .create_ai_plan(plan)
+        .await
+        .map_err(ApiError::DatabaseError)?;
     state.redis.invalidate_ai_plans_cache().await;
-    Ok((StatusCode::CREATED, Json(AiPlanResponse { ok: true, data: plan_to_item(saved) })))
+    Ok((
+        StatusCode::CREATED,
+        Json(AiPlanResponse {
+            ok: true,
+            data: plan_to_item(saved),
+        }),
+    ))
 }
 
 #[utoipa::path(
@@ -346,20 +360,31 @@ pub async fn update_plan_handler(
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(plan_not_found)?;
 
-    if let Some(v) = body.name { plan.name = v.trim().to_string(); }
-    if let Some(v) = body.mbps { plan.mbps = v; }
+    if let Some(v) = body.name {
+        plan.name = v.trim().to_string();
+    }
+    if let Some(v) = body.mbps {
+        plan.mbps = v;
+    }
     if let Some(v) = body.devices_recommendation {
         plan.devices_recommendation = v.trim().to_string();
     }
     if let Some(v) = body.benefits {
-        plan.benefits = v.into_iter()
+        plan.benefits = v
+            .into_iter()
             .map(|b| b.trim().to_string())
             .filter(|b| !b.is_empty())
             .collect();
     }
-    if let Some(v) = body.active { plan.active = v; }
-    if let Some(v) = body.display_order { plan.display_order = v; }
-    if let Some(v) = body.price_usd { plan.price_usd = v; }
+    if let Some(v) = body.active {
+        plan.active = v;
+    }
+    if let Some(v) = body.display_order {
+        plan.display_order = v;
+    }
+    if let Some(v) = body.price_usd {
+        plan.price_usd = v;
+    }
 
     validate_plan_input(&plan.name, &plan.devices_recommendation, &plan.benefits)?;
     plan.updated_at = BsonDateTime::now();
@@ -371,7 +396,10 @@ pub async fn update_plan_handler(
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(plan_not_found)?;
     state.redis.invalidate_ai_plans_cache().await;
-    Ok(Json(AiPlanResponse { ok: true, data: plan_to_item(saved) }))
+    Ok(Json(AiPlanResponse {
+        ok: true,
+        data: plan_to_item(saved),
+    }))
 }
 
 #[utoipa::path(
@@ -392,7 +420,11 @@ pub async fn delete_plan_handler(
 ) -> Result<Json<AiBusinessDataDeleteResponse>, ApiError> {
     require_superadmin(&current_user)?;
     let oid = parse_oid(&id, "id")?;
-    let ok = state.db.delete_ai_plan(&oid).await.map_err(ApiError::DatabaseError)?;
+    let ok = state
+        .db
+        .delete_ai_plan(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?;
     if !ok {
         return Err(plan_not_found());
     }
@@ -481,7 +513,8 @@ pub async fn create_coverage_zone_handler(
         return Err(ApiError::ValidationError {
             code: "missing_field".into(),
             field: "connection_types".into(),
-            message: "'connection_types' es requerido (mínimo 1 elemento: 'fibra' o 'antena')".into(),
+            message: "'connection_types' es requerido (mínimo 1 elemento: 'fibra' o 'antena')"
+                .into(),
         });
     }
 
@@ -504,9 +537,19 @@ pub async fn create_coverage_zone_handler(
         created_at: now,
         updated_at: now,
     };
-    let saved = state.db.create_ai_coverage_zone(zone).await.map_err(ApiError::DatabaseError)?;
+    let saved = state
+        .db
+        .create_ai_coverage_zone(zone)
+        .await
+        .map_err(ApiError::DatabaseError)?;
     state.redis.invalidate_ai_coverage_cache_v2().await;
-    Ok((StatusCode::CREATED, Json(AiCoverageZoneResponse { ok: true, data: zone_to_item(saved) })))
+    Ok((
+        StatusCode::CREATED,
+        Json(AiCoverageZoneResponse {
+            ok: true,
+            data: zone_to_item(saved),
+        }),
+    ))
 }
 
 #[utoipa::path(
@@ -626,7 +669,10 @@ pub async fn update_coverage_zone_handler(
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(zone_not_found)?;
     state.redis.invalidate_ai_coverage_cache_v2().await;
-    Ok(Json(AiCoverageZoneResponse { ok: true, data: zone_to_item(saved) }))
+    Ok(Json(AiCoverageZoneResponse {
+        ok: true,
+        data: zone_to_item(saved),
+    }))
 }
 
 #[utoipa::path(
@@ -647,7 +693,11 @@ pub async fn delete_coverage_zone_handler(
 ) -> Result<Json<AiBusinessDataDeleteResponse>, ApiError> {
     require_superadmin(&current_user)?;
     let oid = parse_oid(&id, "id")?;
-    let ok = state.db.delete_ai_coverage_zone(&oid).await.map_err(ApiError::DatabaseError)?;
+    let ok = state
+        .db
+        .delete_ai_coverage_zone(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?;
     if !ok {
         return Err(zone_not_found());
     }
@@ -757,7 +807,11 @@ fn installation_to_item(c: AiInstallationConfig) -> AiInstallationConfigItem {
         excedente_notes: c.excedente_notes,
         notes: c.notes,
         updated_at: iso(c.updated_at),
-        editor_id: if c.editor_id.is_empty() { None } else { Some(c.editor_id) },
+        editor_id: if c.editor_id.is_empty() {
+            None
+        } else {
+            Some(c.editor_id)
+        },
     }
 }
 
@@ -817,8 +871,12 @@ pub async fn list_installations_handler(
         .map_err(ApiError::DatabaseError)?;
 
     // Si la colección está vacía o le faltan tipos, sembramos los defaults lazy.
-    let has_fibra = items.iter().any(|c| matches!(c.connection_type, ConnectionType::Fibra));
-    let has_antena = items.iter().any(|c| matches!(c.connection_type, ConnectionType::Antena));
+    let has_fibra = items
+        .iter()
+        .any(|c| matches!(c.connection_type, ConnectionType::Fibra));
+    let has_antena = items
+        .iter()
+        .any(|c| matches!(c.connection_type, ConnectionType::Antena));
 
     if !has_fibra {
         let seeded = ensure_installation(&state, ConnectionType::Fibra, &current_user.id).await?;
@@ -858,25 +916,35 @@ pub async fn update_installation_handler(
 ) -> Result<Json<AiInstallationConfigResponse>, ApiError> {
     require_superadmin(&current_user)?;
 
-    let connection_type = ConnectionType::from_slug(&type_slug).ok_or_else(|| {
-        ApiError::ValidationError {
+    let connection_type =
+        ConnectionType::from_slug(&type_slug).ok_or_else(|| ApiError::ValidationError {
             code: "invalid_connection_type".into(),
             field: "type".into(),
-            message: format!("'{}' no es un tipo válido. Usar 'fibra' o 'antena'", type_slug),
-        }
-    })?;
+            message: format!(
+                "'{}' no es un tipo válido. Usar 'fibra' o 'antena'",
+                type_slug
+            ),
+        })?;
 
     // Asegurar que el doc existe (lazy seed si no).
     let mut config = ensure_installation(&state, connection_type, &current_user.id).await?;
 
     // Aplicar PATCH semántico.
-    if let Some(v) = body.base_cost_usd { config.base_cost_usd = v; }
-    if let Some(v) = body.includes { config.includes = v.trim().to_string(); }
+    if let Some(v) = body.base_cost_usd {
+        config.base_cost_usd = v;
+    }
+    if let Some(v) = body.includes {
+        config.includes = v.trim().to_string();
+    }
     if let Some(tri) = body.excedente_per_meter_usd {
         config.excedente_per_meter_usd = tri;
     }
-    if let Some(v) = body.excedente_notes { config.excedente_notes = v.trim().to_string(); }
-    if let Some(v) = body.notes { config.notes = v.trim().to_string(); }
+    if let Some(v) = body.excedente_notes {
+        config.excedente_notes = v.trim().to_string();
+    }
+    if let Some(v) = body.notes {
+        config.notes = v.trim().to_string();
+    }
 
     config.editor_id = current_user.id.clone();
     config.updated_at = BsonDateTime::now();
@@ -927,7 +995,10 @@ fn parse_iso_datetime(s: &str, field: &str) -> Result<mongodb::bson::DateTime, A
         .map_err(|_| ApiError::ValidationError {
             code: "invalid_datetime".into(),
             field: field.into(),
-            message: format!("'{}' debe ser ISO8601 con timezone (ej: 2026-04-01T00:00:00-04:00)", field),
+            message: format!(
+                "'{}' debe ser ISO8601 con timezone (ej: 2026-04-01T00:00:00-04:00)",
+                field
+            ),
         })
 }
 
@@ -1016,7 +1087,13 @@ pub async fn create_promotion_handler(
         .create_ai_promotion(promo)
         .await
         .map_err(ApiError::DatabaseError)?;
-    Ok((StatusCode::CREATED, Json(AiPromotionResponse { ok: true, data: promotion_to_item(saved) })))
+    Ok((
+        StatusCode::CREATED,
+        Json(AiPromotionResponse {
+            ok: true,
+            data: promotion_to_item(saved),
+        }),
+    ))
 }
 
 #[utoipa::path(
@@ -1047,11 +1124,21 @@ pub async fn update_promotion_handler(
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(promotion_not_found)?;
 
-    if let Some(v) = body.name { promo.name = v.trim().to_string(); }
-    if let Some(v) = body.description { promo.description = v.trim().to_string(); }
-    if let Some(v) = body.conditions { promo.conditions = v.trim().to_string(); }
-    if let Some(v) = body.benefit { promo.benefit = v.trim().to_string(); }
-    if let Some(v) = body.is_active { promo.is_active = v; }
+    if let Some(v) = body.name {
+        promo.name = v.trim().to_string();
+    }
+    if let Some(v) = body.description {
+        promo.description = v.trim().to_string();
+    }
+    if let Some(v) = body.conditions {
+        promo.conditions = v.trim().to_string();
+    }
+    if let Some(v) = body.benefit {
+        promo.benefit = v.trim().to_string();
+    }
+    if let Some(v) = body.is_active {
+        promo.is_active = v;
+    }
 
     if let Some(ref s) = body.starts_at {
         promo.starts_at = parse_iso_datetime(s, "starts_at")?;
@@ -1069,7 +1156,10 @@ pub async fn update_promotion_handler(
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(promotion_not_found)?;
-    Ok(Json(AiPromotionResponse { ok: true, data: promotion_to_item(saved) }))
+    Ok(Json(AiPromotionResponse {
+        ok: true,
+        data: promotion_to_item(saved),
+    }))
 }
 
 #[utoipa::path(
@@ -1172,7 +1262,11 @@ mod tests {
         // "Naguanagua" y "naguanagua" deben deduplicarse (mismo normalized key)
         let input = vec!["Naguanagua".to_string(), "naguanagua".to_string()];
         let result = normalize_aliases(input).unwrap();
-        assert_eq!(result.len(), 1, "Debe deduplicar aliases con misma normalización");
+        assert_eq!(
+            result.len(),
+            1,
+            "Debe deduplicar aliases con misma normalización"
+        );
     }
 
     #[test]

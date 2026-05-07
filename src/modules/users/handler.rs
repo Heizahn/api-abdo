@@ -5,8 +5,8 @@ use axum::{
 use std::sync::Arc;
 
 use crate::{
-    db::{UpdateUserPatch, UserListFilter, UserRepository},
     db::mongo::users::last_user_cursor,
+    db::{UpdateUserPatch, UserListFilter, UserRepository},
     error::ApiError,
     models::users::{
         ChangeMyPasswordRequest, CreateUserBody, OkResponse, SetUserPasswordRequest,
@@ -221,7 +221,11 @@ pub async fn create_user_handler(
         d_creation: Some(mongodb::bson::Bson::DateTime(now)),
     };
 
-    state.db.create_user(user.clone()).await.map_err(ApiError::DatabaseError)?;
+    state
+        .db
+        .create_user(user.clone())
+        .await
+        .map_err(ApiError::DatabaseError)?;
 
     // Credenciales en colección separada (UserCredentials).
     state
@@ -264,8 +268,16 @@ pub async fn update_user_handler(
     require_superadmin(&current_user)?;
 
     // Normalización mínima + validación de email si viene.
-    let name = payload.name.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let email = payload.email.as_ref().map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty());
+    let name = payload
+        .name
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let email = payload
+        .email
+        .as_ref()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty());
 
     // Validar unicidad de email si cambió.
     if let Some(new_email) = email.as_ref() {

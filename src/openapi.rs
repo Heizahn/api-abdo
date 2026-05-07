@@ -2,36 +2,26 @@ use utoipa::OpenApi;
 
 use crate::db::mongo::{PaymentDetails, ResultGroupedByDate};
 use crate::models::ai_agent::{
-    AiAgentDeleteResponse, AiAgentFaqItem, AiAgentFaqListResponse, AiAgentFaqResponse,
-    AiAgentItem, AiAgentMetricsData, AiAgentMetricsDailyBucketDto, AiAgentMetricsResponse,
-    AiAgentMode, AiAgentModelItem, AiAgentModelsListResponse, AiAgentPreClassBreakdown,
-    AiAgentPurpose, AiAgentResponse, AiAgentsListResponse, AiBusinessDataDeleteResponse,
-    AiConfigDto, AiConfigPatchRequest, AiConfigResponse,
-    AiCoverageZoneItem, AiCoverageZoneResponse, AiCoverageZonesListResponse, AiEscalationRulesDto,
-    AiEscalationRulesInput,
+    AiAgentDeleteResponse, AiAgentFaqItem, AiAgentFaqListResponse, AiAgentFaqResponse, AiAgentItem,
+    AiAgentMetricsDailyBucketDto, AiAgentMetricsData, AiAgentMetricsResponse, AiAgentMode,
+    AiAgentModelItem, AiAgentModelsListResponse, AiAgentPreClassBreakdown, AiAgentPurpose,
+    AiAgentResponse, AiAgentsListResponse, AiBusinessDataDeleteResponse, AiConfigDto,
+    AiConfigPatchRequest, AiConfigResponse, AiCoverageZoneItem, AiCoverageZoneResponse,
+    AiCoverageZonesListResponse, AiEscalationRulesDto, AiEscalationRulesInput,
     AiInstallationConfigItem, AiInstallationConfigResponse, AiInstallationConfigsListResponse,
-    UpdateAiInstallationConfigRequest,
-    AiLimitsDto, AiLimitsInput, AiModelConfigDto, AiModelConfigInput,
-    AiPersonalityDto, AiPersonalityInput, AiPlanItem, AiPlanResponse, AiPlansListResponse,
-    AiPromotionItem, AiPromotionResponse, AiPromotionsListResponse,
-    CreateAiPromotionRequest, UpdateAiPromotionRequest,
-    AiScheduleDto, AiScheduleInput, AiToolConfigDto, AiToolConfigInput,
-    ConnectionType,
-    CreateAiAgentFaqRequest, CreateAiAgentRequest, CreateAiCoverageZoneRequest,
-    CreateAiPlanRequest, PoliticalDivisionItem, PoliticalDivisionsResponse,
-    TestConnectionData, TestConnectionRequest, TestConnectionResponse,
-    TestConnectionSource, UpdateAiAgentFaqRequest, UpdateAiAgentRequest,
-    UpdateAiCoverageZoneRequest, UpdateAiPlanRequest,
-};
-use crate::modules::ai_agent::business_data::{AiToolMetaItem, AiToolsListResponse};
-use crate::modules::ai_agent::handler::ModelMetadata;
-use crate::modules::ai_agent::sandbox::{
-    SandboxData, SandboxHistoryEntry, SandboxRequest, SandboxResponse, SandboxToolCall,
-    SandboxUsage,
+    AiLimitsDto, AiLimitsInput, AiModelConfigDto, AiModelConfigInput, AiPersonalityDto,
+    AiPersonalityInput, AiPlanItem, AiPlanResponse, AiPlansListResponse, AiPromotionItem,
+    AiPromotionResponse, AiPromotionsListResponse, AiScheduleDto, AiScheduleInput, AiToolConfigDto,
+    AiToolConfigInput, ConnectionType, CreateAiAgentFaqRequest, CreateAiAgentRequest,
+    CreateAiCoverageZoneRequest, CreateAiPlanRequest, CreateAiPromotionRequest,
+    PoliticalDivisionItem, PoliticalDivisionsResponse, TestConnectionData, TestConnectionRequest,
+    TestConnectionResponse, TestConnectionSource, UpdateAiAgentFaqRequest, UpdateAiAgentRequest,
+    UpdateAiCoverageZoneRequest, UpdateAiInstallationConfigRequest, UpdateAiPlanRequest,
+    UpdateAiPromotionRequest,
 };
 use crate::models::auth::{
-    LoginRequest, LoginResponse, RefreshRequest, RefreshResponse,
-    TokenPair, VerifyNumberRequest, VerifyNumberResponse,
+    LoginRequest, LoginResponse, RefreshRequest, RefreshResponse, TokenPair, VerifyNumberRequest,
+    VerifyNumberResponse,
 };
 use crate::models::db::{
     BcvResponse, ClientDetail, ClientListItem, ClientOnu, ClientStatusHistoryItem,
@@ -53,36 +43,39 @@ use crate::models::users::{
     UserItem, UserListResponse, UserLoginRequest, UserLoginResponse, UserResponse,
     UserResponseEnvelope,
 };
-use crate::modules::whatsapp::handler::ResetAiStateResponse;
 use crate::models::whatsapp::{
     ConversationDetailResponse, ConversationItem, ConversationMessagesResponse, ConversationStats,
     ConversationStatsResponse, ConversationsListResponse, CreateQuickReplyRequest,
     CreateSettingsRequest, CreateTicketRequest, CreateWaTemplateRequest, DeleteWaTemplateData,
-    DeleteWaTemplateResponse, DuplicateQuickReplyRequest, InitiateConversationRequest,
-    LocationPayload, MarkReadData, MarkReadResponse, MediaLimitsResponse, MediaSendPayload,
-    MediaTypeLimit, MediaUploadData, MediaUploadResponse, MessageItem, QuickRepliesListResponse,
-    QuickReplyButton,
-    QuickReplyCtaUrl, QuickReplyHeader, QuickReplyItem, QuickReplyList, QuickReplyListRow,
-    QuickReplyListSection, QuickReplyResponse, ReplyToItem, SendMessageData, SendMessageRequest,
-    SendMessageResponse, SendTemplatePayload, SettingsItem, SettingsListResponse, SettingsResponse,
+    DeleteWaTemplateResponse, DuplicateQuickReplyRequest, HeaderMediaUploadData,
+    HeaderMediaUploadResponse, InitiateConversationRequest, LocationPayload, MarkReadData,
+    MarkReadResponse, MediaLimitsResponse, MediaSendPayload, MediaTypeLimit, MediaUploadData,
+    MediaUploadResponse, MessageItem, QuickRepliesListResponse, QuickReplyButton, QuickReplyCtaUrl,
+    QuickReplyHeader, QuickReplyItem, QuickReplyList, QuickReplyListRow, QuickReplyListSection,
+    QuickReplyResponse, ReplyToItem, SendMessageData, SendMessageRequest, SendMessageResponse,
+    SendTemplatePayload, SettingsItem, SettingsListResponse, SettingsResponse,
     TakeConversationResponse, TicketCategoriesResponse, TicketCategoryItem, TicketItem,
     TicketResponse, TicketTimelineEntryItem, TicketsListResponse, ToggleActiveRequest,
     TransferAndTicketData, TransferAndTicketRequest, TransferAndTicketResponse,
     TransferConversationRequest, TransferableAgentItem, TransferableAgentsResponse,
-    HeaderMediaUploadData, HeaderMediaUploadResponse,
-    TrivialResponse,
-    UpdateQuickReplyRequest, UpdateResponse, UpdateSettingsRequest, UpdateTicketStatusRequest,
-    UpdateWaTemplateRequest,
-    WaTemplateHeaderInput, WaTemplateButtonInput,
-    UrlPreview, WaPurposeConfig, WaPurposes, WaPurposesPatch, WaPurposeUsage,
-    WaTemplateCategory, WaTemplateItem, WaTemplateResponse, WaTemplatesListResponse,
-    WaTemplateStatus, WaTicketTimelineEntry,
+    TrivialResponse, UpdateQuickReplyRequest, UpdateResponse, UpdateSettingsRequest,
+    UpdateTicketStatusRequest, UpdateWaTemplateRequest, UrlPreview, WaPurposeConfig,
+    WaPurposeUsage, WaPurposes, WaPurposesPatch, WaTemplateButtonInput, WaTemplateCategory,
+    WaTemplateHeaderInput, WaTemplateItem, WaTemplateResponse, WaTemplateStatus,
+    WaTemplatesListResponse, WaTicketTimelineEntry,
 };
 use crate::models::zabbix::{MonthlyTraffic, ZabbixTrafficResponse};
+use crate::modules::ai_agent::business_data::{AiToolMetaItem, AiToolsListResponse};
+use crate::modules::ai_agent::handler::ModelMetadata;
+use crate::modules::ai_agent::sandbox::{
+    SandboxData, SandboxHistoryEntry, SandboxRequest, SandboxResponse, SandboxToolCall,
+    SandboxUsage,
+};
 use crate::modules::calculations::handler::{
     CalculationRequest, CalculationRequestV2, CalculationResponse, CalculationResponseV2, Currency,
 };
 use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingResponse};
+use crate::modules::whatsapp::handler::ResetAiStateResponse;
 
 #[derive(OpenApi)]
 #[openapi(

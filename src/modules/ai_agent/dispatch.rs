@@ -36,9 +36,8 @@ use crate::{
 use super::{
     ai_agent_secret,
     config_resolver::resolve_ai_api_key,
-    escalation,
-    openrouter::{AiRelay, resolve_base_url},
-    guardrails,
+    escalation, guardrails,
+    openrouter::{resolve_base_url, AiRelay},
     pre_classifier::{self, PreClassResult, PreClassResultFull},
     runner::{run_turn, ConvRole, ConvTurn, MediaInput, PromptVariables},
     state::{apply_state_patches, format_conversation_state},
@@ -67,11 +66,7 @@ const DEBOUNCE_FALLBACK_SECONDS: u64 = 10;
 ///
 /// **Lock anti-concurrencia**: red de seguridad además del debounce
 /// (TTL 60s). Releído al final.
-pub fn dispatch_inbound_async(
-    state: Arc<AppState>,
-    inbound: WaMessage,
-    workspace_id: ObjectId,
-) {
+pub fn dispatch_inbound_async(state: Arc<AppState>, inbound: WaMessage, workspace_id: ObjectId) {
     let conv_hex = inbound.conversation_id.to_hex();
     let now_ms = chrono::Utc::now().timestamp_millis();
 
@@ -81,7 +76,11 @@ pub fn dispatch_inbound_async(
 
         // Cargar la conv y resolver agente según su estado IA. Si la conv
         // tiene `ai_disabled=true`, NO procesamos (un humano la atiende).
-        let conv = match state.db.find_conversation_by_id(&inbound.conversation_id).await {
+        let conv = match state
+            .db
+            .find_conversation_by_id(&inbound.conversation_id)
+            .await
+        {
             Ok(Some(c)) => c,
             Ok(None) => {
                 tracing::warn!(
@@ -314,8 +313,7 @@ async fn run_dispatch(
         .iter()
         .filter(|m| {
             // Excluir los que van a la ráfaga (inbounds con _id >= inbound_oid).
-            !(m.direction == "in"
-                && m.id.map(|i| i >= inbound_oid).unwrap_or(false))
+            !(m.direction == "in" && m.id.map(|i| i >= inbound_oid).unwrap_or(false))
         })
         .filter_map(|m| {
             let text = m.body.as_deref()?.trim().to_string();
@@ -352,8 +350,7 @@ async fn run_dispatch(
         .await
         .unwrap_or(0);
     let prior_history_count = full_history.len();
-    let is_ai_first_turn_with_prior_history =
-        prior_ai_turns == 0 && prior_history_count > 0;
+    let is_ai_first_turn_with_prior_history = prior_ai_turns == 0 && prior_history_count > 0;
 
     let history: Vec<ConvTurn> = if is_ai_first_turn_with_prior_history {
         tracing::info!(
@@ -364,7 +361,10 @@ async fn run_dispatch(
         // Reset counters per-conv: si la IA no había respondido todavía,
         // cualquier contador per-conv proviene de tests previos o estado
         // residual. La IA arranca limpia.
-        state.redis.clear_ai_conv_counters(&inbound.conversation_id.to_hex()).await;
+        state
+            .redis
+            .clear_ai_conv_counters(&inbound.conversation_id.to_hex())
+            .await;
         Vec::new()
     } else {
         full_history
@@ -382,9 +382,7 @@ async fn run_dispatch(
     // Burst: inbounds con `_id >= inbound_oid` en orden de _id ascendente.
     let burst: Vec<&WaMessage> = recent
         .iter()
-        .filter(|m| {
-            m.direction == "in" && m.id.map(|i| i >= inbound_oid).unwrap_or(false)
-        })
+        .filter(|m| m.direction == "in" && m.id.map(|i| i >= inbound_oid).unwrap_or(false))
         .collect();
 
     // High water mark: el _id más alto que la IA "vio" en su prompt. Empieza
@@ -476,8 +474,7 @@ async fn run_dispatch(
     // Si el `conv.phone` matchea con un Cliente, inyectamos sus datos al
     // system_instruction. Así la IA sabe quién es sin pedir cédula y solo
     // la pide si NO se pudo identificar.
-    let (customer_context, customer_first_name) =
-        build_customer_context(&state, &conv.phone).await;
+    let (customer_context, customer_first_name) = build_customer_context(&state, &conv.phone).await;
 
     // ── Phase 3a: Pre-classifier gate ─────────────────────────────────────
     // Solo si el workspace lo habilitó y hay texto del cliente.
@@ -494,8 +491,11 @@ async fn run_dispatch(
         let pc_api_key_result = resolve_ai_api_key(&state).await;
         let pc_api_key_opt = match pc_api_key_result {
             Ok(k) => Some(k),
-            Err(ref e) if matches!(e, crate::error::ApiError::Domain { code, .. } if code == "ai_global_config_missing") => {
-                tracing::debug!("[ai_agent.dispatch] pre-classifier skipped: global config missing");
+            Err(ref e) if matches!(e, crate::error::ApiError::Domain { code, .. } if code == "ai_global_config_missing") =>
+            {
+                tracing::debug!(
+                    "[ai_agent.dispatch] pre-classifier skipped: global config missing"
+                );
                 None
             }
             Err(_) => None,
@@ -617,10 +617,7 @@ async fn run_dispatch(
                             };
                             match state
                                 .db
-                                .find_active_agent_by_workspace_and_purpose(
-                                    &workspace_id,
-                                    purpose,
-                                )
+                                .find_active_agent_by_workspace_and_purpose(&workspace_id, purpose)
                                 .await
                             {
                                 Ok(Some(specialist))
@@ -706,12 +703,8 @@ async fn run_dispatch(
         // Sin config global → skip silencioso del pre-clasificador.
     }
 
-    let prompt_vars = build_prompt_variables(
-        &agent,
-        &wa_settings,
-        &conv,
-        customer_first_name.as_deref(),
-    );
+    let prompt_vars =
+        build_prompt_variables(&agent, &wa_settings, &conv, customer_first_name.as_deref());
 
     let api_key = match resolve_ai_api_key(&state).await {
         Ok(k) => k,
@@ -776,8 +769,9 @@ async fn run_dispatch(
     // conversation_state_owned: el bloque [conversation_state] formateado para
     // inyectar en el system_instruction del PRIMER agente del chain. En chain
     // steps > 0, no lo inyectamos (el target arranca sin estado del anterior).
-    let conversation_state_owned: Option<String> =
-        current_ai_conv_state.as_ref().map(format_conversation_state);
+    let conversation_state_owned: Option<String> = current_ai_conv_state
+        .as_ref()
+        .map(format_conversation_state);
     // Acumulador de todos los patches emitidos durante el chain completo.
     let mut all_state_patches: Vec<StatePatch> = Vec::new();
 
@@ -795,9 +789,7 @@ async fn run_dispatch(
     let mut cross_workspace_message: Option<String> = None;
 
     loop {
-        let active_agent_id = active_agent
-            .id
-            .ok_or_else(|| "agent sin _id".to_string())?;
+        let active_agent_id = active_agent.id.ok_or_else(|| "agent sin _id".to_string())?;
 
         if chain_count > 0 {
             tracing::info!(
@@ -823,8 +815,7 @@ async fn run_dispatch(
                     let new_burst: Vec<&WaMessage> = refreshed
                         .iter()
                         .filter(|m| {
-                            m.direction == "in"
-                                && m.id.map(|i| i >= inbound_oid).unwrap_or(false)
+                            m.direction == "in" && m.id.map(|i| i >= inbound_oid).unwrap_or(false)
                         })
                         .collect();
                     let new_burst_texts: Vec<String> = new_burst
@@ -851,8 +842,7 @@ async fn run_dispatch(
                             effective_user_message = new_user_text;
                             customer_explicit_zones =
                                 guardrails::extract_customer_explicit_zones(&refreshed);
-                            recent_media_ids =
-                                guardrails::extract_recent_media_ids(&refreshed);
+                            recent_media_ids = guardrails::extract_recent_media_ids(&refreshed);
                         }
                     }
                     // Actualizar HWM al máximo _id del burst refrescado —
@@ -877,10 +867,15 @@ async fn run_dispatch(
 
         // Tools del agente activo (cada agente tiene su propia config).
         let allowed_transfer_targets = extract_allowed_transfer_targets(&active_agent.tools);
-        let transfer_target_labels: Vec<(ObjectId, String)> = if allowed_transfer_targets.is_empty() {
+        let transfer_target_labels: Vec<(ObjectId, String)> = if allowed_transfer_targets.is_empty()
+        {
             Vec::new()
         } else {
-            match state.db.find_ai_agents_by_ids(&allowed_transfer_targets).await {
+            match state
+                .db
+                .find_ai_agents_by_ids(&allowed_transfer_targets)
+                .await
+            {
                 Ok(agents) => agents
                     .into_iter()
                     .filter_map(|a| a.id.map(|id| (id, a.label)))
@@ -993,7 +988,11 @@ async fn run_dispatch(
             turn_state_owned.as_deref(),
             // Inyectamos el estado solo en el primer paso del chain (chain_count==0).
             // En pasos > 0 el target arranca sin estado heredado del anterior.
-            if chain_count == 0 { conversation_state_owned.as_deref() } else { None },
+            if chain_count == 0 {
+                conversation_state_owned.as_deref()
+            } else {
+                None
+            },
             Some(&active_prompt_vars),
             &tool_ctx,
         )
@@ -1038,13 +1037,14 @@ async fn run_dispatch(
             active_agent_id,
             chain_count,
             &active_agent.model.model_id,
-            if chain_count == 0 { pre_class_result.as_ref() } else { None },
+            if chain_count == 0 {
+                pre_class_result.as_ref()
+            } else {
+                None
+            },
         );
         if let Err(e) = state.db.create_ai_interaction(interaction).await {
-            tracing::warn!(
-                "[ai_agent.dispatch] persistir AiInteraction falló: {}",
-                e
-            );
+            tracing::warn!("[ai_agent.dispatch] persistir AiInteraction falló: {}", e);
         }
 
         // Tokens daily + turns daily del agente activo.
@@ -1054,17 +1054,27 @@ async fn run_dispatch(
             .redis
             .add_ai_tokens_agent_daily(&active_agent_hex, total_tokens)
             .await;
-        state.redis.incr_ai_turns_agent_daily(&active_agent_hex).await;
+        state
+            .redis
+            .incr_ai_turns_agent_daily(&active_agent_hex)
+            .await;
 
         // Cost alert por agente.
         if active_agent.limits.max_tokens_per_day > 0
             && active_agent.limits.cost_alert_threshold_pct > 0
         {
-            let used = state.redis.get_ai_tokens_agent_daily(&active_agent_hex).await as u64;
+            let used = state
+                .redis
+                .get_ai_tokens_agent_daily(&active_agent_hex)
+                .await as u64;
             let cap = active_agent.limits.max_tokens_per_day;
             let pct_used = (used as f64 / cap as f64) * 100.0;
             if pct_used >= active_agent.limits.cost_alert_threshold_pct as f64 {
-                if state.redis.try_mark_cost_alert_today(&active_agent_hex).await {
+                if state
+                    .redis
+                    .try_mark_cost_alert_today(&active_agent_hex)
+                    .await
+                {
                     tracing::warn!(
                         "[ai_agent.dispatch] cost alert: agent={} used {}/{} tokens ({:.1}% — threshold {}%)",
                         active_agent_hex, used, cap, pct_used,
@@ -1106,7 +1116,11 @@ async fn run_dispatch(
                 return Ok(());
             }
 
-            let target = match state.db.find_ai_agent_by_id(&transfer.target_agent_id).await {
+            let target = match state
+                .db
+                .find_ai_agent_by_id(&transfer.target_agent_id)
+                .await
+            {
                 Ok(Some(a)) if a.enabled => a,
                 _ => {
                     tracing::warn!(
@@ -1177,12 +1191,14 @@ async fn run_dispatch(
     // Esto da `current_intent` determinístico desde el primer mensaje sin
     // pedirle al modelo que se auto-clasifique.
     let mut all_state_patches = all_state_patches; // shadow to allow prepend
-    // Kill switch vive per-workspace en `WaSettings.enable_conversation_state`
-    // (configurable desde UI SUPERADMIN). Los agentes del workspace acatan
-    // la política — un workspace de test puede correr sin state mientras prod
-    // lo mantiene activo.
+                                                   // Kill switch vive per-workspace en `WaSettings.enable_conversation_state`
+                                                   // (configurable desde UI SUPERADMIN). Los agentes del workspace acatan
+                                                   // la política — un workspace de test puede correr sin state mientras prod
+                                                   // lo mantiene activo.
     if wa_settings.enable_conversation_state {
-        let base_intent = current_ai_conv_state.as_ref().and_then(|s| s.current_intent.as_ref());
+        let base_intent = current_ai_conv_state
+            .as_ref()
+            .and_then(|s| s.current_intent.as_ref());
         if base_intent.is_none() && !customer_explicit_intents.is_empty() {
             all_state_patches.insert(
                 0,
@@ -1195,9 +1211,7 @@ async fn run_dispatch(
     }
 
     if wa_settings.enable_conversation_state && !all_state_patches.is_empty() {
-        let base = current_ai_conv_state
-            .clone()
-            .unwrap_or_default();
+        let base = current_ai_conv_state.clone().unwrap_or_default();
         let mut new_state = apply_state_patches(base, &all_state_patches);
 
         // Transfer-reset: si el último step es "transferred_to_*" limpiamos el
@@ -1255,7 +1269,9 @@ async fn run_dispatch(
     {
         tracing::warn!("[ai_agent.dispatch] mark_messages_ai_processed: {}", e);
     } else {
-        let iso = now_for_ai_processed.try_to_rfc3339_string().unwrap_or_default();
+        let iso = now_for_ai_processed
+            .try_to_rfc3339_string()
+            .unwrap_or_default();
         let ev = crate::modules::whatsapp::ws::WsServerEvent::IaProcesoMensaje {
             conversation_id: inbound.conversation_id.to_hex(),
             message_ids: burst_msg_ids.iter().map(|o| o.to_hex()).collect(),
@@ -1283,7 +1299,8 @@ async fn run_dispatch(
             if attempts >= last_agent.escalation.max_identification_attempts as i64 {
                 tracing::info!(
                     "[ai_agent.dispatch] max_identification_attempts ({}) reached (conv={})",
-                    attempts, conv_hex
+                    attempts,
+                    conv_hex
                 );
                 escalation::auto_escalate(
                     &state,
@@ -1572,7 +1589,8 @@ async fn build_media_inputs(
         Err(e) => {
             tracing::warn!(
                 "[ai_agent.dispatch] descarga de media {} falló: {}",
-                media_id, e
+                media_id,
+                e
             );
             return Vec::new();
         }
@@ -1706,7 +1724,10 @@ async fn build_customer_context(
     };
 
     let mut buf = String::new();
-    buf.push_str(&format!("[customer_lookup_by_phone]\nphone: {}\n", customer_phone));
+    buf.push_str(&format!(
+        "[customer_lookup_by_phone]\nphone: {}\n",
+        customer_phone
+    ));
     if matches.is_empty() {
         buf.push_str("matches: 0\n");
         return (Some(buf), None);
@@ -1783,7 +1804,13 @@ mod dispatch_tests {
     use super::*;
     use crate::models::whatsapp::TrivialResponse;
 
-    fn make_trivial(kind: &str, triggers: &[&str], response: &str, priority: i32, enabled: bool) -> TrivialResponse {
+    fn make_trivial(
+        kind: &str,
+        triggers: &[&str],
+        response: &str,
+        priority: i32,
+        enabled: bool,
+    ) -> TrivialResponse {
         TrivialResponse {
             id: uuid::Uuid::new_v4().to_string(),
             kind: kind.to_string(),
@@ -2121,8 +2148,8 @@ mod tests {
         for prior in 0u64..4 {
             let outcome = categorize_dispatch_outcome(
                 prior,
-                4,  // max_turns_without_resolution
-                4,  // qualification_window_turns
+                4,   // max_turns_without_resolution
+                4,   // qualification_window_turns
                 &[], // no tool calls
                 false,
                 false,
@@ -2138,9 +2165,9 @@ mod tests {
 
         // Turn 5: prior_ai_turns = 4 (>= window=4) → normal evaluation, no tools → Increment
         let outcome = categorize_dispatch_outcome(
-            4,  // prior_ai_turns == window, window no longer applies
-            4,  // max_turns_without_resolution
-            4,  // qualification_window_turns
+            4,   // prior_ai_turns == window, window no longer applies
+            4,   // max_turns_without_resolution
+            4,   // qualification_window_turns
             &[], // no tool calls
             false,
             false,
@@ -2159,8 +2186,8 @@ mod tests {
         for prior in 0u64..3 {
             let outcome = categorize_dispatch_outcome(
                 prior,
-                3,  // max_turns_without_resolution
-                0,  // qualification_window_turns = 0 (disabled)
+                3, // max_turns_without_resolution
+                0, // qualification_window_turns = 0 (disabled)
                 &[],
                 false,
                 false,
@@ -2190,7 +2217,9 @@ mod tests {
         let outcome3 = categorize_dispatch_outcome(2, 4, 0, &tools, false, false);
         assert_eq!(
             outcome3,
-            DispatchOutcome::InfoLookupSkip { tool_name: "list_plans".to_string() },
+            DispatchOutcome::InfoLookupSkip {
+                tool_name: "list_plans".to_string()
+            },
             "list_plans success should be InfoLookupSkip, not ActionReset"
         );
 
@@ -2218,7 +2247,9 @@ mod tests {
         let outcome3 = categorize_dispatch_outcome(2, 4, 0, &tools, false, false);
         assert_eq!(
             outcome3,
-            DispatchOutcome::ActionReset { tool_name: "transfer_to_agent".to_string() },
+            DispatchOutcome::ActionReset {
+                tool_name: "transfer_to_agent".to_string()
+            },
             "transfer_to_agent success should ActionReset"
         );
 
@@ -2239,7 +2270,9 @@ mod tests {
         // Unknown tool → InfoLookup default → InfoLookupSkip
         assert_eq!(
             outcome,
-            DispatchOutcome::InfoLookupSkip { tool_name: "some_future_tool".to_string() },
+            DispatchOutcome::InfoLookupSkip {
+                tool_name: "some_future_tool".to_string()
+            },
             "unknown tool with success should be InfoLookupSkip (safe default)"
         );
     }
@@ -2291,9 +2324,9 @@ mod tests {
     fn window_boundary_uses_normal_evaluation() {
         // prior_ai_turns == window → B1 does NOT apply (strict <)
         let outcome = categorize_dispatch_outcome(
-            4,  // prior_ai_turns == window
-            4,  // max_turns_without_resolution
-            4,  // qualification_window_turns
+            4,   // prior_ai_turns == window
+            4,   // max_turns_without_resolution
+            4,   // qualification_window_turns
             &[], // no tools
             false,
             false,
@@ -2331,24 +2364,37 @@ mod handler_validator_tests {
         cur: &mut AiEscalationRules,
         patch: Option<AiEscalationRulesInput>,
     ) -> Result<(), ApiError> {
-        let Some(p) = patch else { return Ok(()); };
-        if let Some(v) = p.keywords { cur.keywords = v; }
-        if let Some(v) = p.max_turns_without_resolution { cur.max_turns_without_resolution = v; }
+        let Some(p) = patch else {
+            return Ok(());
+        };
+        if let Some(v) = p.keywords {
+            cur.keywords = v;
+        }
+        if let Some(v) = p.max_turns_without_resolution {
+            cur.max_turns_without_resolution = v;
+        }
         if let Some(v) = p.qualification_window_turns {
             if v > 10 {
                 return Err(ApiError::domain_simple(
                     axum::http::StatusCode::BAD_REQUEST,
                     "qualification_window_turns_out_of_range",
-                    format!("qualification_window_turns must be between 0 and 10, got {}", v),
+                    format!(
+                        "qualification_window_turns must be between 0 and 10, got {}",
+                        v
+                    ),
                 ));
             }
             cur.qualification_window_turns = v;
         }
-        if let Some(v) = p.max_identification_attempts { cur.max_identification_attempts = v; }
+        if let Some(v) = p.max_identification_attempts {
+            cur.max_identification_attempts = v;
+        }
         if let Some(v) = p.escalate_on_critical_tool_failure {
             cur.escalate_on_critical_tool_failure = v;
         }
-        if let Some(v) = p.always_escalate_when_asked { cur.always_escalate_when_asked = v; }
+        if let Some(v) = p.always_escalate_when_asked {
+            cur.always_escalate_when_asked = v;
+        }
         if p.default_ticket_category_id.is_some() {
             cur.default_ticket_category_id = p.default_ticket_category_id;
         }
@@ -2374,7 +2420,10 @@ mod handler_validator_tests {
             panic!("expected ApiError::Domain variant");
         }
         // Value must NOT be applied on error
-        assert_eq!(esc.qualification_window_turns, 0, "value must not be stored on error");
+        assert_eq!(
+            esc.qualification_window_turns, 0,
+            "value must not be stored on error"
+        );
     }
 
     // Task 4.8: qualification_window_turns = 10 → Ok, value stored
@@ -2386,8 +2435,14 @@ mod handler_validator_tests {
             ..Default::default()
         });
         let result = apply_escalation_under_test(&mut esc, patch);
-        assert!(result.is_ok(), "value 10 should be accepted (upper boundary inclusive)");
-        assert_eq!(esc.qualification_window_turns, 10, "value 10 must be stored");
+        assert!(
+            result.is_ok(),
+            "value 10 should be accepted (upper boundary inclusive)"
+        );
+        assert_eq!(
+            esc.qualification_window_turns, 10,
+            "value 10 must be stored"
+        );
     }
 
     // Bonus: value 0 (lower boundary) → Ok
@@ -2400,7 +2455,10 @@ mod handler_validator_tests {
             ..Default::default()
         });
         let result = apply_escalation_under_test(&mut esc, patch);
-        assert!(result.is_ok(), "value 0 should be accepted (lower boundary)");
+        assert!(
+            result.is_ok(),
+            "value 0 should be accepted (lower boundary)"
+        );
         assert_eq!(esc.qualification_window_turns, 0);
     }
 }

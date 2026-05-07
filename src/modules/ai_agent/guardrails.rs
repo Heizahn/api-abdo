@@ -2,29 +2,99 @@
 //! del prompt. Pure helpers — sin I/O. Toda la data viene precomputada por
 //! `dispatch.rs` desde la `recent` slice del turno.
 
-use crate::models::whatsapp::WaMessage;
 use super::runner::{ConvRole, ConvTurn};
 use super::tools::normalize_zone;
+use crate::models::whatsapp::WaMessage;
 
 /// Mapping intent group → trigger substrings. Substrings ya normalizados
 /// (lowercase, sin tildes). Claves en español alineadas con los prompts
 /// del proyecto. Modificar con cuidado: cada cambio impacta el HUD que
 /// lee Gemini en CADA turno.
 const INTENT_KEYWORDS: &[(&str, &[&str])] = &[
-    ("internet",    &["internet", "conexion", "wifi", "red"]),
-    ("contratar",   &["contratar", "contrato", "instalar", "instalacion", "nuevo servicio", "instalan"]),
-    ("precio",      &["precio", "costo", "cuanto", "vale"]),
-    ("cobertura",   &["cobertura", "llegan", "llega", "cubren", "zona"]),
-    ("factura",     &["factura", "facturacion"]),
-    ("pago",        &["pago", "pagar", "pague", "comprobante", "deposito", "transferencia", "transferi", "abono", "referencia"]),
-    ("saldo",       &["saldo", "debo", "deuda", "mora"]),
-    ("planes",      &["plan", "planes", "mbps", "megas", "velocidad"]),
-    ("soporte",     &["soporte", "no anda", "no funciona", "no tengo internet", "sin internet",
-                      "lento", "se cayo", "no me anda", "no carga", "falla", "averia", "problema"]),
-    ("humano",      &["humano", "persona", "asesor", "operador", "hablar con alguien", "agente", "supervisor"]),
-    ("plan_change", &["cambiar de plan", "subir plan", "bajar plan", "upgrade", "downgrade"]),
-    ("account",     &["actualizar", "cambiar datos", "mi correo", "mi telefono", "mi direccion"]),
-    ("cancel",      &["cancelar", "dar de baja", "retirar"]),
+    ("internet", &["internet", "conexion", "wifi", "red"]),
+    (
+        "contratar",
+        &[
+            "contratar",
+            "contrato",
+            "instalar",
+            "instalacion",
+            "nuevo servicio",
+            "instalan",
+        ],
+    ),
+    ("precio", &["precio", "costo", "cuanto", "vale"]),
+    (
+        "cobertura",
+        &["cobertura", "llegan", "llega", "cubren", "zona"],
+    ),
+    ("factura", &["factura", "facturacion"]),
+    (
+        "pago",
+        &[
+            "pago",
+            "pagar",
+            "pague",
+            "comprobante",
+            "deposito",
+            "transferencia",
+            "transferi",
+            "abono",
+            "referencia",
+        ],
+    ),
+    ("saldo", &["saldo", "debo", "deuda", "mora"]),
+    ("planes", &["plan", "planes", "mbps", "megas", "velocidad"]),
+    (
+        "soporte",
+        &[
+            "soporte",
+            "no anda",
+            "no funciona",
+            "no tengo internet",
+            "sin internet",
+            "lento",
+            "se cayo",
+            "no me anda",
+            "no carga",
+            "falla",
+            "averia",
+            "problema",
+        ],
+    ),
+    (
+        "humano",
+        &[
+            "humano",
+            "persona",
+            "asesor",
+            "operador",
+            "hablar con alguien",
+            "agente",
+            "supervisor",
+        ],
+    ),
+    (
+        "plan_change",
+        &[
+            "cambiar de plan",
+            "subir plan",
+            "bajar plan",
+            "upgrade",
+            "downgrade",
+        ],
+    ),
+    (
+        "account",
+        &[
+            "actualizar",
+            "cambiar datos",
+            "mi correo",
+            "mi telefono",
+            "mi direccion",
+        ],
+    ),
+    ("cancel", &["cancelar", "dar de baja", "retirar"]),
 ];
 
 /// Devuelve los bodies normalizados (lowercase + sin tildes + trim) de los
@@ -64,9 +134,19 @@ pub fn extract_recent_media_ids(messages: &[WaMessage]) -> Vec<String> {
 /// no las filtráramos, palabras como "municipio" o "estado" siempre estarían
 /// presentes en el buffer del cliente y matchearían cualquier alucinación.
 const ZONE_STOPWORDS: &[&str] = &[
-    "municipio", "parroquia", "sector", "urbanizacion", "urb",
-    "estado", "ciudad", "pueblo", "calle", "avenida",
-    "zona", "area", "region",
+    "municipio",
+    "parroquia",
+    "sector",
+    "urbanizacion",
+    "urb",
+    "estado",
+    "ciudad",
+    "pueblo",
+    "calle",
+    "avenida",
+    "zona",
+    "area",
+    "region",
 ];
 
 /// Largo mínimo de un token para considerarse significativo. 4 descarta
@@ -161,10 +241,16 @@ pub fn build_turn_state(
     }
     let mut lines = vec![format!("turn_number: {}", turn_number)];
     if !customer_zones.is_empty() {
-        lines.push(format!("customer_explicit_zones: {}", customer_zones.join(", ")));
+        lines.push(format!(
+            "customer_explicit_zones: {}",
+            customer_zones.join(", ")
+        ));
     }
     if !customer_intents.is_empty() {
-        lines.push(format!("customer_explicit_intents: {}", customer_intents.join(", ")));
+        lines.push(format!(
+            "customer_explicit_intents: {}",
+            customer_intents.join(", ")
+        ));
     }
     Some(lines.join("\n"))
 }
@@ -199,21 +285,19 @@ mod tests {
 
     #[test]
     fn passes_when_ai_claims_subset_of_customer_message() {
-        let zones = customer_buffer(&[
-            "estoy en Valencia, Estado Carabobo",
-        ]);
+        let zones = customer_buffer(&["estoy en Valencia, Estado Carabobo"]);
         assert!(validate_zone_mentioned("Valencia", &zones));
         assert!(validate_zone_mentioned("Carabobo", &zones));
     }
 
     #[test]
     fn blocks_when_ai_hallucinates_zone() {
-        let zones = customer_buffer(&[
-            "hola, quiero info del internet",
-            "soy nuevo cliente",
-        ]);
+        let zones = customer_buffer(&["hola, quiero info del internet", "soy nuevo cliente"]);
         assert!(!validate_zone_mentioned("Naguanagua", &zones));
-        assert!(!validate_zone_mentioned("Valencia, Estado Carabobo", &zones));
+        assert!(!validate_zone_mentioned(
+            "Valencia, Estado Carabobo",
+            &zones
+        ));
     }
 
     #[test]

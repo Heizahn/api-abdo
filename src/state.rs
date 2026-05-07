@@ -8,7 +8,6 @@ pub type WsRegistry = Arc<RwLock<HashMap<String, UnboundedSender<String>>>>;
 /// Estado compartido de la aplicación
 /// Se pasa a todos los handlers mediante Axum's State extractor
 
-
 #[derive(Clone)]
 pub struct AppState {
     pub db: MongoDB,
@@ -32,7 +31,6 @@ impl AppState {
         tracing::info!("Conectando a Redis: {}", config.redis_uri);
         let redis = RedisClient::new(&config).await?;
         tracing::info!("✅ Redis conectado");
-
 
         Ok(Arc::new(Self {
             db,

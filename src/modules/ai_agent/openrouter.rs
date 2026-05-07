@@ -287,7 +287,12 @@ impl OpenRouterClient {
         api_key: String,
         relay: Option<AiRelay>,
     ) -> Self {
-        Self { http, base_url, api_key, relay }
+        Self {
+            http,
+            base_url,
+            api_key,
+            relay,
+        }
     }
 
     /// Llama `POST {base_url}/chat/completions`. Maneja retries para errores
@@ -377,7 +382,8 @@ impl OpenRouterClient {
                         };
                         tracing::warn!(
                             "[openrouter] decode response failed: {} | body: {}",
-                            e, preview
+                            e,
+                            preview
                         );
                         Err(ApiError::domain_simple(
                             axum::http::StatusCode::BAD_GATEWAY,
@@ -393,7 +399,10 @@ impl OpenRouterClient {
 
             let (code, msg) = match status.as_u16() {
                 400 => ("ai_invalid_request", "Petición inválida hacia OpenRouter"),
-                401 | 403 => ("ai_auth_failed", "OpenRouter respondió 401/403 — clave inválida"),
+                401 | 403 => (
+                    "ai_auth_failed",
+                    "OpenRouter respondió 401/403 — clave inválida",
+                ),
                 402 => ("ai_payment_required", "OpenRouter requiere saldo/pago"),
                 404 => ("ai_model_not_found", "Modelo no encontrado en OpenRouter"),
                 429 => ("ai_rate_limit", "Límite de tasa de OpenRouter alcanzado"),
@@ -401,11 +410,7 @@ impl OpenRouterClient {
                 _ => ("ai_upstream_error", "Error inesperado de OpenRouter"),
             };
 
-            let err = ApiError::domain_simple(
-                axum::http::StatusCode::BAD_GATEWAY,
-                code,
-                msg,
-            );
+            let err = ApiError::domain_simple(axum::http::StatusCode::BAD_GATEWAY, code, msg);
 
             if !is_retryable_status(status.as_u16()) {
                 return Err(err);
@@ -492,7 +497,9 @@ mod tests {
             messages: vec![ChatMessage {
                 role: "user".into(),
                 content: Some(MessageContent::Blocks(vec![
-                    ContentBlock::Text { text: "¿Qué es esto?".into() },
+                    ContentBlock::Text {
+                        text: "¿Qué es esto?".into(),
+                    },
                     ContentBlock::ImageUrl {
                         image_url: ImageUrlInner {
                             url: "data:image/jpeg;base64,AABB==".into(),
@@ -518,7 +525,10 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0]["type"], "text");
         assert_eq!(blocks[1]["type"], "image_url");
-        assert_eq!(blocks[1]["image_url"]["url"], "data:image/jpeg;base64,AABB==");
+        assert_eq!(
+            blocks[1]["image_url"]["url"],
+            "data:image/jpeg;base64,AABB=="
+        );
     }
 
     // ── Deserialización de responses ──────────────────────────────────────────
@@ -598,7 +608,10 @@ mod tests {
         assert_eq!(tool_calls.len(), 2);
         assert_eq!(tool_calls[0].id, "call_c1");
         assert_eq!(tool_calls[0].function.name, "lookup_customer");
-        assert_eq!(tool_calls[0].function.arguments, "{\"phone\":\"04140000000\"}");
+        assert_eq!(
+            tool_calls[0].function.arguments,
+            "{\"phone\":\"04140000000\"}"
+        );
         assert_eq!(tool_calls[1].id, "call_c2");
         assert_eq!(tool_calls[1].function.name, "get_invoices");
     }

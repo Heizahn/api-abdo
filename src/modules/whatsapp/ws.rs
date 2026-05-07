@@ -256,10 +256,17 @@ pub async fn emit_to_phone_number_agents(
     payload: String,
 ) {
     // Resolver WaSettings via state.db
-    let settings = match state.db.find_wa_settings_by_phone_number_id(phone_number_id).await {
+    let settings = match state
+        .db
+        .find_wa_settings_by_phone_number_id(phone_number_id)
+        .await
+    {
         Ok(Some(s)) => s,
         Ok(None) => {
-            tracing::warn!("[ws] WaSettings not found for phone_number_id: {}", phone_number_id);
+            tracing::warn!(
+                "[ws] WaSettings not found for phone_number_id: {}",
+                phone_number_id
+            );
             return;
         }
         Err(e) => {
@@ -327,7 +334,9 @@ pub async fn ws_handler(
     // Validar JWT antes del upgrade
     let jwt = UserJwtService::new();
     match jwt.verify_token(&params.token) {
-        Ok(claims) => ws.on_upgrade(move |socket| handle_socket(socket, state, claims.id, claims.name)),
+        Ok(claims) => {
+            ws.on_upgrade(move |socket| handle_socket(socket, state, claims.id, claims.name))
+        }
         Err(_) => {
             // No podemos retornar error HTTP después del upgrade — rechazamos antes
             ws.on_upgrade(|mut socket| async move {
@@ -342,7 +351,12 @@ pub async fn ws_handler(
     }
 }
 
-async fn handle_socket(socket: WebSocket, state: Arc<AppState>, user_id: String, user_name: String) {
+async fn handle_socket(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    user_id: String,
+    user_name: String,
+) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
@@ -411,7 +425,8 @@ async fn handle_client_message(user_id: &str, user_name: &str, text: &str) {
         WsClientEvent::SuscribirConversacion { conversation_id } => {
             tracing::debug!(
                 "[ws] SUSCRIBIR_CONVERSACION de {}: {}",
-                user_id, conversation_id
+                user_id,
+                conversation_id
             );
             // No-op: los eventos van por broadcast y el front filtra.
         }
@@ -493,7 +508,9 @@ async fn send_error(state: &Arc<AppState>, user_id: &str, error: &str) {
     send_to_agent(
         &state.ws_registry,
         user_id,
-        &WsServerEvent::Error { error: error.to_string() },
+        &WsServerEvent::Error {
+            error: error.to_string(),
+        },
     )
     .await;
 }
