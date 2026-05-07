@@ -17,10 +17,10 @@ pub struct CheckReferenceRequest {
 
 /// Resultado de la búsqueda de referencia en DB (retornado por el repositorio)
 pub struct ReferenceMatchInfo {
-    pub source: String,          // "payments" | "payment_reports"
+    pub source: String, // "payments" | "payment_reports"
     pub is_same_client: bool,
-    pub s_name: Option<String>,  // nombre del cliente si es diferente
-    pub s_reference: String,     // la referencia que coincidió en DB
+    pub s_name: Option<String>, // nombre del cliente si es diferente
+    pub s_reference: String,    // la referencia que coincidió en DB
     pub n_amount: f64,
     pub n_bs: f64,
     pub s_state: String,
@@ -170,6 +170,13 @@ pub struct PaymentReport {
 
     #[serde(rename = "idCreator", skip_serializing_if = "Option::is_none", default)]
     pub id_creator: Option<String>,
+
+    #[serde(
+        rename = "idIssuingBank",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub id_issuing_bank: Option<ObjectId>,
 
     #[serde(rename = "dCreation")]
     pub created_at: DateTime<Utc>,

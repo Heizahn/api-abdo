@@ -1,16 +1,21 @@
 pub mod mongo;
 use crate::models::ai_agent::{
-    AiAgent, AiAgentFaq, AiAgentPurpose, AiClientLookup, AiCoverageZone, AiConfig, AiInstallationConfig, AiInteraction, AiPlan, AiPromotion, ConnectionType,
+    AiAgent, AiAgentFaq, AiAgentPurpose, AiClientLookup, AiConfig, AiCoverageZone,
+    AiInstallationConfig, AiInteraction, AiPlan, AiPromotion, ConnectionType,
 };
-use crate::models::db::{ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax};
+use crate::models::db::{
+    ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem,
+    LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax,
+};
 use crate::models::whatsapp::{
     ConversationStats, QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyList,
     UrlPreview, WaConversation, WaConversationAiState, WaConversationEvent,
-    WaConversationEventInput, WaMessage, WaQuickReply, WaSettings, WaTemplate,
-    WaTemplateCategory, WaTemplateStatus, WaTicket, WaTicketTimelineEntry,
+    WaConversationEventInput, WaMessage, WaQuickReply, WaSettings, WaTemplate, WaTemplateCategory,
+    WaTemplateStatus, WaTicket, WaTicketTimelineEntry,
 };
 use std::collections::HashMap;
 
+use crate::error::ApiError;
 use crate::models::payment::{Bank, PaymentReport, ReferenceMatchInfo};
 use crate::models::users::{User, UserCredentials}; // Import
 use crate::modules::network::zte::parser::OnuDetected;
@@ -25,7 +30,6 @@ use mongodb::bson::oid::ObjectId;
 use mongodb::bson::Document;
 use mongodb::error::Error as MongoError;
 use mongodb::results::InsertOneResult;
-use crate::error::ApiError;
 
 // ============================================
 // 1. AuthRepository: Login, Verificación
@@ -91,7 +95,11 @@ pub trait UserRepository {
     /// existe una credencial previa, se inserta — soporta el caso borde donde
     /// el user fue creado sin credencial (no debería pasar por `create_user_handler`
     /// pero es defensivo). Retorna `true` si el user existe.
-    async fn update_user_password(&self, user_id: &str, password_hash: &str) -> Result<bool, String>;
+    async fn update_user_password(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+    ) -> Result<bool, String>;
 }
 
 /// Patch parcial para `update_user` — sólo se setean los `Some`.
@@ -116,11 +124,17 @@ pub trait ProfileRepository {
     /// Batch-lookup de `sName` por `_id` para un conjunto de clientes. Devuelve
     /// solo los que existen y tienen nombre no vacío. Usado para resolver el
     /// nombre de contacto en listados de WhatsApp sin caer en N+1.
-    async fn get_client_names_by_ids(&self, ids: &[ObjectId]) -> Result<HashMap<ObjectId, String>, String>;
+    async fn get_client_names_by_ids(
+        &self,
+        ids: &[ObjectId],
+    ) -> Result<HashMap<ObjectId, String>, String>;
     /// Batch-lookup de `sName` por `sPhone`. Si más de un cliente comparte
     /// teléfono, devuelve el primero que encuentre Mongo. Usado para resolver
     /// el nombre cuando la conversación todavía no tiene `client_id` linkeado.
-    async fn get_client_names_by_phones(&self, phones: &[String]) -> Result<HashMap<String, String>, String>;
+    async fn get_client_names_by_phones(
+        &self,
+        phones: &[String],
+    ) -> Result<HashMap<String, String>, String>;
     async fn find_tax_by_id(&self, id: Option<ObjectId>) -> Result<Option<Tax>, String>;
 
     async fn get_clients_by_phone_group(&self, phone: String) -> Result<Vec<Document>, MongoError>;
@@ -131,7 +145,10 @@ pub trait ProfileRepository {
 
     async fn get_phone(&self, id: &str) -> Result<String, String>;
 
-    async fn find_active_clients_for_closing(&self, owner_id: Option<&str>) -> Result<Vec<ActiveClientBalance>, String>;
+    async fn find_active_clients_for_closing(
+        &self,
+        owner_id: Option<&str>,
+    ) -> Result<Vec<ActiveClientBalance>, String>;
 
     async fn get_solvency_counts(&self, owner_id: Option<&str>) -> Result<SolvencyCounts, String>;
 
@@ -212,7 +229,11 @@ pub trait SalesRepository {
         end: chrono::DateTime<chrono::Utc>,
     ) -> Result<f64, String>;
 
-    async fn get_latest_payments(&self, limit: u32, owner_id: Option<&str>) -> Result<Vec<LatestPayment>, String>;
+    async fn get_latest_payments(
+        &self,
+        limit: u32,
+        owner_id: Option<&str>,
+    ) -> Result<Vec<LatestPayment>, String>;
 
     async fn find_pending_reports_by_debt_ids(
         &self,
@@ -229,13 +250,21 @@ pub trait SalesRepository {
         client_id: &ObjectId,
     ) -> Result<Vec<PaymentReport>, String>;
 
-    /// Verifica si una referencia ya existe en Payments o PaymentReports
+    /// Verifica si una referencia ya existe en Payments o PaymentReports.
     /// Búsqueda bidireccional de derecha a izquierda (sufijo).
-    /// Orden: Payments (mismo cliente) → Payments (global) → PaymentReports (mismo cliente) → PaymentReports (global)
+    /// Orden: Payments (mismo cliente) → Payments (global) → PaymentReports (mismo cliente)
+    ///        → PaymentReports (otro cliente, solo cuando `issuing_bank_id` es Some).
+    ///
+    /// Lógica banco-scoped (pass 4):
+    /// - `issuing_bank_id = Some(bank)`: filtra por `idIssuingBank == bank` en el pass 4.
+    ///   Tabla de verdad: cross-client + mismo banco → DUPLICATE; distinto banco → ACCEPT.
+    /// - `issuing_bank_id = None`: pass 4 se SALTA completamente (cross-client sin banco → ACCEPT).
+    /// Los passes 1–3 corren siempre, sin filtro de banco.
     async fn check_reference(
         &self,
         id_client: &ObjectId,
         s_reference: &str,
+        issuing_bank_id: Option<ObjectId>,
     ) -> Result<Option<ReferenceMatchInfo>, String>;
 }
 
@@ -257,7 +286,8 @@ pub trait UtilsRepository {
         date: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), mongodb::error::Error>;
 
-    async fn find_client_olt_position(&self, client_id: &str) -> Result<(String, String), ApiError>;
+    async fn find_client_olt_position(&self, client_id: &str)
+        -> Result<(String, String), ApiError>;
 }
 
 // ============================================
@@ -430,11 +460,23 @@ pub struct AuditLifecycleByDayBucket {
 
 #[async_trait::async_trait]
 pub trait WhatsAppRepository {
-    async fn find_conversation_by_phones(&self, contact_phone: &str, business_phone: &str) -> Result<Option<WaConversation>, String>;
-    async fn find_conversation_by_id(&self, id: &ObjectId) -> Result<Option<WaConversation>, String>;
+    async fn find_conversation_by_phones(
+        &self,
+        contact_phone: &str,
+        business_phone: &str,
+    ) -> Result<Option<WaConversation>, String>;
+    async fn find_conversation_by_id(
+        &self,
+        id: &ObjectId,
+    ) -> Result<Option<WaConversation>, String>;
     /// Crea o recupera una conversación identificada por el par `(contact_phone, business_phone)`.
     /// Retorna `(conv, created)` — `created = true` cuando se insertó en esta llamada.
-    async fn upsert_conversation(&self, contact_phone: &str, business_phone: &str, name: Option<String>) -> Result<(WaConversation, bool), String>;
+    async fn upsert_conversation(
+        &self,
+        contact_phone: &str,
+        business_phone: &str,
+        name: Option<String>,
+    ) -> Result<(WaConversation, bool), String>;
     async fn touch_conversation(
         &self,
         id: &ObjectId,
@@ -456,7 +498,11 @@ pub trait WhatsAppRepository {
     ///
     /// Atómicamente limpia `meta_throttle_until` (un inbound implica que el
     /// destinatario respondió, por lo que el throttle de engagement se libera).
-    async fn update_last_inbound_at(&self, id: &ObjectId, when: mongodb::bson::DateTime) -> Result<(), String>;
+    async fn update_last_inbound_at(
+        &self,
+        id: &ObjectId,
+        when: mongodb::bson::DateTime,
+    ) -> Result<(), String>;
     /// Setea `meta_throttle_until` cuando Meta nos rebota con error 131049
     /// (engagement throttle). Mientras `now < until`, el backend bloquea
     /// nuevos envíos a esa conversación.
@@ -468,7 +514,11 @@ pub trait WhatsAppRepository {
     /// Setea `client_id` (link al cliente ISP) de una conversación. Usado por
     /// `POST /conversations/initiate` al crear una nueva conversación que
     /// matchea por teléfono con un cliente existente.
-    async fn update_conversation_client_id(&self, id: &ObjectId, client_id: &ObjectId) -> Result<(), String>;
+    async fn update_conversation_client_id(
+        &self,
+        id: &ObjectId,
+        client_id: &ObjectId,
+    ) -> Result<(), String>;
     /// Backfill one-shot: rellena `last_inbound_at` en conversaciones que no lo
     /// tengan, usando el `timestamp` más reciente de los mensajes inbound. Se
     /// corre al arrancar para que la ventana de 24h funcione sobre datos
@@ -477,7 +527,14 @@ pub trait WhatsAppRepository {
     async fn backfill_last_inbound_at(&self) -> Result<u64, String>;
     async fn save_message(&self, message: WaMessage) -> Result<WaMessage, String>;
     /// Cursor-based: `cursor` de la forma `<millis>_<hex_id>` para paginación descendente por `last_message_at`.
-    async fn get_conversations(&self, status: Option<&str>, assigned_to: Option<&str>, business_phone: Option<&str>, cursor: Option<&str>, limit: i64) -> Result<Vec<WaConversation>, String>;
+    async fn get_conversations(
+        &self,
+        status: Option<&str>,
+        assigned_to: Option<&str>,
+        business_phone: Option<&str>,
+        cursor: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<WaConversation>, String>;
     /// Contadores agregados por categoría sobre el scope visible (opcionalmente
     /// acotado por `business_phone`). Resuelve los 5 contadores en una sola
     /// query usando `$facet` — es deliberadamente independiente de los filtros
@@ -488,7 +545,12 @@ pub trait WhatsAppRepository {
         current_user_id: &str,
     ) -> Result<ConversationStats, String>;
     /// Cursor-based: `cursor` de la forma `<millis>_<hex_id>` para paginación descendente por `timestamp`.
-    async fn get_messages(&self, conversation_id: &ObjectId, cursor: Option<&str>, limit: i64) -> Result<Vec<WaMessage>, String>;
+    async fn get_messages(
+        &self,
+        conversation_id: &ObjectId,
+        cursor: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<WaMessage>, String>;
     async fn update_conversation_status(&self, id: &ObjectId, status: &str) -> Result<(), String>;
     /// Cierra la conversación: status="closed" y libera al agente (`$unset assigned_to`).
     async fn close_conversation(&self, id: &ObjectId) -> Result<(), String>;
@@ -526,12 +588,24 @@ pub trait WhatsAppRepository {
         message_ids: &[ObjectId],
         when: mongodb::bson::DateTime,
     ) -> Result<(), String>;
-    async fn assign_conversation(&self, id: &ObjectId, assigned_to: Option<&str>) -> Result<(), String>;
+    async fn assign_conversation(
+        &self,
+        id: &ObjectId,
+        assigned_to: Option<&str>,
+    ) -> Result<(), String>;
     /// Intenta tomar una conversación pendiente. Retorna `None` si ya estaba asignada a otro
     /// (o no estaba en status `pending`), `Some(conv)` si la toma fue exitosa.
-    async fn take_conversation(&self, id: &ObjectId, agent_id: &str) -> Result<Option<WaConversation>, String>;
+    async fn take_conversation(
+        &self,
+        id: &ObjectId,
+        agent_id: &str,
+    ) -> Result<Option<WaConversation>, String>;
     async fn reset_unread(&self, id: &ObjectId) -> Result<(), String>;
-    async fn update_message_status(&self, wa_message_id: &str, status: &str) -> Result<Option<WaMessage>, String>;
+    async fn update_message_status(
+        &self,
+        wa_message_id: &str,
+        status: &str,
+    ) -> Result<Option<WaMessage>, String>;
     /// Marca todos los inbound de una conversación con status != "read" como "read".
     /// Persiste también `read_by_user_id = agent_id` y `read_at = now` en cada
     /// mensaje que efectivamente cambió — el filtro `status != "read"` garantiza
@@ -574,14 +648,15 @@ pub trait WhatsAppRepository {
     /// Lookup por `media_id` (el id que Meta reporta en el webhook). Devuelve el
     /// primer mensaje que lo contiene. Usado por el endpoint que sirve el media
     /// para validar autorización y encontrar el `business_phone`.
-    async fn find_message_by_media_id(
-        &self,
-        media_id: &str,
-    ) -> Result<Option<WaMessage>, String>;
+    async fn find_message_by_media_id(&self, media_id: &str) -> Result<Option<WaMessage>, String>;
 
     // Per-agent "last opened" tracking
     /// Upsert del último momento en que `user_id` abrió `conversation_id`.
-    async fn record_conversation_open(&self, user_id: &str, conversation_id: &ObjectId) -> Result<(), String>;
+    async fn record_conversation_open(
+        &self,
+        user_id: &str,
+        conversation_id: &ObjectId,
+    ) -> Result<(), String>;
     /// Batch lookup: para un agente, devuelve `last_opened_at` por conversación.
     async fn get_conversation_opens(
         &self,
@@ -597,7 +672,10 @@ pub trait WhatsAppRepository {
     /// Lookup por `phone_number_id` (el string de Meta, no el E.164). Usado por
     /// el endpoint de templates. No filtra por `active` — un admin puede listar
     /// templates de un número pausado.
-    async fn find_wa_settings_by_phone_number_id(&self, phone_number_id: &str) -> Result<Option<WaSettings>, String>;
+    async fn find_wa_settings_by_phone_number_id(
+        &self,
+        phone_number_id: &str,
+    ) -> Result<Option<WaSettings>, String>;
     /// Listado de WaSettings cuyo `whatsapp_business_account_id` está vacío.
     /// Usado por la tarea de backfill al arrancar.
     async fn find_wa_settings_missing_waba(&self) -> Result<Vec<WaSettings>, String>;
@@ -606,7 +684,10 @@ pub trait WhatsAppRepository {
     async fn set_wa_settings_waba_id(&self, id: &ObjectId, waba_id: &str) -> Result<(), String>;
     /// Batch-lookup: `business_phone → workspace_name`. Ignora el flag `active` (es sólo display).
     /// Los números sin `WaSettings` configurado o con `workspace_name` vacío quedan fuera del mapa.
-    async fn get_workspace_names(&self, phones: &[String]) -> Result<HashMap<String, String>, String>;
+    async fn get_workspace_names(
+        &self,
+        phones: &[String],
+    ) -> Result<HashMap<String, String>, String>;
     async fn get_all_wa_settings(&self) -> Result<Vec<WaSettings>, String>;
     async fn create_wa_settings(&self, settings: WaSettings) -> Result<WaSettings, String>;
     /// Actualiza campos mutables de `WaSettings`. Todos opcionales: `None` significa "no tocar".
@@ -631,10 +712,7 @@ pub trait WhatsAppRepository {
     /// Busca `WaSettings` activos con el propósito `purpose` configurado.
     /// `purpose` es uno de: `"otp"`, `"notifications"`, `"payment_reminder"`.
     /// Devuelve todos los candidatos; el caller elige (p.ej. round-robin o el primero).
-    async fn find_wa_settings_for_purpose(
-        &self,
-        purpose: &str,
-    ) -> Result<Vec<WaSettings>, String>;
+    async fn find_wa_settings_for_purpose(&self, purpose: &str) -> Result<Vec<WaSettings>, String>;
 
     // Quick replies (snippets)
     /// Devuelve los `WaSettings._id` donde `user_id` aparece en `agents`.
@@ -712,10 +790,7 @@ pub trait WhatsAppRepository {
     /// Cuenta mensajes que matchean el filtro (ignora `cursor` y `limit`).
     /// Usado por `/audit/export` para chequear el cap de 100k antes de
     /// materializar el CSV.
-    async fn audit_count_messages(
-        &self,
-        filter: &AuditMessageFilter<'_>,
-    ) -> Result<u64, String>;
+    async fn audit_count_messages(&self, filter: &AuditMessageFilter<'_>) -> Result<u64, String>;
 
     /// Resuelve los `_id` de `WaConversations` que matchean por
     /// `customer_phone` (campo `phone`) y/o `business_phone`. Si ambos son
@@ -1040,10 +1115,7 @@ pub trait WaTicketRepository {
         idempotency_key: &str,
     ) -> Result<Option<WaTicket>, String>;
 
-    async fn list_tickets(
-        &self,
-        filter: TicketListFilter<'_>,
-    ) -> Result<Vec<WaTicket>, String>;
+    async fn list_tickets(&self, filter: TicketListFilter<'_>) -> Result<Vec<WaTicket>, String>;
 
     /// Aplica la transición en una sola operación: `$set status` (+ campos
     /// derivados) y `$push timeline`. Devuelve el doc actualizado. `None`
@@ -1064,10 +1136,8 @@ pub trait WaTicketRepository {
 pub trait AiAgentRepository {
     /// Lista agentes. Si `workspace_id` viene, filtra por agentes que tengan
     /// ese id dentro de `workspace_ids`.
-    async fn list_ai_agents(
-        &self,
-        workspace_id: Option<&ObjectId>,
-    ) -> Result<Vec<AiAgent>, String>;
+    async fn list_ai_agents(&self, workspace_id: Option<&ObjectId>)
+        -> Result<Vec<AiAgent>, String>;
 
     /// Devuelve el agente activo (`enabled=true`) más viejo que atiende ese
     /// workspace. Opción A para selección hasta que llegue el routing
@@ -1161,8 +1231,7 @@ pub trait AiAgentRepository {
     async fn list_ai_plans(&self, only_active: bool) -> Result<Vec<AiPlan>, String>;
     async fn find_ai_plan_by_id(&self, id: &ObjectId) -> Result<Option<AiPlan>, String>;
     async fn create_ai_plan(&self, plan: AiPlan) -> Result<AiPlan, String>;
-    async fn replace_ai_plan(&self, id: &ObjectId, plan: AiPlan)
-        -> Result<Option<AiPlan>, String>;
+    async fn replace_ai_plan(&self, id: &ObjectId, plan: AiPlan) -> Result<Option<AiPlan>, String>;
     async fn delete_ai_plan(&self, id: &ObjectId) -> Result<bool, String>;
     /// `true` si la colección está vacía. Usado por el seed lazy al arrancar.
     async fn ai_plans_is_empty(&self) -> Result<bool, String>;
@@ -1176,10 +1245,8 @@ pub trait AiAgentRepository {
         &self,
         id: &ObjectId,
     ) -> Result<Option<AiCoverageZone>, String>;
-    async fn create_ai_coverage_zone(
-        &self,
-        zone: AiCoverageZone,
-    ) -> Result<AiCoverageZone, String>;
+    async fn create_ai_coverage_zone(&self, zone: AiCoverageZone)
+        -> Result<AiCoverageZone, String>;
     async fn replace_ai_coverage_zone(
         &self,
         id: &ObjectId,
@@ -1305,10 +1372,7 @@ pub trait AiPromotionRepository: Send + Sync {
         now: mongodb::bson::DateTime,
     ) -> Result<Vec<AiPromotion>, String>;
 
-    async fn find_ai_promotion_by_id(
-        &self,
-        id: &ObjectId,
-    ) -> Result<Option<AiPromotion>, String>;
+    async fn find_ai_promotion_by_id(&self, id: &ObjectId) -> Result<Option<AiPromotion>, String>;
 
     async fn create_ai_promotion(&self, promo: AiPromotion) -> Result<AiPromotion, String>;
 

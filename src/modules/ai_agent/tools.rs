@@ -10,6 +10,7 @@
 //! lectura (`lookup_customer`, `get_invoices`) siempre pegan a DB — son
 //! seguros y validar el flujo end-to-end es el punto del sandbox.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -19,9 +20,8 @@ use serde_json::{json, Value};
 
 use crate::{
     db::{
-        AiAgentRepository, AiInstallationRepository, AiPromotionRepository,
-        ConversationAiPatch, ProfileRepository, SalesRepository,
-        WaTicketRepository, WhatsAppRepository,
+        AiAgentRepository, AiInstallationRepository, AiPromotionRepository, ConversationAiPatch,
+        ProfileRepository, SalesRepository, WaTicketRepository, WhatsAppRepository,
     },
     models::{
         ai_agent::{AiAgent, AiAgentMode, AiInvoice, AiToolConfig, ConnectionType},
@@ -157,6 +157,7 @@ pub const T_REPORT_PAYMENT: &str = "report_payment";
 pub const T_GET_INSTALLATION_INFO: &str = "get_installation_info";
 pub const T_GET_ACTIVE_PROMOTIONS: &str = "get_active_promotions";
 pub const T_GET_PAYMENT_METHODS: &str = "get_payment_methods";
+pub const T_LIST_BANKS: &str = "list_banks";
 
 /// Categoría operativa de un tool, usada por `dispatch.rs` para decidir si un
 /// turn cuenta como "resolución" (que resetea el counter) o sólo como "trabajo
@@ -222,7 +223,7 @@ const TOOL_CATALOG: &[ToolMeta] = &[
     ToolMeta {
         name: T_GET_INVOICES,
         display_name: "Consultar deudas / facturas",
-        ui_description: "Devuelve las deudas activas o recientes del cliente identificado.",
+        ui_description: "Devuelve las deudas activas con su saldo pendiente (descontando abonos parciales ya aplicados). El campo `amount` es lo que falta por cobrar, no el monto original.",
         ui_category: "lookup",
         default_enabled: true,
         operational_category: ToolCategory::InfoLookup,
@@ -286,7 +287,7 @@ const TOOL_CATALOG: &[ToolMeta] = &[
     ToolMeta {
         name: T_REPORT_PAYMENT,
         display_name: "Reportar pago",
-        ui_description: "Registra un reporte de pago del cliente con referencia, monto y comprobante (foto). Crea la deuda/abono asociado y notifica al equipo de cobranzas.",
+        ui_description: "Registra un reporte de pago del cliente con referencia, monto y comprobante (foto). Crea un documento en PaymentReports en estado \"Pendiente\" y abre un ticket en cobranzas/facturación para que el equipo lo revise. La aprobación y el ajuste de saldo/deuda los hace un humano desde el panel.",
         ui_category: "action",
         default_enabled: false,
         operational_category: ToolCategory::Action,
@@ -303,6 +304,14 @@ const TOOL_CATALOG: &[ToolMeta] = &[
         name: T_GET_PAYMENT_METHODS,
         display_name: "Métodos de pago del proveedor",
         ui_description: "Devuelve los datos de pago móvil del proveedor que atiende al cliente (banco, cédula, teléfono, titular). Llamar cuando el cliente pregunta '¿cómo pago?' o '¿a dónde transfiero?'.",
+        ui_category: "info",
+        default_enabled: false,
+        operational_category: ToolCategory::InfoLookup,
+    },
+    ToolMeta {
+        name: T_LIST_BANKS,
+        display_name: "Listar bancos emisores",
+        ui_description: "Catálogo de bancos del país (BCV). Llamar ANTES de report_payment para que el cliente elija el banco emisor y pasar el id elegido en issuing_bank_id.",
         ui_category: "info",
         default_enabled: false,
         operational_category: ToolCategory::InfoLookup,
@@ -400,9 +409,11 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
             }),
         )),
         T_GET_INVOICES => Some((
-            "Obtiene las deudas/facturas activas o recientes del cliente. Usar después de \
+            "Lista las deudas activas del cliente con el SALDO PENDIENTE de cada una \
+             (monto original menos abonos parciales ya recibidos). Usar después de \
              lookup_customer para responder consultas de saldo, monto a pagar o estado de \
-             cobranza. NUNCA inventar números — siempre llamar este tool.",
+             cobranza. Usá el campo `amount` como el monto que el cliente debe HOY en cada \
+             item. NUNCA inventar números — siempre llamar este tool.",
             json!({
                 "type": "object",
                 "properties": {
@@ -552,24 +563,42 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
         )),
         T_REPORT_PAYMENT => Some((
             "Registra un reporte de pago del cliente (referencia + monto + comprobante). \
+             Crea un documento en PaymentReports en estado \"Pendiente\" y abre un ticket en \
+             cobranzas/facturación para que el equipo lo revise. La aprobación y el ajuste de \
+             saldo/deuda los hace un humano desde el panel. \
              PRECONDICIONES: (1) llamá `lookup_customer` ANTES y confirmá con el cliente \
              cuál servicio si hay varios. (2) Pedile la foto del comprobante por WhatsApp \
              — sin imagen el tool falla. (3) Pasá `amount_bs` O `amount_usd`, NUNCA ambos: \
-             el sistema deriva el otro con la tasa BCV vigente.",
+             el sistema deriva el otro con la tasa BCV vigente. \
+             (4) Llamá `list_banks` ANTES y pasá el id elegido en `issuing_bank_id`. \
+             El campo `bank` (texto libre) queda DEPRECADO — usá `issuing_bank_id` cuando puedas. \
+             La referencia puede venir como texto descriptivo (ej: 'Pago Móvil ref 5678') \
+             — el sistema extrae el número canónico automáticamente.",
             json!({
                 "type": "object",
                 "properties": {
-                    "client_id":    { "type": "string", "description": "ObjectId hex devuelto por lookup_customer." },
-                    "reference":    { "type": "string", "description": "Referencia bancaria del comprobante." },
-                    "media_id":     { "type": "string", "description": "ID del media de WhatsApp (foto del comprobante). Lo recibís en el contexto del mensaje del cliente." },
-                    "amount_bs":    { "type": "number", "description": "Monto en bolívares. Mutuamente excluyente con amount_usd." },
-                    "amount_usd":   { "type": "number", "description": "Monto en dólares. Mutuamente excluyente con amount_bs." },
-                    "bank":         { "type": "string", "description": "Nombre del banco origen del pago. Opcional." },
-                    "phone":        { "type": "string", "description": "Teléfono asociado al pago móvil. Opcional." },
-                    "debt_id":      { "type": "string", "description": "ObjectId hex de la deuda específica si el cliente la mencionó. Opcional — si falta, el reporte queda como abono a cuenta." },
-                    "payment_date": { "type": "string", "description": "Fecha del pago en RFC3339 (ej: 2026-05-04T15:30:00Z). Opcional — default: ahora." }
+                    "client_id":        { "type": "string", "description": "ObjectId hex devuelto por lookup_customer." },
+                    "reference":        { "type": "string", "description": "Referencia bancaria del comprobante. Puede venir como texto libre — el sistema extrae el número canónico automáticamente." },
+                    "media_id":         { "type": "string", "description": "ID del media de WhatsApp (foto del comprobante). Lo recibís en el contexto del mensaje del cliente." },
+                    "amount_bs":        { "type": "number", "description": "Monto en bolívares. Mutuamente excluyente con amount_usd." },
+                    "amount_usd":       { "type": "number", "description": "Monto en dólares. Mutuamente excluyente con amount_bs." },
+                    "issuing_bank_id":  { "type": "string", "description": "ObjectId hex del banco emisor devuelto por list_banks. Recomendado para deduplicación banco-scoped." },
+                    "bank":             { "type": "string", "description": "[DEPRECATED] Nombre libre del banco origen. Usar issuing_bank_id en su lugar." },
+                    "phone":            { "type": "string", "description": "Teléfono asociado al pago móvil. Opcional." },
+                    "debt_id":          { "type": "string", "description": "ObjectId hex de la deuda específica si el cliente la mencionó. Opcional — si falta, el reporte queda como abono a cuenta." },
+                    "payment_date":     { "type": "string", "description": "Fecha del pago en RFC3339 (ej: 2026-05-04T15:30:00Z). Opcional — default: ahora." }
                 },
                 "required": ["client_id", "reference", "media_id"]
+            }),
+        )),
+        T_LIST_BANKS => Some((
+            "Lista los bancos del catálogo nacional. Usar ANTES de report_payment para que \
+             el cliente elija el banco emisor (de dónde salió la transferencia). \
+             Pasar el id devuelto al campo issuing_bank_id de report_payment. \
+             Argumentos: ninguno.",
+            json!({
+                "type": "object",
+                "properties": {}
             }),
         )),
         _ => None,
@@ -669,7 +698,10 @@ fn inject_target_enum(
         .collect();
 
     if let Some(props) = params.get_mut("properties").and_then(|v| v.as_object_mut()) {
-        if let Some(target) = props.get_mut("target_agent_id").and_then(|v| v.as_object_mut()) {
+        if let Some(target) = props
+            .get_mut("target_agent_id")
+            .and_then(|v| v.as_object_mut())
+        {
             target.insert("enum".to_string(), Value::Array(hexes));
             if !mapping_lines.is_empty() {
                 let base = target
@@ -711,6 +743,7 @@ pub async fn execute_tool(name: &str, args: Value, ctx: &ToolContext) -> ToolRes
         T_GET_INSTALLATION_INFO => exec_get_installation_info(args, ctx, started).await,
         T_GET_ACTIVE_PROMOTIONS => exec_get_active_promotions(args, ctx, started).await,
         T_GET_PAYMENT_METHODS => exec_get_payment_methods(args, ctx, started).await,
+        T_LIST_BANKS => exec_list_banks(args, ctx, started).await,
         other => ToolResult::err(format!("unknown_tool:{}", other), started),
     }
 }
@@ -736,18 +769,16 @@ async fn exec_lookup_customer(args: Value, ctx: &ToolContext, started: Instant) 
     let phone = parsed.phone.as_deref();
     let id = parsed.identification.as_deref();
 
-    match ctx
-        .state
-        .db
-        .find_clients_for_ai_lookup(phone, id)
-        .await
-    {
+    match ctx.state.db.find_clients_for_ai_lookup(phone, id).await {
         Ok(items) => {
             // Patch: si hay al menos un resultado, colectar el client_id del primero.
             let patches = if let Some(first) = items.first() {
                 let cid = first.client_id.clone();
                 vec![
-                    StatePatch::SetCollectedData { key: "client_id".into(), value: cid },
+                    StatePatch::SetCollectedData {
+                        key: "client_id".into(),
+                        value: cid,
+                    },
                     StatePatch::AddCompletedAction("lookup_customer".into()),
                 ]
             } else {
@@ -781,6 +812,7 @@ async fn exec_get_invoices(args: Value, ctx: &ToolContext, started: Instant) -> 
         Err(_) => return ToolResult::err("invalid_client_id", started),
     };
 
+    // Step 1: fetch active debts (already sorted dCreation ASC by find_active_debts_by_client_ids).
     // `find_active_debts_by_client_ids` ya recorta a `sState != "Pagada"`.
     let debts = match ctx
         .state
@@ -792,18 +824,67 @@ async fn exec_get_invoices(args: Value, ctx: &ToolContext, started: Instant) -> 
         Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
     };
 
-    // Cap a `limit` (default 5).
-    let limit = parsed.limit.unwrap_or(5).max(1).min(20) as usize;
+    if debts.is_empty() {
+        return ToolResult::ok(json!({ "items": [] }), started)
+            .with_patches(vec![StatePatch::AddCompletedAction("get_invoices".into())]);
+    }
+
+    // Step 2: gather debt_ids and fetch part_payments
+    let debt_ids: Vec<ObjectId> = debts.iter().map(|d| d._id).collect();
+    let part_payments = match ctx.state.db.find_part_payments_by_debt_ids(&debt_ids).await {
+        Ok(pp) => pp,
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    };
+
+    // Step 3: fetch payments by id and build active_payment_ids HashSet
+    // Filter to sState == "Activo" in Rust (preserves helper neutrality — same pattern as receivables/handler.rs:124)
+    let payment_ids: Vec<ObjectId> = part_payments.iter().map(|pp| pp.id_payment).collect();
+    let payments = match ctx.state.db.find_payments_by_ids(&payment_ids).await {
+        Ok(p) => p,
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    };
+
+    let active_payment_ids: HashSet<ObjectId> = payments
+        .iter()
+        .filter(|p| p.s_state.eq_ignore_ascii_case("Activo"))
+        .map(|p| p._id)
+        .collect();
+
+    // Step 4: sum partPayments per debt, only for active payments
+    let mut paid_by_debt: HashMap<ObjectId, f64> = HashMap::new();
+    for pp in &part_payments {
+        if active_payment_ids.contains(&pp.id_payment) {
+            *paid_by_debt.entry(pp.id_debt).or_insert(0.0) += pp.n_amount;
+        }
+    }
+
+    // Step 5: compute remaining balance, filter, then take(limit)
+    // CRITICAL: take AFTER filter — fully-paid debts must not steal slots (WI-6 fix)
+    let epsilon = 0.001_f64;
+    let limit = parsed.limit.unwrap_or(5).clamp(1, 20) as usize;
+
     let invoices: Vec<AiInvoice> = debts
         .into_iter()
-        .take(limit)
-        .map(|d| AiInvoice {
-            id: d._id.to_hex(),
-            amount: d.n_amount,
-            reason: d.s_reason,
-            state: d.s_state,
-            due_date: d.d_creation.try_to_rfc3339_string().unwrap_or_default(),
+        .filter_map(|d| {
+            let paid = paid_by_debt.get(&d._id).copied().unwrap_or(0.0);
+            // Round each side to centavos before subtracting — same rounding as receivables/handler.rs:156-157
+            let debt_rounded = (d.n_amount * 100.0).round() / 100.0;
+            let paid_rounded = (paid * 100.0).round() / 100.0;
+            let remaining = debt_rounded - paid_rounded;
+
+            if remaining <= epsilon {
+                return None;
+            }
+
+            Some(AiInvoice {
+                id: d._id.to_hex(),
+                amount: remaining, // WI-6: remaining balance, NOT face value
+                reason: d.s_reason,
+                state: d.s_state,
+                due_date: d.d_creation.try_to_rfc3339_string().unwrap_or_default(),
+            })
         })
+        .take(limit)
         .collect();
 
     ToolResult::ok(json!({ "items": invoices }), started)
@@ -906,7 +987,10 @@ async fn exec_list_plans(_args: Value, ctx: &ToolContext, started: Instant) -> T
         "note": "price_usd es el precio mensual en USD. Usá calculate_amount_bs para convertir a Bs con la tasa BCV + IVA vigente.",
     });
     if let Ok(s) = serde_json::to_string(&response) {
-        ctx.state.redis.set_ai_plans_cache(&s, AI_BUSINESS_CACHE_TTL_SECS).await;
+        ctx.state
+            .redis
+            .set_ai_plans_cache(&s, AI_BUSINESS_CACHE_TTL_SECS)
+            .await;
     }
     ToolResult::ok(response, started)
         .with_patches(vec![StatePatch::AddCompletedAction("list_plans".into())])
@@ -956,7 +1040,10 @@ async fn load_active_zones(ctx: &ToolContext) -> Result<Vec<CachedZone>, String>
         })
         .collect();
     if let Ok(s) = serde_json::to_string(&cached) {
-        ctx.state.redis.set_ai_coverage_cache_v2(&s, AI_BUSINESS_CACHE_TTL_SECS).await;
+        ctx.state
+            .redis
+            .set_ai_coverage_cache_v2(&s, AI_BUSINESS_CACHE_TTL_SECS)
+            .await;
     }
     Ok(cached)
 }
@@ -981,12 +1068,37 @@ enum MatchTier {
 /// "centro de güigüe", "de" tampoco debería contar.
 const TOKEN_STOPWORDS: &[&str] = &[
     // Conectores
-    "de", "del", "la", "el", "los", "las", "y", "o", "en",
+    "de",
+    "del",
+    "la",
+    "el",
+    "los",
+    "las",
+    "y",
+    "o",
+    "en",
     // Estructurales geográficas (después de normalize_zone, sin tildes)
-    "municipio", "municip", "municipalidad", "estado", "estados",
-    "parroquia", "parroquias", "sector", "sectores", "barrio", "barrios",
-    "urbanizacion", "urbanizaciones", "urb", "zona", "zonas",
-    "calle", "avenida", "avenidas", "carretera", "vereda",
+    "municipio",
+    "municip",
+    "municipalidad",
+    "estado",
+    "estados",
+    "parroquia",
+    "parroquias",
+    "sector",
+    "sectores",
+    "barrio",
+    "barrios",
+    "urbanizacion",
+    "urbanizaciones",
+    "urb",
+    "zona",
+    "zonas",
+    "calle",
+    "avenida",
+    "avenidas",
+    "carretera",
+    "vereda",
 ];
 const TOKEN_MIN_LEN: usize = 3;
 
@@ -1018,10 +1130,12 @@ fn levenshtein(a: &str, b: &str) -> usize {
     for i in 1..=m {
         curr[0] = i;
         for j in 1..=n {
-            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1)
-                .min(curr[j - 1] + 1)
-                .min(prev[j - 1] + cost);
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -1142,26 +1256,17 @@ fn zone_match_tier(z: &CachedZone, query_tokens: &[String]) -> Option<MatchTier>
         return None;
     }
 
-    let parish_tokens: Vec<String> = z
-        .parish
-        .as_deref()
-        .map(tokenize_zone)
-        .unwrap_or_default();
+    let parish_tokens: Vec<String> = z.parish.as_deref().map(tokenize_zone).unwrap_or_default();
     let municipality_tokens = tokenize_zone(&z.municipality);
     let state_tokens = tokenize_zone(&z.state);
     let display_tokens = tokenize_zone(&z.display_name);
-    let alias_tokens: Vec<String> = z
-        .aliases
-        .iter()
-        .flat_map(|a| tokenize_zone(a))
-        .collect();
+    let alias_tokens: Vec<String> = z.aliases.iter().flat_map(|a| tokenize_zone(a)).collect();
 
     let mut display_and_alias = display_tokens.clone();
     display_and_alias.extend(alias_tokens);
 
-    let any_in_query = |tokens: &[String]| -> bool {
-        tokens.iter().any(|t| fuzzy_contains(query_tokens, t))
-    };
+    let any_in_query =
+        |tokens: &[String]| -> bool { tokens.iter().any(|t| fuzzy_contains(query_tokens, t)) };
 
     // SECTOR: tokens en sector pero no en parish/muni/state. (No restamos display
     // porque display puede coincidir con sector en zonas chicas y eso sigue siendo
@@ -1268,20 +1373,21 @@ async fn exec_check_coverage(args: Value, ctx: &ToolContext, started: Instant) -
     let matches = match_zones(&zones, &q);
 
     match matches.len() {
-        0 => {
-            ToolResult::ok(
-                json!({
-                    "covered": false,
-                    "disambiguation_required": false,
-                    "queried_zone": raw,
-                }),
-                started,
-            )
-            .with_patches(vec![StatePatch::AddCompletedAction("check_coverage".into())])
-        }
+        0 => ToolResult::ok(
+            json!({
+                "covered": false,
+                "disambiguation_required": false,
+                "queried_zone": raw,
+            }),
+            started,
+        )
+        .with_patches(vec![StatePatch::AddCompletedAction(
+            "check_coverage".into(),
+        )]),
         1 => {
             let z = matches[0];
-            let available_types: Vec<&str> = z.connection_types.iter().map(|t| t.as_slug()).collect();
+            let available_types: Vec<&str> =
+                z.connection_types.iter().map(|t| t.as_slug()).collect();
             ToolResult::ok(
                 json!({
                     "covered": true,
@@ -1306,11 +1412,13 @@ async fn exec_check_coverage(args: Value, ctx: &ToolContext, started: Instant) -
         _ => {
             let summarized: Vec<_> = matches
                 .iter()
-                .map(|z| json!({
-                    "display_name": z.display_name,
-                    "state": z.state,
-                    "municipality": z.municipality,
-                }))
+                .map(|z| {
+                    json!({
+                        "display_name": z.display_name,
+                        "state": z.state,
+                        "municipality": z.municipality,
+                    })
+                })
                 .collect();
             ToolResult::ok(
                 json!({
@@ -1322,7 +1430,9 @@ async fn exec_check_coverage(args: Value, ctx: &ToolContext, started: Instant) -
                 }),
                 started,
             )
-            .with_patches(vec![StatePatch::AddCompletedAction("check_coverage".into())])
+            .with_patches(vec![StatePatch::AddCompletedAction(
+                "check_coverage".into(),
+            )])
         }
     }
 }
@@ -1336,7 +1446,11 @@ struct GetInstallationInfoArgs {
     connection_type: String,
 }
 
-async fn exec_get_installation_info(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
+async fn exec_get_installation_info(
+    args: Value,
+    ctx: &ToolContext,
+    started: Instant,
+) -> ToolResult {
     let parsed: GetInstallationInfoArgs = match serde_json::from_value(args) {
         Ok(v) => v,
         Err(e) => return ToolResult::err(format!("invalid_args:{}", e), started),
@@ -1344,10 +1458,15 @@ async fn exec_get_installation_info(args: Value, ctx: &ToolContext, started: Ins
 
     let ct = match ConnectionType::from_slug(&parsed.connection_type) {
         Some(t) => t,
-        None => return ToolResult::err(
-            format!("invalid_connection_type: '{}'. Usar 'fibra' o 'antena'", parsed.connection_type),
-            started,
-        ),
+        None => {
+            return ToolResult::err(
+                format!(
+                    "invalid_connection_type: '{}'. Usar 'fibra' o 'antena'",
+                    parsed.connection_type
+                ),
+                started,
+            )
+        }
     };
 
     let config = match ctx.state.db.get_ai_installation(ct).await {
@@ -1376,14 +1495,20 @@ async fn exec_get_installation_info(args: Value, ctx: &ToolContext, started: Ins
         }),
         started,
     )
-    .with_patches(vec![StatePatch::AddCompletedAction("get_installation_info".into())])
+    .with_patches(vec![StatePatch::AddCompletedAction(
+        "get_installation_info".into(),
+    )])
 }
 
 // ============================================
 // Tool: get_active_promotions
 // ============================================
 
-async fn exec_get_active_promotions(_args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
+async fn exec_get_active_promotions(
+    _args: Value,
+    ctx: &ToolContext,
+    started: Instant,
+) -> ToolResult {
     let now = mongodb::bson::DateTime::now();
     let promos = match ctx.state.db.list_active_ai_promotions(now).await {
         Ok(p) => p,
@@ -1403,11 +1528,9 @@ async fn exec_get_active_promotions(_args: Value, ctx: &ToolContext, started: In
         })
         .collect();
 
-    ToolResult::ok(
-        json!({ "items": items }),
-        started,
-    )
-    .with_patches(vec![StatePatch::AddCompletedAction("get_active_promotions".into())])
+    ToolResult::ok(json!({ "items": items }), started).with_patches(vec![
+        StatePatch::AddCompletedAction("get_active_promotions".into()),
+    ])
 }
 
 // ============================================
@@ -1447,7 +1570,9 @@ async fn exec_get_payment_methods(args: Value, ctx: &ToolContext, started: Insta
             }),
             started,
         )
-        .with_patches(vec![StatePatch::AddCompletedAction("get_payment_methods".into())]);
+        .with_patches(vec![StatePatch::AddCompletedAction(
+            "get_payment_methods".into(),
+        )]);
     }
 
     // 3. Find client → owner_id
@@ -1459,11 +1584,20 @@ async fn exec_get_payment_methods(args: Value, ctx: &ToolContext, started: Insta
     let owner_id = owner.id_owner;
 
     // 4. Redis cache hit?
-    if let Some(cached) = ctx.state.redis.get_ai_payment_methods_cache(&owner_id).await {
+    if let Some(cached) = ctx
+        .state
+        .redis
+        .get_ai_payment_methods_cache(&owner_id)
+        .await
+    {
         if let Ok(parsed_val) = serde_json::from_str::<Value>(&cached) {
-            tracing::info!("[ai_agent.get_payment_methods] cache hit for owner {}", owner_id);
-            return ToolResult::ok(parsed_val, started)
-                .with_patches(vec![StatePatch::AddCompletedAction("get_payment_methods".into())]);
+            tracing::info!(
+                "[ai_agent.get_payment_methods] cache hit for owner {}",
+                owner_id
+            );
+            return ToolResult::ok(parsed_val, started).with_patches(vec![
+                StatePatch::AddCompletedAction("get_payment_methods".into()),
+            ]);
         }
     }
 
@@ -1475,10 +1609,11 @@ async fn exec_get_payment_methods(args: Value, ctx: &ToolContext, started: Insta
     };
 
     // 6. No payment method configured → return empty (not cached — transient state)
-    let pm_id = match user_info.id_payment_method {
-        Some(id) => id,
-        None => {
-            return ToolResult::ok(
+    let pm_id =
+        match user_info.id_payment_method {
+            Some(id) => id,
+            None => {
+                return ToolResult::ok(
                 json!({
                     "items": [],
                     "note": "El proveedor no tiene métodos de pago configurados, deriva a humano."
@@ -1486,15 +1621,16 @@ async fn exec_get_payment_methods(args: Value, ctx: &ToolContext, started: Insta
                 started,
             )
             .with_patches(vec![StatePatch::AddCompletedAction("get_payment_methods".into())]);
-        }
-    };
+            }
+        };
 
     // 7. Fetch payment method
-    let pm = match ctx.state.db.find_payment_method_by_id(&pm_id).await {
-        Ok(Some(p)) if p.is_active => p,
-        Ok(_) => {
-            // method missing or inactive — same response as no method
-            return ToolResult::ok(
+    let pm =
+        match ctx.state.db.find_payment_method_by_id(&pm_id).await {
+            Ok(Some(p)) if p.is_active => p,
+            Ok(_) => {
+                // method missing or inactive — same response as no method
+                return ToolResult::ok(
                 json!({
                     "items": [],
                     "note": "El proveedor no tiene métodos de pago configurados, deriva a humano."
@@ -1502,9 +1638,9 @@ async fn exec_get_payment_methods(args: Value, ctx: &ToolContext, started: Insta
                 started,
             )
             .with_patches(vec![StatePatch::AddCompletedAction("get_payment_methods".into())]);
-        }
-        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
-    };
+            }
+            Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+        };
 
     // 8. Build response — never leak _id, owner_id, or bActive
     let response = json!({
@@ -1520,15 +1656,79 @@ async fn exec_get_payment_methods(args: Value, ctx: &ToolContext, started: Insta
 
     // 9. Cache result
     if let Ok(s) = serde_json::to_string(&response) {
-        ctx.state.redis.set_ai_payment_methods_cache(&owner_id, &s, AI_PAYMENT_METHODS_CACHE_TTL_SECS).await;
+        ctx.state
+            .redis
+            .set_ai_payment_methods_cache(&owner_id, &s, AI_PAYMENT_METHODS_CACHE_TTL_SECS)
+            .await;
     }
 
-    tracing::info!("[ai_agent.get_payment_methods] live result for owner {}", owner_id);
+    tracing::info!(
+        "[ai_agent.get_payment_methods] live result for owner {}",
+        owner_id
+    );
+    ToolResult::ok(response, started).with_patches(vec![
+        StatePatch::AddCompletedAction("get_payment_methods".into()),
+        StatePatch::SetCollectedData {
+            key: "payment_methods_shown".into(),
+            value: "true".into(),
+        },
+    ])
+}
+
+// ============================================
+// Tool: list_banks
+// ============================================
+
+async fn exec_list_banks(_args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
+    // 1. Sandbox short-circuit — return fixture banks before any DB call
+    if ctx.is_sandbox {
+        return ToolResult::ok(
+            json!({
+                "items": [
+                    { "id": "000000000000000000000001", "bank_name": "Banesco", "bank_code": "0134" },
+                    { "id": "000000000000000000000002", "bank_name": "Banco de Venezuela", "bank_code": "0102" },
+                    { "id": "000000000000000000000003", "bank_name": "Mercantil", "bank_code": "0105" }
+                ]
+            }),
+            started,
+        );
+    }
+
+    // 2. Redis cache hit?
+    if let Some(cached) = ctx.state.redis.get_ai_list_banks_cache().await {
+        if let Ok(parsed_val) = serde_json::from_str::<Value>(&cached) {
+            tracing::info!("[ai_agent.list_banks] cache hit");
+            return ToolResult::ok(parsed_val, started);
+        }
+    }
+
+    // 3. DB fetch
+    let banks = match ctx.state.db.find_bank_list().await {
+        Ok(b) => b,
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    };
+
+    // 4. Build response — only id, bank_name, bank_code (lean context per spec LB-1)
+    let items: Vec<Value> = banks
+        .iter()
+        .map(|b| {
+            json!({
+                "id": b.id.to_hex(),
+                "bank_name": b.bank_name,
+                "bank_code": b.bank_code
+            })
+        })
+        .collect();
+
+    let response = json!({ "items": items });
+
+    // 5. Cache result — 24h TTL (catálogo BCV cambia rarísimo)
+    if let Ok(s) = serde_json::to_string(&response) {
+        ctx.state.redis.set_ai_list_banks_cache(&s, 86_400).await;
+    }
+
+    tracing::info!("[ai_agent.list_banks] live result, {} banks", banks.len());
     ToolResult::ok(response, started)
-        .with_patches(vec![
-            StatePatch::AddCompletedAction("get_payment_methods".into()),
-            StatePatch::SetCollectedData { key: "payment_methods_shown".into(), value: "true".into() },
-        ])
 }
 
 #[cfg(test)]
@@ -1560,8 +1760,22 @@ mod tests {
         // nunca llegan al matcher).
         vec![
             make_zone("Valencia Centro", "Carabobo", "Valencia", None, None, &[]),
-            make_zone("Naguanaguá", "Carabobo", "Naguanagua", None, None, &["Naguanagua", "Naguanagüa"]),
-            make_zone("Loro Pedernales", "Carabobo", "Valencia", None, Some("Loro"), &[]),
+            make_zone(
+                "Naguanaguá",
+                "Carabobo",
+                "Naguanagua",
+                None,
+                None,
+                &["Naguanagua", "Naguanagüa"],
+            ),
+            make_zone(
+                "Loro Pedernales",
+                "Carabobo",
+                "Valencia",
+                None,
+                Some("Loro"),
+                &[],
+            ),
             make_zone("Las Vegas", "Carabobo", "Valencia", None, None, &[]),
             make_zone("Las Vegas Norte", "Miranda", "Baruta", None, None, &[]),
         ]
@@ -1592,7 +1806,14 @@ mod tests {
         // Zona con display_name único que no comparte substrings con otras.
         // Usar "Naguanaguá" — no es municipio de ninguna otra zona del fixture.
         let zones = vec![
-            make_zone("Naguanaguá", "Carabobo", "Naguanagua", None, None, &["Naguanagua"]),
+            make_zone(
+                "Naguanaguá",
+                "Carabobo",
+                "Naguanagua",
+                None,
+                None,
+                &["Naguanagua"],
+            ),
             make_zone("Valencia Sur", "Carabobo", "Valencia", None, None, &[]),
         ];
         let q = normalize_zone("Naguanaguá");
@@ -1633,7 +1854,11 @@ mod tests {
         let zones = fixture_zones();
         let q = normalize_zone("Las Vegas");
         let result = match_zones(&zones, &q);
-        assert_eq!(result.len(), 2, "Debe haber ambigüedad con dos zonas 'Las Vegas'");
+        assert_eq!(
+            result.len(),
+            2,
+            "Debe haber ambigüedad con dos zonas 'Las Vegas'"
+        );
     }
 
     #[test]
@@ -1643,7 +1868,10 @@ mod tests {
         let q = normalize_zone("Carabobo");
         let result = match_zones(&zones, &q);
         // Deben ser 4 (todas las de Carabobo)
-        assert!(result.len() > 1, "Estado 'Carabobo' debe matchear múltiples zonas → disambiguation");
+        assert!(
+            result.len() > 1,
+            "Estado 'Carabobo' debe matchear múltiples zonas → disambiguation"
+        );
     }
 
     #[test]
@@ -1671,7 +1899,11 @@ mod tests {
         ];
         let q = normalize_zone("centro de Güigüe");
         let result = match_zones(&zones, &q);
-        assert_eq!(result.len(), 1, "Sólo la zona con sector 'Centro Güigüe' debe matchear");
+        assert_eq!(
+            result.len(),
+            1,
+            "Sólo la zona con sector 'Centro Güigüe' debe matchear"
+        );
         assert_eq!(result[0].sector.as_deref(), Some("Centro Güigüe"));
     }
 
@@ -1699,7 +1931,11 @@ mod tests {
         ];
         let q = normalize_zone("güigüe");
         let result = match_zones(&zones, &q);
-        assert_eq!(result.len(), 2, "Sin discriminador, ambas zonas en parish 'Güigüe' deben matchear");
+        assert_eq!(
+            result.len(),
+            2,
+            "Sin discriminador, ambas zonas en parish 'Güigüe' deben matchear"
+        );
     }
 
     #[test]
@@ -1797,10 +2033,14 @@ mod tests {
     #[test]
     fn test_fuzzy_plural_suffix() {
         // Cliente escribe "Carlos Arvelos" (con "s" extra), DB tiene "Carlos Arvelo"
-        let zones = vec![
-            make_zone("Carlos Arvelo", "Carabobo", "Carlos Arvelo",
-                      Some("Güigüe"), Some("Centro Güigüe"), &[]),
-        ];
+        let zones = vec![make_zone(
+            "Carlos Arvelo",
+            "Carabobo",
+            "Carlos Arvelo",
+            Some("Güigüe"),
+            Some("Centro Güigüe"),
+            &[],
+        )];
         let q = normalize_zone("Carlos Arvelos");
         let result = match_zones(&zones, &q);
         assert_eq!(result.len(), 1, "Plural 'Arvelos' debe matchear 'Arvelo'");
@@ -1810,10 +2050,14 @@ mod tests {
     fn test_fuzzy_transposition_in_sector() {
         // Bug real reportado: sector en DB tiene typo "Centro Gugiue"
         // (i↔u swap) y cliente escribe "centro de guigue".
-        let zones = vec![
-            make_zone("Carlos Arvelo", "Carabobo", "Carlos Arvelo",
-                      Some("Guigue"), Some("Centro Gugiue"), &[]),
-        ];
+        let zones = vec![make_zone(
+            "Carlos Arvelo",
+            "Carabobo",
+            "Carlos Arvelo",
+            Some("Guigue"),
+            Some("Centro Gugiue"),
+            &[],
+        )];
         let q = normalize_zone("centro de guigue");
         let result = match_zones(&zones, &q);
         assert_eq!(result.len(), 1, "guigue debe matchear gugiue (1-2 typos)");
@@ -1823,10 +2067,14 @@ mod tests {
     fn test_fuzzy_query_with_geographic_stopwords() {
         // Cliente escribe "centro de guigue municip carlos arvelos" — la
         // palabra "municip" debe ignorarse como stopword estructural.
-        let zones = vec![
-            make_zone("Carlos Arvelo", "Carabobo", "Carlos Arvelo",
-                      Some("Guigue"), Some("Centro Guigue"), &[]),
-        ];
+        let zones = vec![make_zone(
+            "Carlos Arvelo",
+            "Carabobo",
+            "Carlos Arvelo",
+            Some("Guigue"),
+            Some("Centro Guigue"),
+            &[],
+        )];
         let q = normalize_zone("centro de guigue municip carlos arvelos");
         let result = match_zones(&zones, &q);
         assert!(
@@ -1845,7 +2093,8 @@ mod tests {
         let q = normalize_zone("valencia");
         let result = match_zones(&zones, &q);
         assert_eq!(
-            result.len(), 1,
+            result.len(),
+            1,
             "valencia NO debe matchear valera por distancia (lev=3)"
         );
         assert_eq!(result[0].display_name, "Valencia Centro");
@@ -1856,12 +2105,27 @@ mod tests {
         // Tests directos sobre la función helper.
         assert!(fuzzy_token_match("arvelo", "arvelo"), "exacto");
         assert!(fuzzy_token_match("arvelos", "arvelo"), "plural sufijo");
-        assert!(fuzzy_token_match("arvelo", "arvelos"), "plural sufijo invertido");
+        assert!(
+            fuzzy_token_match("arvelo", "arvelos"),
+            "plural sufijo invertido"
+        );
         assert!(fuzzy_token_match("guigue", "gugiue"), "transposición lev=2");
-        assert!(fuzzy_token_match("carabobo", "carabovo"), "1 typo en palabra larga");
-        assert!(!fuzzy_token_match("loro", "lora"), "tokens cortos solo exacto");
-        assert!(!fuzzy_token_match("valencia", "valera"), "distancia 3 = no match");
-        assert!(!fuzzy_token_match("abc", "abd"), "menos de 4 chars = no fuzzy");
+        assert!(
+            fuzzy_token_match("carabobo", "carabovo"),
+            "1 typo en palabra larga"
+        );
+        assert!(
+            !fuzzy_token_match("loro", "lora"),
+            "tokens cortos solo exacto"
+        );
+        assert!(
+            !fuzzy_token_match("valencia", "valera"),
+            "distancia 3 = no match"
+        );
+        assert!(
+            !fuzzy_token_match("abc", "abd"),
+            "menos de 4 chars = no fuzzy"
+        );
     }
 }
 
@@ -1993,7 +2257,12 @@ async fn exec_transfer_to_agent(args: Value, ctx: &ToolContext, started: Instant
         ai_disabled: Some(false),
         ai_transfer_context: Some(ctx_to_persist),
     };
-    if let Err(e) = ctx.state.db.update_conversation_ai_state(&conv_id, patch).await {
+    if let Err(e) = ctx
+        .state
+        .db
+        .update_conversation_ai_state(&conv_id, patch)
+        .await
+    {
         return ToolResult::err(format!("db_error:{}", e), started);
     }
 
@@ -2038,12 +2307,7 @@ async fn exec_transfer_to_agent(args: Value, ctx: &ToolContext, started: Instant
 fn format_phone_pretty(raw: &str) -> String {
     let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
     if digits.len() == 12 && digits.starts_with("58") {
-        format!(
-            "+58 {} {} {}",
-            &digits[2..5],
-            &digits[5..8],
-            &digits[8..12]
-        )
+        format!("+58 {} {} {}", &digits[2..5], &digits[5..8], &digits[8..12])
     } else {
         format!("+{}", digits)
     }
@@ -2073,7 +2337,10 @@ const KNOWN_CATEGORIES: &[(&str, &str)] = &[
     ("gestion_planes", "Gestión de Planes"),
     ("bajas_retencion", "Bajas y Retención"),
     ("actualizacion_datos", "Actualización de Datos"),
-    ("soporte_primer_segundo_nivel", "Soporte de Primer y Segundo Nivel"),
+    (
+        "soporte_primer_segundo_nivel",
+        "Soporte de Primer y Segundo Nivel",
+    ),
     ("configuraciones_tecnicas", "Configuraciones Técnicas"),
     ("mantenimiento_red", "Mantenimiento de Red"),
     ("despacho_tecnico", "Despacho Técnico (Campo)"),
@@ -2081,7 +2348,10 @@ const KNOWN_CATEGORIES: &[(&str, &str)] = &[
 ];
 
 fn category_label(id: &str) -> Option<&'static str> {
-    KNOWN_CATEGORIES.iter().find(|(k, _)| *k == id).map(|(_, l)| *l)
+    KNOWN_CATEGORIES
+        .iter()
+        .find(|(k, _)| *k == id)
+        .map(|(_, l)| *l)
 }
 
 async fn exec_create_ticket(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
@@ -2094,7 +2364,12 @@ async fn exec_create_ticket(args: Value, ctx: &ToolContext, started: Instant) ->
     if reason.is_empty() {
         return ToolResult::err("reason_required", started);
     }
-    let category_id = match parsed.category_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    let category_id = match parsed
+        .category_id
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         Some(c) => c.to_string(),
         None => match ctx.default_ticket_category_id.as_ref() {
             Some(d) if !d.trim().is_empty() => d.trim().to_string(),
@@ -2135,7 +2410,12 @@ async fn exec_create_ticket(args: Value, ctx: &ToolContext, started: Instant) ->
     };
 
     let now = BsonDateTime::now();
-    let summary_note = parsed.summary.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    let summary_note = parsed
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
 
     let timeline = vec![WaTicketTimelineEntry {
         action: "created".into(),
@@ -2203,7 +2483,10 @@ async fn exec_create_ticket(args: Value, ctx: &ToolContext, started: Instant) ->
     .with_patches(vec![
         StatePatch::AddCompletedAction("create_ticket".into()),
         StatePatch::SetCurrentStep("ticket_created".into()),
-        StatePatch::SetCollectedData { key: "ticket_id".into(), value: ticket_id },
+        StatePatch::SetCollectedData {
+            key: "ticket_id".into(),
+            value: ticket_id,
+        },
     ])
 }
 
@@ -2221,11 +2504,7 @@ fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
 }
 
-async fn exec_calculate_amount_bs(
-    args: Value,
-    ctx: &ToolContext,
-    started: Instant,
-) -> ToolResult {
+async fn exec_calculate_amount_bs(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
     // 1. Parse args
     let parsed: CalculateAmountBsArgs = match serde_json::from_value(args) {
         Ok(v) => v,
@@ -2234,7 +2513,8 @@ async fn exec_calculate_amount_bs(
     let amount_usd = parsed.amount_usd;
 
     // 2. Validate amount
-    if !(amount_usd > 0.0) {  // catches 0, negatives, NaN
+    if !(amount_usd > 0.0) {
+        // catches 0, negatives, NaN
         return ToolResult::err("invalid_amount", started);
     }
 
@@ -2264,12 +2544,11 @@ async fn exec_calculate_amount_bs(
     // 5. Compute — un solo monto final con IVA aplicado (mismo cálculo que el
     //    endpoint v2). Devolver dos amounts (base + with_iva) en el JSON
     //    confundía al LLM y mostraba el sin-IVA al cliente.
-    let amount_bs   = round2(amount_usd * rate * iva_factor);
+    let amount_bs = round2(amount_usd * rate * iva_factor);
     let iva_percent = round2((iva_factor - 1.0) * 100.0);
 
     // 6. Date stamp (Caracas TZ — coherente con la clave diaria del cron BCV).
-    let rate_date = crate::utils::timezone::VenezuelaDateTime::now()
-        .date_string_venezuela();
+    let rate_date = crate::utils::timezone::VenezuelaDateTime::now().date_string_venezuela();
 
     // 7. Result
     ToolResult::ok(
@@ -2303,6 +2582,8 @@ struct ReportPaymentArgs {
     #[serde(default)]
     bank: Option<String>,
     #[serde(default)]
+    issuing_bank_id: Option<String>,
+    #[serde(default)]
     phone: Option<String>,
     #[serde(default)]
     debt_id: Option<String>,
@@ -2321,14 +2602,24 @@ async fn create_cobranzas_ticket_internal(
     amount_bs: f64,
     amount_usd: f64,
 ) -> Result<ObjectId, String> {
-    let conv_id = ctx.conversation_id.ok_or_else(|| "conversation_id_missing".to_string())?;
+    let conv_id = ctx
+        .conversation_id
+        .ok_or_else(|| "conversation_id_missing".to_string())?;
 
-    let conv_doc = ctx.state.db.find_conversation_by_id(&conv_id).await
+    let conv_doc = ctx
+        .state
+        .db
+        .find_conversation_by_id(&conv_id)
+        .await
         .map_err(|e| format!("db_error:{}", e))?
         .ok_or_else(|| "conversation_not_found".to_string())?;
 
     let report_id_hex = payment_report_id.to_hex();
-    let bank_display = if bank.is_empty() { "(no informado)" } else { bank };
+    let bank_display = if bank.is_empty() {
+        "(no informado)"
+    } else {
+        bank
+    };
     let reason = format!(
         "Reporte de pago pendiente de validación. Banco: {}, Ref: {}, Monto: {} Bs / {} USD. PaymentReport ID: {}",
         bank_display, reference, amount_bs, amount_usd, report_id_hex
@@ -2343,7 +2634,10 @@ async fn create_cobranzas_ticket_internal(
         to_status: Some("open".into()),
         assigned_to_id: None,
         assigned_to_name: None,
-        note: Some(format!("Auto-creado por report_payment. PaymentReport: {}", report_id_hex)),
+        note: Some(format!(
+            "Auto-creado por report_payment. PaymentReport: {}",
+            report_id_hex
+        )),
         created_at: now,
     }];
 
@@ -2378,7 +2672,11 @@ async fn create_cobranzas_ticket_internal(
         timeline,
     };
 
-    let saved = ctx.state.db.create_ticket(ticket).await
+    let saved = ctx
+        .state
+        .db
+        .create_ticket(ticket)
+        .await
         .map_err(|e| format!("db_error:{}", e))?;
 
     saved.id.ok_or_else(|| "ticket_id_missing".to_string())
@@ -2390,8 +2688,8 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     use tokio::io::AsyncWriteExt;
     use uuid::Uuid;
 
-    use crate::crypto::aes::decrypt_payload;
     use super::ai_agent_secret;
+    use crate::crypto::aes::decrypt_payload;
 
     // 1. Parse args
     let parsed: ReportPaymentArgs = match serde_json::from_value(args) {
@@ -2413,10 +2711,13 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         }
     }
 
-    // 3. Validate reference non-empty
-    if parsed.reference.trim().is_empty() {
-        return ToolResult::err("reference_required", started);
-    }
+    // 3. Normalize reference — extract canonical numeric run (WI-5)
+    let reference = match crate::modules::ai_agent::reference_normalize::extract_canonical_reference(
+        parsed.reference.trim(),
+    ) {
+        Some(r) => r,
+        None => return ToolResult::err("reference_not_found_in_input", started),
+    };
 
     // 4. Validate amount XOR (catches NaN via !(x > 0.0))
     let (amount_input_bs, amount_input_usd) = match (parsed.amount_bs, parsed.amount_usd) {
@@ -2452,6 +2753,69 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         Err(_) => return ToolResult::err("invalid_client_id", started),
     };
 
+    // 6b. Parse + validate issuing_bank_id (WI-3)
+    let parsed_issuing_bank_oid: Option<ObjectId> = match parsed
+        .issuing_bank_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(s) => match ObjectId::parse_str(s) {
+            Ok(oid) => Some(oid),
+            Err(_) => return ToolResult::err("invalid_issuing_bank_id", started),
+        },
+        None => None,
+    };
+
+    // 6c. When Some: verify the bank exists in ListBanks (via Redis cache → DB)
+    if let Some(bank_oid) = parsed_issuing_bank_oid {
+        let bank_exists = {
+            // Try cache first
+            let cached_banks = ctx.state.redis.get_ai_list_banks_cache().await;
+            if let Some(cached_str) = cached_banks {
+                if let Ok(cached_val) = serde_json::from_str::<Value>(&cached_str) {
+                    if let Some(items) = cached_val.get("items").and_then(|v| v.as_array()) {
+                        items.iter().any(|item| {
+                            item.get("id")
+                                .and_then(|id| id.as_str())
+                                .map(|id_str| id_str == bank_oid.to_hex())
+                                .unwrap_or(false)
+                        })
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                // Cache miss — load from DB and cache for next time
+                match ctx.state.db.find_bank_list().await {
+                    Ok(banks) => {
+                        let items: Vec<Value> = banks
+                            .iter()
+                            .map(|b| {
+                                json!({
+                                    "id": b.id.to_hex(),
+                                    "bank_name": b.bank_name,
+                                    "bank_code": b.bank_code
+                                })
+                            })
+                            .collect();
+                        let payload = json!({ "items": items });
+                        if let Ok(s) = serde_json::to_string(&payload) {
+                            ctx.state.redis.set_ai_list_banks_cache(&s, 86_400).await;
+                        }
+                        banks.iter().any(|b| b.id == bank_oid)
+                    }
+                    Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+                }
+            }
+        };
+        if !bank_exists {
+            return ToolResult::err("issuing_bank_id_not_found", started);
+        }
+    }
+
     // 7. Find client (need id_tax).
     // NOTE: find_client_by_id returns Ok(fake_client) on "not found" — detect
     // by comparing returned _id to the queried _id.
@@ -2464,9 +2828,36 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         }
     };
 
-    // 8. Idempotency check — BEFORE any network or DB write
-    let trimmed_ref = parsed.reference.trim().to_string();
-    match ctx.state.db.check_reference(&client_oid, &trimmed_ref).await {
+    // 8. Parse optional debt_id and validate existence BEFORE idempotency check (W-1 fix)
+    // Spec order: static arg validation (parse + existence) before live lookups (check_reference).
+    let id_debt_oid: Option<ObjectId> = match parsed
+        .debt_id
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        Some(s) => match ObjectId::parse_str(s) {
+            Ok(o) => Some(o),
+            Err(_) => return ToolResult::err("invalid_debt_id", started),
+        },
+        None => None,
+    };
+
+    if let Some(ref debt_oid) = id_debt_oid {
+        match ctx.state.db.find_debt_by_id(&debt_oid.to_hex()).await {
+            Ok(Some(_)) => {} // exists, continue
+            Ok(None) => return ToolResult::err("debt_id_not_found", started),
+            Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+        }
+    }
+
+    // 9. Idempotency check — BEFORE any network or DB write
+    match ctx
+        .state
+        .db
+        .check_reference(&client_oid, &reference, parsed_issuing_bank_oid)
+        .await
+    {
         Ok(Some(match_info)) => {
             return ToolResult::ok(
                 json!({
@@ -2496,7 +2887,12 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         Ok(None) => return ToolResult::err("payment_method_not_configured", started),
         Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
     };
-    let user_info = match ctx.state.db.find_user_payment_info_by_id(&owner.id_owner).await {
+    let user_info = match ctx
+        .state
+        .db
+        .find_user_payment_info_by_id(&owner.id_owner)
+        .await
+    {
         Ok(Some(u)) => u,
         Ok(None) => return ToolResult::err("payment_method_not_configured", started),
         Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
@@ -2576,10 +2972,10 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
 
     // 14. Save to uploads/ (mirror payments::handler convention)
     let ext = match mime.as_str() {
-        "image/png"  => "png",
+        "image/png" => "png",
         "image/webp" => "webp",
-        "image/gif"  => "gif",
-        _            => "jpg",
+        "image/gif" => "gif",
+        _ => "jpg",
     };
     let unique_name = format!("{}.{}", Uuid::new_v4(), ext);
     let file_path = format!("uploads/{}", unique_name);
@@ -2588,35 +2984,31 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         file.write_all(&bytes).await?;
         file.flush().await?;
         Ok::<_, std::io::Error>(())
-    }.await {
+    }
+    .await
+    {
         return ToolResult::err(format!("image_save_failed:{}", e), started);
     }
     let image_url = format!("/uploads/{}", unique_name);
 
-    // 15. Parse optional debt_id and payment_date
-    let id_debt_oid: Option<ObjectId> = match parsed.debt_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        Some(s) => match ObjectId::parse_str(s) {
-            Ok(o) => Some(o),
-            Err(_) => return ToolResult::err("invalid_debt_id", started),
-        },
-        None => None,
-    };
-    let payment_date: DateTime<Utc> = parsed.payment_date
+    // 15. Parse payment_date
+    let payment_date: DateTime<Utc> = parsed
+        .payment_date
         .as_deref()
         .and_then(|d| d.parse::<DateTime<Utc>>().ok())
         .unwrap_or_else(Utc::now);
 
     // 16. Build PaymentReport
-    // Clone trimmed_ref and bank before they move into the report struct so we
+    // Clone reference and bank before they move into the report struct so we
     // can pass them to create_cobranzas_ticket_internal afterwards.
-    let trimmed_ref_for_ticket = trimmed_ref.clone();
+    let ref_for_ticket = reference.clone();
     let bank_for_ticket = parsed.bank.clone().unwrap_or_default();
     let report = crate::models::payment::PaymentReport {
         id: None,
         id_client: Some(client_oid),
         id_debt: id_debt_oid,
         id_payment_method: Some(id_payment_method),
-        reference: trimmed_ref,
+        reference: reference.clone(),
         payment_date,
         amount_bs,
         bank_origin: parsed.bank.unwrap_or_default(),
@@ -2627,6 +3019,7 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         state: "Pendiente".to_string(),
         rejection_reason: None,
         id_creator: Some(ctx.ai_user_id.clone()),
+        id_issuing_bank: parsed_issuing_bank_oid,
         created_at: Utc::now(),
     };
 
@@ -2646,10 +3039,12 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         ctx,
         &report_oid,
         &bank_for_ticket,
-        &trimmed_ref_for_ticket,
+        &ref_for_ticket,
         amount_bs,
         amount_usd,
-    ).await {
+    )
+    .await
+    {
         Ok(tid) => (Some(tid.to_hex()), None::<String>),
         Err(e) => {
             tracing::warn!(

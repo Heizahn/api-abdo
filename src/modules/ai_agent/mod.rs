@@ -12,6 +12,7 @@ pub mod guardrails;
 pub mod handler;
 pub mod openrouter;
 pub mod pre_classifier;
+pub mod reference_normalize;
 pub mod runner;
 pub mod sandbox;
 pub mod seed;
@@ -104,8 +105,7 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/v1/auth-user/whatsapp/ai-agent/plans/:id",
-            patch(business_data::update_plan_handler)
-                .delete(business_data::delete_plan_handler),
+            patch(business_data::update_plan_handler).delete(business_data::delete_plan_handler),
         )
         // CRUD zonas de cobertura
         .route(

@@ -1,8 +1,7 @@
 use axum::{
     extract::{Multipart, Path as AxumPath, State},
     response::IntoResponse,
-    Extension,
-    Json,
+    Extension, Json,
 };
 use std::sync::Arc;
 
@@ -305,10 +304,10 @@ pub async fn report_payment_handler(
         if name == "image" {
             let content_type = field.content_type().unwrap_or("image/jpeg").to_string();
             let extension = match content_type.as_str() {
-                "image/png"  => "png",
+                "image/png" => "png",
                 "image/webp" => "webp",
-                "image/gif"  => "gif",
-                _            => "jpg",
+                "image/gif" => "gif",
+                _ => "jpg",
             };
             let unique_name = format!("{}.{}", Uuid::new_v4(), extension);
             let file_path = format!("uploads/{}", unique_name);
@@ -320,10 +319,16 @@ pub async fn report_payment_handler(
 
             if data.is_empty() {
                 tracing::error!("Imagen recibida esta vacia (0 bytes)");
-                return Err(ApiError::BadRequest("La imagen llego vacia al servidor".into()));
+                return Err(ApiError::BadRequest(
+                    "La imagen llego vacia al servidor".into(),
+                ));
             }
 
-            tracing::info!("Imagen recibida: {} bytes, tipo: {}", data.len(), content_type);
+            tracing::info!(
+                "Imagen recibida: {} bytes, tipo: {}",
+                data.len(),
+                content_type
+            );
 
             let mut file = File::create(&file_path)
                 .await
@@ -439,6 +444,7 @@ pub async fn report_payment_handler(
         state: "Pendiente".to_string(),
         rejection_reason: None,
         id_creator: None,
+        id_issuing_bank: None,
         created_at: Utc::now(),
     };
 
@@ -501,10 +507,10 @@ pub async fn report_payment_user_handler(
         if name == "image" {
             let content_type = field.content_type().unwrap_or("image/jpeg").to_string();
             let extension = match content_type.as_str() {
-                "image/png"  => "png",
+                "image/png" => "png",
                 "image/webp" => "webp",
-                "image/gif"  => "gif",
-                _            => "jpg",
+                "image/gif" => "gif",
+                _ => "jpg",
             };
             let unique_name = format!("{}.{}", Uuid::new_v4(), extension);
             let file_path = format!("uploads/{}", unique_name);
@@ -516,10 +522,16 @@ pub async fn report_payment_user_handler(
 
             if data.is_empty() {
                 tracing::error!("Imagen recibida esta vacia (0 bytes)");
-                return Err(ApiError::BadRequest("La imagen llego vacia al servidor".into()));
+                return Err(ApiError::BadRequest(
+                    "La imagen llego vacia al servidor".into(),
+                ));
             }
 
-            tracing::info!("Imagen recibida: {} bytes, tipo: {}", data.len(), content_type);
+            tracing::info!(
+                "Imagen recibida: {} bytes, tipo: {}",
+                data.len(),
+                content_type
+            );
 
             let mut file = File::create(&file_path)
                 .await
@@ -635,6 +647,7 @@ pub async fn report_payment_user_handler(
         state: "Pendiente".to_string(),
         rejection_reason: None,
         id_creator: None,
+        id_issuing_bank: None,
         created_at: Utc::now(),
     };
 

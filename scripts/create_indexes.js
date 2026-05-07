@@ -178,6 +178,18 @@ db.PaymentReports.createIndex(
 );
 print("  ✅ PaymentReports.idClient");
 
+// check_reference pass 4: banco-scoped cross-client dedup
+// Índice parcial — solo cubre docs con idIssuingBank presente (excluye legacy null docs).
+db.PaymentReports.createIndex(
+  { "idIssuingBank": 1, "sReference": 1 },
+  {
+    name: "idx_paymentreports_bank_ref",
+    partialFilterExpression: { "idIssuingBank": { "$exists": true } },
+    background: true
+  }
+);
+print("  ✅ PaymentReports.idIssuingBank + sReference (partial)");
+
 print("");
 
 // ============================================

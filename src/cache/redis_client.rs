@@ -1,7 +1,7 @@
-use redis::{Client, AsyncCommands, RedisError};
-use sha2::{Digest, Sha256};
 use crate::config::Config;
 use crate::utils::timezone::VenezuelaDateTime;
+use redis::{AsyncCommands, Client, RedisError};
+use sha2::{Digest, Sha256};
 
 #[derive(Clone)]
 pub struct RedisClient {
@@ -84,7 +84,10 @@ impl RedisClient {
         };
         let current: i64 = conn.get(agent_load_key(agent_id)).await.unwrap_or(0);
         if current > 0 {
-            let _: () = conn.decr(agent_load_key(agent_id), 1i64).await.unwrap_or(());
+            let _: () = conn
+                .decr(agent_load_key(agent_id), 1i64)
+                .await
+                .unwrap_or(());
         }
     }
 
@@ -209,8 +212,16 @@ impl RedisClient {
         let key = media_cache_key(media_id);
         let mut pipe = redis::pipe();
         pipe.atomic()
-            .cmd("HSET").arg(&key).arg("bin").arg(bytes).ignore()
-            .cmd("HSET").arg(&key).arg("mime").arg(mime).ignore();
+            .cmd("HSET")
+            .arg(&key)
+            .arg("bin")
+            .arg(bytes)
+            .ignore()
+            .cmd("HSET")
+            .arg(&key)
+            .arg("mime")
+            .arg(mime)
+            .ignore();
         if let Some(f) = filename {
             pipe.cmd("HSET").arg(&key).arg("filename").arg(f).ignore();
         }
@@ -228,11 +239,7 @@ impl RedisClient {
     /// El key incluye el hash de la api_key para que rotar la key invalide
     /// implícitamente el cache (key vieja queda huérfana hasta que expire).
     #[allow(dead_code)]
-    pub async fn get_ai_models_cache(
-        &self,
-        workspace_id: &str,
-        api_key: &str,
-    ) -> Option<String> {
+    pub async fn get_ai_models_cache(&self, workspace_id: &str, api_key: &str) -> Option<String> {
         let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;
         let key = ai_models_cache_key(workspace_id, api_key);
         conn.get(key).await.ok().flatten()
@@ -372,7 +379,9 @@ impl RedisClient {
             Ok(c) => c,
             Err(_) => return,
         };
-        let _: Result<(), _> = conn.set_ex(Self::AI_COVERAGE_KEY_V2, payload, ttl_secs).await;
+        let _: Result<(), _> = conn
+            .set_ex(Self::AI_COVERAGE_KEY_V2, payload, ttl_secs)
+            .await;
     }
 
     pub async fn invalidate_ai_coverage_cache_v2(&self) {
@@ -408,6 +417,32 @@ impl RedisClient {
     }
 
     // ============================================
+    // AI Agent — catálogo de bancos (list_banks)
+    // ============================================
+    //
+    // Clave global única — el catálogo de bancos BCV es nacional, no varía por
+    // proveedor ni workspace. TTL 24h — los bancos del catálogo cambian rarísimo.
+    // Sin invalidación explícita (TTL-only, idéntico al patrón de payment_methods).
+
+    const AI_LIST_BANKS_KEY: &str = "ai_agent:list_banks";
+    const AI_LIST_BANKS_CACHE_TTL_SECS: u64 = 86_400; // 24h
+
+    pub async fn get_ai_list_banks_cache(&self) -> Option<String> {
+        let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;
+        conn.get(Self::AI_LIST_BANKS_KEY).await.ok().flatten()
+    }
+
+    pub async fn set_ai_list_banks_cache(&self, payload: &str, ttl_secs: u64) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let _: Result<(), _> = conn
+            .set_ex(Self::AI_LIST_BANKS_KEY, payload, ttl_secs)
+            .await;
+    }
+
+    // ============================================
     // AI Agent — configuración global (AiConfig)
     // ============================================
     //
@@ -430,7 +465,9 @@ impl RedisClient {
             Ok(c) => c,
             Err(_) => return,
         };
-        let _: Result<(), _> = conn.set_ex(Self::AI_CONFIG_CACHE_KEY, api_key, ttl_secs).await;
+        let _: Result<(), _> = conn
+            .set_ex(Self::AI_CONFIG_CACHE_KEY, api_key, ttl_secs)
+            .await;
     }
 
     /// Elimina la key de cache. Llamada inmediatamente después de cada

@@ -137,7 +137,7 @@ pub async fn check_reference_handler(
 
     let result = state
         .db
-        .check_reference(&id_client, &payload.s_reference)
+        .check_reference(&id_client, &payload.s_reference, None)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
 
