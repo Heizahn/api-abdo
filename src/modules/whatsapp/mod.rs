@@ -121,6 +121,17 @@ pub fn user_routes() -> Router<Arc<AppState>> {
             "/v1/auth-user/whatsapp/settings/:id",
             delete(handler::delete_settings_handler),
         )
+        // Test connection: pre-creación (raw) y re-test sobre setting guardado.
+        // La ruta sin `:id` debe declararse ANTES de las que matchean `:id`
+        // para que axum no interprete `test-connection` como un id literal.
+        .route(
+            "/v1/auth-user/whatsapp/settings/test-connection",
+            post(handler::test_settings_connection_raw_handler),
+        )
+        .route(
+            "/v1/auth-user/whatsapp/settings/:id/test-connection",
+            post(handler::test_settings_connection_stored_handler),
+        )
         // Alias: el frontend se refiere a estas configs como "WhatsApp Numbers"
         .route(
             "/v1/auth-user/whatsapp/whatsapp-numbers",
@@ -137,6 +148,14 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/auth-user/whatsapp/whatsapp-numbers/:id",
             delete(handler::delete_settings_handler),
+        )
+        .route(
+            "/v1/auth-user/whatsapp/whatsapp-numbers/test-connection",
+            post(handler::test_settings_connection_raw_handler),
+        )
+        .route(
+            "/v1/auth-user/whatsapp/whatsapp-numbers/:id/test-connection",
+            post(handler::test_settings_connection_stored_handler),
         )
         // Quick replies (snippets de texto)
         .route(

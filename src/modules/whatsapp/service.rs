@@ -56,6 +56,16 @@ pub struct MediaInfo {
     pub file_name: Option<String>,
 }
 
+/// Snapshot de un phone_number_id devuelto por Meta. Usado por `test-connection`
+/// para verificar que el par (phone_number_id, access_token) es válido y para
+/// devolver al front el nombre verificado y el formato display que la UI muestra.
+#[derive(Debug, Clone)]
+pub struct MetaPhoneInfo {
+    pub id: String,
+    pub verified_name: Option<String>,
+    pub display_phone_number: Option<String>,
+}
+
 /// Intenta parsear el body de un error 4xx/5xx de Meta como `MetaApiError`.
 /// Si el body tiene la forma `{ "error": { "code", "message", ... } }` retorna
 /// `Err(anyhow::Error::new(MetaApiError { ... }))` para que el handler pueda
@@ -304,6 +314,45 @@ impl WhatsAppService {
         let wa_id = json["messages"][0]["id"].as_str().unwrap_or("").to_string();
 
         Ok(wa_id)
+    }
+
+    /// Verifica el par `(phone_number_id, access_token)` contra Meta.
+    /// `GET /v25.0/{phone_number_id}?fields=id,verified_name,display_phone_number`.
+    /// Devuelve la metadata del número si las credenciales son válidas. En caso
+    /// contrario, propaga `MetaApiError` cuando el body trae el shape estándar
+    /// de error de Meta — el handler hace `downcast_ref` para mapearlo a un
+    /// `ApiError` con `code` estable.
+    pub async fn test_phone_number(&self) -> Result<MetaPhoneInfo> {
+        let url = format!(
+            "https://graph.facebook.com/{}/{}?fields=id,verified_name,display_phone_number",
+            WA_API_VERSION, self.phone_number_id
+        );
+        let resp = send_with_retry("test_phone_number", || {
+            self.meta_request(reqwest::Method::GET, &url)
+                .bearer_auth(&self.access_token)
+        })
+        .await
+        .map_err(|e| describe_reqwest_error("test_phone_number request", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(parse_meta_error("test_phone_number", status, &body));
+        }
+
+        let info: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| describe_reqwest_error("test_phone_number decode", e))?;
+
+        Ok(MetaPhoneInfo {
+            id: info["id"]
+                .as_str()
+                .unwrap_or(&self.phone_number_id)
+                .to_string(),
+            verified_name: info["verified_name"].as_str().map(|s| s.to_string()),
+            display_phone_number: info["display_phone_number"].as_str().map(|s| s.to_string()),
+        })
     }
 
     /// Info de un media: URL firmada por Meta (TTL ~5 min), mime, tamaño y filename.

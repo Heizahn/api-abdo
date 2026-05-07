@@ -1166,6 +1166,64 @@ pub struct SettingsResponse {
 }
 
 // ============================================
+// TEST CONNECTION (verificación contra Meta)
+// ============================================
+
+/// Body para `POST /v1/auth-user/whatsapp/settings/test-connection` (raw,
+/// pre-creación) y para `POST /v1/auth-user/whatsapp/settings/{id}/test-connection`
+/// (re-test sobre setting guardado).
+///
+/// En el endpoint sin `:id`, ambos campos son **requeridos**: el back no
+/// tiene credenciales guardadas.
+///
+/// En el endpoint con `:id`, ambos son **opcionales** y actúan como override
+/// de los valores guardados — útil cuando el front quiere validar un cambio
+/// antes de hacer PUT.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct WaTestConnectionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phone_number_id: Option<String>,
+    /// Token de Meta en claro. Nunca se persiste desde este endpoint —
+    /// el guardado va por POST/PUT settings que ya cifran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_token: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WaTestConnectionData {
+    /// `true` si Meta respondió 2xx con la metadata del número.
+    pub reachable: bool,
+    /// Echo del `phone_number_id` que se validó.
+    pub phone_number_id: String,
+    /// Nombre verificado por Meta (puede tardar días tras el setup inicial).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_name: Option<String>,
+    /// Formato amigable que Meta muestra (ej: `+58 412-345-6789`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_phone_number: Option<String>,
+    /// `body` cuando las credenciales vinieron del body; `stored` cuando se
+    /// usaron las cifradas del setting (sin override).
+    pub source: WaTestConnectionSource,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum WaTestConnectionSource {
+    /// `phone_number_id` + `access_token` vinieron en el body (override total
+    /// o endpoint raw pre-creación).
+    Body,
+    /// Se usaron las credenciales guardadas en el setting (token descifrado
+    /// in-memory desde `WaSettings.access_token`).
+    Stored,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WaTestConnectionResponse {
+    pub ok: bool,
+    pub data: WaTestConnectionData,
+}
+
+// ============================================
 // AGENTES TRANSFERIBLES
 // ============================================
 

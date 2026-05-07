@@ -55,6 +55,8 @@ use crate::models::whatsapp::{
     QuickReplyResponse, ReplyToItem, SendMessageData, SendMessageRequest, SendMessageResponse,
     SendTemplatePayload, SettingsItem, SettingsListResponse, SettingsResponse,
     TakeConversationResponse, TicketCategoriesResponse, TicketCategoryItem, TicketItem,
+    WaTestConnectionData, WaTestConnectionRequest, WaTestConnectionResponse,
+    WaTestConnectionSource,
     TicketResponse, TicketTimelineEntryItem, TicketsListResponse, ToggleActiveRequest,
     TransferAndTicketData, TransferAndTicketRequest, TransferAndTicketResponse,
     TransferConversationRequest, TransferableAgentItem, TransferableAgentsResponse,
@@ -153,6 +155,8 @@ use crate::modules::whatsapp::handler::ResetAiStateResponse;
         crate::modules::whatsapp::handler::create_settings_handler,
         crate::modules::whatsapp::handler::update_settings_handler,
         crate::modules::whatsapp::handler::delete_settings_handler,
+        crate::modules::whatsapp::handler::test_settings_connection_raw_handler,
+        crate::modules::whatsapp::handler::test_settings_connection_stored_handler,
         crate::modules::whatsapp::handler::get_media_handler,
         crate::modules::whatsapp::handler::upload_media_handler,
         crate::modules::whatsapp::handler::get_media_limits_handler,
@@ -290,6 +294,8 @@ use crate::modules::whatsapp::handler::ResetAiStateResponse;
             // WhatsApp — Items
             ConversationItem, MessageItem, SettingsItem,
             TransferableAgentItem, ReplyToItem, UrlPreview, LocationPayload, QuickReplyItem,
+            // WhatsApp — Test connection
+            WaTestConnectionRequest, WaTestConnectionResponse, WaTestConnectionData, WaTestConnectionSource,
             // WhatsApp — Tickets
             CreateTicketRequest, UpdateTicketStatusRequest, TransferAndTicketRequest,
             TicketItem, TicketTimelineEntryItem, WaTicketTimelineEntry,

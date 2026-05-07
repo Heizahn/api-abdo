@@ -3210,6 +3210,154 @@ pub async fn delete_settings_handler(
 }
 
 // ============================================
+// TEST CONNECTION (verificación contra Meta)
+// ============================================
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/settings/test-connection",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    request_body = WaTestConnectionRequest,
+    responses(
+        (status = 200, description = "Credenciales válidas", body = WaTestConnectionResponse),
+        (status = 400, description = "phone_number_id o access_token faltante / inválido"),
+        (status = 401, description = "No autorizado"),
+        (status = 502, description = "Meta rechazó las credenciales"),
+    )
+)]
+pub async fn test_settings_connection_raw_handler(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<WaTestConnectionRequest>,
+) -> Result<Json<WaTestConnectionResponse>, ApiError> {
+    let phone_number_id = payload
+        .phone_number_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ApiError::BadRequest("phone_number_id requerido".into()))?
+        .to_string();
+    let token_raw = payload
+        .access_token
+        .as_deref()
+        .ok_or_else(|| ApiError::BadRequest("access_token requerido".into()))?;
+    let token = validate_access_token(token_raw)?.to_string();
+
+    let svc = apply_media_relay(
+        &state,
+        WhatsAppService::new(state.reqwest_client.clone(), phone_number_id.clone(), token),
+    );
+
+    let info = svc
+        .test_phone_number()
+        .await
+        .map_err(|e| map_meta_error(&e, "no se pudo validar las credenciales contra Meta"))?;
+
+    Ok(Json(WaTestConnectionResponse {
+        ok: true,
+        data: WaTestConnectionData {
+            reachable: true,
+            phone_number_id: info.id,
+            verified_name: info.verified_name,
+            display_phone_number: info.display_phone_number,
+            source: WaTestConnectionSource::Body,
+        },
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/settings/{id}/test-connection",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ID del WaSettings a re-validar")),
+    request_body = WaTestConnectionRequest,
+    responses(
+        (status = 200, description = "Credenciales válidas", body = WaTestConnectionResponse),
+        (status = 400, description = "id inválido o access_token de override mal formado"),
+        (status = 401, description = "No autorizado"),
+        (status = 404, description = "WaSettings no encontrado"),
+        (status = 502, description = "Meta rechazó las credenciales"),
+    )
+)]
+pub async fn test_settings_connection_stored_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(payload): Json<WaTestConnectionRequest>,
+) -> Result<Json<WaTestConnectionResponse>, ApiError> {
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+    let settings = state
+        .db
+        .find_wa_settings_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    // Resolver phone_number_id: override del body si vino con valor, si no el guardado.
+    let phone_override = payload
+        .phone_number_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let phone_number_id = phone_override
+        .clone()
+        .unwrap_or_else(|| settings.phone_number_id.clone());
+    if phone_number_id.is_empty() {
+        return Err(ApiError::BadRequest(
+            "phone_number_id no configurado y no se envió override".into(),
+        ));
+    }
+
+    // Resolver token: override del body (validado) o el guardado descifrado.
+    let token_override = match payload.access_token.as_deref() {
+        Some(raw) if !raw.trim().is_empty() => Some(validate_access_token(raw)?.to_string()),
+        _ => None,
+    };
+    let token = match token_override.as_ref() {
+        Some(t) => t.clone(),
+        None => {
+            if settings.access_token.is_empty() {
+                return Err(ApiError::BadRequest(
+                    "access_token no guardado y no se envió override".into(),
+                ));
+            }
+            decrypt_payload(&settings_secret(), &settings.access_token)
+                .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?
+        }
+    };
+
+    // `source = body` cuando CUALQUIER credencial vino en el body — refleja que
+    // lo validado no es 100% lo guardado.
+    let source = if phone_override.is_some() || token_override.is_some() {
+        WaTestConnectionSource::Body
+    } else {
+        WaTestConnectionSource::Stored
+    };
+
+    let svc = apply_media_relay(
+        &state,
+        WhatsAppService::new(state.reqwest_client.clone(), phone_number_id.clone(), token),
+    );
+
+    let info = svc
+        .test_phone_number()
+        .await
+        .map_err(|e| map_meta_error(&e, "no se pudo validar las credenciales contra Meta"))?;
+
+    Ok(Json(WaTestConnectionResponse {
+        ok: true,
+        data: WaTestConnectionData {
+            reachable: true,
+            phone_number_id: info.id,
+            verified_name: info.verified_name,
+            display_phone_number: info.display_phone_number,
+            source,
+        },
+    }))
+}
+
+// ============================================
 // MEDIA (descarga proxy)
 // ============================================
 
