@@ -122,6 +122,90 @@ impl MediaInput {
 /// converger, escalamos por `max_iterations_reached`.
 const MAX_ITERATIONS: u32 = 5;
 
+/// Reintentos máximos cuando el LLM emite `[transfer_to_agent → ...]` o
+/// `<<TOOL_CALL: foo(...)>>` como TEXTO PLANO (en vez de llamar la función).
+/// Modelos chicos (gpt-4o-mini) pattern-matchean los ejemplos del prompt; el
+/// re-roll con system note correctivo recupera la mayoría de casos. Si la
+/// segunda iteración también pifia, stripeamos los brackets y mandamos el
+/// texto limpio para evitar exponer metanotación al cliente.
+const MAX_BRACKET_RETRIES: u32 = 1;
+
+/// Tool names que el detector busca como "tool-call-as-text". Mantener en
+/// sync con las constantes `T_*` en `tools.rs`.
+const KNOWN_TOOL_NAMES: &[&str] = &[
+    "lookup_customer",
+    "get_invoices",
+    "request_human",
+    "create_ticket",
+    "transfer_to_agent",
+    "list_plans",
+    "check_coverage",
+    "calculate_amount_bs",
+    "report_payment",
+    "get_installation_info",
+    "get_active_promotions",
+    "get_payment_methods",
+    "list_banks",
+];
+
+/// Devuelve los nombres de tools que aparecen como invocación-en-texto en
+/// `text`. Detecta dos formatos comunes en los prompts del proyecto:
+///   - `[<tool_name>` (notación de Sofía: `[transfer_to_agent → Pagos, ...]`)
+///   - `<<TOOL_CALL: <tool_name>` (metanotación de ejemplo en el prompt de Andrea)
+///
+/// Si el LLM emite estos patrones en su `content` SIN haber hecho un
+/// function_call real, está replicando los ejemplos como si fueran su output
+/// literal — el cliente ve metanotación rota y la acción nunca pasa.
+fn detect_text_tool_invocations(text: &str) -> Vec<&'static str> {
+    KNOWN_TOOL_NAMES
+        .iter()
+        .copied()
+        .filter(|tool| {
+            text.contains(&format!("[{}", tool))
+                || text.contains(&format!("<<TOOL_CALL: {}", tool))
+        })
+        .collect()
+}
+
+/// Remueve `[<tool_name> ... ]` y `<<TOOL_CALL: <tool_name> ... >>` de `text`.
+/// Best-effort: si el bracket/marker no cierra, corta hasta el primer newline
+/// como fallback. Trim final para que el mensaje resultante no quede con
+/// líneas en blanco.
+fn strip_text_tool_invocations(text: &str) -> String {
+    let mut out = text.to_string();
+    for tool in KNOWN_TOOL_NAMES {
+        let bracket_pat = format!("[{}", tool);
+        while let Some(start) = out.find(&bracket_pat) {
+            let after = start + bracket_pat.len();
+            let end = out[after..]
+                .find(']')
+                .map(|i| after + i + 1)
+                .unwrap_or_else(|| {
+                    out[after..]
+                        .find('\n')
+                        .map(|i| after + i)
+                        .unwrap_or(out.len())
+                });
+            out.replace_range(start..end, "");
+        }
+        let toolcall_pat = format!("<<TOOL_CALL: {}", tool);
+        while let Some(start) = out.find(&toolcall_pat) {
+            let after = start + toolcall_pat.len();
+            let end = out[after..]
+                .find(">>")
+                .map(|i| after + i + 2)
+                .unwrap_or_else(|| {
+                    out[after..]
+                        .find('\n')
+                        .map(|i| after + i)
+                        .unwrap_or(out.len())
+                });
+            out.replace_range(start..end, "");
+        }
+    }
+    out.trim().to_string()
+}
+
 /// Una entrada del historial de conversación que llega al runner. El handler
 /// del sandbox lo construye desde el body del POST; en producción (PR 3) lo
 /// arma desde `WaMessages`.
@@ -518,6 +602,9 @@ pub async fn run_turn(
     let mut escalation_reason: Option<String> = None;
     // Phase 2: acumula patches de cada tool call en este turno.
     let mut state_patches_acc: Vec<StatePatch> = Vec::new();
+    // Cuenta cuántas veces este turno re-rolleó por "tool-call-as-text"
+    // (ver detect_text_tool_invocations). Cap en MAX_BRACKET_RETRIES.
+    let mut bracket_retries: u32 = 0;
 
     'turn: for iter in 0..MAX_ITERATIONS {
         let req = ChatCompletionRequest {
@@ -580,6 +667,53 @@ pub async fn run_turn(
                     .join(""),
                 None => String::new(),
             };
+
+            // ── Defensa "tool-call-as-text" ─────────────────────────────────
+            // gpt-4o-mini a veces emite `[transfer_to_agent → Pagos, ...]` o
+            // `<<TOOL_CALL: foo(...)>>` como TEXTO en vez de invocar la
+            // función. Resultado: el cliente ve metanotación rota y la
+            // acción nunca pasa. Re-rollamos UNA vez con system note
+            // correctivo; si la 2da pifia, stripeamos y mandamos el texto
+            // limpio (mejor un mensaje sin acción que metanotación al cliente).
+            let invocations = detect_text_tool_invocations(&text);
+            if !invocations.is_empty() {
+                tracing::warn!(
+                    "[ai_agent.runner] tool-call-as-text detectado (iter={}, retries={}, tools={:?}): preview='{}'",
+                    iter,
+                    bracket_retries,
+                    invocations,
+                    text.chars().take(200).collect::<String>(),
+                );
+                if bracket_retries < MAX_BRACKET_RETRIES && iter + 1 < MAX_ITERATIONS {
+                    bracket_retries += 1;
+                    // Append corrective system note. NO appendeamos el output
+                    // malo como assistant — sería precedente que el modelo
+                    // puede replicar. Solo guiamos al próximo roundtrip.
+                    messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: Some(MessageContent::Text(format!(
+                            "ATENCIÓN: tu respuesta anterior escribió {:?} como TEXTO (entre brackets `[...]` o `<<TOOL_CALL: ...>>`). \
+                             Las tools se invocan vía function_calling — JAMÁS escribiéndolas como texto. \
+                             Volvé a procesar el último mensaje del cliente. Opciones válidas: \
+                             (1) llamar la función real vía la API de tools, o \
+                             (2) responder solo texto natural SIN brackets, SIN `<<TOOL_CALL>>`, sin nombres de funciones.",
+                            invocations
+                        ))),
+                        ..Default::default()
+                    });
+                    continue;
+                }
+                // Sin más retries: usar el texto limpio.
+                let cleaned = strip_text_tool_invocations(&text);
+                tracing::warn!(
+                    "[ai_agent.runner] tool-call-as-text persistente — devolviendo texto stripeado (len_orig={}, len_clean={})",
+                    text.len(),
+                    cleaned.len()
+                );
+                response_text = Some(cleaned);
+                break 'turn;
+            }
+
             response_text = Some(text);
             break 'turn;
         }
@@ -773,5 +907,68 @@ fn truncate_summary(value: &serde_json::Value) -> String {
         s
     } else {
         format!("{}…(truncated)", &s[..500])
+    }
+}
+
+#[cfg(test)]
+mod text_tool_invocation_tests {
+    use super::{detect_text_tool_invocations, strip_text_tool_invocations};
+
+    #[test]
+    fn detects_sofia_bracket_transfer() {
+        // Caso real prod: Sofía emitió `[transfer_to_agent → Pagos, ...]` como texto.
+        let text = "Te voy a transferir con el área de pagos.\n\n[transfer_to_agent → Pagos, reason=\"Cliente HUMBERTO BRACHO, estado Activo. Mensaje: 'saldo'.\"]";
+        let hits = detect_text_tool_invocations(text);
+        assert_eq!(hits, vec!["transfer_to_agent"]);
+    }
+
+    #[test]
+    fn detects_andrea_toolcall_metanotation_leaked() {
+        let text = "Voy a consultar tu saldo. <<TOOL_CALL: get_invoices(client_id=\"abc\")>>";
+        let hits = detect_text_tool_invocations(text);
+        assert_eq!(hits, vec!["get_invoices"]);
+    }
+
+    #[test]
+    fn detects_request_human_bracket() {
+        let text = "Te paso con un asesor. [request_human con reason=\"caso complejo\"]";
+        let hits = detect_text_tool_invocations(text);
+        assert_eq!(hits, vec!["request_human"]);
+    }
+
+    #[test]
+    fn does_not_match_normal_text() {
+        let text = "Tu saldo pendiente es Bs. 5.798,39, vencimiento 17/04. ¿Querés los métodos de pago?";
+        assert!(detect_text_tool_invocations(text).is_empty());
+    }
+
+    #[test]
+    fn strip_removes_sofia_bracket() {
+        let text = "Te voy a transferir.\n\n[transfer_to_agent → Pagos, reason=\"x\"]";
+        let cleaned = strip_text_tool_invocations(text);
+        assert_eq!(cleaned, "Te voy a transferir.");
+    }
+
+    #[test]
+    fn strip_removes_andrea_metanotation() {
+        let text = "Consulto tu saldo. <<TOOL_CALL: get_invoices(client_id=\"abc\")>> Listo.";
+        let cleaned = strip_text_tool_invocations(text);
+        assert_eq!(cleaned, "Consulto tu saldo.  Listo.");
+    }
+
+    #[test]
+    fn strip_handles_unclosed_bracket_with_newline_fallback() {
+        // Bracket sin cerrar → cortar hasta el primer newline.
+        let text = "Hola.\n[transfer_to_agent → Pagos, reason=\"x\"\nResto del mensaje.";
+        let cleaned = strip_text_tool_invocations(text);
+        assert!(cleaned.contains("Hola."));
+        assert!(cleaned.contains("Resto del mensaje."));
+        assert!(!cleaned.contains("transfer_to_agent"));
+    }
+
+    #[test]
+    fn strip_is_idempotent_on_clean_text() {
+        let text = "Tu saldo es Bs. 5.798,39. ¿Algo más?";
+        assert_eq!(strip_text_tool_invocations(text), text);
     }
 }
