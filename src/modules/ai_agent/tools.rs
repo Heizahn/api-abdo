@@ -3004,13 +3004,31 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         }
     }
 
-    // 9. Idempotency check — BEFORE any network or DB write
+    // 9. Idempotency check — BEFORE any network or DB write.
+    // Excepción: si el match previo está en estado "Rechazado" (humano lo
+    // descartó), permitimos un nuevo intento. El registro rechazado queda
+    // en DB para auditoría; el nuevo crea otra entrada Pendiente que el
+    // humano vuelve a evaluar. Bloquear rechazados dejaría al cliente
+    // atorado: ya pagó pero no puede reportar de nuevo.
     match ctx
         .state
         .db
         .check_reference(&client_oid, &reference, parsed_issuing_bank_oid)
         .await
     {
+        Ok(Some(match_info))
+            if match_info.s_state.eq_ignore_ascii_case("Rechazado") =>
+        {
+            tracing::info!(
+                "[ai_agent.report_payment] previous report rejected, allowing re-report (client={}, ref='{}', source={}, is_same_client={}, prev_amount_bs={})",
+                client_oid.to_hex(),
+                reference,
+                match_info.source,
+                match_info.is_same_client,
+                match_info.n_bs,
+            );
+            // proceed con nuevo report
+        }
         Ok(Some(match_info)) => {
             return ToolResult::ok(
                 json!({
