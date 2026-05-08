@@ -303,7 +303,7 @@ const TOOL_CATALOG: &[ToolMeta] = &[
     ToolMeta {
         name: T_GET_PAYMENT_METHODS,
         display_name: "Métodos de pago del proveedor",
-        ui_description: "Devuelve los datos de pago móvil del proveedor que atiende al cliente (banco, cédula, teléfono, titular). Llamar cuando el cliente pregunta '¿cómo pago?' o '¿a dónde transfiero?'.",
+        ui_description: "Devuelve los datos de pago móvil del proveedor que atiende al cliente (banco, cédula, teléfono). Llamar cuando el cliente pregunta '¿cómo pago?' o '¿a dónde transfiero?'.",
         ui_category: "info",
         default_enabled: false,
         operational_category: ToolCategory::InfoLookup,
@@ -547,7 +547,7 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
         )),
         T_GET_PAYMENT_METHODS => Some((
             "Devuelve los métodos de pago del proveedor que atiende al cliente \
-             (banco, número de cédula, teléfono Pago Móvil, titular de la cuenta). \
+             (banco, número de cédula, teléfono Pago Móvil). \
              PRECONDICIONES: (1) llamá `lookup_customer` ANTES y confirmá con el cliente \
              cuál servicio si hay varios. (2) Pasá el `client_id` que el cliente CONFIRMÓ \
              — si quedaron varios sin confirmar, preguntale antes. \
@@ -1588,8 +1588,7 @@ async fn exec_get_payment_methods(args: Value, ctx: &ToolContext, started: Insta
                     "type": "pago_movil",
                     "bank_name": "Banesco",
                     "id_number": "V-12345678",
-                    "phone": "04141234567",
-                    "account_name": "Empresa Sandbox"
+                    "phone": "04141234567"
                 }],
                 "note": "datos de prueba"
             }),
@@ -1667,14 +1666,16 @@ async fn exec_get_payment_methods(args: Value, ctx: &ToolContext, started: Insta
             Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
         };
 
-    // 8. Build response — never leak _id, owner_id, or bActive
+    // 8. Build response — never leak _id, owner_id, bActive, ni account_name
+    //    (titular). El titular no se muestra al cliente: para Pago Móvil
+    //    alcanza con banco + cédula + teléfono, y exponerlo invita al LLM a
+    //    pintarlo en el mensaje.
     let response = json!({
         "items": [{
             "type": "pago_movil",
             "bank_name": pm.bank_name,
             "id_number": pm.id_number,
-            "phone": pm.phone,
-            "account_name": pm.account_name
+            "phone": pm.phone
         }],
         "note": "Pago Móvil. Pedile al cliente la referencia y comprobante después de pagar para llamar `report_payment`."
     });
