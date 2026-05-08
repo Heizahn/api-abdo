@@ -231,10 +231,19 @@ pub async fn receive_webhook(
                                 message_id: updated.wa_message_id.clone(),
                                 status: s.status.clone(),
                             };
-                            tracing::info!(
-                                "[webhook] status {} → broadcast MENSAJE_ACTUALIZADO (wa_id={}, conv={})",
-                                s.status, updated.wa_message_id, updated.conversation_id.to_hex()
-                            );
+                            // sent/delivered/read son routine — DEBUG. failed es
+                            // accionable y queda en WARN para que no se pierda.
+                            if s.status == "failed" {
+                                tracing::warn!(
+                                    "[webhook] status failed → broadcast (wa_id={}, conv={})",
+                                    updated.wa_message_id, updated.conversation_id.to_hex()
+                                );
+                            } else {
+                                tracing::debug!(
+                                    "[webhook] status {} → broadcast (wa_id={}, conv={})",
+                                    s.status, updated.wa_message_id, updated.conversation_id.to_hex()
+                                );
+                            }
                             broadcast_all(&state.ws_registry, &event).await;
 
                             // 131049 — engagement throttle de Meta. Setea cooldown

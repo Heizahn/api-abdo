@@ -425,7 +425,6 @@ impl RedisClient {
     // Sin invalidación explícita (TTL-only, idéntico al patrón de payment_methods).
 
     const AI_LIST_BANKS_KEY: &str = "ai_agent:list_banks";
-    const AI_LIST_BANKS_CACHE_TTL_SECS: u64 = 86_400; // 24h
 
     pub async fn get_ai_list_banks_cache(&self) -> Option<String> {
         let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;

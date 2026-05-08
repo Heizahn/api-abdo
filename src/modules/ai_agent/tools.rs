@@ -576,8 +576,12 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
              cuál servicio si hay varios. (2) Pedile la foto del comprobante por WhatsApp \
              — sin imagen el tool falla. (3) Pasá `amount_bs` O `amount_usd`, NUNCA ambos: \
              el sistema deriva el otro con la tasa BCV vigente. \
-             (4) Llamá `list_banks` ANTES y pasá el id elegido en `issuing_bank_id`. \
-             El campo `bank` (texto libre) queda DEPRECADO — usá `issuing_bank_id` cuando puedas. \
+             (4) `issuing_bank_id` es el banco EMISOR / ORIGEN — desde dónde el CLIENTE \
+             envió la transferencia, NO el banco destino del proveedor. Llamá `list_banks` \
+             ANTES y pasá el id elegido. Si en el comprobante hay 'banco destino' y 'banco \
+             origen', usá el ORIGEN. Si el cliente dijo solo el nombre del banco y coincide \
+             con el destino, preguntale '¿desde qué banco hiciste el pago?' antes de reportar. \
+             El campo `bank` (texto libre) queda DEPRECADO — usá `issuing_bank_id`. \
              La referencia puede venir como texto descriptivo (ej: 'Pago Móvil ref 5678') \
              — el sistema extrae el número canónico automáticamente.",
             json!({
@@ -588,7 +592,7 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                     "media_id":         { "type": "string", "description": "ID exacto del media de WhatsApp de la foto del comprobante. DEBE ser uno de los IDs listados en `[turn_state] available_media_ids` (numérico, ej: '1281788957402373'). PROHIBIDO inventar, usar placeholders ('...', 'image_0', 'media_X'), o pasar IDs que no estén en esa lista — el tool rechaza con `media_id_not_in_conversation`. Si el cliente no envió comprobante todavía, NO llames esta tool: pedile la foto primero." },
                     "amount_bs":        { "type": "number", "description": "Monto en bolívares. Mutuamente excluyente con amount_usd." },
                     "amount_usd":       { "type": "number", "description": "Monto en dólares. Mutuamente excluyente con amount_bs." },
-                    "issuing_bank_id":  { "type": "string", "description": "ObjectId hex del banco emisor devuelto por list_banks (recomendado: ej '65a7f8d9c3e2a1b4d6f8e0c5'). El backend tolera nombre o código si el LLM no llamó list_banks (ej: 'Banesco' o '0134') y resuelve al ObjectId server-side; si el match es ambiguo o no existe, el tool devuelve error rico con la lista de candidatos. Llamar list_banks ANTES sigue siendo lo correcto." },
+                    "issuing_bank_id":  { "type": "string", "description": "Banco EMISOR / ORIGEN del pago: aquel donde el cliente TIENE su cuenta y desde donde envió la transferencia. NO es el banco destino del proveedor. En el comprobante suele aparecer como 'banco origen', 'desde', o 'cuenta origen'. Pasá el ObjectId hex devuelto por list_banks (recomendado, ej '65a7f8d9c3e2a1b4d6f8e0c5'). El backend tolera nombre/código (ej: 'Banco de Venezuela' o '0102') y resuelve server-side; si es ambiguo o no existe, devuelve error rico con candidatos. Si el cliente dice solo 'banco Banesco' sin aclarar origen/destino y el destino es Banesco también, preguntá: '¿desde qué banco hiciste la transferencia?'." },
                     "bank":             { "type": "string", "description": "[DEPRECATED] Nombre libre del banco origen. Usar issuing_bank_id en su lugar." },
                     "phone":            { "type": "string", "description": "Teléfono asociado al pago móvil. Opcional." },
                     "debt_id":          { "type": "string", "description": "ObjectId hex de la deuda específica si el cliente la mencionó. Opcional — si falta, el reporte queda como abono a cuenta." },
@@ -3203,6 +3207,26 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
             (None::<String>, Some("ticket_creation_failed".to_string()))
         }
     };
+
+    // Trazabilidad estructurada del registro: una sola línea con todo lo
+    // necesario para auditar el pago sin tener que hilar varios logs.
+    // Incluye el OID del banco emisor resuelto (no el string que mandó el
+    // LLM) — clave para detectar errores tipo "guardó destino como origen".
+    tracing::info!(
+        "[ai_agent.report_payment] OK payment_id={} ticket_id={:?} client_id={} amount_bs={} amount_usd={} exchange_rate={} iva_rate={} issuing_bank_oid={:?} reference='{}' debt_id={:?} is_advance={} ticket_warning={:?}",
+        payment_id,
+        ticket_id,
+        client_oid.to_hex(),
+        amount_bs,
+        amount_usd,
+        exchange_rate,
+        iva_rate,
+        parsed_issuing_bank_oid.map(|o| o.to_hex()),
+        reference,
+        id_debt_oid.map(|o| o.to_hex()),
+        id_debt_oid.is_none(),
+        ticket_warning,
+    );
 
     ToolResult::ok(
         json!({
