@@ -313,7 +313,10 @@ const TOOL_CATALOG: &[ToolMeta] = &[
         display_name: "Listar bancos emisores",
         ui_description: "Catálogo de bancos del país (BCV). Llamar ANTES de report_payment para que el cliente elija el banco emisor y pasar el id elegido en issuing_bank_id.",
         ui_category: "info",
-        default_enabled: false,
+        // Prerequisito de report_payment: sin esta tool el LLM no tiene de
+        // dónde sacar el ObjectId del banco emisor. Se enciende por default
+        // para que agentes nuevos no queden bloqueados al reportar pagos.
+        default_enabled: true,
         operational_category: ToolCategory::InfoLookup,
     },
 ];
@@ -585,7 +588,7 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                     "media_id":         { "type": "string", "description": "ID exacto del media de WhatsApp de la foto del comprobante. DEBE ser uno de los IDs listados en `[turn_state] available_media_ids` (numérico, ej: '1281788957402373'). PROHIBIDO inventar, usar placeholders ('...', 'image_0', 'media_X'), o pasar IDs que no estén en esa lista — el tool rechaza con `media_id_not_in_conversation`. Si el cliente no envió comprobante todavía, NO llames esta tool: pedile la foto primero." },
                     "amount_bs":        { "type": "number", "description": "Monto en bolívares. Mutuamente excluyente con amount_usd." },
                     "amount_usd":       { "type": "number", "description": "Monto en dólares. Mutuamente excluyente con amount_bs." },
-                    "issuing_bank_id":  { "type": "string", "description": "ObjectId hex del banco emisor devuelto por list_banks. Recomendado para deduplicación banco-scoped." },
+                    "issuing_bank_id":  { "type": "string", "description": "ObjectId hex del banco emisor devuelto por list_banks (recomendado: ej '65a7f8d9c3e2a1b4d6f8e0c5'). El backend tolera nombre o código si el LLM no llamó list_banks (ej: 'Banesco' o '0134') y resuelve al ObjectId server-side; si el match es ambiguo o no existe, el tool devuelve error rico con la lista de candidatos. Llamar list_banks ANTES sigue siendo lo correcto." },
                     "bank":             { "type": "string", "description": "[DEPRECATED] Nombre libre del banco origen. Usar issuing_bank_id en su lugar." },
                     "phone":            { "type": "string", "description": "Teléfono asociado al pago móvil. Opcional." },
                     "debt_id":          { "type": "string", "description": "ObjectId hex de la deuda específica si el cliente la mencionó. Opcional — si falta, el reporte queda como abono a cuenta." },
@@ -1705,6 +1708,59 @@ async fn exec_get_payment_methods(args: Value, ctx: &ToolContext, started: Insta
 // Tool: list_banks
 // ============================================
 
+/// Carga la lista de bancos para lookup interno (cache Redis → DB fallback).
+/// Devuelve `(ObjectId, bank_name, bank_code)`. La cache se popula como efecto
+/// secundario en el cache miss para que llamadas siguientes sean baratas.
+///
+/// Usado por `exec_report_payment` para resolver `issuing_bank_id` cuando el
+/// LLM manda un nombre/código en vez de un ObjectId hex (fallback robusto).
+async fn load_banks_for_lookup(
+    ctx: &ToolContext,
+) -> Result<Vec<(ObjectId, String, String)>, String> {
+    if let Some(cached_str) = ctx.state.redis.get_ai_list_banks_cache().await {
+        if let Ok(cached_val) = serde_json::from_str::<Value>(&cached_str) {
+            if let Some(items) = cached_val.get("items").and_then(|v| v.as_array()) {
+                let parsed: Vec<(ObjectId, String, String)> = items
+                    .iter()
+                    .filter_map(|item| {
+                        let id = item.get("id")?.as_str()?;
+                        let oid = ObjectId::parse_str(id).ok()?;
+                        let name = item.get("bank_name")?.as_str()?.to_string();
+                        let code = item.get("bank_code")?.as_str()?.to_string();
+                        Some((oid, name, code))
+                    })
+                    .collect();
+                if !parsed.is_empty() {
+                    return Ok(parsed);
+                }
+            }
+        }
+    }
+    let banks = ctx
+        .state
+        .db
+        .find_bank_list()
+        .await
+        .map_err(|e| format!("db_error:{}", e))?;
+    let items: Vec<Value> = banks
+        .iter()
+        .map(|b| {
+            json!({
+                "id": b.id.to_hex(),
+                "bank_name": b.bank_name,
+                "bank_code": b.bank_code
+            })
+        })
+        .collect();
+    if let Ok(s) = serde_json::to_string(&json!({ "items": items })) {
+        ctx.state.redis.set_ai_list_banks_cache(&s, 86_400).await;
+    }
+    Ok(banks
+        .into_iter()
+        .map(|b| (b.id, b.bank_name, b.bank_code))
+        .collect())
+}
+
 async fn exec_list_banks(_args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
     // 1. Sandbox short-circuit — return fixture banks before any DB call
     if ctx.is_sandbox {
@@ -2780,6 +2836,13 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     };
 
     // 6b. Parse + validate issuing_bank_id (WI-3)
+    // El LLM debería pasar el ObjectId hex devuelto por `list_banks`. Pero
+    // gpt-4o-mini ocasionalmente manda el nombre del banco como string
+    // (ej: "Banesco") porque lo lee del bank_name de get_payment_methods o
+    // del comprobante. Si no parsea como ObjectId, hacemos fallback:
+    // resolvemos por nombre/código contra el catálogo (cache → DB), match
+    // único → usamos; ambiguo o ningún match → error rico con candidatos
+    // para que el LLM pueda llamar list_banks o pedirle al cliente.
     let parsed_issuing_bank_oid: Option<ObjectId> = match parsed
         .issuing_bank_id
         .as_deref()
@@ -2788,7 +2851,67 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     {
         Some(s) => match ObjectId::parse_str(s) {
             Ok(oid) => Some(oid),
-            Err(_) => return ToolResult::err("invalid_issuing_bank_id", started),
+            Err(_) => {
+                let banks = match load_banks_for_lookup(ctx).await {
+                    Ok(b) => b,
+                    Err(e) => return ToolResult::err(e, started),
+                };
+                let needle = s.to_lowercase();
+                let exact: Vec<&(ObjectId, String, String)> = banks
+                    .iter()
+                    .filter(|(_, name, code)| {
+                        name.to_lowercase() == needle || code.to_lowercase() == needle
+                    })
+                    .collect();
+                let candidates: Vec<&(ObjectId, String, String)> = if !exact.is_empty() {
+                    exact
+                } else {
+                    banks
+                        .iter()
+                        .filter(|(_, name, code)| {
+                            name.to_lowercase().contains(&needle)
+                                || code.to_lowercase().contains(&needle)
+                        })
+                        .collect()
+                };
+                match candidates.len() {
+                    1 => Some(candidates[0].0),
+                    0 => {
+                        let preview = banks
+                            .iter()
+                            .take(8)
+                            .map(|(_, n, c)| format!("{} ({})", n, c))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        return ToolResult::err(
+                            format!(
+                                "issuing_bank_not_recognized: input='{}'. \
+                                 Llamá list_banks para ver todos los bancos disponibles \
+                                 y pasá el id exacto en issuing_bank_id. \
+                                 Algunos ejemplos: {}",
+                                s, preview
+                            ),
+                            started,
+                        );
+                    }
+                    _ => {
+                        let listing = candidates
+                            .iter()
+                            .take(8)
+                            .map(|(id, n, _)| format!("{}={}", id.to_hex(), n))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        return ToolResult::err(
+                            format!(
+                                "issuing_bank_ambiguous: input='{}' matchea varios bancos. \
+                                 Preguntale al cliente cuál es y pasá el id exacto. Candidatos: {}",
+                                s, listing
+                            ),
+                            started,
+                        );
+                    }
+                }
+            }
         },
         None => None,
     };
