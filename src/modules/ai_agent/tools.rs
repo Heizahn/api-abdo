@@ -2783,6 +2783,24 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         Err(e) => return ToolResult::err(format!("invalid_args:{}", e), started),
     };
 
+    // Log estructurado de entrada: qué mandó EXACTAMENTE el LLM. Útil cuando
+    // el resultado en DB no matchea expectativas (ej: sBank vacío porque el
+    // LLM no pasó `bank`, o issuing_bank_id mal copiado del comprobante).
+    // Una sola línea con todos los campos opcionales explícitos.
+    tracing::info!(
+        "[ai_agent.report_payment] IN client_id='{}' reference='{}' media_id='{}' amount_bs={:?} amount_usd={:?} bank={:?} issuing_bank_id={:?} phone={:?} debt_id={:?} payment_date={:?}",
+        parsed.client_id,
+        parsed.reference,
+        parsed.media_id,
+        parsed.amount_bs,
+        parsed.amount_usd,
+        parsed.bank,
+        parsed.issuing_bank_id,
+        parsed.phone,
+        parsed.debt_id,
+        parsed.payment_date,
+    );
+
     // 2. Validate media_id non-empty
     if parsed.media_id.trim().is_empty() {
         return ToolResult::err("image_required", started);
@@ -2920,54 +2938,22 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         None => None,
     };
 
-    // 6c. When Some: verify the bank exists in ListBanks (via Redis cache → DB)
-    if let Some(bank_oid) = parsed_issuing_bank_oid {
-        let bank_exists = {
-            // Try cache first
-            let cached_banks = ctx.state.redis.get_ai_list_banks_cache().await;
-            if let Some(cached_str) = cached_banks {
-                if let Ok(cached_val) = serde_json::from_str::<Value>(&cached_str) {
-                    if let Some(items) = cached_val.get("items").and_then(|v| v.as_array()) {
-                        items.iter().any(|item| {
-                            item.get("id")
-                                .and_then(|id| id.as_str())
-                                .map(|id_str| id_str == bank_oid.to_hex())
-                                .unwrap_or(false)
-                        })
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                // Cache miss — load from DB and cache for next time
-                match ctx.state.db.find_bank_list().await {
-                    Ok(banks) => {
-                        let items: Vec<Value> = banks
-                            .iter()
-                            .map(|b| {
-                                json!({
-                                    "id": b.id.to_hex(),
-                                    "bank_name": b.bank_name,
-                                    "bank_code": b.bank_code
-                                })
-                            })
-                            .collect();
-                        let payload = json!({ "items": items });
-                        if let Ok(s) = serde_json::to_string(&payload) {
-                            ctx.state.redis.set_ai_list_banks_cache(&s, 86_400).await;
-                        }
-                        banks.iter().any(|b| b.id == bank_oid)
-                    }
-                    Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
-                }
-            }
+    // 6c. When Some: verify the bank exists in ListBanks AND capture
+    //     name+code para popular el legacy `bank_origin` (sBank) con el
+    //     formato "0102 - BANCO DE VENEZUELA". Sin esto sBank queda vacío
+    //     porque el LLM ya no manda el campo `bank` (deprecated).
+    let resolved_bank_display: Option<String> = if let Some(bank_oid) = parsed_issuing_bank_oid {
+        let banks = match load_banks_for_lookup(ctx).await {
+            Ok(b) => b,
+            Err(e) => return ToolResult::err(e, started),
         };
-        if !bank_exists {
-            return ToolResult::err("issuing_bank_id_not_found", started);
+        match banks.iter().find(|(oid, _, _)| *oid == bank_oid) {
+            Some((_, name, code)) => Some(format!("{} - {}", code, name.to_uppercase())),
+            None => return ToolResult::err("issuing_bank_id_not_found", started),
         }
-    }
+    } else {
+        None
+    };
 
     // 7. Find client (need id_tax).
     // NOTE: find_client_by_id returns Ok(fake_client) on "not found" — detect
@@ -3172,8 +3158,19 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     // 16. Build PaymentReport
     // Clone reference and bank before they move into the report struct so we
     // can pass them to create_cobranzas_ticket_internal afterwards.
+    // bank_origin (legacy `sBank`): si el LLM no lo pasó, lo derivamos del
+    // banco emisor resuelto vía issuing_bank_id ("0102 - BANCO DE VENEZUELA"
+    // matchea el formato histórico del campo). Esto mantiene útil el campo
+    // legacy para front/listings sin obligar al LLM a duplicar el dato.
+    let bank_origin: String = parsed
+        .bank
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| resolved_bank_display.clone())
+        .unwrap_or_default();
+    let report_phone_number: String = parsed.phone.clone().unwrap_or_default();
     let ref_for_ticket = reference.clone();
-    let bank_for_ticket = parsed.bank.clone().unwrap_or_default();
+    let bank_for_ticket = bank_origin.clone();
     let report = crate::models::payment::PaymentReport {
         id: None,
         id_client: Some(client_oid),
@@ -3182,8 +3179,8 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         reference: reference.clone(),
         payment_date,
         amount_bs,
-        bank_origin: parsed.bank.unwrap_or_default(),
-        phone_number: parsed.phone.unwrap_or_default(),
+        bank_origin,
+        phone_number: report_phone_number.clone(),
         image_url,
         amount_usd,
         exchange_rate,
@@ -3229,9 +3226,11 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     // Trazabilidad estructurada del registro: una sola línea con todo lo
     // necesario para auditar el pago sin tener que hilar varios logs.
     // Incluye el OID del banco emisor resuelto (no el string que mandó el
-    // LLM) — clave para detectar errores tipo "guardó destino como origen".
+    // LLM) y el bank_origin/phone_number que efectivamente se persisten —
+    // clave para detectar discrepancias entre lo que mandó el LLM y lo que
+    // termina en DB.
     tracing::info!(
-        "[ai_agent.report_payment] OK payment_id={} ticket_id={:?} client_id={} amount_bs={} amount_usd={} exchange_rate={} iva_rate={} issuing_bank_oid={:?} reference='{}' debt_id={:?} is_advance={} ticket_warning={:?}",
+        "[ai_agent.report_payment] OK payment_id={} ticket_id={:?} client_id={} amount_bs={} amount_usd={} exchange_rate={} iva_rate={} issuing_bank_oid={:?} bank_origin='{}' phone_number='{}' reference='{}' debt_id={:?} is_advance={} ticket_warning={:?}",
         payment_id,
         ticket_id,
         client_oid.to_hex(),
@@ -3240,6 +3239,8 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         exchange_rate,
         iva_rate,
         parsed_issuing_bank_oid.map(|o| o.to_hex()),
+        bank_for_ticket,
+        report_phone_number,
         reference,
         id_debt_oid.map(|o| o.to_hex()),
         id_debt_oid.is_none(),

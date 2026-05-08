@@ -520,7 +520,10 @@ pub async fn run_turn(
         first_turn_note.is_some(),
         agent_state.is_some(),
     );
-    tracing::debug!(
+    // El system_prompt entero (~17K chars) es ruido para troubleshooting normal:
+    // ya tenemos system_chars y la lista de tools en el INFO log de arriba.
+    // Si necesitás ver el prompt sustituido, levantar log a TRACE.
+    tracing::trace!(
         "[ai_agent.runner] system_instruction (final, placeholders sustituidos):\n{}",
         system_instruction
     );
