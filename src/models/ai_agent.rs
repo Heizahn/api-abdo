@@ -333,13 +333,19 @@ pub struct AiClientLookup {
     pub identification: Option<String>,
     pub phone: String,
     pub status: String,
-    pub balance: f64,
+    /// `true` cuando el cliente tiene saldo deudor (`nBalance < 0`). Señal
+    /// booleana para evitar exponer el monto crudo en USD al LLM —
+    /// el modelo debe llamar `get_invoices` para obtener el monto exacto en Bs.
+    pub has_pending_debt: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
 pub struct AiInvoice {
     pub id: String,
-    pub amount: f64,
+    /// Saldo pendiente convertido a bolívares aplicando tasa BCV vigente +
+    /// IVA (DEFAULT). Es el monto listo para mostrar al cliente, sin
+    /// conversiones adicionales.
+    pub amount_bs: f64,
     pub reason: String,
     pub state: String,
     pub due_date: String,

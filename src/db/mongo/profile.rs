@@ -1060,7 +1060,10 @@ impl ProfileRepository for MongoDB {
                         .map(|v| format_dni(v, "sRif"))
                 });
             // Balance: get_bson_amount maneja int/double/decimal128 sin pérdida.
+            // Sólo derivamos el flag booleano — el monto crudo en USD no se
+            // expone al LLM para evitar que lo reporte como "Bs." sin convertir.
             let balance = get_bson_amount(&doc, "nBalance");
+            let has_pending_debt = balance < 0.0;
 
             out.push(AiClientLookup {
                 client_id: id_obj.to_hex(),
@@ -1072,7 +1075,7 @@ impl ProfileRepository for MongoDB {
                 identification,
                 phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
                 status: doc.get_str("sState").unwrap_or_default().to_string(),
-                balance,
+                has_pending_debt,
             });
         }
         Ok(out)

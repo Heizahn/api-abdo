@@ -1735,13 +1735,13 @@ async fn build_customer_context(
     buf.push_str(&format!("matches: {}\n", matches.len()));
     for (i, m) in matches.iter().enumerate() {
         buf.push_str(&format!(
-            "  - [{}] client_id: {} | name: {} | identification: {} | status: {} | balance: {:.2}\n",
+            "  - [{}] client_id: {} | name: {} | identification: {} | status: {} | has_pending_debt: {}\n",
             i + 1,
             m.client_id,
             m.name.as_deref().unwrap_or(""),
             m.identification.as_deref().unwrap_or(""),
             m.status,
-            m.balance,
+            m.has_pending_debt,
         ));
     }
     let first_name = matches

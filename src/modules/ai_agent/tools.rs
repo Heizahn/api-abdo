@@ -223,7 +223,7 @@ const TOOL_CATALOG: &[ToolMeta] = &[
     ToolMeta {
         name: T_GET_INVOICES,
         display_name: "Consultar deudas / facturas",
-        ui_description: "Devuelve las deudas activas con su saldo pendiente (descontando abonos parciales ya aplicados). El campo `amount` es lo que falta por cobrar, no el monto original.",
+        ui_description: "Devuelve las deudas activas con su saldo pendiente convertido a bolívares (tasa BCV vigente + IVA aplicado). El campo `amount_bs` es lo que falta por cobrar HOY, listo para mostrar al cliente.",
         ui_category: "lookup",
         default_enabled: true,
         operational_category: ToolCategory::InfoLookup,
@@ -410,10 +410,13 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
         )),
         T_GET_INVOICES => Some((
             "Lista las deudas activas del cliente con el SALDO PENDIENTE de cada una \
-             (monto original menos abonos parciales ya recibidos). Usar después de \
+             (monto original menos abonos parciales ya recibidos), YA CONVERTIDO a bolívares \
+             aplicando la tasa BCV vigente y el IVA configurado. Usar después de \
              lookup_customer para responder consultas de saldo, monto a pagar o estado de \
-             cobranza. Usá el campo `amount` como el monto que el cliente debe HOY en cada \
-             item. NUNCA inventar números — siempre llamar este tool.",
+             cobranza. El campo `amount_bs` es Bs listos para mostrar al cliente — NO lo \
+             conviertas, NO le agregues IVA, NO lo trates como USD. NUNCA inventar números \
+             — siempre llamar este tool. NUNCA respondas un saldo sin haber llamado este tool \
+             antes en la conversación.",
             json!({
                 "type": "object",
                 "properties": {
@@ -858,8 +861,28 @@ async fn exec_get_invoices(args: Value, ctx: &ToolContext, started: Instant) -> 
         }
     }
 
-    // Step 5: compute remaining balance, filter, then take(limit)
-    // CRITICAL: take AFTER filter — fully-paid debts must not steal slots (WI-6 fix)
+    // Step 5: resolve BCV rate + IVA (DEFAULT) — mismo contrato que
+    // `exec_calculate_amount_bs` y que `/v2/utils/calculate`. Si falla, abortamos:
+    // el LLM tiene la regla "Tool falla → request_human" y nunca debe inventar
+    // montos. Devolver USD como fallback abriría el bug que estamos cerrando.
+    let rate: f64 = match ctx.state.redis.get_exchange_rate().await {
+        Ok(Some(r)) => r,
+        _ => match ctx.state.db.get_latest_exchange_rate().await {
+            Ok(r) => r,
+            Err(_) => return ToolResult::err("exchange_rate_unavailable", started),
+        },
+    };
+    if rate == 0.0 {
+        return ToolResult::err("exchange_rate_zero", started);
+    }
+    let iva_factor = match ctx.state.db.find_tax_by_id(None).await {
+        Ok(Some(t)) => t.iva,
+        Ok(None) => return ToolResult::err("tax_config_missing", started),
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    };
+
+    // Step 6: compute remaining balance (USD), convert to Bs, filter, then take(limit).
+    // CRITICAL: take AFTER filter — fully-paid debts must not steal slots (WI-6 fix).
     let epsilon = 0.001_f64;
     let limit = parsed.limit.unwrap_or(5).clamp(1, 20) as usize;
 
@@ -870,15 +893,17 @@ async fn exec_get_invoices(args: Value, ctx: &ToolContext, started: Instant) -> 
             // Round each side to centavos before subtracting — same rounding as receivables/handler.rs:156-157
             let debt_rounded = (d.n_amount * 100.0).round() / 100.0;
             let paid_rounded = (paid * 100.0).round() / 100.0;
-            let remaining = debt_rounded - paid_rounded;
+            let remaining_usd = debt_rounded - paid_rounded;
 
-            if remaining <= epsilon {
+            if remaining_usd <= epsilon {
                 return None;
             }
 
+            let amount_bs = round2(remaining_usd * rate * iva_factor);
+
             Some(AiInvoice {
                 id: d._id.to_hex(),
-                amount: remaining, // WI-6: remaining balance, NOT face value
+                amount_bs, // WI-6: remaining balance, ya convertido a Bs con IVA
                 reason: d.s_reason,
                 state: d.s_state,
                 due_date: d.d_creation.try_to_rfc3339_string().unwrap_or_default(),
