@@ -301,11 +301,56 @@ pub async fn receive_webhook(
                             }
                         }
                         Ok(None) => {
-                            tracing::debug!(
-                                "[webhook] status {} para wa_id={} sin doc en DB (ignorado)",
-                                s.status,
-                                s.id
-                            );
+                            // Status update para un mensaje sin doc en DB. Caso común:
+                            // Meta no pudo procesar la media inbound del cliente (131052
+                            // "Media download error", 131053 "Media upload error", 131056
+                            // "(Recoverable) Failure"). Sin doc en DB no podemos
+                            // marcar nada, pero PODEMOS avisarle al cliente que
+                            // reenvíe — sino queda esperando respuesta de un archivo
+                            // que nunca llegó al sistema.
+                            let is_media_failure = s.status == "failed"
+                                && s.errors.as_ref().is_some_and(|errs| {
+                                    errs.iter().any(|e| {
+                                        matches!(
+                                            e.code,
+                                            Some(131052) | Some(131053) | Some(131056)
+                                        )
+                                    })
+                                });
+                            if is_media_failure {
+                                let recipient = s
+                                    .recipient_id
+                                    .as_deref()
+                                    .map(str::to_string)
+                                    .unwrap_or_default();
+                                let business_phone = value
+                                    .metadata
+                                    .as_ref()
+                                    .and_then(|m| m.display_phone_number.as_deref())
+                                    .map(normalize_to_e164)
+                                    .unwrap_or_default();
+                                tracing::warn!(
+                                    "[webhook] inbound media failed (Meta no pudo procesar): wa_id={} recipient='{}' business='{}' errors={:?}",
+                                    s.id, recipient, business_phone, s.errors
+                                );
+                                if !recipient.is_empty() && !business_phone.is_empty() {
+                                    let state_cl = state.clone();
+                                    tokio::spawn(async move {
+                                        notify_inbound_media_failure(
+                                            &state_cl,
+                                            &recipient,
+                                            &business_phone,
+                                        )
+                                        .await;
+                                    });
+                                }
+                            } else {
+                                tracing::debug!(
+                                    "[webhook] status {} para wa_id={} sin doc en DB (ignorado)",
+                                    s.status,
+                                    s.id
+                                );
+                            }
                         }
                         Err(e) => {
                             tracing::error!(
@@ -4485,6 +4530,62 @@ async fn resolve_service_for_phone(
         token,
     );
     Ok(apply_media_relay(&state, svc))
+}
+
+/// Avisa al cliente que su archivo no llegó cuando Meta reporta un fallo de
+/// media inbound (131052/131053/131056). Mejor un mensaje pidiendo reenvío
+/// que dejar al cliente esperando respuesta sobre un comprobante que nunca
+/// existió en nuestro sistema.
+///
+/// Best-effort: si falla cualquier paso (settings, decrypt, send) sólo
+/// loguea WARN y retorna. No re-intenta — un mensaje fallido de este tipo
+/// no justifica complejidad de retry.
+async fn notify_inbound_media_failure(
+    state: &Arc<AppState>,
+    recipient_phone: &str,
+    business_phone: &str,
+) {
+    let settings = match state.db.find_wa_settings_by_phone(business_phone).await {
+        Ok(Some(s)) => s,
+        _ => {
+            tracing::warn!(
+                "[webhook] inbound_media_failure: WaSettings no encontrado para business='{}'",
+                business_phone
+            );
+            return;
+        }
+    };
+    let token = match decrypt_payload(&settings_secret(), &settings.access_token) {
+        Some(t) => t,
+        None => {
+            tracing::warn!(
+                "[webhook] inbound_media_failure: decrypt_payload falló (business='{}')",
+                business_phone
+            );
+            return;
+        }
+    };
+    let svc = WhatsAppService::new(
+        state.reqwest_client.clone(),
+        settings.phone_number_id.clone(),
+        token,
+    );
+    let svc = apply_media_relay(state, svc);
+    let body = "No pude leer el archivo que enviaste. ¿Podrías reenviarlo como *Foto* \
+                (no como Documento)? Si preferís, también podés escribirme los datos \
+                del pago: monto, banco origen, referencia y fecha.";
+    match svc.send_text(recipient_phone, body, None, false).await {
+        Ok(wamid) => tracing::info!(
+            "[webhook] inbound_media_failure: fallback enviado a '{}' (wamid={})",
+            recipient_phone,
+            wamid
+        ),
+        Err(e) => tracing::warn!(
+            "[webhook] inbound_media_failure: send_text falló para '{}': {}",
+            recipient_phone,
+            e
+        ),
+    }
 }
 
 /// Aplica el relay de Cloudflare al service si ambas env vars están seteadas
