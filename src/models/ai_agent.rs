@@ -337,6 +337,11 @@ pub struct AiClientLookup {
     /// booleana para evitar exponer el monto crudo en USD al LLM —
     /// el modelo debe llamar `get_invoices` para obtener el monto exacto en Bs.
     pub has_pending_debt: bool,
+    /// Dirección del servicio (`sAddress` en DB). Útil para el flujo
+    /// multi-cliente del prompt: cuando hay varios servicios atados al mismo
+    /// teléfono, el LLM lista nombre+dirección para que el cliente elija.
+    /// `None` si el campo está vacío en DB.
+    pub address: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]

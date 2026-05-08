@@ -1030,6 +1030,7 @@ impl ProfileRepository for MongoDB {
             .projection(doc! {
                 "_id": 1, "sPhone": 1, "sName": 1,
                 "sDni": 1, "sRif": 1, "sState": 1, "nBalance": 1,
+                "sAddress": 1,
             })
             .limit(LIMIT)
             .build();
@@ -1065,6 +1066,11 @@ impl ProfileRepository for MongoDB {
             let balance = get_bson_amount(&doc, "nBalance");
             let has_pending_debt = balance < 0.0;
 
+            let address = doc
+                .get_str("sAddress")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string);
             out.push(AiClientLookup {
                 client_id: id_obj.to_hex(),
                 name: doc
@@ -1076,6 +1082,7 @@ impl ProfileRepository for MongoDB {
                 phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
                 status: doc.get_str("sState").unwrap_or_default().to_string(),
                 has_pending_debt,
+                address,
             });
         }
         Ok(out)

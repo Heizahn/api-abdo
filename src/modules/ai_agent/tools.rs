@@ -3022,6 +3022,32 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
             // proceed con nuevo report
         }
         Ok(Some(match_info)) => {
+            // Normalizamos `matched_state` al subset que el prompt de Andrea
+            // entiende: "Pendiente" o "Aprobado". Sin esto, estados crudos de
+            // DB ("Activo" en `payments`, "Verificado" en `payment_reports`)
+            // confunden al LLM y termina diciendo "estado Activo" (no es un
+            // estado válido en el contrato del prompt). "Rechazado" ya fue
+            // filtrado arriba (permitimos re-report).
+            let normalized_state = match match_info.s_state.as_str() {
+                s if s.eq_ignore_ascii_case("Pendiente") => "Pendiente",
+                s if s.eq_ignore_ascii_case("Verificado")
+                    || s.eq_ignore_ascii_case("Aprobado")
+                    || s.eq_ignore_ascii_case("Activo") =>
+                {
+                    "Aprobado"
+                }
+                other => {
+                    // Estado inesperado (Anulado u otro). Loguear para
+                    // debug y mapear a "Aprobado" conservador (es un
+                    // duplicado real, mejor decirle al cliente que ya
+                    // existe que dejar a la IA inventar).
+                    tracing::warn!(
+                        "[ai_agent.report_payment] matched_state crudo inesperado '{}' — normalizado a 'Aprobado'",
+                        other
+                    );
+                    "Aprobado"
+                }
+            };
             return ToolResult::ok(
                 json!({
                     "ok": true,
@@ -3030,7 +3056,8 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
                     "source": match_info.source,
                     "is_same_client": match_info.is_same_client,
                     "matched_reference": match_info.s_reference,
-                    "matched_state": match_info.s_state,
+                    "matched_state": normalized_state,
+                    "matched_state_raw": match_info.s_state,
                     "matched_amount_bs": match_info.n_bs,
                     "matched_amount_usd": match_info.n_amount,
                 }),
