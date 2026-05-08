@@ -582,7 +582,7 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                 "properties": {
                     "client_id":        { "type": "string", "description": "ObjectId hex devuelto por lookup_customer." },
                     "reference":        { "type": "string", "description": "Referencia bancaria del comprobante. Puede venir como texto libre — el sistema extrae el número canónico automáticamente." },
-                    "media_id":         { "type": "string", "description": "ID del media de WhatsApp (foto del comprobante). Lo recibís en el contexto del mensaje del cliente." },
+                    "media_id":         { "type": "string", "description": "ID exacto del media de WhatsApp de la foto del comprobante. DEBE ser uno de los IDs listados en `[turn_state] available_media_ids` (numérico, ej: '1281788957402373'). PROHIBIDO inventar, usar placeholders ('...', 'image_0', 'media_X'), o pasar IDs que no estén en esa lista — el tool rechaza con `media_id_not_in_conversation`. Si el cliente no envió comprobante todavía, NO llames esta tool: pedile la foto primero." },
                     "amount_bs":        { "type": "number", "description": "Monto en bolívares. Mutuamente excluyente con amount_usd." },
                     "amount_usd":       { "type": "number", "description": "Monto en dólares. Mutuamente excluyente con amount_bs." },
                     "issuing_bank_id":  { "type": "string", "description": "ObjectId hex del banco emisor devuelto por list_banks. Recomendado para deduplicación banco-scoped." },

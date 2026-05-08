@@ -229,14 +229,19 @@ pub fn extract_customer_explicit_intents(messages: &[WaMessage]) -> Vec<String> 
 
 /// Construye el bloque `[turn_state]` body (sin la cabecera `[turn_state]`,
 /// que la pega `runner::build_system_instruction`). Devuelve `None` cuando
-/// es turn_number 1 y no hay zones ni intents — evitar inyectar HUD vacío.
+/// es turn_number 1 y no hay zones, intents ni media — evitar inyectar HUD vacío.
 pub fn build_turn_state(
     history: &[ConvTurn],
     customer_zones: &[String],
     customer_intents: &[String],
+    customer_media_ids: &[String],
 ) -> Option<String> {
     let turn_number = history.iter().filter(|t| t.role == ConvRole::User).count() + 1;
-    if turn_number == 1 && customer_zones.is_empty() && customer_intents.is_empty() {
+    if turn_number == 1
+        && customer_zones.is_empty()
+        && customer_intents.is_empty()
+        && customer_media_ids.is_empty()
+    {
         return None;
     }
     let mut lines = vec![format!("turn_number: {}", turn_number)];
@@ -250,6 +255,16 @@ pub fn build_turn_state(
         lines.push(format!(
             "customer_explicit_intents: {}",
             customer_intents.join(", ")
+        ));
+    }
+    // Lista cerrada de media_ids legítimos (de los mensajes inbound del cliente).
+    // El validador de `report_payment` rechaza cualquier ID fuera de esta lista,
+    // así que el LLM debe copiar uno de acá literal — no inventar `...` ni
+    // `image_0` ni concatenaciones.
+    if !customer_media_ids.is_empty() {
+        lines.push(format!(
+            "available_media_ids: {}",
+            customer_media_ids.join(", ")
         ));
     }
     Some(lines.join("\n"))

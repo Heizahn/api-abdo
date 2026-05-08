@@ -336,6 +336,7 @@ async fn run_dispatch(
         &full_history,
         &customer_explicit_zones,
         &customer_explicit_intents,
+        &recent_media_ids,
     );
 
     // ── Fresh-start detection ──────────────────────────────────────────────
