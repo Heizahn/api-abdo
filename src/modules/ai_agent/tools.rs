@@ -2982,13 +2982,19 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         None => None,
     };
 
-    if let Some(ref debt_oid) = id_debt_oid {
+    // Capturamos el Debt completo (no solo verificamos existencia) para
+    // permitir el anchor USD en paso 12: cuando el cliente paga el quote
+    // exacto, registramos el USD canónico del Debt en vez del derivado por
+    // round2 (que pierde decimales).
+    let loaded_debt: Option<crate::models::db::Debt> = if let Some(ref debt_oid) = id_debt_oid {
         match ctx.state.db.find_debt_by_id(&debt_oid.to_hex()).await {
-            Ok(Some(_)) => {} // exists, continue
+            Ok(Some(d)) => Some(d),
             Ok(None) => return ToolResult::err("debt_id_not_found", started),
             Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
         }
-    }
+    } else {
+        None
+    };
 
     // 9. Idempotency check — BEFORE any network or DB write.
     // Excepción: si el match previo está en estado "Rechazado" (humano lo
@@ -3081,12 +3087,42 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         1.0
     };
 
-    // 12. Compute the missing amount
+    // 12. Compute the missing amount.
+    //
+    // USD anchor: cuando el cliente paga el quote EXACTO de un debt
+    // específico (debt_id pasado y amount_bs matchea debt.n_amount * rate
+    // * iva con tolerancia de 1 céntimo), registramos `amount_usd` igual
+    // al `n_amount` original del Debt en vez del derivado por
+    // `bs / iva / rate` con round2. Esto evita el ruido de ±0.01 USD que
+    // aparece cuando el debt tiene más de 2 decimales (ej: 10.7407 → al
+    // round trip da 10.74). Pagos parciales o overpays NO se anclan
+    // (siguen derivándose) — son montos distintos al debt y el USD debe
+    // reflejar lo realmente pagado.
     let (amount_bs, amount_usd) = match (amount_input_bs, amount_input_usd) {
         (Some(bs), None) => {
+            let bs_rounded = round2(bs);
             let bs_neto = bs / iva_rate;
-            let usd = round2(bs_neto / exchange_rate);
-            (round2(bs), usd)
+            let derived_usd = round2(bs_neto / exchange_rate);
+            let final_usd = if let Some(ref debt) = loaded_debt {
+                let expected_bs = round2(debt.n_amount * exchange_rate * iva_rate);
+                if (bs_rounded - expected_bs).abs() <= 0.01 {
+                    let canonical = round2(debt.n_amount);
+                    tracing::info!(
+                        "[ai_agent.report_payment] USD anchored to debt: debt_id={} debt_usd={} expected_bs={} bs_paid={} (bypassed derived={})",
+                        debt._id.to_hex(),
+                        canonical,
+                        expected_bs,
+                        bs_rounded,
+                        derived_usd,
+                    );
+                    canonical
+                } else {
+                    derived_usd
+                }
+            } else {
+                derived_usd
+            };
+            (bs_rounded, final_usd)
         }
         (None, Some(usd)) => {
             let bs_neto = usd * exchange_rate;
@@ -3158,15 +3194,32 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     // 16. Build PaymentReport
     // Clone reference and bank before they move into the report struct so we
     // can pass them to create_cobranzas_ticket_internal afterwards.
-    // bank_origin (legacy `sBank`): si el LLM no lo pasó, lo derivamos del
-    // banco emisor resuelto vía issuing_bank_id ("0102 - BANCO DE VENEZUELA"
-    // matchea el formato histórico del campo). Esto mantiene útil el campo
-    // legacy para front/listings sin obligar al LLM a duplicar el dato.
-    let bank_origin: String = parsed
+    // bank_origin (legacy `sBank`): el campo `bank` del LLM está deprecated.
+    // Cuando hay `issuing_bank_id` resuelto, usamos SIEMPRE el formato
+    // canónico del catálogo ("0102 - BANCO DE VENEZUELA") y descartamos
+    // cualquier string que el LLM haya mandado en `bank`. Sólo fallbackeamos
+    // a `parsed.bank` si NO hay issuing_bank_id (caller legacy).
+    if let Some(b) = parsed
         .bank
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if resolved_bank_display.is_some() {
+            tracing::warn!(
+                "[ai_agent.report_payment] LLM mandó `bank='{}'` (deprecated) y también issuing_bank_id — descartando legacy y usando formato canónico del catálogo",
+                b
+            );
+        }
+    }
+    let bank_origin: String = resolved_bank_display
         .clone()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| resolved_bank_display.clone())
+        .or_else(|| {
+            parsed
+                .bank
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+        })
         .unwrap_or_default();
     let report_phone_number: String = parsed.phone.clone().unwrap_or_default();
     let ref_for_ticket = reference.clone();
