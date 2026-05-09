@@ -6,7 +6,7 @@ use axum::{
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use mongodb::bson::oid::ObjectId;
+use mongodb::bson::{oid::ObjectId, DateTime as BsonDateTime};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
@@ -16,9 +16,26 @@ use crate::{
     auth::user_jwt::UserProfileClaims,
     db::{ProfileRepository, SalesRepository},
     error::ApiError,
+    models::db::PaymentReportFull,
     models::payment::{PagoMovilData, PaymentMethodResponse, PaymentReport},
+    modules::payments::service::{PaymentInput, PaymentsService},
+    modules::whatsapp::ws::{broadcast_to_roles, ReportePagoPendienteData, WsServerEvent},
     state::AppState,
 };
+
+// nRole values eligible for payments-reports endpoints.
+// 0.0 = superadmin, 1.0 = contador, 1.5 = contador-mensajero.
+// Float equality is safe: these are exact sums of powers of 2.
+const REPORT_ROLES: &[f32] = &[0.0_f32, 1.0_f32, 1.5_f32];
+
+/// Returns true if the role is authorised to manage payment reports.
+#[inline]
+fn has_report_access(role: Option<f32>) -> bool {
+    match role {
+        Some(r) => REPORT_ROLES.contains(&r),
+        None => false,
+    }
+}
 
 #[utoipa::path(
     get,
@@ -454,6 +471,26 @@ pub async fn report_payment_handler(
         .await
         .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
 
+    let created_id = result
+        .inserted_id
+        .as_object_id()
+        .map(|o| o.to_hex())
+        .unwrap_or_default();
+
+    // EMIT BADGE: REPORTE_PAGO_PENDIENTE
+    let pending_total = state.db.count_pending_reports().await.unwrap_or(0);
+    let badge_event = WsServerEvent::ReportePagoPendiente {
+        data: ReportePagoPendienteData {
+            pending_total,
+            report_id: created_id.clone(),
+            previous_state: None,
+            new_state: "Pendiente".to_string(),
+        },
+    };
+    if let Ok(payload) = serde_json::to_string(&badge_event) {
+        let _ = broadcast_to_roles(&state, REPORT_ROLES, payload).await;
+    }
+
     Ok(Json(serde_json::json!({
         "ok": true,
         "message": if id_debt_oid.is_some() { "Pago a deuda registrado" } else { "Abono a cuenta registrado" },
@@ -657,6 +694,26 @@ pub async fn report_payment_user_handler(
         .await
         .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
 
+    let created_id = result
+        .inserted_id
+        .as_object_id()
+        .map(|o| o.to_hex())
+        .unwrap_or_default();
+
+    // EMIT BADGE: REPORTE_PAGO_PENDIENTE
+    let pending_total = state.db.count_pending_reports().await.unwrap_or(0);
+    let badge_event = WsServerEvent::ReportePagoPendiente {
+        data: ReportePagoPendienteData {
+            pending_total,
+            report_id: created_id.clone(),
+            previous_state: None,
+            new_state: "Pendiente".to_string(),
+        },
+    };
+    if let Ok(payload) = serde_json::to_string(&badge_event) {
+        let _ = broadcast_to_roles(&state, REPORT_ROLES, payload).await;
+    }
+
     Ok(Json(serde_json::json!({
         "ok": true,
         "message": if id_debt_oid.is_some() { "Pago a deuda registrado" } else { "Abono a cuenta registrado" },
@@ -666,4 +723,334 @@ pub async fn report_payment_user_handler(
             "is_advance": id_debt_oid.is_none()
         }
     })))
+}
+
+// ============================================================================
+// T20 — list_payment_reports_handler
+// ============================================================================
+
+/// Lista los reportes de pago pendientes (y los de los últimos 2 meses).
+/// Solo accesible por roles 0 (superadmin), 1 (contador), 1.5 (contador-mensajero).
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/payments-reports",
+    tag = "Payments",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Lista de reportes de pago", body = Vec<PaymentReportListItem>),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Rol no autorizado — solo 0, 1, 1.5"),
+    )
+)]
+pub async fn list_payment_reports_handler(
+    Extension(claims): Extension<UserProfileClaims>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !has_report_access(claims.role) {
+        return Err(ApiError::Forbidden);
+    }
+
+    let reports = state
+        .db
+        .list_payment_reports()
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    Ok(Json(serde_json::json!({ "ok": true, "data": reports })))
+}
+
+// ============================================================================
+// T21 — approve_payment_report_handler
+// ============================================================================
+
+/// Aprueba un reporte de pago (Pendiente/Rechazado → Verificado).
+///
+/// Realiza fuzzy-match bidireccional por `sReference` contra los pagos activos
+/// del cliente. Si hay coincidencia, vincula el pago; si no, crea uno nuevo vía
+/// `PaymentsService::create_payment`. Emite `REPORTE_PAGO_PENDIENTE`.
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/payments-reports/{id}/approve",
+    tag = "Payments",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ObjectId del reporte de pago")),
+    responses(
+        (status = 200, description = "Reporte aprobado"),
+        (status = 400, description = "ID inválido o reporte ya verificado"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Rol no autorizado"),
+        (status = 404, description = "Reporte no encontrado"),
+    )
+)]
+pub async fn approve_payment_report_handler(
+    Extension(claims): Extension<UserProfileClaims>,
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !has_report_access(claims.role) {
+        return Err(ApiError::Forbidden);
+    }
+
+    // 1. Parse path param
+    let report_oid = ObjectId::parse_str(&id).map_err(|_| {
+        ApiError::domain_simple(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_id",
+            "ID de reporte inválido",
+        )
+    })?;
+
+    // 2. Fetch report
+    let report: PaymentReportFull = state
+        .db
+        .find_report_by_id(report_oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| {
+            ApiError::domain_simple(
+                axum::http::StatusCode::NOT_FOUND,
+                "report_not_found",
+                "Reporte de pago no encontrado",
+            )
+        })?;
+
+    // 3. Guard: already Verificado → 400
+    if report.state == "Verificado" {
+        return Err(ApiError::domain_simple(
+            axum::http::StatusCode::BAD_REQUEST,
+            "already_verified",
+            "El reporte ya fue verificado",
+        ));
+    }
+
+    let previous_state = report.state.clone();
+
+    // 4. Require id_client
+    let client_id = report.id_client.ok_or_else(|| {
+        ApiError::domain_simple(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_report",
+            "El reporte no tiene cliente asociado",
+        )
+    })?;
+
+    // 5. Bidirectional fuzzy match on sReference (scoped to this client)
+    let candidates = state
+        .db
+        .find_payments_for_match_by_client(client_id)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    let report_ref = report.reference.trim().to_string();
+
+    let matched = candidates.into_iter().find(|p| {
+        let payment_ref = p.s_reference.trim().to_string();
+        !payment_ref.is_empty()
+            && !report_ref.is_empty()
+            && (payment_ref.ends_with(&report_ref) || report_ref.ends_with(&payment_ref))
+    });
+
+    let message: &str = if let Some(matched_payment) = matched {
+        // MATCH — check whether the payment is already linked to a report
+        let already_linked = matched_payment.id_payment_report.is_some();
+
+        if !already_linked {
+            state
+                .db
+                .update_payment_link(matched_payment._id, report_oid, report.id_payment_method)
+                .await
+                .map_err(ApiError::DatabaseError)?;
+        }
+        "Reporte marcado como verificado (el pago ya existía en sistema)"
+    } else {
+        // NO MATCH — create a new payment
+        let now_iso = BsonDateTime::now().to_string();
+        let d_creation = {
+            let pd = report.payment_date.trim().to_string();
+            if pd.is_empty() {
+                now_iso
+            } else {
+                pd
+            }
+        };
+
+        let commentary = format!(
+            "Reporte aprobado. Banco: {}, Tel: {}",
+            if report.bank_origin.is_empty() {
+                "N/A"
+            } else {
+                &report.bank_origin
+            },
+            if report.phone_number.is_empty() {
+                "N/A"
+            } else {
+                &report.phone_number
+            },
+        );
+
+        let payment_input = PaymentInput {
+            id_client: client_id,
+            s_reference: report.reference.clone(),
+            n_bs: report.amount_bs,
+            n_amount: report.amount_usd,
+            b_usd: false,
+            b_cash: false,
+            id_payment_method: report.id_payment_method,
+            id_payment_report: Some(report_oid),
+            id_creator: claims.id.clone(),
+            d_creation: Some(d_creation),
+            s_commentary: Some(commentary),
+        };
+
+        let svc = PaymentsService::new(state.db.clone());
+        svc.create_payment(payment_input, report.id_debt).await?;
+
+        "Reporte aprobado y nuevo pago creado exitosamente"
+    };
+
+    // 6. Transition report → Verificado
+    state
+        .db
+        .update_report_state(report_oid, "Verificado", &claims.id, None)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    // 7. Count pending + emit REPORTE_PAGO_PENDIENTE
+    let pending_total = state.db.count_pending_reports().await.unwrap_or(0);
+
+    let ws_payload = serde_json::to_string(&WsServerEvent::ReportePagoPendiente {
+        data: ReportePagoPendienteData {
+            pending_total,
+            report_id: report_oid.to_hex(),
+            previous_state: Some(previous_state),
+            new_state: "Verificado".to_string(),
+        },
+    })
+    .unwrap_or_default();
+
+    // EMIT BADGE: REPORTE_PAGO_PENDIENTE
+    let _ = broadcast_to_roles(&state, REPORT_ROLES, ws_payload).await;
+
+    Ok(Json(
+        serde_json::json!({ "ok": true, "data": { "message": message } }),
+    ))
+}
+
+// ============================================================================
+// T22 — reject_payment_report_handler
+// ============================================================================
+
+/// Request body para rechazar un reporte de pago.
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+pub struct RejectReportRequest {
+    /// Motivo del rechazo. Requerido, no puede estar vacío.
+    pub reason: Option<String>,
+}
+
+/// Rechaza un reporte de pago (Pendiente → Rechazado).
+///
+/// Requiere body `{ "reason": "..." }` no vacío.
+/// Solo permite la transición desde `Pendiente`.
+/// Emite `REPORTE_PAGO_PENDIENTE` a roles {0, 1, 1.5}.
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/payments-reports/{id}/reject",
+    tag = "Payments",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ObjectId del reporte de pago")),
+    request_body = RejectReportRequest,
+    responses(
+        (status = 200, description = "Reporte rechazado"),
+        (status = 400, description = "ID inválido o estado no permite rechazo"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Rol no autorizado"),
+        (status = 404, description = "Reporte no encontrado"),
+        (status = 422, description = "Falta el motivo del rechazo"),
+    )
+)]
+pub async fn reject_payment_report_handler(
+    Extension(claims): Extension<UserProfileClaims>,
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+    Json(body): Json<RejectReportRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !has_report_access(claims.role) {
+        return Err(ApiError::Forbidden);
+    }
+
+    // Validate reason first (cheap — before any DB call)
+    let reason = body
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            ApiError::domain_simple(
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                "missing_reason",
+                "El motivo del rechazo es requerido",
+            )
+        })?;
+
+    // 1. Parse path param
+    let report_oid = ObjectId::parse_str(&id).map_err(|_| {
+        ApiError::domain_simple(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_id",
+            "ID de reporte inválido",
+        )
+    })?;
+
+    // 2. Fetch report
+    let report: PaymentReportFull = state
+        .db
+        .find_report_by_id(report_oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| {
+            ApiError::domain_simple(
+                axum::http::StatusCode::NOT_FOUND,
+                "report_not_found",
+                "Reporte de pago no encontrado",
+            )
+        })?;
+
+    // 3. Guard: only Pendiente can be rejected
+    if report.state != "Pendiente" {
+        return Err(ApiError::domain_simple(
+            axum::http::StatusCode::BAD_REQUEST,
+            "only_pending_can_be_rejected",
+            "Solo los reportes en estado Pendiente pueden ser rechazados",
+        ));
+    }
+
+    let previous_state = report.state.clone();
+
+    // 4. Transition report → Rechazado
+    state
+        .db
+        .update_report_state(report_oid, "Rechazado", &claims.id, Some(&reason))
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    // 5. Count pending + emit REPORTE_PAGO_PENDIENTE
+    let pending_total = state.db.count_pending_reports().await.unwrap_or(0);
+
+    let ws_payload = serde_json::to_string(&WsServerEvent::ReportePagoPendiente {
+        data: ReportePagoPendienteData {
+            pending_total,
+            report_id: report_oid.to_hex(),
+            previous_state: Some(previous_state),
+            new_state: "Rechazado".to_string(),
+        },
+    })
+    .unwrap_or_default();
+
+    // EMIT BADGE: REPORTE_PAGO_PENDIENTE
+    let _ = broadcast_to_roles(&state, REPORT_ROLES, ws_payload).await;
+
+    Ok(Json(
+        serde_json::json!({ "ok": true, "data": { "message": "Reporte rechazado" } }),
+    ))
 }

@@ -37,8 +37,9 @@ use super::assignment::assign_conversation;
 
 use super::service::WhatsAppService;
 use super::ws::{
-    broadcast_all, broadcast_except, build_template_created_event, build_template_deleted_event,
-    build_template_updated_event, emit_to_phone_number_agents, WsServerEvent,
+    broadcast_all, broadcast_except, broadcast_to_chat_users, build_template_created_event,
+    build_template_deleted_event, build_template_updated_event, emit_to_phone_number_agents,
+    ConversacionNoLeidaData, WsServerEvent,
 };
 
 /// Cooldown que aplica el back cuando Meta rebota con error 131049
@@ -236,12 +237,15 @@ pub async fn receive_webhook(
                             if s.status == "failed" {
                                 tracing::warn!(
                                     "[webhook] status failed → broadcast (wa_id={}, conv={})",
-                                    updated.wa_message_id, updated.conversation_id.to_hex()
+                                    updated.wa_message_id,
+                                    updated.conversation_id.to_hex()
                                 );
                             } else {
                                 tracing::debug!(
                                     "[webhook] status {} → broadcast (wa_id={}, conv={})",
-                                    s.status, updated.wa_message_id, updated.conversation_id.to_hex()
+                                    s.status,
+                                    updated.wa_message_id,
+                                    updated.conversation_id.to_hex()
                                 );
                             }
                             broadcast_all(&state.ws_registry, &event).await;
@@ -311,10 +315,7 @@ pub async fn receive_webhook(
                             let is_media_failure = s.status == "failed"
                                 && s.errors.as_ref().is_some_and(|errs| {
                                     errs.iter().any(|e| {
-                                        matches!(
-                                            e.code,
-                                            Some(131052) | Some(131053) | Some(131056)
-                                        )
+                                        matches!(e.code, Some(131052) | Some(131053) | Some(131056))
                                     })
                                 });
                             if is_media_failure {
@@ -661,6 +662,10 @@ pub async fn receive_webhook(
                         }
                     }
 
+                    // Capture unread count before touch so we can tell if
+                    // this message pushes a clean conversation into unread.
+                    let pre_touch_unread = conv.unread_count;
+
                     let touch = crate::db::ConversationTouch {
                         preview: &preview,
                         msg_type: &msg.msg_type,
@@ -674,6 +679,22 @@ pub async fn receive_webhook(
                     };
                     if let Err(e) = state.db.touch_conversation(&conv_id, touch).await {
                         tracing::warn!("touch_conversation error: {}", e);
+                    }
+
+                    // EMIT BADGE: CONVERSACION_NO_LEIDA
+                    // Design accepts always-emit on increment_unread (pending_total is authoritative).
+                    // Pre-touch_unread is captured above; always emit — front uses pending_total as truth.
+                    let _ = pre_touch_unread; // retained for documentation; always emit
+                    let unread_pending = state.db.count_unread_conversations().await.unwrap_or(0);
+                    let unread_ev = WsServerEvent::ConversacionNoLeida {
+                        data: ConversacionNoLeidaData {
+                            pending_total: unread_pending,
+                            conversation_id: conv_id.to_hex(),
+                            delta: 1,
+                        },
+                    };
+                    if let Ok(badge_payload) = serde_json::to_string(&unread_ev) {
+                        let _ = broadcast_to_chat_users(&state, badge_payload).await;
                     }
 
                     // Actualizar `last_inbound_at` → reabre la ventana de 24h.
@@ -2189,8 +2210,26 @@ pub async fn mark_read_handler(
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
 
+    // Capture old unread_count BEFORE reset (conv was fetched above).
+    let old_unread = conv.unread_count;
+
     // Resetear contador local en la conversación.
     let _ = state.db.reset_unread(&oid).await;
+
+    // EMIT BADGE: CONVERSACION_NO_LEIDA — only if there was something to clear.
+    if old_unread > 0 {
+        let pending_total = state.db.count_unread_conversations().await.unwrap_or(0);
+        let unread_ev = WsServerEvent::ConversacionNoLeida {
+            data: ConversacionNoLeidaData {
+                pending_total,
+                conversation_id: id.clone(),
+                delta: -1,
+            },
+        };
+        if let Ok(badge_payload) = serde_json::to_string(&unread_ev) {
+            let _ = broadcast_to_chat_users(&state, badge_payload).await;
+        }
+    }
 
     // Notificar a Meta (ticks azules + mic azul en voice notes) para cada
     // inbound del batch. Meta NO propaga `read` a mensajes anteriores — en

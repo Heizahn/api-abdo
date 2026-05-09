@@ -8,7 +8,10 @@ use mongodb::{error::Error as MongoError, Collection};
 
 use super::MongoDB;
 use crate::db::SalesRepository;
-use crate::models::db::{Debt, LatestPayment, PartPayment, Payment};
+use crate::models::db::{
+    Debt, LatestPayment, PartPayment, PartPaymentWithPaymentState, Payment, PaymentForMatch,
+    PaymentReportFull, PaymentReportListItem,
+};
 use crate::models::payment::{
     Bank, ClientOwner, PaymentMethod, PaymentReport, ReferenceMatchInfo, UserPaymentInfo,
 };
@@ -124,6 +127,8 @@ impl SalesRepository for MongoDB {
                 n_amount: get_bson_amount(&doc, "nAmount"),
                 s_state: doc.get_str("sState").unwrap_or_default().to_string(),
                 n_bs: get_bson_amount(&doc, "nBs"),
+                s_reason: doc.get_str("sReason").ok().map(|s| s.to_string()),
+                id_client: doc.get_object_id("idClient").ok(),
             };
             payments.push(payment);
         }
@@ -594,6 +599,602 @@ impl SalesRepository for MongoDB {
         }
 
         Ok(reports)
+    }
+
+    // ── realtime-pending-badges: T03 ─────────────────────────────────────────
+
+    async fn count_pending_reports(&self) -> Result<u64, String> {
+        let collection = self.db.collection::<Document>("PaymentReports");
+        collection
+            .count_documents(doc! { "sState": "Pendiente" })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn list_payment_reports(&self) -> Result<Vec<PaymentReportListItem>, String> {
+        // now - 2 months boundary
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let two_months_ms = 2 * 30 * 24 * 60 * 60 * 1000_i64;
+        let cutoff_ms = now_ms - two_months_ms;
+        let cutoff_iso = {
+            let dt = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(cutoff_ms)
+                .unwrap_or_default();
+            dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+        };
+
+        // Filter: Pendiente OR dPaymentDate (stored as string) >= cutoff
+        // We use $expr + $toDate to convert the string field for comparison.
+        let pipeline = vec![
+            doc! {
+                "$match": {
+                    "$or": [
+                        { "sState": "Pendiente" },
+                        {
+                            "$expr": {
+                                "$gte": [
+                                    { "$toDate": "$dPaymentDate" },
+                                    { "$toDate": &cutoff_iso }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            },
+            // Lookup client name
+            doc! {
+                "$lookup": {
+                    "from": "Clients",
+                    "localField": "idClient",
+                    "foreignField": "_id",
+                    "as": "client",
+                    "pipeline": [{ "$project": { "_id": 0, "sName": 1 } }]
+                }
+            },
+            doc! { "$unwind": { "path": "$client", "preserveNullAndEmptyArrays": true } },
+            // Lookup editor name (Users._id is a UUID string, idEditor is also a string)
+            doc! {
+                "$lookup": {
+                    "from": "Users",
+                    "localField": "idEditor",
+                    "foreignField": "_id",
+                    "as": "editor",
+                    "pipeline": [{ "$project": { "_id": 0, "sName": 1 } }]
+                }
+            },
+            doc! { "$unwind": { "path": "$editor", "preserveNullAndEmptyArrays": true } },
+            // Sort: Pendiente first, then by dPaymentDate desc (convert string to date for sort)
+            doc! {
+                "$addFields": {
+                    "_sort_pending": {
+                        "$cond": { "if": { "$eq": ["$sState", "Pendiente"] }, "then": 0, "else": 1 }
+                    },
+                    "_sort_date": { "$toDate": "$dPaymentDate" }
+                }
+            },
+            doc! { "$sort": { "_sort_pending": 1, "_sort_date": -1 } },
+        ];
+
+        let collection = self.db.collection::<Document>("PaymentReports");
+        let mut cursor = collection
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut items = Vec::new();
+
+        while let Some(Ok(doc)) = cursor.next().await {
+            let id = doc
+                .get_object_id("_id")
+                .map(|o| o.to_hex())
+                .unwrap_or_default();
+
+            let id_client = doc.get_object_id("idClient").ok().map(|o| o.to_hex());
+            let id_payment_method = doc
+                .get_object_id("idPaymentMethod")
+                .ok()
+                .map(|o| o.to_hex());
+            let id_debt = doc.get_object_id("idDebt").ok().map(|o| o.to_hex());
+            let id_issuing_bank = doc.get_object_id("idIssuingBank").ok().map(|o| o.to_hex());
+            let id_editor = doc.get_str("idEditor").ok().map(|s| s.to_string());
+            let id_creator = doc.get_str("idCreator").ok().map(|s| s.to_string());
+            let id_payment = doc.get_object_id("idPayment").ok().map(|o| o.to_hex());
+
+            let payment_date = doc.get_str("dPaymentDate").unwrap_or_default().to_string();
+            let created_at = doc
+                .get_datetime("dCreation")
+                .ok()
+                .map(|dt| VenezuelaDateTime::from(*dt).datetime_string_venezuela())
+                .unwrap_or_default();
+
+            let client_name = doc
+                .get_document("client")
+                .ok()
+                .and_then(|d| d.get_str("sName").ok())
+                .map(|s| s.to_string());
+            let editor_name = doc
+                .get_document("editor")
+                .ok()
+                .and_then(|d| d.get_str("sName").ok())
+                .map(|s| s.to_string());
+
+            items.push(PaymentReportListItem {
+                id,
+                id_client,
+                id_payment_method,
+                id_debt,
+                reference: doc.get_str("sReference").unwrap_or_default().to_string(),
+                payment_date,
+                amount_bs: get_bson_amount(&doc, "nBs"),
+                bank_origin: doc.get_str("sBank").unwrap_or_default().to_string(),
+                phone_number: doc.get_str("sPhone").unwrap_or_default().to_string(),
+                image_url: doc.get_str("sImageUrl").unwrap_or_default().to_string(),
+                amount_usd: get_bson_amount(&doc, "nAmountUSD"),
+                exchange_rate: get_bson_amount(&doc, "nExchangeRate"),
+                state: doc.get_str("sState").unwrap_or_default().to_string(),
+                rejection_reason: doc.get_str("sRejectionReason").ok().map(|s| s.to_string()),
+                id_creator,
+                id_editor,
+                id_payment,
+                id_issuing_bank,
+                created_at,
+                client_name,
+                editor_name,
+            });
+        }
+
+        Ok(items)
+    }
+
+    async fn find_report_by_id(&self, id: ObjectId) -> Result<Option<PaymentReportFull>, String> {
+        let collection = self.db.collection::<Document>("PaymentReports");
+        let result = collection
+            .find_one(doc! { "_id": id })
+            .await
+            .map_err(|e| e.to_string())?;
+
+        match result {
+            None => Ok(None),
+            Some(doc) => {
+                let report = PaymentReportFull {
+                    _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
+                    id_client: doc.get_object_id("idClient").ok(),
+                    id_payment_method: doc.get_object_id("idPaymentMethod").ok(),
+                    id_debt: doc.get_object_id("idDebt").ok(),
+                    reference: doc.get_str("sReference").unwrap_or_default().to_string(),
+                    payment_date: doc.get_str("dPaymentDate").unwrap_or_default().to_string(),
+                    amount_bs: get_bson_amount(&doc, "nBs"),
+                    bank_origin: doc.get_str("sBank").unwrap_or_default().to_string(),
+                    phone_number: doc.get_str("sPhone").unwrap_or_default().to_string(),
+                    image_url: doc.get_str("sImageUrl").unwrap_or_default().to_string(),
+                    amount_usd: get_bson_amount(&doc, "nAmountUSD"),
+                    exchange_rate: get_bson_amount(&doc, "nExchangeRate"),
+                    state: doc.get_str("sState").unwrap_or_default().to_string(),
+                    rejection_reason: doc.get_str("sRejectionReason").ok().map(|s| s.to_string()),
+                    id_creator: doc.get_str("idCreator").ok().map(|s| s.to_string()),
+                    id_editor: doc.get_str("idEditor").ok().map(|s| s.to_string()),
+                    id_payment: doc.get_object_id("idPayment").ok(),
+                    id_issuing_bank: doc.get_object_id("idIssuingBank").ok(),
+                    created_at: doc
+                        .get_datetime("dCreation")
+                        .ok()
+                        .map(|dt| VenezuelaDateTime::from(*dt).datetime_string_venezuela())
+                        .unwrap_or_default(),
+                };
+                Ok(Some(report))
+            }
+        }
+    }
+
+    async fn update_report_state(
+        &self,
+        id: ObjectId,
+        new_state: &str,
+        editor_id: &str,
+        rejection_reason: Option<&str>,
+    ) -> Result<(), String> {
+        let collection = self.db.collection::<Document>("PaymentReports");
+        let now = mongodb::bson::DateTime::now();
+
+        let mut set_doc = doc! {
+            "sState": new_state,
+            "idEditor": editor_id,
+            "dEdition": now,
+        };
+
+        if let Some(reason) = rejection_reason {
+            set_doc.insert("sRejectionReason", reason);
+        }
+
+        collection
+            .update_one(doc! { "_id": id }, doc! { "$set": set_doc })
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    // ── realtime-pending-badges: T04 ─────────────────────────────────────────
+
+    async fn find_payments_for_match_by_client(
+        &self,
+        id_client: ObjectId,
+    ) -> Result<Vec<PaymentForMatch>, String> {
+        let collection = self.db.collection::<Document>("Payments");
+        let options = mongodb::options::FindOptions::builder()
+            .projection(doc! {
+                "_id": 1,
+                "sReference": 1,
+                "idPaymentReport": 1,
+                "idPaymentMethod": 1,
+            })
+            .build();
+
+        let mut cursor = collection
+            .find(doc! { "idClient": id_client, "sState": "Activo" })
+            .with_options(options)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut results = Vec::new();
+        while let Some(Ok(doc)) = cursor.next().await {
+            results.push(PaymentForMatch {
+                _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
+                s_reference: doc.get_str("sReference").unwrap_or_default().to_string(),
+                id_payment_report: doc.get_object_id("idPaymentReport").ok(),
+                id_payment_method: doc.get_object_id("idPaymentMethod").ok(),
+            });
+        }
+        Ok(results)
+    }
+
+    async fn update_payment_link(
+        &self,
+        payment_id: ObjectId,
+        id_payment_report: ObjectId,
+        id_payment_method: Option<ObjectId>,
+    ) -> Result<(), String> {
+        let collection = self.db.collection::<Document>("Payments");
+        let mut set_doc = doc! { "idPaymentReport": id_payment_report };
+        if let Some(pm) = id_payment_method {
+            set_doc.insert("idPaymentMethod", pm);
+        }
+        collection
+            .update_one(doc! { "_id": payment_id }, doc! { "$set": set_doc })
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn insert_payment(&self, doc: Document) -> Result<ObjectId, String> {
+        let collection = self.db.collection::<Document>("Payments");
+        let result = collection
+            .insert_one(doc)
+            .await
+            .map_err(|e| e.to_string())?;
+        result
+            .inserted_id
+            .as_object_id()
+            .ok_or_else(|| "inserted_id is not ObjectId".to_string())
+    }
+
+    async fn find_payment_by_id(&self, id: ObjectId) -> Result<Option<Payment>, String> {
+        let collection = self.db.collection::<Document>("Payments");
+        let result = collection
+            .find_one(doc! { "_id": id })
+            .await
+            .map_err(|e| e.to_string())?;
+
+        match result {
+            None => Ok(None),
+            Some(doc) => Ok(Some(Payment {
+                _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
+                n_amount: get_bson_amount(&doc, "nAmount"),
+                s_state: doc.get_str("sState").unwrap_or_default().to_string(),
+                n_bs: get_bson_amount(&doc, "nBs"),
+                s_reason: doc.get_str("sReason").ok().map(|s| s.to_string()),
+                id_client: doc.get_object_id("idClient").ok(),
+            })),
+        }
+    }
+
+    async fn update_payment_reason(
+        &self,
+        payment_id: ObjectId,
+        reason: &str,
+    ) -> Result<(), String> {
+        let collection = self.db.collection::<Document>("Payments");
+        collection
+            .update_one(
+                doc! { "_id": payment_id },
+                doc! { "$set": { "sReason": reason } },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    // ── realtime-pending-badges: T05 ─────────────────────────────────────────
+
+    async fn find_active_debt_by_id(&self, id: ObjectId) -> Result<Option<Debt>, String> {
+        let collection = self.db.collection::<Document>("Debts");
+        let result = collection
+            .find_one(doc! { "_id": id, "sState": "Activo" })
+            .await
+            .map_err(|e| e.to_string())?;
+
+        match result {
+            None => Ok(None),
+            Some(doc) => Ok(Some(Debt {
+                _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
+                n_amount: get_bson_amount(&doc, "nAmount"),
+                s_state: doc.get_str("sState").unwrap_or_default().to_string(),
+                id_client: doc
+                    .get_object_id("idClient")
+                    .unwrap_or_else(|_| ObjectId::new()),
+                s_reason: doc.get_str("sReason").unwrap_or_default().to_string(),
+                d_creation: doc
+                    .get_datetime("dCreation")
+                    .ok()
+                    .cloned()
+                    .unwrap_or_else(|| DateTime::from_millis(0)),
+            })),
+        }
+    }
+
+    async fn find_oldest_active_debt(
+        &self,
+        client_id: ObjectId,
+        excluded: &[ObjectId],
+    ) -> Result<Option<Debt>, String> {
+        // Pipeline: Debts → PartPayments (only active-payment parts) → compute pending → filter > 0
+        // → sort by dCreation asc → limit 1
+        // Mirrors the legacy TS pipeline from design §5.5.
+        let excluded_bson: Vec<mongodb::bson::Bson> = excluded
+            .iter()
+            .map(|o| mongodb::bson::Bson::ObjectId(*o))
+            .collect();
+
+        let pipeline = vec![
+            doc! {
+                "$match": {
+                    "idClient": client_id,
+                    "sState": "Activo",
+                    "_id": { "$nin": excluded_bson }
+                }
+            },
+            doc! {
+                "$lookup": {
+                    "from": "PartPayments",
+                    "let": { "debtId": "$_id" },
+                    "pipeline": [
+                        { "$match": { "$expr": { "$eq": ["$idDebt", "$$debtId"] } } },
+                        {
+                            "$lookup": {
+                                "from": "Payments",
+                                "localField": "idPayment",
+                                "foreignField": "_id",
+                                "as": "payment",
+                                "pipeline": [{ "$project": { "sState": 1 } }]
+                            }
+                        },
+                        { "$unwind": "$payment" },
+                        { "$match": { "payment.sState": "Activo" } },
+                        { "$project": { "nAmount": 1 } }
+                    ],
+                    "as": "partPayments"
+                }
+            },
+            doc! {
+                "$addFields": {
+                    "pending": {
+                        "$subtract": ["$nAmount", { "$sum": "$partPayments.nAmount" }]
+                    }
+                }
+            },
+            doc! { "$match": { "pending": { "$gt": 0.0 } } },
+            doc! { "$sort": { "dCreation": 1 } },
+            doc! { "$limit": 1 },
+        ];
+
+        let collection = self.db.collection::<Document>("Debts");
+        let mut cursor = collection
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if let Some(Ok(doc)) = cursor.next().await {
+            return Ok(Some(Debt {
+                _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
+                n_amount: get_bson_amount(&doc, "nAmount"),
+                s_state: doc.get_str("sState").unwrap_or_default().to_string(),
+                id_client: doc
+                    .get_object_id("idClient")
+                    .unwrap_or_else(|_| ObjectId::new()),
+                s_reason: doc.get_str("sReason").unwrap_or_default().to_string(),
+                d_creation: doc
+                    .get_datetime("dCreation")
+                    .ok()
+                    .cloned()
+                    .unwrap_or_else(|| DateTime::from_millis(0)),
+            }));
+        }
+        Ok(None)
+    }
+
+    async fn find_debts_for_reason(
+        &self,
+        debt_ids: Vec<ObjectId>,
+        this_payment_id: ObjectId,
+    ) -> Result<Vec<Debt>, String> {
+        // Returns debts matching ($in debt_ids) AND
+        // (sState=Activo OR (sState=Anulado AND idPayment=this_payment_id))
+        let filter = doc! {
+            "_id": { "$in": &debt_ids },
+            "$or": [
+                { "sState": "Activo" },
+                { "sState": "Anulado", "idPayment": this_payment_id }
+            ]
+        };
+        let collection = self.db.collection::<Document>("Debts");
+        let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
+        let mut debts = Vec::new();
+
+        while let Some(Ok(doc)) = cursor.next().await {
+            debts.push(Debt {
+                _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
+                n_amount: get_bson_amount(&doc, "nAmount"),
+                s_state: doc.get_str("sState").unwrap_or_default().to_string(),
+                id_client: doc
+                    .get_object_id("idClient")
+                    .unwrap_or_else(|_| ObjectId::new()),
+                s_reason: doc.get_str("sReason").unwrap_or_default().to_string(),
+                d_creation: doc
+                    .get_datetime("dCreation")
+                    .ok()
+                    .cloned()
+                    .unwrap_or_else(|| DateTime::from_millis(0)),
+            });
+        }
+        Ok(debts)
+    }
+
+    async fn find_active_debt_amounts_by_client(
+        &self,
+        client_id: ObjectId,
+    ) -> Result<Vec<f64>, String> {
+        let collection = self.db.collection::<Document>("Debts");
+        let options = mongodb::options::FindOptions::builder()
+            .projection(doc! { "_id": 0, "nAmount": 1 })
+            .build();
+        let mut cursor = collection
+            .find(doc! { "idClient": client_id, "sState": "Activo" })
+            .with_options(options)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut amounts = Vec::new();
+        while let Some(Ok(doc)) = cursor.next().await {
+            amounts.push(get_bson_amount(&doc, "nAmount"));
+        }
+        Ok(amounts)
+    }
+
+    async fn find_active_payment_amounts_by_client(
+        &self,
+        client_id: ObjectId,
+    ) -> Result<Vec<f64>, String> {
+        let collection = self.db.collection::<Document>("Payments");
+        let options = mongodb::options::FindOptions::builder()
+            .projection(doc! { "_id": 0, "nAmount": 1 })
+            .build();
+        let mut cursor = collection
+            .find(doc! { "idClient": client_id, "sState": "Activo" })
+            .with_options(options)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut amounts = Vec::new();
+        while let Some(Ok(doc)) = cursor.next().await {
+            amounts.push(get_bson_amount(&doc, "nAmount"));
+        }
+        Ok(amounts)
+    }
+
+    // ── realtime-pending-badges: T06 ─────────────────────────────────────────
+
+    async fn insert_part_payment(
+        &self,
+        id_debt: ObjectId,
+        id_payment: ObjectId,
+        n_amount: f64,
+    ) -> Result<(), String> {
+        let collection = self.db.collection::<Document>("PartPayments");
+        let doc = doc! {
+            "_id": ObjectId::new(),
+            "idDebt": id_debt,
+            "idPayment": id_payment,
+            "nAmount": n_amount,
+        };
+        collection
+            .insert_one(doc)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn find_part_payments_by_payment_id(
+        &self,
+        payment_id: ObjectId,
+    ) -> Result<Vec<PartPayment>, String> {
+        let collection = self.db.collection::<Document>("PartPayments");
+        let mut cursor = collection
+            .find(doc! { "idPayment": payment_id })
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut results = Vec::new();
+        while let Some(Ok(doc)) = cursor.next().await {
+            results.push(PartPayment {
+                _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
+                id_debt: doc
+                    .get_object_id("idDebt")
+                    .unwrap_or_else(|_| ObjectId::new()),
+                id_payment: doc
+                    .get_object_id("idPayment")
+                    .unwrap_or_else(|_| ObjectId::new()),
+                n_amount: get_bson_amount(&doc, "nAmount"),
+            });
+        }
+        Ok(results)
+    }
+
+    async fn find_part_payments_by_debt(
+        &self,
+        debt_id: ObjectId,
+    ) -> Result<Vec<PartPaymentWithPaymentState>, String> {
+        // Join PartPayments with Payments.sState for the linked payment.
+        let pipeline = vec![
+            doc! { "$match": { "idDebt": debt_id } },
+            doc! {
+                "$lookup": {
+                    "from": "Payments",
+                    "localField": "idPayment",
+                    "foreignField": "_id",
+                    "as": "payment",
+                    "pipeline": [{ "$project": { "_id": 0, "sState": 1 } }]
+                }
+            },
+            doc! { "$unwind": { "path": "$payment", "preserveNullAndEmptyArrays": true } },
+            doc! {
+                "$project": {
+                    "_id": 1,
+                    "idDebt": 1,
+                    "idPayment": 1,
+                    "nAmount": 1,
+                    "payment_state": { "$ifNull": ["$payment.sState", ""] }
+                }
+            },
+        ];
+
+        let collection = self.db.collection::<Document>("PartPayments");
+        let mut cursor = collection
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut results = Vec::new();
+
+        while let Some(Ok(doc)) = cursor.next().await {
+            results.push(PartPaymentWithPaymentState {
+                _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
+                id_debt: doc
+                    .get_object_id("idDebt")
+                    .unwrap_or_else(|_| ObjectId::new()),
+                id_payment: doc
+                    .get_object_id("idPayment")
+                    .unwrap_or_else(|_| ObjectId::new()),
+                n_amount: get_bson_amount(&doc, "nAmount"),
+                payment_state: doc.get_str("payment_state").unwrap_or_default().to_string(),
+            });
+        }
+        Ok(results)
     }
 }
 

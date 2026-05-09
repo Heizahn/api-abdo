@@ -5,7 +5,9 @@ use crate::models::ai_agent::{
 };
 use crate::models::db::{
     ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem,
-    LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate, SolvencyCounts, Tax,
+    LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate,
+    PartPaymentWithPaymentState, PaymentForMatch, PaymentReportFull, PaymentReportListItem,
+    SolvencyCounts, Tax,
 };
 use crate::models::whatsapp::{
     ConversationStats, QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyList,
@@ -77,11 +79,26 @@ pub trait UserRepository {
     /// Usuarios con permiso para atender chats (campo `bCanChat == true` y `visible == true`).
     /// Usado para poblar el dropdown de transferencia de conversaciones.
     async fn find_chat_agents(&self) -> Result<Vec<User>, String>;
-    /// UUIDs de todos los SUPERADMIN visibles (`nRole == 0` y `visible == true`).
-    /// Usado por el módulo de tickets para determinar el scope de broadcast
-    /// del evento `TICKET_ACTUALIZADO` (creador + asignado + supervisores).
-    /// Devuelve sólo strings — el caller no necesita el doc User completo.
-    async fn find_superadmin_ids(&self) -> Result<Vec<String>, String>;
+    // ── realtime-pending-badges additions ────────────────────────────────────
+
+    /// UUIDs de usuarios visibles y no-bot cuyo `nRole` está en `roles`.
+    /// Filter: `{ visible: true, bIsBot: { $ne: true }, nRole: { $in: roles } }`.
+    /// Usado por `broadcast_to_roles` para determinar destinatarios de badge events.
+    async fn find_users_by_roles(&self, roles: &[f32]) -> Result<Vec<String>, String>;
+
+    /// UUIDs de usuarios visibles y no-bot con `bCanChat == true`.
+    /// Filter: `{ visible: true, bIsBot: { $ne: true }, bCanChat: true }`.
+    /// Usado por `broadcast_to_chat_users` (WA + Tickets badge events).
+    async fn find_chat_user_ids(&self) -> Result<Vec<String>, String>;
+
+    /// Retorna `(nRole, bCanChat)` del usuario. Usado al conectar un WS para
+    /// determinar qué campos del `BADGES_SNAPSHOT` corresponde poblar.
+    /// Retorna `(None, false)` si el usuario no existe.
+    async fn get_user_role_and_can_chat(
+        &self,
+        user_id: &str,
+    ) -> Result<(Option<f32>, bool), String>;
+
     /// Listado paginado con filtros para el CRUD de usuarios.
     /// Ordenado por `sName` ascendente con `_id` como tiebreaker estable.
     async fn list_users(&self, filter: UserListFilter<'_>) -> Result<Vec<User>, String>;
@@ -180,6 +197,10 @@ pub trait ProfileRepository {
         phone: Option<&str>,
         identification: Option<&str>,
     ) -> Result<Vec<AiClientLookup>, String>;
+
+    /// Actualiza el campo `nBalance` del cliente. Llamado por `PaymentsService::update_balance`
+    /// tras recomputar el balance (Σ active Payments − Σ active Debts).
+    async fn update_client_balance(&self, id: ObjectId, balance: f64) -> Result<(), String>;
 }
 
 // ============================================
@@ -266,6 +287,116 @@ pub trait SalesRepository {
         s_reference: &str,
         issuing_bank_id: Option<ObjectId>,
     ) -> Result<Option<ReferenceMatchInfo>, String>;
+
+    // ── realtime-pending-badges additions ────────────────────────────────────
+
+    // Counts
+    /// Cuenta documentos en `PaymentReports` con `sState == "Pendiente"`.
+    async fn count_pending_reports(&self) -> Result<u64, String>;
+
+    // Reports
+    /// Lista `PaymentReports` con filtro temporal + join de nombre de cliente y editor.
+    /// Filtro: `sState == "Pendiente"` OR `dPaymentDate >= now - 2 months`.
+    /// Sort: Pendiente primero, luego `dPaymentDate` desc.
+    async fn list_payment_reports(&self) -> Result<Vec<PaymentReportListItem>, String>;
+
+    /// Busca un `PaymentReport` por `_id`. Retorna el doc completo o `None`.
+    async fn find_report_by_id(&self, id: ObjectId) -> Result<Option<PaymentReportFull>, String>;
+
+    /// Actualiza el estado de un `PaymentReport`. Además setea `idEditor`, `dEdition`,
+    /// y opcionalmente `sRejectionReason` (solo cuando `new_state == "Rechazado"`).
+    async fn update_report_state(
+        &self,
+        id: ObjectId,
+        new_state: &str,
+        editor_id: &str,
+        rejection_reason: Option<&str>,
+    ) -> Result<(), String>;
+
+    // Payments — fuzzy match path
+    /// Proyección mínima `{ _id, sReference, idPaymentReport, idPaymentMethod }`
+    /// de todos los `Payments` activos para un cliente. Usado en la lógica de
+    /// match bidireccional al aprobar un `PaymentReport`.
+    async fn find_payments_for_match_by_client(
+        &self,
+        id_client: ObjectId,
+    ) -> Result<Vec<PaymentForMatch>, String>;
+
+    /// Vincula un `Payment` existente a un `PaymentReport`: setea
+    /// `idPaymentReport` e `idPaymentMethod`.
+    async fn update_payment_link(
+        &self,
+        payment_id: ObjectId,
+        id_payment_report: ObjectId,
+        id_payment_method: Option<ObjectId>,
+    ) -> Result<(), String>;
+
+    /// Inserta un `Payment` documento (BSON crudo) y retorna el `ObjectId` insertado.
+    async fn insert_payment(&self, doc: Document) -> Result<ObjectId, String>;
+
+    /// Busca un `Payment` por `_id`. Retorna el doc o `None`.
+    async fn find_payment_by_id(&self, id: ObjectId) -> Result<Option<Payment>, String>;
+
+    /// Escribe `sReason` en un `Payment`.
+    async fn update_payment_reason(&self, payment_id: ObjectId, reason: &str)
+        -> Result<(), String>;
+
+    // Debts
+    /// Busca una `Debt` activa por `_id`. Retorna `None` si no existe o no está activa.
+    async fn find_active_debt_by_id(&self, id: ObjectId) -> Result<Option<Debt>, String>;
+
+    /// Pipeline `Debts → PartPayments → Payments` para encontrar la deuda activa
+    /// más antigua con `pending > 0`, excluyendo los `excluded` IDs.
+    async fn find_oldest_active_debt(
+        &self,
+        client_id: ObjectId,
+        excluded: &[ObjectId],
+    ) -> Result<Option<Debt>, String>;
+
+    /// Devuelve `Debt`s cuyos `_id` estén en `debt_ids` y cuyo estado sea
+    /// `Activo` O (`Anulado` AND `idPayment == this_payment_id`).
+    /// Usado por `calculate_payment_reason`.
+    async fn find_debts_for_reason(
+        &self,
+        debt_ids: Vec<ObjectId>,
+        this_payment_id: ObjectId,
+    ) -> Result<Vec<Debt>, String>;
+
+    /// Suma los `nAmount` de `Debts` activas del cliente. Retorna lista de montos
+    /// para que el caller sume con `Iterator::sum()`.
+    async fn find_active_debt_amounts_by_client(
+        &self,
+        client_id: ObjectId,
+    ) -> Result<Vec<f64>, String>;
+
+    // Payments — balance recompute
+    /// Suma los `nAmount` de `Payments` activos del cliente. Retorna lista de montos.
+    async fn find_active_payment_amounts_by_client(
+        &self,
+        client_id: ObjectId,
+    ) -> Result<Vec<f64>, String>;
+
+    // PartPayments
+    /// Inserta un `PartPayment` que vincula `id_debt` con `id_payment` por `n_amount`.
+    async fn insert_part_payment(
+        &self,
+        id_debt: ObjectId,
+        id_payment: ObjectId,
+        n_amount: f64,
+    ) -> Result<(), String>;
+
+    /// Retorna todos los `PartPayment` de un `Payment`.
+    async fn find_part_payments_by_payment_id(
+        &self,
+        payment_id: ObjectId,
+    ) -> Result<Vec<PartPayment>, String>;
+
+    /// Retorna `PartPayment`s de una `Debt` joinados con `Payments.sState`.
+    /// Usado por `process_payment` para calcular el `pending` de una deuda.
+    async fn find_part_payments_by_debt(
+        &self,
+        debt_id: ObjectId,
+    ) -> Result<Vec<PartPaymentWithPaymentState>, String>;
 }
 
 // ============================================
@@ -873,6 +1004,18 @@ pub trait WhatsAppRepository {
         business_phone: Option<&str>,
         conversation_ids: Option<&[ObjectId]>,
     ) -> Result<Vec<i64>, String>;
+
+    // ── realtime-pending-badges additions ────────────────────────────────────
+
+    /// Cuenta conversaciones con `unread_count > 0`.
+    /// Usado para poblar el campo `wa_conversations_unread` del `BADGES_SNAPSHOT`
+    /// y el `pending_total` de `CONVERSACION_NO_LEIDA`.
+    async fn count_unread_conversations(&self) -> Result<u64, String>;
+
+    /// Cuenta tickets con `status == "open"`.
+    /// Usado para poblar el campo `wa_tickets_open` del `BADGES_SNAPSHOT`
+    /// y el `pending_total` de `TICKET_PENDIENTE`.
+    async fn count_open_tickets(&self) -> Result<u64, String>;
 }
 
 // ============================================

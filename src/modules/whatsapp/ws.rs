@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     auth::user_jwt::UserJwtService,
-    db::WhatsAppRepository,
+    db::{SalesRepository, UserRepository, WhatsAppRepository},
     models::whatsapp::{ConversationItem, MessageItem, TicketItem},
     state::{AppState, WsRegistry},
 };
@@ -215,6 +215,89 @@ pub enum WsServerEvent {
     /// Confirmación de conexión tras el upgrade WebSocket.
     #[serde(rename = "CONECTADO")]
     Conectado { usuario_id: String },
+
+    /// Snapshot de badges enviado al conectar. Contiene los 3 contadores
+    /// según el rol y flags del usuario. Campos sin acceso llegan como 0.
+    #[serde(rename = "BADGES_SNAPSHOT")]
+    BadgesSnapshot { data: BadgesSnapshotData },
+
+    /// Evento reactivo: cambio en el conteo de reportes de pago pendientes.
+    /// Audience: nRole ∈ {0.0, 1.0, 1.5}. Fan-out vía `broadcast_to_roles`.
+    ///
+    /// Emit sites (// EMIT BADGE: REPORTE_PAGO_PENDIENTE):
+    /// - payments/handler.rs::report_payment_handler (client create)
+    /// - payments/handler.rs::report_payment_user_handler (staff create)
+    /// - ai_agent/tools.rs report_payment tool
+    /// - payments/handler.rs::approve_payment_report_handler (NEW)
+    /// - payments/handler.rs::reject_payment_report_handler (NEW)
+    #[serde(rename = "REPORTE_PAGO_PENDIENTE")]
+    ReportePagoPendiente { data: ReportePagoPendienteData },
+
+    /// Evento reactivo: cambio en el conteo de conversaciones con mensajes no leídos.
+    /// Audience: bCanChat == true. Fan-out vía `broadcast_to_chat_users`.
+    ///
+    /// Emit sites (// EMIT BADGE: CONVERSACION_NO_LEIDA):
+    /// - whatsapp/handler.rs (after touch_conversation(increment_unread=true))
+    /// - whatsapp/handler.rs mark_read_handler (after reset_unread)
+    #[serde(rename = "CONVERSACION_NO_LEIDA")]
+    ConversacionNoLeida { data: ConversacionNoLeidaData },
+
+    /// Evento reactivo: cambio en el conteo de tickets con status "open".
+    /// Audience: bCanChat == true. Fan-out vía `broadcast_to_chat_users`.
+    ///
+    /// Emit sites (// EMIT BADGE: TICKET_PENDIENTE):
+    /// - whatsapp/tickets.rs::create_ticket_handler (after insert)
+    /// - whatsapp/tickets.rs::transfer_and_ticket_handler (after insert)
+    /// - whatsapp/tickets.rs::update_ticket_handler (only when crossing open boundary)
+    /// - ai_agent/tools.rs ticket tool (if exists)
+    #[serde(rename = "TICKET_PENDIENTE")]
+    TicketPendiente { data: TicketPendienteData },
+}
+
+// ============================================
+// DATA STRUCTS PARA BADGE EVENTS
+// ============================================
+
+/// Payload para BADGES_SNAPSHOT — snapshot completo de los 3 inboxes al conectar.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub struct BadgesSnapshotData {
+    pub payment_reports_pending: u64,
+    pub wa_conversations_unread: u64,
+    pub wa_tickets_open: u64,
+}
+
+/// Payload para REPORTE_PAGO_PENDIENTE — delta tras cualquier cambio de estado de un reporte.
+/// `previous_state` es None en inserts nuevos.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub struct ReportePagoPendienteData {
+    pub pending_total: u64,
+    pub report_id: String,
+    pub previous_state: Option<String>,
+    pub new_state: String,
+}
+
+/// Payload para CONVERSACION_NO_LEIDA — delta tras touch_conversation o reset_unread.
+/// `delta` es +1 cuando la conversación pasa de 0→1 mensajes no leídos,
+/// -1 cuando pasa de N→0 (mark-read). `pending_total` es siempre autoritativo.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub struct ConversacionNoLeidaData {
+    pub pending_total: u64,
+    pub conversation_id: String,
+    pub delta: i32,
+}
+
+/// Payload para TICKET_PENDIENTE — delta tras cualquier transición que cruce el estado "open".
+/// `previous_status` es None en tickets recién creados.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub struct TicketPendienteData {
+    pub pending_total: u64,
+    pub ticket_id: String,
+    pub previous_status: Option<String>,
+    pub new_status: String,
 }
 
 // ============================================
@@ -296,6 +379,62 @@ pub async fn broadcast_all(registry: &WsRegistry, event: &WsServerEvent) {
     }
 }
 
+/// Broadcast un payload JSON pre-serializado a todos los usuarios cuyo `nRole` ∈ `roles`.
+///
+/// Filtros DB: visible == true, bIsBot != true. Dedupes por user_id.
+/// Best-effort: fallas de envío por usuario son silenciosas (usuario desconectado).
+///
+/// Callsites (// EMIT BADGE: REPORTE_PAGO_PENDIENTE):
+/// - payments/handler.rs::report_payment_handler (client create)
+/// - payments/handler.rs::report_payment_user_handler (staff create)
+/// - ai_agent/tools.rs report_payment tool
+/// - payments/handler.rs::approve_payment_report_handler (NEW)
+/// - payments/handler.rs::reject_payment_report_handler (NEW)
+pub async fn broadcast_to_roles(
+    state: &Arc<AppState>,
+    roles: &[f32],
+    payload: String,
+) -> Result<(), String> {
+    let user_ids = state
+        .db
+        .find_users_by_roles(roles)
+        .await
+        .map_err(|e| format!("find_users_by_roles failed: {}", e))?;
+    // Dedup: the DB query is already filtered but collect into HashSet for safety.
+    let unique: std::collections::HashSet<String> = user_ids.into_iter().collect();
+    for uid in unique {
+        send_to_user(&state.ws_registry, &uid, payload.clone()).await;
+    }
+    Ok(())
+}
+
+/// Broadcast un payload JSON pre-serializado a todos los usuarios con `bCanChat == true`.
+///
+/// Filtros DB: visible == true, bIsBot != true.
+/// Best-effort: fallas de envío por usuario son silenciosas.
+///
+/// Callsites (// EMIT BADGE: CONVERSACION_NO_LEIDA):
+/// - whatsapp/handler.rs (after touch_conversation(increment_unread=true))
+/// - whatsapp/handler.rs mark_read_handler (after reset_unread)
+///
+/// Callsites (// EMIT BADGE: TICKET_PENDIENTE):
+/// - whatsapp/tickets.rs::create_ticket_handler
+/// - whatsapp/tickets.rs::transfer_and_ticket_handler
+/// - whatsapp/tickets.rs::update_ticket_handler (crossing open boundary only)
+/// - ai_agent/tools.rs ticket tool (if exists)
+pub async fn broadcast_to_chat_users(state: &Arc<AppState>, payload: String) -> Result<(), String> {
+    let user_ids = state
+        .db
+        .find_chat_user_ids()
+        .await
+        .map_err(|e| format!("find_chat_user_ids failed: {}", e))?;
+    let unique: std::collections::HashSet<String> = user_ids.into_iter().collect();
+    for uid in unique {
+        send_to_user(&state.ws_registry, &uid, payload.clone()).await;
+    }
+    Ok(())
+}
+
 /// Broadcast a todos los agentes conectados excepto el indicado.
 /// Útil para eventos como CHAT_TOMADO, donde el que tomó ya tiene la respuesta HTTP.
 pub async fn broadcast_except(registry: &WsRegistry, skip_agent_id: &str, event: &WsServerEvent) {
@@ -344,7 +483,7 @@ pub async fn ws_handler(
                     error: "token_invalido".to_string(),
                 })
                 .unwrap_or_default();
-                let _ = socket.send(Message::Text(err.into())).await;
+                let _ = socket.send(Message::Text(err)).await;
                 let _ = socket.close().await;
             })
         }
@@ -372,12 +511,66 @@ async fn handle_socket(
         usuario_id: user_id.clone(),
     })
     .unwrap_or_default();
-    let _ = sink.send(Message::Text(connected_msg.into())).await;
+    let _ = sink.send(Message::Text(connected_msg)).await;
+
+    // Emitir BADGES_SNAPSHOT justo después de CONECTADO, antes del send_task.
+    // Enviamos directo al sink (lo poseemos aún) para evitar cualquier race con el relay channel.
+    // nRole == 0.0, 1.0, 1.5 son exactos en f32 (potencias/sumas de potencias de 2).
+    {
+        let (role_opt, can_chat) = state
+            .db
+            .get_user_role_and_can_chat(&user_id)
+            .await
+            .unwrap_or((None, false));
+
+        let role_eligible =
+            matches!(role_opt, Some(r) if r == 0.0_f32 || r == 1.0_f32 || r == 1.5_f32);
+
+        let (reports, unread, tickets) = tokio::join!(
+            async {
+                if role_eligible {
+                    state.db.count_pending_reports().await.unwrap_or(0)
+                } else {
+                    0
+                }
+            },
+            async {
+                if can_chat {
+                    state.db.count_unread_conversations().await.unwrap_or(0)
+                } else {
+                    0
+                }
+            },
+            async {
+                if can_chat {
+                    state.db.count_open_tickets().await.unwrap_or(0)
+                } else {
+                    0
+                }
+            },
+        );
+
+        let snapshot = WsServerEvent::BadgesSnapshot {
+            data: BadgesSnapshotData {
+                payment_reports_pending: reports,
+                wa_conversations_unread: unread,
+                wa_tickets_open: tickets,
+            },
+        };
+        match serde_json::to_string(&snapshot) {
+            Ok(payload) => {
+                let _ = sink.send(Message::Text(payload)).await;
+            }
+            Err(e) => {
+                tracing::error!("[ws] serialize BADGES_SNAPSHOT: {}", e);
+            }
+        }
+    }
 
     // Task: reenviar mensajes del canal al socket
     let send_task = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if sink.send(Message::Text(msg.into())).await.is_err() {
+            if sink.send(Message::Text(msg)).await.is_err() {
                 break;
             }
         }

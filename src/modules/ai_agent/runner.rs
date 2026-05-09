@@ -161,8 +161,7 @@ fn detect_text_tool_invocations(text: &str) -> Vec<&'static str> {
         .iter()
         .copied()
         .filter(|tool| {
-            text.contains(&format!("[{}", tool))
-                || text.contains(&format!("<<TOOL_CALL: {}", tool))
+            text.contains(&format!("[{}", tool)) || text.contains(&format!("<<TOOL_CALL: {}", tool))
         })
         .collect()
 }
@@ -941,7 +940,8 @@ mod text_tool_invocation_tests {
 
     #[test]
     fn does_not_match_normal_text() {
-        let text = "Tu saldo pendiente es Bs. 5.798,39, vencimiento 17/04. ¿Querés los métodos de pago?";
+        let text =
+            "Tu saldo pendiente es Bs. 5.798,39, vencimiento 17/04. ¿Querés los métodos de pago?";
         assert!(detect_text_tool_invocations(text).is_empty());
     }
 

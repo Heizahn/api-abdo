@@ -1087,4 +1087,16 @@ impl ProfileRepository for MongoDB {
         }
         Ok(out)
     }
+
+    // ── realtime-pending-badges: T08 ─────────────────────────────────────────
+
+    async fn update_client_balance(&self, id: ObjectId, balance: f64) -> Result<(), String> {
+        let collection: mongodb::Collection<mongodb::bson::Document> =
+            self.db.collection("Clients");
+        collection
+            .update_one(doc! { "_id": id }, doc! { "$set": { "nBalance": balance } })
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }

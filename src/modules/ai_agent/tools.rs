@@ -2556,6 +2556,26 @@ async fn exec_create_ticket(args: Value, ctx: &ToolContext, started: Instant) ->
     }
 
     let ticket_id = saved.id.map(|o| o.to_hex()).unwrap_or_default();
+
+    // EMIT BADGE: TICKET_PENDIENTE — AI agent creates tickets in "open" status.
+    {
+        use crate::modules::whatsapp::ws::{
+            broadcast_to_chat_users, TicketPendienteData, WsServerEvent,
+        };
+        let pending_total = ctx.state.db.count_open_tickets().await.unwrap_or(0);
+        let badge_ev = WsServerEvent::TicketPendiente {
+            data: TicketPendienteData {
+                pending_total,
+                ticket_id: ticket_id.clone(),
+                previous_status: None,
+                new_status: "open".to_string(),
+            },
+        };
+        if let Ok(badge_payload) = serde_json::to_string(&badge_ev) {
+            let _ = broadcast_to_chat_users(&ctx.state, badge_payload).await;
+        }
+    }
+
     ToolResult::ok(
         json!({
             "ok": true,
@@ -3008,9 +3028,7 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         .check_reference(&client_oid, &reference, parsed_issuing_bank_oid)
         .await
     {
-        Ok(Some(match_info))
-            if match_info.s_state.eq_ignore_ascii_case("Rechazado") =>
-        {
+        Ok(Some(match_info)) if match_info.s_state.eq_ignore_ascii_case("Rechazado") => {
             tracing::info!(
                 "[ai_agent.report_payment] previous report rejected, allowing re-report (client={}, ref='{}', source={}, is_same_client={}, prev_amount_bs={})",
                 client_oid.to_hex(),
@@ -3241,12 +3259,7 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     }
     let bank_origin: String = resolved_bank_display
         .clone()
-        .or_else(|| {
-            parsed
-                .bank
-                .clone()
-                .filter(|s| !s.trim().is_empty())
-        })
+        .or_else(|| parsed.bank.clone().filter(|s| !s.trim().is_empty()))
         .unwrap_or_default();
     let report_phone_number: String = parsed.phone.clone().unwrap_or_default();
     let ref_for_ticket = reference.clone();
@@ -3278,6 +3291,26 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     };
     let report_oid = inserted.inserted_id.as_object_id().unwrap_or_default();
     let payment_id = report_oid.to_hex();
+
+    // EMIT BADGE: REPORTE_PAGO_PENDIENTE
+    {
+        use crate::modules::whatsapp::ws::{
+            broadcast_to_roles, ReportePagoPendienteData, WsServerEvent,
+        };
+        let pending_total = ctx.state.db.count_pending_reports().await.unwrap_or(0);
+        let badge_event = WsServerEvent::ReportePagoPendiente {
+            data: ReportePagoPendienteData {
+                pending_total,
+                report_id: payment_id.clone(),
+                previous_state: None,
+                new_state: "Pendiente".to_string(),
+            },
+        };
+        if let Ok(badge_payload) = serde_json::to_string(&badge_event) {
+            let _ =
+                broadcast_to_roles(&ctx.state, &[0.0_f32, 1.0_f32, 1.5_f32], badge_payload).await;
+        }
+    }
 
     // 18. Best-effort ticket creation in cobranzas_facturacion.
     // If the PaymentReport was saved successfully but ticket creation fails, we

@@ -1,4 +1,5 @@
 pub mod handler;
+pub mod service;
 
 use crate::state::AppState;
 use axum::{
@@ -34,5 +35,20 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/auth-user/payments/methods/by-client/:client_id",
             get(handler::get_pago_movil_data_by_client_user_handler),
+        )
+        // T20 — list payment reports
+        .route(
+            "/v1/auth-user/payments-reports",
+            get(handler::list_payment_reports_handler),
+        )
+        // T21 — approve a payment report
+        .route(
+            "/v1/auth-user/payments-reports/:id/approve",
+            post(handler::approve_payment_report_handler),
+        )
+        // T22 — reject a payment report
+        .route(
+            "/v1/auth-user/payments-reports/:id/reject",
+            post(handler::reject_payment_report_handler),
         )
 }

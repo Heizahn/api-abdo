@@ -25,8 +25,8 @@ use crate::models::auth::{
 };
 use crate::models::db::{
     BcvResponse, ClientDetail, ClientListItem, ClientOnu, ClientStatusHistoryItem,
-    CustomerInfoItem, LatestPayment, LatestVersion, LatestVersionResponse, PingResponse,
-    SolvencyCounts,
+    CustomerInfoItem, LatestPayment, LatestVersion, LatestVersionResponse, PaymentReportListItem,
+    PingResponse, SolvencyCounts,
 };
 use crate::models::payment::{
     Bank, BankListResponse, CheckReferenceData, CheckReferenceRequest, CheckReferenceResponse,
@@ -55,8 +55,6 @@ use crate::models::whatsapp::{
     QuickReplyResponse, ReplyToItem, SendMessageData, SendMessageRequest, SendMessageResponse,
     SendTemplatePayload, SettingsItem, SettingsListResponse, SettingsResponse,
     TakeConversationResponse, TicketCategoriesResponse, TicketCategoryItem, TicketItem,
-    WaTestConnectionData, WaTestConnectionRequest, WaTestConnectionResponse,
-    WaTestConnectionSource,
     TicketResponse, TicketTimelineEntryItem, TicketsListResponse, ToggleActiveRequest,
     TransferAndTicketData, TransferAndTicketRequest, TransferAndTicketResponse,
     TransferConversationRequest, TransferableAgentItem, TransferableAgentsResponse,
@@ -64,7 +62,8 @@ use crate::models::whatsapp::{
     UpdateTicketStatusRequest, UpdateWaTemplateRequest, UrlPreview, WaPurposeConfig,
     WaPurposeUsage, WaPurposes, WaPurposesPatch, WaTemplateButtonInput, WaTemplateCategory,
     WaTemplateHeaderInput, WaTemplateItem, WaTemplateResponse, WaTemplateStatus,
-    WaTemplatesListResponse, WaTicketTimelineEntry,
+    WaTemplatesListResponse, WaTestConnectionData, WaTestConnectionRequest,
+    WaTestConnectionResponse, WaTestConnectionSource, WaTicketTimelineEntry,
 };
 use crate::models::zabbix::{MonthlyTraffic, ZabbixTrafficResponse};
 use crate::modules::ai_agent::business_data::{AiToolMetaItem, AiToolsListResponse};
@@ -77,6 +76,7 @@ use crate::modules::calculations::handler::{
     CalculationRequest, CalculationRequestV2, CalculationResponse, CalculationResponseV2, Currency,
 };
 use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingResponse};
+use crate::modules::payments::handler::RejectReportRequest;
 use crate::modules::whatsapp::handler::ResetAiStateResponse;
 
 #[derive(OpenApi)]
@@ -111,6 +111,9 @@ use crate::modules::whatsapp::handler::ResetAiStateResponse;
         crate::modules::payments::handler::get_pago_movil_data_by_client_user_handler,
         crate::modules::payments::handler::report_payment_handler,
         crate::modules::payments::handler::report_payment_user_handler,
+        crate::modules::payments::handler::list_payment_reports_handler,
+        crate::modules::payments::handler::approve_payment_report_handler,
+        crate::modules::payments::handler::reject_payment_report_handler,
         crate::modules::auth_user::handler::check_reference_handler,
         // Dashboard
         crate::modules::dashboard::handler::latest_payments_handler,
@@ -243,6 +246,7 @@ use crate::modules::whatsapp::handler::ResetAiStateResponse;
             RejectedPayment, RejectedPaymentsResponse,
             // Payments
             PaymentMethodResponse, PagoMovilData,
+            PaymentReportListItem, RejectReportRequest,
             CheckReferenceRequest, CheckReferenceResponse, CheckReferenceData, ReferenceDetails,
             // Dashboard
             LatestPayment, SolvencyCounts, MonthlyClosingResponse, MonthlyClosingData,

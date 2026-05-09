@@ -2070,6 +2070,22 @@ impl WhatsAppRepository for MongoDB {
 
         Ok(inserted)
     }
+
+    // ── realtime-pending-badges: T09 ─────────────────────────────────────────
+
+    async fn count_unread_conversations(&self) -> Result<u64, String> {
+        self.wa_conversations()
+            .count_documents(doc! { "unread_count": { "$gt": 0 } })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn count_open_tickets(&self) -> Result<u64, String> {
+        self.wa_tickets()
+            .count_documents(doc! { "status": "open" })
+            .await
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// Decodifica cursor con formato `<millis>_<hex_id>`.

@@ -163,7 +163,7 @@ pub struct PaymentReport {
     pub exchange_rate: f64,
 
     #[serde(rename = "sState")]
-    pub state: String, // "Pendiente", "Aprobado", "Rechazado"
+    pub state: String, // "Pendiente", "Verificado", "Rechazado"
 
     #[serde(rename = "sRejectionReason", default)]
     pub rejection_reason: Option<String>,

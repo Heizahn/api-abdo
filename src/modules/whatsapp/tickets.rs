@@ -48,7 +48,7 @@ use crate::{
 };
 
 use super::handler::{build_conversation_item, iso8601_pub as iso8601, require_can_chat};
-use super::ws::{send_to_user, WsServerEvent};
+use super::ws::{broadcast_to_chat_users, send_to_user, TicketPendienteData, WsServerEvent};
 
 // ============================================
 // CATÁLOGO DE CATEGORÍAS (MVP — hardcoded)
@@ -426,23 +426,48 @@ async fn broadcast_ticket_updated(
         }
     };
 
-    // Dedup: creador + asignado actual + SUPERADMINs.
+    // Dedup: creador + asignado actual + SUPERADMINs (nRole == 0.0).
+    // nRole == 0.0 es exacto en f32 (representación IEEE-754 exacta).
     let mut recipients: std::collections::HashSet<String> = std::collections::HashSet::new();
     recipients.insert(ticket.created_by_id.clone());
     if let Some(uid) = &ticket.assigned_to_id {
         recipients.insert(uid.clone());
     }
-    match state.db.find_superadmin_ids().await {
+    match state.db.find_users_by_roles(&[0.0]).await {
         Ok(ids) => {
             for id in ids {
                 recipients.insert(id);
             }
         }
-        Err(e) => tracing::warn!("[ws] find_superadmin_ids: {}", e),
+        Err(e) => tracing::warn!("[ws] find_users_by_roles(superadmin): {}", e),
     }
 
     for uid in recipients {
         send_to_user(&state.ws_registry, &uid, payload.clone()).await;
+    }
+
+    // EMIT BADGE: TICKET_PENDIENTE — only when the transition crosses the "open" boundary.
+    // open → in_progress (or cancelled/closed): badge decrements.
+    // resolved/in_progress/closed → open: badge increments.
+    // in_progress → resolved (neither is "open"): no badge change.
+    let new_status = ticket.status.as_str();
+    if previous_status != new_status && (previous_status == "open" || new_status == "open") {
+        match state.db.count_open_tickets().await {
+            Ok(pending_total) => {
+                let badge_ev = WsServerEvent::TicketPendiente {
+                    data: TicketPendienteData {
+                        pending_total,
+                        ticket_id: ticket.id.clone(),
+                        previous_status: Some(previous_status.to_string()),
+                        new_status: new_status.to_string(),
+                    },
+                };
+                if let Ok(badge_payload) = serde_json::to_string(&badge_ev) {
+                    let _ = broadcast_to_chat_users(state, badge_payload).await;
+                }
+            }
+            Err(e) => tracing::warn!("[ws] count_open_tickets for TICKET_PENDIENTE badge: {}", e),
+        }
     }
 }
 
@@ -706,10 +731,24 @@ pub async fn create_ticket_handler(
         .await
         .map_err(ApiError::DatabaseError)?;
 
+    let item = ticket_to_item(ticket, true);
+
+    // EMIT BADGE: TICKET_PENDIENTE — new ticket always starts at "open".
+    let ticket_pending_total = state.db.count_open_tickets().await.unwrap_or(0);
+    let ticket_badge_ev = WsServerEvent::TicketPendiente {
+        data: TicketPendienteData {
+            pending_total: ticket_pending_total,
+            ticket_id: item.id.clone(),
+            previous_status: None,
+            new_status: "open".to_string(),
+        },
+    };
+    if let Ok(badge_payload) = serde_json::to_string(&ticket_badge_ev) {
+        let _ = broadcast_to_chat_users(&state, badge_payload).await;
+    }
+
     // 6. Cierre best-effort de la conversación origen. No-op si ya estaba cerrada.
     cascade_close_conversation(&state, &conv, &claims.id, &creator.name, "ticket_created").await;
-
-    let item = ticket_to_item(ticket, true);
 
     // 7. WS: TICKET_ASIGNADO al destino (si aplica).
     if item.assigned_to_id.is_some() {
@@ -1334,6 +1373,22 @@ pub async fn transfer_and_ticket_handler(
         .await
         .map_err(ApiError::DatabaseError)?;
 
+    let item = ticket_to_item(ticket, true);
+
+    // EMIT BADGE: TICKET_PENDIENTE — transfer always creates an "open" ticket.
+    let ticket_pending_total = state.db.count_open_tickets().await.unwrap_or(0);
+    let ticket_badge_ev = WsServerEvent::TicketPendiente {
+        data: TicketPendienteData {
+            pending_total: ticket_pending_total,
+            ticket_id: item.id.clone(),
+            previous_status: None,
+            new_status: "open".to_string(),
+        },
+    };
+    if let Ok(badge_payload) = serde_json::to_string(&ticket_badge_ev) {
+        let _ = broadcast_to_chat_users(&state, badge_payload).await;
+    }
+
     // Cierre de la conversación + auditoría + WS, mismo patrón que POST /tickets.
     cascade_close_conversation(
         &state,
@@ -1344,7 +1399,6 @@ pub async fn transfer_and_ticket_handler(
     )
     .await;
 
-    let item = ticket_to_item(ticket, true);
     send_ticket_assigned(&state, &item, &creator.name).await;
 
     // Cargar conv actualizada para la respuesta.

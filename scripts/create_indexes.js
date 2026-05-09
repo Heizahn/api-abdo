@@ -118,6 +118,13 @@ db.Payments.createIndex(
 );
 print("  ✅ Payments.sState");
 
+// approve_payment_report_handler: fuzzy match por cliente + referencia
+db.Payments.createIndex(
+  { "idClient": 1, "sReference": 1 },
+  { name: "idx_payments_client_reference", background: true }
+);
+print("  ✅ Payments.idClient + sReference");
+
 print("");
 
 // ============================================
@@ -177,6 +184,13 @@ db.PaymentReports.createIndex(
   { name: "idx_paymentreports_client", background: true }
 );
 print("  ✅ PaymentReports.idClient");
+
+// list_payment_reports_handler + count_pending_reports: filtran por sState
+db.PaymentReports.createIndex(
+  { "sState": 1 },
+  { name: "idx_payment_reports_state", background: true }
+);
+print("  ✅ PaymentReports.sState");
 
 // check_reference pass 4: banco-scoped cross-client dedup
 // Índice parcial — solo cubre docs con idIssuingBank presente (excluye legacy null docs).
@@ -393,6 +407,61 @@ print("  ✅ WaMessages.direction + msg_type + timestamp desc");
 print("");
 
 // ============================================
+// COLECCIÓN: WaConversations — badge de no leídas
+// ============================================
+print("📦 Colección: WaConversations");
+
+// count_unread_conversations: índice parcial — solo cubre docs con unread_count > 0.
+// Requiere MongoDB ≥ 3.2 (confirmado: cluster en 8.0.8).
+db.WaConversations.createIndex(
+  { "unread_count": 1 },
+  {
+    name: "idx_wa_conversations_unread_partial",
+    partialFilterExpression: { "unread_count": { "$gt": 0 } },
+    background: true
+  }
+);
+print("  ✅ WaConversations.unread_count (partial: unread_count > 0)");
+
+print("");
+
+// ============================================
+// COLECCIÓN: WaTickets — badge de tickets abiertos
+// ============================================
+print("📦 Colección: WaTickets");
+
+// count_open_tickets + list con filtro por status y orden cronológico.
+// WaTickets no tenía ningún índice antes de esta migración.
+db.WaTickets.createIndex(
+  { "status": 1, "created_at": -1 },
+  { name: "idx_wa_tickets_status_created_desc", background: true }
+);
+print("  ✅ WaTickets.status + created_at desc");
+
+// broadcast_ticket_updated + list: filtra por agente asignado.
+db.WaTickets.createIndex(
+  { "assigned_to_id": 1 },
+  { name: "idx_wa_tickets_assignee", background: true }
+);
+print("  ✅ WaTickets.assigned_to_id");
+
+// Auditoría: filtra por creador.
+db.WaTickets.createIndex(
+  { "created_by_id": 1 },
+  { name: "idx_wa_tickets_created_by", background: true }
+);
+print("  ✅ WaTickets.created_by_id");
+
+// Listado por workspace: filtra por business_phone + status.
+db.WaTickets.createIndex(
+  { "business_phone": 1, "status": 1 },
+  { name: "idx_wa_tickets_phone_status", background: true }
+);
+print("  ✅ WaTickets.business_phone + status");
+
+print("");
+
+// ============================================
 // VERIFICAR ÍNDICES CREADOS
 // ============================================
 print("=".repeat(60));
@@ -400,7 +469,7 @@ print("📋 VERIFICACIÓN DE ÍNDICES");
 print("=".repeat(60));
 print("");
 
-const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes", "WaTemplates", "wa_template_media.files", "WaConversationEvents", "WaMessages", "AiAgents", "AiAgentFaqs", "AiInteractions", "AiPlans", "AiCoverageZones"];
+const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes", "WaTemplates", "wa_template_media.files", "WaConversations", "WaConversationEvents", "WaMessages", "WaTickets", "AiAgents", "AiAgentFaqs", "AiInteractions", "AiPlans", "AiCoverageZones"];
 toVerify.forEach(col => {
   print(col + ":");
   db.getCollection(col).getIndexes().forEach(idx => {

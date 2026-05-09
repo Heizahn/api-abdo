@@ -141,24 +141,6 @@ impl UserRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
-    async fn find_superadmin_ids(&self) -> Result<Vec<String>, String> {
-        let collection: Collection<User> = self.db.collection("Users");
-        let filter = doc! {
-            "nRole": 0.0,
-            "visible": true,
-            "bIsBot": { "$ne": true },
-        };
-
-        let users: Vec<User> = collection
-            .find(filter)
-            .await
-            .map_err(|e| e.to_string())?
-            .try_collect::<Vec<_>>()
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(users.into_iter().map(|u| u.id).collect())
-    }
-
     async fn find_providers(&self) -> Result<Vec<User>, String> {
         let collection: Collection<User> = self.db.collection("Users");
         let filter = doc! { "nRole": 3.0 };
@@ -377,5 +359,78 @@ impl UserRepository for MongoDB {
             .try_collect::<Vec<_>>()
             .await
             .map_err(|e| e.to_string())
+    }
+
+    // ── realtime-pending-badges: T07 ─────────────────────────────────────────
+
+    async fn find_users_by_roles(&self, roles: &[f32]) -> Result<Vec<String>, String> {
+        let collection: Collection<User> = self.db.collection("Users");
+        // Convert &[f32] to Vec<Bson> for the $in operator.
+        let roles_bson: Vec<mongodb::bson::Bson> = roles
+            .iter()
+            .map(|&r| mongodb::bson::Bson::Double(r as f64))
+            .collect();
+        let filter = doc! {
+            "nRole": { "$in": roles_bson },
+            "visible": true,
+            "bIsBot": { "$ne": true },
+        };
+        let users: Vec<User> = collection
+            .find(filter)
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(users.into_iter().map(|u| u.id).collect())
+    }
+
+    async fn find_chat_user_ids(&self) -> Result<Vec<String>, String> {
+        let collection: Collection<User> = self.db.collection("Users");
+        let filter = doc! {
+            "bCanChat": true,
+            "visible": true,
+            "bIsBot": { "$ne": true },
+        };
+        let users: Vec<User> = collection
+            .find(filter)
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(users.into_iter().map(|u| u.id).collect())
+    }
+
+    async fn get_user_role_and_can_chat(
+        &self,
+        user_id: &str,
+    ) -> Result<(Option<f32>, bool), String> {
+        let collection: Collection<Document> = self.db.collection("Users");
+        let opts = FindOptions::builder()
+            .projection(doc! { "_id": 0, "nRole": 1, "bCanChat": 1 })
+            .limit(1)
+            .build();
+        let result = collection
+            .find(doc! { "_id": user_id })
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())?
+            .try_next()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        match result {
+            None => Ok((None, false)),
+            Some(doc) => {
+                // nRole is stored as f64 in Mongo; cast to f32 for the trait contract.
+                let role = doc.get("nRole").and_then(|v| v.as_f64()).map(|f| f as f32);
+                let can_chat = doc
+                    .get("bCanChat")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                Ok((role, can_chat))
+            }
+        }
     }
 }
