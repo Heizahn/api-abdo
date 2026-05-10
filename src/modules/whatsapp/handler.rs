@@ -2622,6 +2622,21 @@ pub async fn close_conversation_handler(
     };
     broadcast_all(&state.ws_registry, &ev).await;
 
+    // EMIT BADGE: CONVERSACION_NO_LEIDA — cerrar puede bajar el conteo si había mensajes sin leer.
+    if conv.unread_count > 0 {
+        let pending_total = state.db.count_unread_conversations().await.unwrap_or(0);
+        let unread_ev = WsServerEvent::ConversacionNoLeida {
+            data: ConversacionNoLeidaData {
+                pending_total,
+                conversation_id: id.clone(),
+                delta: -1,
+            },
+        };
+        if let Ok(badge_payload) = serde_json::to_string(&unread_ev) {
+            let _ = broadcast_to_chat_users(&state, badge_payload).await;
+        }
+    }
+
     record_conv_event(
         &state,
         WaConversationEventInput {

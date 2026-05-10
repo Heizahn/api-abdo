@@ -2075,7 +2075,7 @@ impl WhatsAppRepository for MongoDB {
 
     async fn count_unread_conversations(&self) -> Result<u64, String> {
         self.wa_conversations()
-            .count_documents(doc! { "unread_count": { "$gt": 0 } })
+            .count_documents(doc! { "unread_count": { "$gt": 0 }, "status": { "$ne": "closed" } })
             .await
             .map_err(|e| e.to_string())
     }
