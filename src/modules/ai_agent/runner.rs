@@ -340,9 +340,10 @@ fn build_system_instruction(
     customer_context: Option<&str>,
     transfer_context: Option<&str>,
     first_turn_note: Option<&str>,
+    reopen_note: Option<&str>,
     agent_state: Option<&str>,
     turn_state: Option<&str>,
-    conversation_state: Option<&str>, // NEW — Phase 2
+    conversation_state: Option<&str>,
     vars: Option<&PromptVariables>,
 ) -> String {
     // El back solo pasa DATOS etiquetados — el SUPERADMIN decide el
@@ -415,6 +416,12 @@ fn build_system_instruction(
         }
     }
 
+    if let Some(note) = reopen_note {
+        if !note.trim().is_empty() {
+            chunks.push(format!("[conv_reopen]\n{}", note.trim()));
+        }
+    }
+
     if let Some(state) = agent_state {
         if !state.trim().is_empty() {
             chunks.push(format!("[agent_state]\n{}", state.trim()));
@@ -481,9 +488,10 @@ pub async fn run_turn(
     customer_context: Option<&str>,
     transfer_context: Option<&str>,
     first_turn_note: Option<&str>,
+    reopen_note: Option<&str>,
     agent_state: Option<&str>,
     turn_state: Option<&str>,
-    conversation_state: Option<&str>, // NEW — Phase 2
+    conversation_state: Option<&str>,
     prompt_vars: Option<&PromptVariables>,
     tool_ctx: &ToolContext,
 ) -> Result<RunnerOutput, ApiError> {
@@ -494,9 +502,10 @@ pub async fn run_turn(
         customer_context,
         transfer_context,
         first_turn_note,
+        reopen_note,
         agent_state,
         turn_state,
-        conversation_state, // NEW — Phase 2
+        conversation_state,
         prompt_vars,
     );
 
@@ -508,7 +517,7 @@ pub async fn run_turn(
         .map(|t| t.name.as_str())
         .collect();
     tracing::info!(
-        "[ai_agent.runner] turno start (agent_id={}, model={}, system_chars={}, tools_enabled={}, history_turns={}, has_customer_ctx={}, has_transfer_ctx={}, has_first_turn_note={}, has_agent_state={})",
+        "[ai_agent.runner] turno start (agent_id={}, model={}, system_chars={}, tools_enabled={}, history_turns={}, has_customer_ctx={}, has_transfer_ctx={}, has_first_turn_note={}, has_reopen_note={}, has_agent_state={})",
         agent.id.map(|o| o.to_hex()).unwrap_or_default(),
         agent.model.model_id,
         system_instruction.chars().count(),
@@ -517,6 +526,7 @@ pub async fn run_turn(
         customer_context.is_some(),
         transfer_context.is_some(),
         first_turn_note.is_some(),
+        reopen_note.is_some(),
         agent_state.is_some(),
     );
     // El system_prompt entero (~17K chars) es ruido para troubleshooting normal:

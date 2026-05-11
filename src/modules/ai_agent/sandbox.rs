@@ -328,6 +328,7 @@ pub async fn sandbox_handler(
         None, // customer_context
         None, // transfer_context
         None, // first_turn_note
+        None, // reopen_note — sandbox is stateless
         None, // agent_state
         None, // turn_state
         None, // conversation_state — sandbox is stateless (Phase 2)

@@ -380,6 +380,31 @@ async fn run_dispatch(
         None
     };
 
+    // Detecta reopen: la IA ya respondió antes (prior_ai_turns > 0) pero
+    // ai_conv_state fue limpiado (reopen). El agente activo puede ser distinto
+    // al que atendió la sesión anterior — inyectamos [conv_reopen] para que
+    // el modelo no asuma continuidad ni repita el saludo del agente previo.
+    // `history` es el resultado del fresh-start gate: Vec::new() si es primer turno
+    // IA ever, o full_history (movido) en caso contrario. En el caso reopen,
+    // prior_ai_turns > 0 garantiza que full_history no fue descartado.
+    let is_reopen_with_prior_ai =
+        prior_ai_turns > 0 && conv.ai_conv_state.is_none() && !history.is_empty();
+
+    let reopen_note_owned: Option<String> = if is_reopen_with_prior_ai {
+        tracing::info!(
+            "[ai_agent.dispatch] reopen detectado (conv={}, prior_ai_turns={}, history_turns={}); inyectando [conv_reopen]",
+            inbound.conversation_id.to_hex(),
+            prior_ai_turns,
+            history.len(),
+        );
+        Some(format!(
+            "prior_turns_count: {}\nnote: Esta conversación fue reabierta. Los turnos del history son de una sesión previa, posiblemente atendida por otro agente IA. Tratá el próximo mensaje del cliente como el inicio de un nuevo flujo. No asumas que los datos recopilados anteriormente siguen vigentes.",
+            history.len()
+        ))
+    } else {
+        None
+    };
+
     // Burst: inbounds con `_id >= inbound_oid` en orden de _id ascendente.
     let burst: Vec<&WaMessage> = recent
         .iter()
@@ -937,9 +962,14 @@ async fn run_dispatch(
             p
         };
 
-        // first_turn_note solo en el primer turno del chain.
+        // first_turn_note y reopen_note solo en el primer turno del chain.
         let ftn_for_iter = if chain_count == 0 {
             first_turn_note_owned.as_deref()
+        } else {
+            None
+        };
+        let reopen_for_iter = if chain_count == 0 {
+            reopen_note_owned.as_deref()
         } else {
             None
         };
@@ -985,6 +1015,7 @@ async fn run_dispatch(
             customer_context.as_deref(),
             active_transfer_context.as_deref(),
             ftn_for_iter,
+            reopen_for_iter,
             agent_state_owned.as_deref(),
             turn_state_owned.as_deref(),
             // Inyectamos el estado solo en el primer paso del chain (chain_count==0).
