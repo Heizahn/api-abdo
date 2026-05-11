@@ -117,12 +117,27 @@ fn normalize_phone_for_comparison(s: &str) -> String {
     }
 }
 
-/// Normaliza un número de cédula/RIF: mayúsculas, sólo alfanuméricos.
+/// Normaliza un número de cédula/RIF: mayúsculas, sólo alfanuméricos, sin prefijo de letra.
+/// Permite que "J-50001234", "J50001234" y "50001234" comparen igual.
 fn normalize_id_for_comparison(s: &str) -> String {
-    s.to_uppercase()
+    let filtered: String = s
+        .to_uppercase()
         .chars()
         .filter(|c| c.is_alphanumeric())
-        .collect()
+        .collect();
+    // Strip single-letter prefix (V, E, J, G, P…) when the rest is all digits.
+    if filtered.len() > 1
+        && filtered
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic())
+            .unwrap_or(false)
+        && filtered[1..].chars().all(|c| c.is_ascii_digit())
+    {
+        filtered[1..].to_string()
+    } else {
+        filtered
+    }
 }
 
 /// Comparación fuzzy de nombres de banco: case-insensitive, ignora espacios/guiones.
@@ -669,7 +684,7 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                     "payment_date":     { "type": "string", "description": "Fecha del pago en RFC3339 (ej: 2026-05-04T15:30:00Z). Opcional — default: ahora." },
                     "destination_bank": { "type": "string", "description": "Banco RECEPTOR / DESTINO del pago, tal como aparece en el comprobante (ej: 'Banesco', 'Banco de Venezuela'). Opcional — si lo extraés del comprobante, pasalo para validación server-side. El sistema rechaza con `destination_bank_mismatch` si no coincide con la cuenta configurada del proveedor." },
                     "destination_phone": { "type": "string", "description": "Teléfono Pago Móvil DESTINO del comprobante. Opcional — si aparece en el comprobante, pasalo para validación." },
-                    "destination_id":   { "type": "string", "description": "Cédula o RIF DESTINO del comprobante (a nombre de quién está configurado el Pago Móvil del proveedor). Opcional — si aparece en el comprobante, pasalo para validación." }
+                    "destination_id":   { "type": "string", "description": "Cédula o RIF DESTINO del comprobante (a nombre de quién está configurado el Pago Móvil del proveedor). Siempre extraelo del comprobante cuando sea visible — omitirlo devuelve `destination_id_missing` si el método de pago tiene cédula configurada. Prefijo de letra (V-, J-, E-) opcional: el servidor normaliza." }
                 },
                 "required": ["client_id", "reference", "media_id"]
             }),
@@ -3079,32 +3094,52 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     };
 
     // 7b. Destination validation — only if the LLM extracted destination fields from the receipt.
-    // Fetches the provider's payment method and rejects if any provided field doesn't match.
-    // Fail-open on DB errors or unconfigured methods to avoid blocking valid payments.
+    // Validates destination fields against the provider's configured payment method.
+    // Fail-open on DB errors or unconfigured methods; fail-closed when the method
+    // is resolved and a configured field (id_number) is missing or unparseable.
     {
         let dest_bank = parsed.destination_bank.as_deref().map(str::trim).filter(|s| !s.is_empty());
         let dest_phone = parsed.destination_phone.as_deref().map(str::trim).filter(|s| !s.is_empty());
         let dest_id = parsed.destination_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
 
-        if dest_bank.is_some() || dest_phone.is_some() || dest_id.is_some() {
-            if let Ok(Some(owner)) = ctx.state.db.find_client_owner_by_id(&client_oid).await {
-                if let Ok(Some(user_info)) = ctx.state.db.find_user_payment_info_by_id(&owner.id_owner).await {
-                    if let Some(pm_id) = user_info.id_payment_method {
-                        if let Ok(Some(pm)) = ctx.state.db.find_payment_method_by_id(&pm_id).await {
-                            if pm.is_active {
-                                if let Some(db) = dest_bank {
-                                    if !bank_names_match(db, &pm.bank_name) {
-                                        return ToolResult::err("destination_bank_mismatch", started);
-                                    }
+        if let Ok(Some(owner)) = ctx.state.db.find_client_owner_by_id(&client_oid).await {
+            if let Ok(Some(user_info)) = ctx.state.db.find_user_payment_info_by_id(&owner.id_owner).await {
+                if let Some(pm_id) = user_info.id_payment_method {
+                    if let Ok(Some(pm)) = ctx.state.db.find_payment_method_by_id(&pm_id).await {
+                        if pm.is_active {
+                            if let Some(db) = dest_bank {
+                                if !bank_names_match(db, &pm.bank_name) {
+                                    return ToolResult::err("destination_bank_mismatch", started);
                                 }
-                                if let Some(dp) = dest_phone {
-                                    if normalize_phone_for_comparison(dp) != normalize_phone_for_comparison(&pm.phone) {
-                                        return ToolResult::err("destination_phone_mismatch", started);
-                                    }
+                            }
+                            if let Some(dp) = dest_phone {
+                                if normalize_phone_for_comparison(dp)
+                                    != normalize_phone_for_comparison(&pm.phone)
+                                {
+                                    return ToolResult::err("destination_phone_mismatch", started);
                                 }
-                                if let Some(di) = dest_id {
-                                    if normalize_id_for_comparison(di) != normalize_id_for_comparison(&pm.id_number) {
-                                        return ToolResult::err("destination_id_mismatch", started);
+                            }
+                            let db_id = pm.id_number.trim();
+                            if !db_id.is_empty() {
+                                match dest_id {
+                                    None => {
+                                        return ToolResult::err("destination_id_missing", started)
+                                    }
+                                    Some(di) => {
+                                        let norm_provided = normalize_id_for_comparison(di);
+                                        let norm_db = normalize_id_for_comparison(db_id);
+                                        if norm_provided.is_empty() || norm_db.is_empty() {
+                                            return ToolResult::err(
+                                                "destination_id_unparseable",
+                                                started,
+                                            );
+                                        }
+                                        if norm_provided != norm_db {
+                                            return ToolResult::err(
+                                                "destination_id_mismatch",
+                                                started,
+                                            );
+                                        }
                                     }
                                 }
                             }
