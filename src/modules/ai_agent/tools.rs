@@ -94,11 +94,81 @@ pub struct ToolContext {
     /// report_payment); el toggle de conversation_state lo lee dispatch
     /// directamente desde wa_settings, no se propaga al ctx.
     pub workspace_enable_guardrails: bool,
+
+    /// Teléfono del cliente (E.164 sin "+") extraído de la conversación.
+    /// Vacío en sandbox — usado por `validate_client_owned_by_phone` para
+    /// verificar que el `client_id` que manda el LLM pertenece al dueño
+    /// de la conversación actual (previene leakeo de datos entre clientes).
+    pub customer_phone: String,
 }
 
 #[allow(dead_code)]
 fn agent_mode_is_live(ctx: &ToolContext) -> bool {
     matches!(ctx.agent_snapshot.mode, AiAgentMode::Live)
+}
+
+/// Normaliza un teléfono a 10 dígitos locales (Venezuela): strip +58 o 58.
+fn normalize_phone_for_comparison(s: &str) -> String {
+    let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() == 12 && digits.starts_with("58") {
+        digits[2..].to_string()
+    } else {
+        digits
+    }
+}
+
+/// Normaliza un número de cédula/RIF: mayúsculas, sólo alfanuméricos.
+fn normalize_id_for_comparison(s: &str) -> String {
+    s.to_uppercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect()
+}
+
+/// Comparación fuzzy de nombres de banco: case-insensitive, ignora espacios/guiones.
+fn bank_names_match(a: &str, b: &str) -> bool {
+    let clean = |s: &str| {
+        s.to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>()
+    };
+    let a_n = clean(a);
+    let b_n = clean(b);
+    !a_n.is_empty() && !b_n.is_empty() && (a_n == b_n || a_n.contains(&b_n) || b_n.contains(&a_n))
+}
+
+/// Verifica que `client_oid` pertenece al teléfono de la conversación actual.
+/// Si `customer_phone` está vacío (sandbox o contexto sin conv), la validación
+/// se omite — no bloqueamos testing. Solo rechaza cuando hay un teléfono real
+/// y el cliente consultado NO aparece en los registros de ese número.
+async fn validate_client_owned_by_phone(
+    client_oid: ObjectId,
+    ctx: &ToolContext,
+    started: Instant,
+) -> Result<(), ToolResult> {
+    if ctx.customer_phone.is_empty() {
+        return Ok(());
+    }
+    let matches = match ctx
+        .state
+        .db
+        .find_clients_for_ai_lookup(Some(&ctx.customer_phone), None)
+        .await
+    {
+        Ok(m) => m,
+        Err(_) => return Err(ToolResult::err("db_error:ownership_check", started)),
+    };
+    let owned = matches.iter().any(|c| {
+        ObjectId::parse_str(&c.client_id)
+            .map(|oid| oid == client_oid)
+            .unwrap_or(false)
+    });
+    if owned {
+        Ok(())
+    } else {
+        Err(ToolResult::err("customer_not_owned_by_phone", started))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -596,7 +666,10 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                     "bank":             { "type": "string", "description": "[DEPRECATED] Nombre libre del banco origen. Usar issuing_bank_id en su lugar." },
                     "phone":            { "type": "string", "description": "Teléfono asociado al pago móvil. Opcional." },
                     "debt_id":          { "type": "string", "description": "ObjectId hex de la deuda específica si el cliente la mencionó. Opcional — si falta, el reporte queda como abono a cuenta." },
-                    "payment_date":     { "type": "string", "description": "Fecha del pago en RFC3339 (ej: 2026-05-04T15:30:00Z). Opcional — default: ahora." }
+                    "payment_date":     { "type": "string", "description": "Fecha del pago en RFC3339 (ej: 2026-05-04T15:30:00Z). Opcional — default: ahora." },
+                    "destination_bank": { "type": "string", "description": "Banco RECEPTOR / DESTINO del pago, tal como aparece en el comprobante (ej: 'Banesco', 'Banco de Venezuela'). Opcional — si lo extraés del comprobante, pasalo para validación server-side. El sistema rechaza con `destination_bank_mismatch` si no coincide con la cuenta configurada del proveedor." },
+                    "destination_phone": { "type": "string", "description": "Teléfono Pago Móvil DESTINO del comprobante. Opcional — si aparece en el comprobante, pasalo para validación." },
+                    "destination_id":   { "type": "string", "description": "Cédula o RIF DESTINO del comprobante (a nombre de quién está configurado el Pago Móvil del proveedor). Opcional — si aparece en el comprobante, pasalo para validación." }
                 },
                 "required": ["client_id", "reference", "media_id"]
             }),
@@ -821,6 +894,9 @@ async fn exec_get_invoices(args: Value, ctx: &ToolContext, started: Instant) -> 
         Ok(o) => o,
         Err(_) => return ToolResult::err("invalid_client_id", started),
     };
+    if let Err(e) = validate_client_owned_by_phone(client_oid, ctx, started).await {
+        return e;
+    }
 
     // Step 1: fetch active debts (already sorted dCreation ASC by find_active_debts_by_client_ids).
     // `find_active_debts_by_client_ids` ya recorta a `sState != "Pagada"`.
@@ -1607,6 +1683,9 @@ async fn exec_get_payment_methods(args: Value, ctx: &ToolContext, started: Insta
     }
 
     // 3. Find client → owner_id
+    if let Err(e) = validate_client_owned_by_phone(client_oid, ctx, started).await {
+        return e;
+    }
     let owner = match ctx.state.db.find_client_owner_by_id(&client_oid).await {
         Ok(Some(o)) => o,
         Ok(None) => return ToolResult::err("client_not_found", started),
@@ -2695,6 +2774,15 @@ struct ReportPaymentArgs {
     debt_id: Option<String>,
     #[serde(default)]
     payment_date: Option<String>,
+    /// Banco destino que figura en el comprobante (banco receptor del pago).
+    #[serde(default)]
+    destination_bank: Option<String>,
+    /// Teléfono destino que figura en el comprobante (Pago Móvil destino).
+    #[serde(default)]
+    destination_phone: Option<String>,
+    /// Cédula/RIF destino que figura en el comprobante.
+    #[serde(default)]
+    destination_id: Option<String>,
 }
 
 // Crea un WaTicket en categoría `cobranzas_facturacion` sin cerrar la conversación.
@@ -2876,6 +2964,9 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         Ok(o) => o,
         Err(_) => return ToolResult::err("invalid_client_id", started),
     };
+    if let Err(e) = validate_client_owned_by_phone(client_oid, ctx, started).await {
+        return e;
+    }
 
     // 6b. Parse + validate issuing_bank_id (WI-3)
     // El LLM debería pasar el ObjectId hex devuelto por `list_banks`. Pero
@@ -2986,6 +3077,43 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
             return ToolResult::err("client_not_found", started);
         }
     };
+
+    // 7b. Destination validation — only if the LLM extracted destination fields from the receipt.
+    // Fetches the provider's payment method and rejects if any provided field doesn't match.
+    // Fail-open on DB errors or unconfigured methods to avoid blocking valid payments.
+    {
+        let dest_bank = parsed.destination_bank.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let dest_phone = parsed.destination_phone.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let dest_id = parsed.destination_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+        if dest_bank.is_some() || dest_phone.is_some() || dest_id.is_some() {
+            if let Ok(Some(owner)) = ctx.state.db.find_client_owner_by_id(&client_oid).await {
+                if let Ok(Some(user_info)) = ctx.state.db.find_user_payment_info_by_id(&owner.id_owner).await {
+                    if let Some(pm_id) = user_info.id_payment_method {
+                        if let Ok(Some(pm)) = ctx.state.db.find_payment_method_by_id(&pm_id).await {
+                            if pm.is_active {
+                                if let Some(db) = dest_bank {
+                                    if !bank_names_match(db, &pm.bank_name) {
+                                        return ToolResult::err("destination_bank_mismatch", started);
+                                    }
+                                }
+                                if let Some(dp) = dest_phone {
+                                    if normalize_phone_for_comparison(dp) != normalize_phone_for_comparison(&pm.phone) {
+                                        return ToolResult::err("destination_phone_mismatch", started);
+                                    }
+                                }
+                                if let Some(di) = dest_id {
+                                    if normalize_id_for_comparison(di) != normalize_id_for_comparison(&pm.id_number) {
+                                        return ToolResult::err("destination_id_mismatch", started);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // 8. Parse optional debt_id and validate existence BEFORE idempotency check (W-1 fix)
     // Spec order: static arg validation (parse + existence) before live lookups (check_reference).

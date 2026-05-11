@@ -932,6 +932,7 @@ async fn run_dispatch(
             customer_explicit_zones: customer_explicit_zones.clone(),
             recent_media_ids: recent_media_ids.clone(),
             workspace_enable_guardrails: wa_settings.enable_guardrails,
+            customer_phone: conv.phone.clone(),
         };
 
         // FAQs y prompt_vars del agente activo (assistant_name cambia entre

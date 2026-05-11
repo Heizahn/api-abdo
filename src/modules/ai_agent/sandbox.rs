@@ -290,6 +290,9 @@ pub async fn sandbox_handler(
         // La gate de `is_sandbox` adicional en cada tool evita que el
         // guardrail bloquee testing de edge cases.
         workspace_enable_guardrails: true,
+        // Sandbox no tiene conversación real — ownership guard se omite
+        // cuando customer_phone está vacío.
+        customer_phone: String::new(),
     };
 
     use chrono::Datelike;
