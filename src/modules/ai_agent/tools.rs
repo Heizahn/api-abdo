@@ -591,7 +591,7 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                     "reference":        { "type": "string", "description": "Referencia bancaria del comprobante. Puede venir como texto libre — el sistema extrae el número canónico automáticamente." },
                     "media_id":         { "type": "string", "description": "ID exacto del media de WhatsApp de la foto del comprobante. DEBE ser uno de los IDs listados en `[turn_state] available_media_ids` (numérico, ej: '1281788957402373'). PROHIBIDO inventar, usar placeholders ('...', 'image_0', 'media_X'), o pasar IDs que no estén en esa lista — el tool rechaza con `media_id_not_in_conversation`. Si el cliente no envió comprobante todavía, NO llames esta tool: pedile la foto primero." },
                     "amount_bs":        { "type": "number", "description": "Monto en bolívares. Mutuamente excluyente con amount_usd." },
-                    "amount_usd":       { "type": "number", "description": "Monto en dólares. Mutuamente excluyente con amount_bs." },
+                    "amount_usd":       { "type": "number", "description": "Monto en dólares. Mutuamente excluyente con amount_bs. PREFERÍ siempre `amount_bs` — el sistema deriva el USD internamente con el IVA correcto." },
                     "issuing_bank_id":  { "type": "string", "description": "Banco EMISOR / ORIGEN del pago: aquel donde el cliente TIENE su cuenta y desde donde envió la transferencia. NO es el banco destino del proveedor. En el comprobante suele aparecer como 'banco origen', 'desde', o 'cuenta origen'. Pasá el ObjectId hex devuelto por list_banks (recomendado, ej '65a7f8d9c3e2a1b4d6f8e0c5'). El backend tolera nombre/código (ej: 'Banco de Venezuela' o '0102') y resuelve server-side; si es ambiguo o no existe, devuelve error rico con candidatos. Si el cliente dice solo 'banco Banesco' sin aclarar origen/destino y el destino es Banesco también, preguntá: '¿desde qué banco hiciste la transferencia?'." },
                     "bank":             { "type": "string", "description": "[DEPRECATED] Nombre libre del banco origen. Usar issuing_bank_id en su lugar." },
                     "phone":            { "type": "string", "description": "Teléfono asociado al pago móvil. Opcional." },
@@ -2975,10 +2975,10 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         None
     };
 
-    // 7. Find client (need id_tax).
+    // 7. Find client (validate existence — id_tax no longer used, IVA is now global).
     // NOTE: find_client_by_id returns Ok(fake_client) on "not found" — detect
     // by comparing returned _id to the queried _id.
-    let client = match ctx.state.db.find_client_by_id(&client_oid.to_hex()).await {
+    let _client = match ctx.state.db.find_client_by_id(&client_oid.to_hex()).await {
         Ok(c) if c._id == client_oid => c,
         Ok(_) => return ToolResult::err("client_not_found", started),
         Err(e) => {
@@ -3122,14 +3122,11 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         return ToolResult::err("exchange_rate_zero", started);
     }
 
-    // 11. Resolve iva_rate (default 1.0 if id_tax missing/not found)
-    let iva_rate: f64 = if let Some(tax_id) = client.id_tax {
-        match ctx.state.db.find_tax_by_id(Some(tax_id)).await {
-            Ok(Some(t)) => t.iva,
-            _ => 1.0,
-        }
-    } else {
-        1.0
+    // 11. Resolve iva_rate — siempre IVA empresarial (find_tax_by_id(None)),
+    // igual que exec_get_invoices. El IVA del cliente individual no aplica aquí.
+    let iva_rate: f64 = match ctx.state.db.find_tax_by_id(None).await {
+        Ok(Some(t)) => t.iva,
+        _ => 1.0,
     };
 
     // 12. Compute the missing amount.
@@ -3170,9 +3167,9 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
             (bs_rounded, final_usd)
         }
         (None, Some(usd)) => {
-            let bs_neto = usd * exchange_rate;
-            let bs = round2(bs_neto * iva_rate);
-            (bs, round2(usd))
+            let usd_neto = round2(usd / iva_rate);
+            let bs = round2(usd_neto * exchange_rate * iva_rate);
+            (bs, usd_neto)
         }
         _ => unreachable!("amounts validated above"),
     };
