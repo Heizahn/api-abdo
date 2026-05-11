@@ -382,15 +382,15 @@ async fn run_dispatch(
 
     // Detecta reopen: la IA ya respondió antes (prior_ai_turns > 0) pero
     // ai_conv_state fue limpiado (reopen). El agente activo puede ser distinto
-    // al que atendió la sesión anterior — inyectamos [conv_reopen] para que
-    // el modelo no asuma continuidad ni repita el saludo del agente previo.
-    // `history` es el resultado del fresh-start gate: Vec::new() si es primer turno
-    // IA ever, o full_history (movido) en caso contrario. En el caso reopen,
-    // prior_ai_turns > 0 garantiza que full_history no fue descartado.
+    // Reopen detection: si la conversación fue cerrada y reabierta con history
+    // previo, truncamos el history a [] antes de pasarlo al LLM.
     //
-    // `is_reopen_with_prior_ai` = Turn 1 de la sesión reabierta (ai_conv_state
-    // era None). `reopen_from_state` = Turn 2+ (la nota se persiste via el flag
-    // `reopen_pending` en WaConversationAiState, seteado en Turn 1).
+    // Garantía dura: sin history no hay datos viejos que alucinar. El agente
+    // arranca limpio con solo el mensaje actual del cliente.
+    //
+    // `is_reopen_with_prior_ai` = Turn 1 (ai_conv_state era None).
+    // `reopen_from_state`       = Turn 2+ (flag persistido en WaConversationAiState).
+    // Ambos aplican el truncado — el flag se limpia al finalizar Turn 2.
     let is_reopen_with_prior_ai =
         prior_ai_turns > 0 && conv.ai_conv_state.is_none() && !history.is_empty();
     let reopen_from_state = conv
@@ -398,22 +398,19 @@ async fn run_dispatch(
         .as_ref()
         .map(|s| s.reopen_pending)
         .unwrap_or(false);
-    let should_inject_reopen = is_reopen_with_prior_ai || reopen_from_state;
+    let should_truncate_history = is_reopen_with_prior_ai || reopen_from_state;
 
-    let reopen_note_owned: Option<String> = if should_inject_reopen {
+    let history = if should_truncate_history {
         tracing::info!(
-            "[ai_agent.dispatch] reopen detectado (conv={}, prior_ai_turns={}, history_turns={}, from_state={}); inyectando [conv_reopen]",
+            "[ai_agent.dispatch] reopen detectado — history truncado (conv={}, prior_ai_turns={}, turns_descartados={}, from_state={})",
             inbound.conversation_id.to_hex(),
             prior_ai_turns,
             history.len(),
             reopen_from_state,
         );
-        Some(format!(
-            "prior_turns_count: {}\nnote: Esta conversación fue reabierta. Los turnos del history son de una sesión previa, posiblemente atendida por otro agente IA. Tratá el próximo mensaje del cliente como el inicio de un nuevo flujo. No asumas que los datos recopilados anteriormente siguen vigentes.",
-            history.len()
-        ))
+        vec![]
     } else {
-        None
+        history
     };
 
     // Burst: inbounds con `_id >= inbound_oid` en orden de _id ascendente.
@@ -980,11 +977,8 @@ async fn run_dispatch(
         } else {
             None
         };
-        // La nota de reopen se propaga a TODOS los agentes del chain
-        // (chain_count 0, 1, 2…) — el especialista (Andrea, Carla) que
-        // recibe el transfer también necesita saber que el history es de
-        // una sesión previa.
-        let reopen_for_iter = reopen_note_owned.as_deref();
+        // History ya fue truncado a [] si should_truncate_history — no hay nota
+        // de reopen que inyectar: sin history viejo no hay qué advertir.
 
         // agent_state: chequeamos si el agente activo ya respondió antes en
         // esta conv. Si sí, le inyectamos un bloque para que sepa que ya
@@ -1027,7 +1021,7 @@ async fn run_dispatch(
             customer_context.as_deref(),
             active_transfer_context.as_deref(),
             ftn_for_iter,
-            reopen_for_iter,
+            None, // reopen_note: history truncado en reopen — nota redundante
             agent_state_owned.as_deref(),
             turn_state_owned.as_deref(),
             // Inyectamos el estado solo en el primer paso del chain (chain_count==0).
@@ -1255,7 +1249,7 @@ async fn run_dispatch(
     }
 
     // `reopen_pending_next`: qué valor escribir en el flag para el próximo turno.
-    // - Turn 1 (is_reopen_with_prior_ai): seteamos true → Turn 2 también recibe la nota.
+    // - Turn 1 (is_reopen_with_prior_ai): seteamos true → Turn 2 también trunca el history.
     // - Turn 2+ (reopen_from_state): seteamos false → la sesión queda normalizada.
     // - Sin reopen: None → no tocamos el flag.
     let reopen_pending_next: Option<bool> = if is_reopen_with_prior_ai {
@@ -1291,8 +1285,8 @@ async fn run_dispatch(
             new_state.intent_confidence = None;
         }
 
-        // Persistir el flag de reopen para que el próximo turno también reciba
-        // el [conv_reopen] aunque ai_conv_state ya no sea None.
+        // Persistir el flag de reopen para que el próximo turno también
+        // reciba history truncado aunque ai_conv_state ya no sea None.
         if let Some(pending) = reopen_pending_next {
             new_state.reopen_pending = pending;
             new_state.updated_at = chrono::Utc::now();
