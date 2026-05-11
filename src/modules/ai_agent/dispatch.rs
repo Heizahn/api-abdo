@@ -387,15 +387,26 @@ async fn run_dispatch(
     // `history` es el resultado del fresh-start gate: Vec::new() si es primer turno
     // IA ever, o full_history (movido) en caso contrario. En el caso reopen,
     // prior_ai_turns > 0 garantiza que full_history no fue descartado.
+    //
+    // `is_reopen_with_prior_ai` = Turn 1 de la sesión reabierta (ai_conv_state
+    // era None). `reopen_from_state` = Turn 2+ (la nota se persiste via el flag
+    // `reopen_pending` en WaConversationAiState, seteado en Turn 1).
     let is_reopen_with_prior_ai =
         prior_ai_turns > 0 && conv.ai_conv_state.is_none() && !history.is_empty();
+    let reopen_from_state = conv
+        .ai_conv_state
+        .as_ref()
+        .map(|s| s.reopen_pending)
+        .unwrap_or(false);
+    let should_inject_reopen = is_reopen_with_prior_ai || reopen_from_state;
 
-    let reopen_note_owned: Option<String> = if is_reopen_with_prior_ai {
+    let reopen_note_owned: Option<String> = if should_inject_reopen {
         tracing::info!(
-            "[ai_agent.dispatch] reopen detectado (conv={}, prior_ai_turns={}, history_turns={}); inyectando [conv_reopen]",
+            "[ai_agent.dispatch] reopen detectado (conv={}, prior_ai_turns={}, history_turns={}, from_state={}); inyectando [conv_reopen]",
             inbound.conversation_id.to_hex(),
             prior_ai_turns,
             history.len(),
+            reopen_from_state,
         );
         Some(format!(
             "prior_turns_count: {}\nnote: Esta conversación fue reabierta. Los turnos del history son de una sesión previa, posiblemente atendida por otro agente IA. Tratá el próximo mensaje del cliente como el inicio de un nuevo flujo. No asumas que los datos recopilados anteriormente siguen vigentes.",
@@ -969,11 +980,11 @@ async fn run_dispatch(
         } else {
             None
         };
-        let reopen_for_iter = if chain_count == 0 {
-            reopen_note_owned.as_deref()
-        } else {
-            None
-        };
+        // La nota de reopen se propaga a TODOS los agentes del chain
+        // (chain_count 0, 1, 2…) — el especialista (Andrea, Carla) que
+        // recibe el transfer también necesita saber que el history es de
+        // una sesión previa.
+        let reopen_for_iter = reopen_note_owned.as_deref();
 
         // agent_state: chequeamos si el agente activo ya respondió antes en
         // esta conv. Si sí, le inyectamos un bloque para que sepa que ya
@@ -1243,9 +1254,28 @@ async fn run_dispatch(
         }
     }
 
-    if wa_settings.enable_conversation_state && !all_state_patches.is_empty() {
+    // `reopen_pending_next`: qué valor escribir en el flag para el próximo turno.
+    // - Turn 1 (is_reopen_with_prior_ai): seteamos true → Turn 2 también recibe la nota.
+    // - Turn 2+ (reopen_from_state): seteamos false → la sesión queda normalizada.
+    // - Sin reopen: None → no tocamos el flag.
+    let reopen_pending_next: Option<bool> = if is_reopen_with_prior_ai {
+        Some(true)
+    } else if reopen_from_state {
+        Some(false)
+    } else {
+        None
+    };
+
+    let needs_state_write = (wa_settings.enable_conversation_state && !all_state_patches.is_empty())
+        || reopen_pending_next.is_some();
+
+    if needs_state_write {
         let base = current_ai_conv_state.clone().unwrap_or_default();
-        let mut new_state = apply_state_patches(base, &all_state_patches);
+        let mut new_state = if wa_settings.enable_conversation_state && !all_state_patches.is_empty() {
+            apply_state_patches(base, &all_state_patches)
+        } else {
+            base
+        };
 
         // Transfer-reset: si el último step es "transferred_to_*" limpiamos el
         // intent para que el próximo agente en la cadena (o en el próximo turno)
@@ -1259,6 +1289,13 @@ async fn run_dispatch(
         {
             new_state.current_intent = None;
             new_state.intent_confidence = None;
+        }
+
+        // Persistir el flag de reopen para que el próximo turno también reciba
+        // el [conv_reopen] aunque ai_conv_state ya no sea None.
+        if let Some(pending) = reopen_pending_next {
+            new_state.reopen_pending = pending;
+            new_state.updated_at = chrono::Utc::now();
         }
 
         if Some(&new_state) != current_ai_conv_state.as_ref() {

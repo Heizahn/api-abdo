@@ -56,6 +56,13 @@ pub struct WaConversationAiState {
     #[serde(default)]
     pub failed_attempts: Vec<FailedAttempt>,
 
+    /// `true` durante los primeros turnos de una sesión reabierta.
+    /// Seteado en Turn 1 para que el [conv_reopen] se propague también
+    /// en Turn 2 (cuando `ai_conv_state` ya no es None). Se limpia a
+    /// `false` al finalizar Turn 2 o el siguiente turno que lo lea.
+    #[serde(default)]
+    pub reopen_pending: bool,
+
     /// Última vez que se modificó este estado (siempre seteado).
     pub updated_at: ChronoDateTime<Utc>,
 }
