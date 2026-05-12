@@ -677,12 +677,12 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                     "media_id":         { "type": "string", "description": "ID exacto del media de WhatsApp de la foto del comprobante. DEBE ser uno de los IDs listados en `[turn_state] available_media_ids` (numérico, ej: '1281788957402373'). PROHIBIDO inventar, usar placeholders ('...', 'image_0', 'media_X'), o pasar IDs que no estén en esa lista — el tool rechaza con `media_id_not_in_conversation`. Si el cliente no envió comprobante todavía, NO llames esta tool: pedile la foto primero." },
                     "amount_bs":        { "type": "number", "description": "Monto en bolívares. Mutuamente excluyente con amount_usd." },
                     "amount_usd":       { "type": "number", "description": "Monto en dólares. Mutuamente excluyente con amount_bs. PREFERÍ siempre `amount_bs` — el sistema deriva el USD internamente con el IVA correcto." },
-                    "issuing_bank_id":  { "type": "string", "description": "Banco EMISOR / ORIGEN del pago: aquel donde el cliente TIENE su cuenta y desde donde envió la transferencia. NO es el banco destino del proveedor. En el comprobante suele aparecer como 'banco origen', 'desde', o 'cuenta origen'. Pasá el ObjectId hex devuelto por list_banks (recomendado, ej '65a7f8d9c3e2a1b4d6f8e0c5'). El backend tolera nombre/código (ej: 'Banco de Venezuela' o '0102') y resuelve server-side; si es ambiguo o no existe, devuelve error rico con candidatos. Si el cliente dice solo 'banco Banesco' sin aclarar origen/destino y el destino es Banesco también, preguntá: '¿desde qué banco hiciste la transferencia?'." },
+                    "issuing_bank_id":  { "type": "string", "description": "Banco EMISOR / ORIGEN del pago: aquel donde el cliente TIENE su cuenta y desde donde envió la transferencia. NO es el banco destino del proveedor. En el comprobante suele aparecer como 'banco origen', 'banco emisor', o 'desde'. ATENCIÓN comprobante app BDV: el campo 'Banco' en esa app es el banco DESTINO y 'Origen' es el número de cuenta de origen (no el nombre del banco emisor — resolverlo requiere conocer el prefijo, ej: 0102=BDV, 0134=Banesco). Pasá el ObjectId hex devuelto por list_banks (recomendado). El backend también acepta nombre o código BCV (ej: 'Banco de Venezuela' o '0102') y resuelve server-side. NO inventes un ObjectId hex; si no tenés el id exacto, pasá el nombre del banco en texto." },
                     "bank":             { "type": "string", "description": "[DEPRECATED] Nombre libre del banco origen. Usar issuing_bank_id en su lugar." },
                     "phone":            { "type": "string", "description": "Teléfono asociado al pago móvil. Opcional." },
                     "debt_id":          { "type": "string", "description": "ObjectId hex de la deuda específica si el cliente la mencionó. Opcional — si falta, el reporte queda como abono a cuenta." },
                     "payment_date":     { "type": "string", "description": "Fecha del pago en RFC3339 (ej: 2026-05-04T15:30:00Z). Opcional — default: ahora." },
-                    "destination_bank": { "type": "string", "description": "Banco RECEPTOR / DESTINO del pago, tal como aparece en el comprobante (ej: 'Banesco', 'Banco de Venezuela'). Opcional — si lo extraés del comprobante, pasalo para validación server-side. El sistema rechaza con `destination_bank_mismatch` si no coincide con la cuenta configurada del proveedor." },
+                    "destination_bank": { "type": "string", "description": "Banco RECEPTOR / DESTINO del pago, tal como aparece en el comprobante. Opcional — si lo extraés del comprobante, pasalo para validación server-side. ATENCIÓN formato BDV: en comprobantes del app PagoMóvil BDV, el campo 'Banco' es el banco DESTINO (ej: '0134 - BANESCO'); 'Origen' es el número de cuenta de quien envió, NO el banco destino. El sistema rechaza con `destination_bank_mismatch` si no coincide con la cuenta del proveedor — en ese caso el error incluye qué banco se esperaba." },
                     "destination_phone": { "type": "string", "description": "Teléfono Pago Móvil DESTINO del comprobante. Opcional — si aparece en el comprobante, pasalo para validación." },
                     "destination_id":   { "type": "string", "description": "Cédula o RIF DESTINO del comprobante (a nombre de quién está configurado el Pago Móvil del proveedor). Siempre extraelo del comprobante cuando sea visible — omitirlo devuelve `destination_id_missing` si el método de pago tiene cédula configurada. Prefijo de letra (V-, J-, E-) opcional: el servidor normaliza." }
                 },
@@ -3075,7 +3075,15 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         };
         match banks.iter().find(|(oid, _, _)| *oid == bank_oid) {
             Some((_, name, code)) => Some(format!("{} - {}", code, name.to_uppercase())),
-            None => return ToolResult::err("issuing_bank_id_not_found", started),
+            None => {
+                // ObjectId válido pero no existe en el catálogo — el LLM probablemente
+                // copió el ejemplo del schema. Fallback graceful: bank_origin queda vacío.
+                tracing::warn!(
+                    "[ai_agent.report_payment] issuing_bank_id={} no existe en catálogo; bank_origin quedará vacío",
+                    bank_oid.to_hex()
+                );
+                None
+            }
         }
     } else {
         None
@@ -3109,7 +3117,16 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
                         if pm.is_active {
                             if let Some(db) = dest_bank {
                                 if !bank_names_match(db, &pm.bank_name) {
-                                    return ToolResult::err("destination_bank_mismatch", started);
+                                    return ToolResult::err(
+                                        format!(
+                                            "destination_bank_mismatch: el comprobante dice '{}' pero la cuenta del proveedor está en '{}'. \
+                                             Si leíste el comprobante de la app BDV, el campo 'Banco' muestra el banco DESTINO y \
+                                             'Origen' es el número de cuenta de origen (no el nombre del banco emisor). \
+                                             Verificá que extrajiste correctamente el banco receptor del comprobante.",
+                                            db, pm.bank_name
+                                        ),
+                                        started,
+                                    );
                                 }
                             }
                             if let Some(dp) = dest_phone {

@@ -284,10 +284,13 @@ async fn run_dispatch(
 
     // ── Releer mensajes recientes y armar la "ráfaga" ───────────────────
     // `recent` viene ordenado por `_id` ascendente (orden de inserción real
-    // en el back, no `timestamp` de Meta). Ráfaga = todos los inbounds con
-    // `_id >= inbound.id` — el inbound original que disparó este dispatch
-    // y cualquiera que llegó después (incluso si su timestamp es anterior
-    // al último outbound persistido).
+    // en el back, no `timestamp` de Meta).
+    //
+    // La ráfaga son TODOS los inbounds que llegaron después del último outbound
+    // del bot (o todos si no hay outbound). Esto cubre el caso en que el cliente
+    // manda imagen + texto en rápida sucesión: el debounce cancela el spawn de la
+    // imagen y solo dispara el del texto, pero la imagen debe quedar en la ráfaga
+    // para que el LLM la reciba como contenido visual.
     let inbound_oid = match inbound.id {
         Some(o) => o,
         None => return Err("inbound sin _id".into()),
@@ -297,6 +300,13 @@ async fn run_dispatch(
         .list_recent_messages_for_conversation(&inbound.conversation_id, RECENT_WINDOW)
         .await?;
 
+    // Último outbound del bot: define el inicio lógico de la ráfaga actual.
+    let last_out_oid: Option<ObjectId> = recent
+        .iter()
+        .filter(|m| m.direction == "out")
+        .filter_map(|m| m.id)
+        .max();
+
     // ── Guardrail data + turn-state HUD (precomputado por turno) ────────────
     // Vive a este nivel porque NO cambia entre iteraciones del chain de
     // transfer (zones / media_ids / intents son función del cliente, no del
@@ -305,15 +315,19 @@ async fn run_dispatch(
     let recent_media_ids = guardrails::extract_recent_media_ids(&recent);
     let customer_explicit_intents = guardrails::extract_customer_explicit_intents(&recent);
 
-    // History: todo lo que NO está en la ráfaga. Esto incluye outbounds
-    // posteriores al inbound_oid (porque el bot pudo haber respondido a
-    // un turno previo mientras este mensaje quedaba pendiente). Los
-    // mantenemos para que la IA tenga el contexto cronológico correcto.
+    // History: todo lo que NO está en la ráfaga. Incluye outbounds del bot para
+    // que la IA tenga el contexto cronológico correcto.
     let full_history: Vec<ConvTurn> = recent
         .iter()
         .filter(|m| {
-            // Excluir los que van a la ráfaga (inbounds con _id >= inbound_oid).
-            !(m.direction == "in" && m.id.map(|i| i >= inbound_oid).unwrap_or(false))
+            // Excluir inbounds que forman la ráfaga (llegaron después del último outbound).
+            if m.direction != "in" {
+                return true;
+            }
+            match last_out_oid {
+                Some(out_id) => m.id.map(|i| i <= out_id).unwrap_or(false),
+                None => false, // sin outbound previo → todo es ráfaga
+            }
         })
         .filter_map(|m| {
             let text = m.body.as_deref()?.trim().to_string();
@@ -413,10 +427,23 @@ async fn run_dispatch(
         history
     };
 
-    // Burst: inbounds con `_id >= inbound_oid` en orden de _id ascendente.
+    // Burst: todos los inbounds que llegaron después del último outbound del bot,
+    // ordenados por _id ascendente. Garantiza que imagen + texto enviados en
+    // ráfaga rápida lleguen juntos al LLM aunque el debounce haya cancelado
+    // el spawn de la imagen.
+    // Fallback: si no hay outbound, incluir todos los inbounds de la ventana.
+    // Siempre incluimos al menos el inbound que disparó este dispatch (inbound_oid).
     let burst: Vec<&WaMessage> = recent
         .iter()
-        .filter(|m| m.direction == "in" && m.id.map(|i| i >= inbound_oid).unwrap_or(false))
+        .filter(|m| {
+            if m.direction != "in" {
+                return false;
+            }
+            match last_out_oid {
+                Some(out_id) => m.id.map(|i| i > out_id).unwrap_or(false),
+                None => true,
+            }
+        })
         .collect();
 
     // High water mark: el _id más alto que la IA "vio" en su prompt. Empieza
