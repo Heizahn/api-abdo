@@ -312,7 +312,8 @@ async fn run_dispatch(
     // transfer (zones / media_ids / intents son función del cliente, no del
     // agente activo). turn_number también se computa una vez por turno.
     let customer_explicit_zones = guardrails::extract_customer_explicit_zones(&recent);
-    let recent_media_ids = guardrails::extract_recent_media_ids(&recent);
+    // NOTA: media_ids se computan DESPUÉS del burst (ver abajo) para que solo
+    // incluyan IDs del turno actual, no imágenes de sesiones anteriores.
     let customer_explicit_intents = guardrails::extract_customer_explicit_intents(&recent);
 
     // History: todo lo que NO está en la ráfaga. Incluye outbounds del bot para
@@ -343,15 +344,7 @@ async fn run_dispatch(
         })
         .collect();
 
-    // El history que ve el modelo arranca desde full_history (puede recortarse
-    // adelante por fresh-start). Para turn_number contamos `User` turns en
-    // ESTE history — que es lo que efectivamente ve Gemini.
-    let turn_state_owned: Option<String> = guardrails::build_turn_state(
-        &full_history,
-        &customer_explicit_zones,
-        &customer_explicit_intents,
-        &recent_media_ids,
-    );
+    // turn_state_owned se computa más abajo, después del burst y recent_media_ids.
 
     // ── Fresh-start detection ──────────────────────────────────────────────
     // Si la IA NUNCA respondió en esta conv y hay history previo (mensajes
@@ -446,6 +439,22 @@ async fn run_dispatch(
         })
         .collect();
 
+    // Media IDs del burst actual — solo los del turno corriente para evitar que
+    // el LLM elija imágenes de sesiones anteriores que siguen en la ventana de 20.
+    let recent_media_ids: Vec<String> = {
+        let mut seen = std::collections::LinkedList::new();
+        let mut dedup = std::collections::HashSet::new();
+        for m in &burst {
+            if let Some(mid) = m.media_id.as_deref() {
+                let mid = mid.trim();
+                if !mid.is_empty() && dedup.insert(mid.to_string()) {
+                    seen.push_back(mid.to_string());
+                }
+            }
+        }
+        seen.into_iter().collect()
+    };
+
     // High water mark: el _id más alto que la IA "vio" en su prompt. Empieza
     // siendo el max del burst inicial; si hay chain reload, se actualiza con
     // el max del nuevo burst. Al final del dispatch lo usamos para detectar
@@ -486,6 +495,16 @@ async fn run_dispatch(
         return Ok(());
     }
     let user_text = burst_texts.join("\n");
+
+    // turn_state_owned se computa con el `history` final (post fresh-start/reopen)
+    // y los media_ids del burst actual — garantiza que turn_number y available_media_ids
+    // sean consistentes con lo que realmente ve el LLM.
+    let turn_state_owned: Option<String> = guardrails::build_turn_state(
+        &history,
+        &customer_explicit_zones,
+        &customer_explicit_intents,
+        &recent_media_ids,
+    );
 
     // ── Per-conv: chequeo de turn limit ANTES del LLM ──────────────────────
     let conv_hex = inbound.conversation_id.to_hex();
@@ -873,10 +892,21 @@ async fn run_dispatch(
                 .await
             {
                 Ok(refreshed) => {
+                    // Mismo criterio que el burst inicial: todos los inbounds
+                    // desde el último outbound (no solo >= inbound_oid).
+                    let refreshed_last_out_oid: Option<ObjectId> = refreshed
+                        .iter()
+                        .filter(|m| m.direction == "out")
+                        .filter_map(|m| m.id)
+                        .max();
                     let new_burst: Vec<&WaMessage> = refreshed
                         .iter()
                         .filter(|m| {
-                            m.direction == "in" && m.id.map(|i| i >= inbound_oid).unwrap_or(false)
+                            if m.direction != "in" { return false; }
+                            match refreshed_last_out_oid {
+                                Some(out_id) => m.id.map(|i| i > out_id).unwrap_or(false),
+                                None => true,
+                            }
                         })
                         .collect();
                     let new_burst_texts: Vec<String> = new_burst
@@ -903,7 +933,20 @@ async fn run_dispatch(
                             effective_user_message = new_user_text;
                             customer_explicit_zones =
                                 guardrails::extract_customer_explicit_zones(&refreshed);
-                            recent_media_ids = guardrails::extract_recent_media_ids(&refreshed);
+                            // Media IDs: solo del burst recargado, misma lógica que burst inicial.
+                            recent_media_ids = {
+                                let mut seen = std::collections::LinkedList::new();
+                                let mut dedup = std::collections::HashSet::new();
+                                for m in &new_burst {
+                                    if let Some(mid) = m.media_id.as_deref() {
+                                        let mid = mid.trim();
+                                        if !mid.is_empty() && dedup.insert(mid.to_string()) {
+                                            seen.push_back(mid.to_string());
+                                        }
+                                    }
+                                }
+                                seen.into_iter().collect()
+                            };
                         }
                     }
                     // Actualizar HWM al máximo _id del burst refrescado —

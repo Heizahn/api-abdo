@@ -3438,7 +3438,11 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         .clone()
         .or_else(|| parsed.bank.clone().filter(|s| !s.trim().is_empty()))
         .unwrap_or_default();
-    let report_phone_number: String = parsed.phone.clone().unwrap_or_default();
+    let report_phone_number: String = parsed
+        .phone
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| ctx.customer_phone.clone());
     let ref_for_ticket = reference.clone();
     let bank_for_ticket = bank_origin.clone();
     let report = crate::models::payment::PaymentReport {
