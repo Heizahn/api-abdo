@@ -3465,7 +3465,7 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         rejection_reason: None,
         id_creator: Some(ctx.ai_user_id.clone()),
         id_issuing_bank: parsed_issuing_bank_oid,
-        created_at: payment_date,
+        created_at: Utc::now(),
     };
 
     // 17. Persist
