@@ -2423,7 +2423,14 @@ pub async fn take_conversation_handler(
                 previous_status: "pending".to_string(),
             }
         };
-        broadcast_except(&state.ws_registry, &claims.id, &ev).await;
+        // is_takeover: broadcast_all para que el agente destino también reciba
+        // el status actualizado (pending) sin depender solo de la respuesta HTTP.
+        // toma nueva: broadcast_except es suficiente (el tomador ya tiene la resp).
+        if is_takeover {
+            broadcast_all(&state.ws_registry, &ev).await;
+        } else {
+            broadcast_except(&state.ws_registry, &claims.id, &ev).await;
+        }
         record_conv_event(
             &state,
             WaConversationEventInput {
