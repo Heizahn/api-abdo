@@ -444,8 +444,8 @@ async fn run_dispatch(
         })
         .collect();
 
-    // Media IDs del burst actual — solo los del turno corriente para evitar que
-    // el LLM elija imágenes de sesiones anteriores que siguen en la ventana de 20.
+    // Media IDs del burst actual — para el HUD available_media_ids del sistema
+    // (le muestra al LLM qué imágenes puede usar en este turno).
     let recent_media_ids: Vec<String> = {
         let mut seen = std::collections::LinkedList::new();
         let mut dedup = std::collections::HashSet::new();
@@ -459,6 +459,10 @@ async fn run_dispatch(
         }
         seen.into_iter().collect()
     };
+    // session_media_ids: todos los inbounds con imagen en la ventana reciente.
+    // Más amplio que recent_media_ids — el guardrail de report_payment acepta
+    // imágenes de bursts anteriores que el LLM ya analizó en el mismo turno.
+    let session_media_ids: Vec<String> = guardrails::extract_recent_media_ids(&recent);
 
     // High water mark: el _id más alto que la IA "vio" en su prompt. Empieza
     // siendo el max del burst inicial; si hay chain reload, se actualiza con
@@ -824,6 +828,7 @@ async fn run_dispatch(
     };
     let mut customer_explicit_zones = customer_explicit_zones;
     let mut recent_media_ids = recent_media_ids;
+    let mut session_media_ids = session_media_ids;
 
     // ── Loop de dispatch con chain de transfers ─────────────────────────────
     // Cuando un agente del MISMO workspace llama `transfer_to_agent`, el
@@ -938,7 +943,7 @@ async fn run_dispatch(
                             effective_user_message = new_user_text;
                             customer_explicit_zones =
                                 guardrails::extract_customer_explicit_zones(&refreshed);
-                            // Media IDs: solo del burst recargado, misma lógica que burst inicial.
+                            // Media IDs: burst recargado para el HUD, ventana completa para el guardrail.
                             recent_media_ids = {
                                 let mut seen = std::collections::LinkedList::new();
                                 let mut dedup = std::collections::HashSet::new();
@@ -952,6 +957,7 @@ async fn run_dispatch(
                                 }
                                 seen.into_iter().collect()
                             };
+                            session_media_ids = guardrails::extract_recent_media_ids(&refreshed);
                         }
                     }
                     // Actualizar HWM al máximo _id del burst refrescado —
@@ -1014,6 +1020,7 @@ async fn run_dispatch(
             default_ticket_category_id: active_agent.escalation.default_ticket_category_id.clone(),
             customer_explicit_zones: customer_explicit_zones.clone(),
             recent_media_ids: recent_media_ids.clone(),
+            session_media_ids: session_media_ids.clone(),
             workspace_enable_guardrails: wa_settings.enable_guardrails,
             customer_phone: conv.phone.clone(),
         };

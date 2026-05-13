@@ -83,9 +83,17 @@ pub struct ToolContext {
     /// `is_sandbox` antes de leer este campo).
     pub customer_explicit_zones: Vec<String>,
 
-    /// media_ids de mensajes inbound recientes con archivo adjunto.
-    /// Precomputado en dispatch. Vacío en sandbox.
+    /// media_ids del burst actual (inbounds desde el último outbound).
+    /// Usado por build_turn_state para el HUD available_media_ids del sistema.
+    /// Vacío en sandbox.
     pub recent_media_ids: Vec<String>,
+
+    /// media_ids de TODOS los inbounds en la ventana reciente de la sesión.
+    /// Más amplio que recent_media_ids: incluye imágenes enviadas en bursts
+    /// anteriores del mismo turno (ej: la imagen que el LLM ya analizó pero
+    /// que quedó fuera del burst actual porque hubo un outbound intermedio).
+    /// Usado por el guardrail de report_payment. Vacío en sandbox.
+    pub session_media_ids: Vec<String>,
 
     /// Toggle del workspace para guardrails server-side (Phase 1).
     /// Resuelto desde `WaSettings.enable_guardrails` en dispatch. Los
@@ -2933,7 +2941,7 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     // los mensajes recientes (evita que la IA invente un ID).
     if ctx.workspace_enable_guardrails && !ctx.is_sandbox {
         let mid = parsed.media_id.trim();
-        if !ctx.recent_media_ids.iter().any(|m| m == mid) {
+        if !ctx.session_media_ids.iter().any(|m| m == mid) {
             return ToolResult::err("media_id_not_in_conversation", started);
         }
     }
@@ -3462,7 +3470,7 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         rejection_reason: None,
         id_creator: Some(ctx.ai_user_id.clone()),
         id_issuing_bank: parsed_issuing_bank_oid,
-        created_at: Utc::now(),
+        created_at: payment_date,
     };
 
     // 17. Persist

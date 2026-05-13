@@ -286,6 +286,7 @@ pub async fn sandbox_handler(
         default_ticket_category_id: agent.escalation.default_ticket_category_id.clone(),
         customer_explicit_zones: Vec::new(),
         recent_media_ids: Vec::new(),
+        session_media_ids: Vec::new(),
         // Sandbox no tiene WaSettings real — defaulteamos a guardrails ON.
         // La gate de `is_sandbox` adicional en cada tool evita que el
         // guardrail bloquee testing de edge cases.
