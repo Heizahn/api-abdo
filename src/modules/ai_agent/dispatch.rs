@@ -109,7 +109,12 @@ pub fn dispatch_inbound_async(state: Arc<AppState>, inbound: WaMessage, workspac
             return;
         }
 
-        let agent = match select_agent(&state, &conv, &workspace_id).await {
+        let reopen_from_state_early = conv
+            .ai_conv_state
+            .as_ref()
+            .map(|s| s.reopen_pending)
+            .unwrap_or(false);
+        let agent = match select_agent(&state, &conv, &workspace_id, reopen_from_state_early).await {
             Some(a) => a,
             None => {
                 tracing::debug!(
@@ -2044,20 +2049,27 @@ async fn select_agent(
     state: &Arc<AppState>,
     conv: &crate::models::whatsapp::WaConversation,
     workspace_id: &ObjectId,
+    skip_active_agent: bool,
 ) -> Option<AiAgent> {
-    if let Some(active) = conv.ai_active_agent_id {
-        match state.db.find_ai_agent_by_id(&active).await {
-            Ok(Some(a)) if a.enabled => return Some(a),
-            Ok(_) => {
-                tracing::debug!(
-                    "[ai_agent.dispatch] ai_active_agent_id={} deshabilitado/borrado, fallback",
-                    active.to_hex()
-                );
-            }
-            Err(e) => {
-                tracing::warn!("[ai_agent.dispatch] lookup active agent: {}", e);
+    if !skip_active_agent {
+        if let Some(active) = conv.ai_active_agent_id {
+            match state.db.find_ai_agent_by_id(&active).await {
+                Ok(Some(a)) if a.enabled => return Some(a),
+                Ok(_) => {
+                    tracing::debug!(
+                        "[ai_agent.dispatch] ai_active_agent_id={} deshabilitado/borrado, fallback",
+                        active.to_hex()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("[ai_agent.dispatch] lookup active agent: {}", e);
+                }
             }
         }
+    } else {
+        tracing::debug!(
+            "[ai_agent.dispatch] reopen Turn 2 — ignorando ai_active_agent_id, forzando receptionist"
+        );
     }
 
     if let Ok(Some(a)) = state.db.find_receptionist_for_workspace(workspace_id).await {
