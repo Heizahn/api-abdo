@@ -59,6 +59,10 @@ fn substitute_prompt(text: &str, vars: &PromptVariables) -> String {
         .replace("{weekday}", &vars.weekday)
 }
 
+/// Modelo de OpenRouter que acepta `input_audio` content blocks.
+/// Se activa automáticamente cuando el burst incluye un mensaje de audio.
+const AUDIO_CAPABLE_MODEL: &str = "openai/gpt-4o-mini-audio-preview";
+
 use super::{
     openrouter::{
         AiRelay, ChatCompletionRequest, ChatMessage, ContentBlock, MessageContent,
@@ -566,6 +570,23 @@ pub async fn run_turn(
     for m in user_media {
         user_blocks.push(m.to_content_block());
     }
+
+    // Si el burst tiene audio, override al modelo audio-capable de OpenRouter.
+    // gpt-4o-mini no acepta input_audio blocks — el audio-preview sí, mismo precio.
+    let has_audio = user_blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::InputAudio { .. }));
+    let effective_model_id = if has_audio {
+        tracing::info!(
+            "[ai_agent.runner] audio detectado en burst — override model: {} → {}",
+            agent.model.model_id,
+            AUDIO_CAPABLE_MODEL
+        );
+        AUDIO_CAPABLE_MODEL.to_string()
+    } else {
+        agent.model.model_id.clone()
+    };
+
     let user_content = match user_blocks.len() {
         0 => MessageContent::Text(String::new()), // fallback defensivo
         1 => {
@@ -620,7 +641,7 @@ pub async fn run_turn(
 
     'turn: for iter in 0..MAX_ITERATIONS {
         let req = ChatCompletionRequest {
-            model: agent.model.model_id.clone(),
+            model: effective_model_id.clone(),
             messages: messages.clone(),
             tools: tools_option.clone(),
             tool_choice: tool_choice_option.clone(),
