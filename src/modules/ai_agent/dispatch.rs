@@ -1791,6 +1791,7 @@ async fn send_live_response(
         interactive_payload: None,
         contacts_payload: None,
         location: None,
+        reactions: vec![],
         ai_processed_at: None,
         timestamp: now,
     };

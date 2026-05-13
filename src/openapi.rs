@@ -176,6 +176,7 @@ use crate::modules::whatsapp::handler::ResetAiStateResponse;
         crate::modules::whatsapp::handler::delete_template_handler,
         crate::modules::whatsapp::handler::resync_template_handler,
         crate::modules::whatsapp::handler::upload_template_header_media_handler,
+        crate::modules::whatsapp::handler::react_message_handler,
         // WhatsApp — Tickets
         crate::modules::whatsapp::tickets::list_ticket_categories_handler,
         crate::modules::whatsapp::tickets::list_tickets_handler,
@@ -295,6 +296,10 @@ use crate::modules::whatsapp::handler::ResetAiStateResponse;
             UserItem, UserListResponse, UserResponseEnvelope, OkResponse,
             SetUserVisibleRequest, UpdateUserRequest, CreateUserBody, SetUserPasswordRequest,
             ChangeMyPasswordRequest,
+            // WhatsApp — Reactions
+            crate::models::whatsapp::MessageReaction,
+            crate::modules::whatsapp::handler::ReactMessageRequest,
+            crate::modules::whatsapp::handler::ReactMessageResponse,
             // WhatsApp — Items
             ConversationItem, MessageItem, SettingsItem,
             TransferableAgentItem, ReplyToItem, UrlPreview, LocationPayload, QuickReplyItem,

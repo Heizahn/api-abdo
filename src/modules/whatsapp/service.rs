@@ -847,6 +847,80 @@ impl WhatsAppService {
         Ok(())
     }
 
+    /// Envía una reacción (o la elimina si `emoji` está vacío) al mensaje
+    /// `target_wa_message_id` del contacto `to`.
+    ///
+    /// Usa `self.meta_request(...)` para pasar por el relay cuando está configurado.
+    /// Mapea Meta error code 131047 → 409 `reaction_window_expired`.
+    /// Cualquier otro error no-2xx → 502 `meta_upstream_error`.
+    /// Descarta el ack wamid — no se crea WaMessage para la reacción.
+    pub async fn send_reaction(
+        &self,
+        to: &str,
+        target_wa_message_id: &str,
+        emoji: &str,
+    ) -> Result<(), crate::error::ApiError> {
+        use axum::http::StatusCode;
+
+        let payload = json!({
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "type": "reaction",
+            "reaction": {
+                "message_id": target_wa_message_id,
+                "emoji": emoji
+            }
+        });
+
+        let url = self.messages_url();
+        let resp = send_with_retry("send_reaction", || {
+            self.meta_request(reqwest::Method::POST, &url)
+                .bearer_auth(&self.access_token)
+                .json(&payload)
+        })
+        .await
+        .map_err(|e| {
+            crate::error::ApiError::domain_simple(
+                StatusCode::BAD_GATEWAY,
+                "meta_upstream_error",
+                format!(
+                    "Meta inalcanzable: {}",
+                    describe_reqwest_error("send_reaction request", e)
+                ),
+            )
+        })?;
+
+        if !resp.status().is_success() {
+            let http_status = resp.status();
+            let raw = resp.text().await.unwrap_or_default();
+            // Intentar parsear el error code de Meta para mapear a 409 si aplica.
+            let meta_code: Option<i64> = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|v| v.get("error").and_then(|e| e.get("code")).and_then(|c| c.as_i64()));
+
+            return match meta_code {
+                // 131047: outside 24h reaction window.
+                Some(131047) => Err(crate::error::ApiError::domain_simple(
+                    StatusCode::CONFLICT,
+                    "reaction_window_expired",
+                    "No se puede reaccionar a este mensaje: la ventana de 24h ya expiró.",
+                )),
+                _ => {
+                    tracing::warn!("[send_reaction] Meta error [{}]: {}", http_status, raw);
+                    Err(crate::error::ApiError::domain_simple(
+                        StatusCode::BAD_GATEWAY,
+                        "meta_upstream_error",
+                        format!("Meta rechazó la reacción ({}).", http_status),
+                    ))
+                }
+            };
+        }
+
+        // El response trae `messages[0].id` (ack wamid) — se descarta.
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Template management — Meta Cloud API
     // -----------------------------------------------------------------------

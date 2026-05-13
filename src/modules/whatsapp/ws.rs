@@ -209,6 +209,25 @@ pub enum WsServerEvent {
         ai_conv_state: Option<serde_json::Value>,
     },
 
+    /// Reacción aplicada o removida sobre un mensaje existente.
+    /// `emoji = ""` significa que la reacción fue removida desde ese lado.
+    /// `sender_name` viene sólo cuando `from = "agent"` (claims.name); en
+    /// reacciones del cliente es `None`.
+    #[serde(rename = "REACCION_MENSAJE")]
+    ReaccionMensaje {
+        conversation_id: String,
+        /// ObjectId hex del `WaMessage` actualizado.
+        message_id: String,
+        /// `wa_message_id` (wamid…) del mismo mensaje.
+        wa_message_id: String,
+        /// Emoji crudo o `""` para remoción.
+        emoji: String,
+        /// `"customer"` | `"agent"`.
+        from: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sender_name: Option<String>,
+    },
+
     #[serde(rename = "ERROR")]
     Error { error: String },
 

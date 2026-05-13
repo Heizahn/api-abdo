@@ -242,6 +242,20 @@ pub struct WaConversationEventInput<'a> {
     pub note: Option<&'a str>,
 }
 
+/// Una sola reacción persistida en `WaMessage.reactions`. Hay como máximo
+/// una por `from` (una del cliente, una del agente).
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+pub struct MessageReaction {
+    /// Emoji crudo enviado por Meta o por el agente. Cadena vacía nunca se
+    /// persiste — `""` significa "remover" y se traduce a `$pull` sin `$push`.
+    pub emoji: String,
+    /// `"customer"` cuando viene del webhook inbound; `"agent"` cuando viene del staff.
+    pub from: String,
+    /// Sólo presente cuando `from == "agent"` (claims.name del JWT).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_name: Option<String>,
+}
+
 /// Mensaje individual de WhatsApp (colección `wa_messages`)
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WaMessage {
@@ -336,6 +350,11 @@ pub struct WaMessage {
     /// como caption si vienen.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<LocationPayload>,
+    /// Reacciones activas sobre este mensaje. Máximo 2 elementos:
+    /// uno con `from: "customer"`, otro con `from: "agent"`.
+    /// Default `Vec::new()` para deserializar documentos pre-rollout sin migración.
+    #[serde(default)]
+    pub reactions: Vec<MessageReaction>,
     pub timestamp: DateTime,
 }
 
@@ -846,6 +865,10 @@ pub struct MessageItem {
     /// Datos estructurados de ubicación (sólo cuando `type == "location"`).
     /// El front renderiza el mapa con `latitude`/`longitude`.
     pub location: Option<LocationPayload>,
+    /// Reacciones activas sobre el mensaje. Vacío `[]` cuando no hay ninguna.
+    /// El front renderiza el badge de emoji + tooltip con `sender_name`.
+    #[serde(default)]
+    pub reactions: Vec<MessageReaction>,
     /// ISO-8601 (RFC 3339) UTC. Cuando está seteado, indica que la IA procesó
     /// este mensaje inbound (cualquier modo). El front lo renderiza con un
     /// indicador 🤖 sin alterar el `unread_count` del humano.

@@ -780,6 +780,26 @@ pub trait WhatsAppRepository {
     /// primer mensaje que lo contiene. Usado por el endpoint que sirve el media
     /// para validar autorización y encontrar el `business_phone`.
     async fn find_message_by_media_id(&self, media_id: &str) -> Result<Option<WaMessage>, String>;
+    /// Aplica una reacción al mensaje identificado por `wa_message_id`.
+    ///
+    /// Semántica:
+    /// - Si `emoji.is_empty()`: elimina la reacción de ese `sender` (idempotente).
+    /// - Si `emoji` no está vacío: reemplaza la reacción de ese `sender`
+    ///   (pull existente + push nuevo en una sola operación atómica).
+    ///
+    /// `sender` debe ser `"customer"` o `"agent"`. `sender_name` sólo se persiste
+    /// si está presente Y `emoji` no está vacío.
+    ///
+    /// Retorna `Ok(None)` si no existe ningún mensaje con ese `wa_message_id`.
+    async fn update_message_reactions(
+        &self,
+        wa_message_id: &str,
+        sender: &str,
+        emoji: &str,
+        sender_name: Option<&str>,
+    ) -> Result<Option<WaMessage>, String>;
+    /// Busca un mensaje por `_id`.
+    async fn find_message_by_id(&self, id: &ObjectId) -> Result<Option<WaMessage>, String>;
 
     // Per-agent "last opened" tracking
     /// Upsert del último momento en que `user_id` abrió `conversation_id`.

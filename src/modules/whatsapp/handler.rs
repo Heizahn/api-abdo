@@ -395,6 +395,63 @@ pub async fn receive_webhook(
                 };
 
                 for msg in messages {
+                    // === REACCIONES — early return, no toca conversación ni persistencia ===
+                    if msg.msg_type == "reaction" {
+                        let reaction = match &msg.reaction {
+                            Some(v) => v,
+                            None => {
+                                tracing::warn!(
+                                    "[webhook] reaction sin payload, ignorando: from={}",
+                                    msg.from
+                                );
+                                continue;
+                            }
+                        };
+                        let target_wamid = reaction
+                            .get("message_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let emoji = reaction
+                            .get("emoji")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if target_wamid.is_empty() {
+                            tracing::warn!("[webhook] reaction sin message_id, ignorando");
+                            continue;
+                        }
+
+                        match state
+                            .db
+                            .update_message_reactions(target_wamid, "customer", emoji, None)
+                            .await
+                        {
+                            Ok(Some(updated)) => {
+                                let event = WsServerEvent::ReaccionMensaje {
+                                    conversation_id: updated.conversation_id.to_hex(),
+                                    message_id: updated.id.map(|o| o.to_hex()).unwrap_or_default(),
+                                    wa_message_id: target_wamid.to_string(),
+                                    emoji: emoji.to_string(),
+                                    from: "customer".to_string(),
+                                    sender_name: None,
+                                };
+                                broadcast_all(&state.ws_registry, &event).await;
+                            }
+                            Ok(None) => {
+                                tracing::info!(
+                                    "[webhook] reaction sobre wamid desconocido (ignorada): {}",
+                                    target_wamid
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "[webhook] update_message_reactions error: {}",
+                                    e
+                                );
+                            }
+                        }
+                        continue; // CRÍTICO: no caer en el resto del loop (no upsert, no touch, no insert).
+                    }
+
                     let agents = settings.agents.clone();
 
                     let name = contacts
@@ -636,6 +693,7 @@ pub async fn receive_webhook(
                         interactive_payload,
                         contacts_payload,
                         location: location_payload,
+                        reactions: vec![],
                         ai_processed_at: None,
                         timestamp: msg_ts,
                     };
@@ -1377,6 +1435,7 @@ pub async fn send_message_handler(
         interactive_payload: sent.interactive_payload,
         contacts_payload: sent.contacts_payload,
         location: sent.location,
+        reactions: vec![],
         ai_processed_at: None,
         timestamp: DateTime::now(),
     };
@@ -3039,6 +3098,7 @@ pub async fn initiate_conversation_handler(
         interactive_payload: None,
         contacts_payload: None,
         location: None,
+        reactions: vec![],
         ai_processed_at: None,
         timestamp: DateTime::now(),
     };
@@ -4977,6 +5037,7 @@ fn msg_to_item(
         interactive_payload: m.interactive_payload,
         contacts_payload: m.contacts_payload,
         location: m.location,
+        reactions: m.reactions,
         ai_processed_at: m.ai_processed_at.map(iso8601),
         created_at: iso8601(m.timestamp),
     }
@@ -7230,4 +7291,106 @@ pub async fn reset_ai_conv_state_handler(
         ok: true,
         conversation_id: id,
     }))
+}
+
+// ============================================
+// REACCIONES A MENSAJES
+// ============================================
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct ReactMessageRequest {
+    /// Emoji crudo (ej: "👍", "❤️"). Cadena vacía `""` significa "remover mi reacción".
+    pub emoji: String,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct ReactMessageResponse {
+    pub ok: bool,
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/messages/{id}/react",
+    tag = "WhatsApp — Messages",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ObjectId del WaMessage al que se reacciona")),
+    request_body = ReactMessageRequest,
+    responses(
+        (status = 200, description = "Reacción aplicada", body = ReactMessageResponse),
+        (status = 400, description = "id inválido o payload malformado"),
+        (status = 401, description = "No autorizado"),
+        (status = 404, description = "Mensaje no encontrado"),
+        (status = 409, description = "reaction_window_expired — ventana de 24h expirada"),
+        (status = 502, description = "meta_upstream_error — Meta rechazó la reacción"),
+    )
+)]
+pub async fn react_message_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<crate::auth::user_jwt::UserProfileClaims>,
+    Path(id): Path<String>,
+    Json(body): Json<ReactMessageRequest>,
+) -> Result<Json<ReactMessageResponse>, ApiError> {
+    use crate::db::WhatsAppRepository;
+    use axum::http::StatusCode;
+
+    // 1. Parsear ObjectId
+    let oid = ObjectId::parse_str(&id)
+        .map_err(|_| ApiError::domain_simple(StatusCode::BAD_REQUEST, "invalid_id", "id inválido"))?;
+
+    // 2. Cargar el WaMessage target
+    let message = state
+        .db
+        .find_message_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| {
+            ApiError::domain_simple(StatusCode::NOT_FOUND, "message_not_found", "Mensaje no encontrado")
+        })?;
+
+    // 3. Cargar la conversación para obtener customer_phone + business_phone
+    let conv = state
+        .db
+        .find_conversation_by_id(&message.conversation_id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| {
+            ApiError::domain_simple(
+                StatusCode::NOT_FOUND,
+                "conversation_not_found",
+                "Conversación no encontrada",
+            )
+        })?;
+
+    // 4. Resolver WhatsAppService para el business_phone
+    let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
+
+    // 5. Llamar a Meta (Meta acepta emoji vacío para remover)
+    wa.send_reaction(&conv.phone, &message.wa_message_id, &body.emoji).await?;
+
+    // 6. Aplicar update en DB (sólo si Meta aceptó)
+    let updated = state
+        .db
+        .update_message_reactions(&message.wa_message_id, "agent", &body.emoji, Some(&claims.name))
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| {
+            ApiError::domain_simple(
+                StatusCode::NOT_FOUND,
+                "message_not_found",
+                "Mensaje desapareció entre lookup y update",
+            )
+        })?;
+
+    // 7. Broadcast WS
+    let event = WsServerEvent::ReaccionMensaje {
+        conversation_id: updated.conversation_id.to_hex(),
+        message_id: updated.id.map(|o| o.to_hex()).unwrap_or_default(),
+        wa_message_id: updated.wa_message_id.clone(),
+        emoji: body.emoji.clone(),
+        from: "agent".to_string(),
+        sender_name: Some(claims.name.clone()),
+    };
+    broadcast_all(&state.ws_registry, &event).await;
+
+    Ok(Json(ReactMessageResponse { ok: true }))
 }

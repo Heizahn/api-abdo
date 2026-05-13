@@ -822,6 +822,69 @@ impl WhatsAppRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
+    async fn update_message_reactions(
+        &self,
+        wa_message_id: &str,
+        sender: &str,
+        emoji: &str,
+        sender_name: Option<&str>,
+    ) -> Result<Option<WaMessage>, String> {
+        use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+
+        if sender != "customer" && sender != "agent" {
+            return Err(format!("invalid reaction sender: {}", sender));
+        }
+
+        // Documento de la nueva reacción (vacío = remoción → array vacío).
+        let new_reaction_arr: Vec<mongodb::bson::Document> = if emoji.is_empty() {
+            vec![]
+        } else {
+            let mut r = doc! { "emoji": emoji, "from": sender };
+            if let Some(name) = sender_name {
+                r.insert("sender_name", name);
+            }
+            vec![r]
+        };
+
+        // Pipeline: $set reactions = filter(out same-side) ++ new_reaction_arr.
+        // - $ifNull protege documentos pre-rollout sin el campo `reactions`.
+        // - $filter elimina la reacción previa del mismo `from`.
+        // - $concatArrays appendea la nueva (o nada, si es remoción).
+        let pipeline = vec![doc! {
+            "$set": {
+                "reactions": {
+                    "$concatArrays": [
+                        {
+                            "$filter": {
+                                "input": { "$ifNull": ["$reactions", []] },
+                                "as": "r",
+                                "cond": { "$ne": ["$$r.from", sender] }
+                            }
+                        },
+                        new_reaction_arr
+                    ]
+                }
+            }
+        }];
+
+        let opts = FindOneAndUpdateOptions::builder()
+            .return_document(ReturnDocument::After)
+            .build();
+
+        self.wa_messages()
+            .find_one_and_update(doc! { "wa_message_id": wa_message_id }, pipeline)
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn find_message_by_id(&self, id: &ObjectId) -> Result<Option<WaMessage>, String> {
+        self.wa_messages()
+            .find_one(doc! { "_id": id })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn update_message_status(
         &self,
         wa_message_id: &str,

@@ -252,6 +252,7 @@ async fn send_farewell_message(
         interactive_payload: None,
         contacts_payload: None,
         location: None,
+        reactions: vec![],
         ai_processed_at: None,
         timestamp: now,
     };
