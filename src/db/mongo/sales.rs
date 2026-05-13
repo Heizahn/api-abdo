@@ -699,11 +699,7 @@ impl SalesRepository for MongoDB {
             let id_payment = doc.get_object_id("idPayment").ok().map(|o| o.to_hex());
 
             let payment_date = doc.get_str("dPaymentDate").unwrap_or_default().to_string();
-            let created_at = doc
-                .get_datetime("dCreation")
-                .ok()
-                .map(|dt| VenezuelaDateTime::from(*dt).datetime_string_venezuela())
-                .unwrap_or_default();
+            let created_at = doc.get_str("dCreation").unwrap_or_default().to_string();
 
             let client_name = doc
                 .get_document("client")
@@ -773,11 +769,7 @@ impl SalesRepository for MongoDB {
                     id_editor: doc.get_str("idEditor").ok().map(|s| s.to_string()),
                     id_payment: doc.get_object_id("idPayment").ok(),
                     id_issuing_bank: doc.get_object_id("idIssuingBank").ok(),
-                    created_at: doc
-                        .get_datetime("dCreation")
-                        .ok()
-                        .map(|dt| VenezuelaDateTime::from(*dt).datetime_string_venezuela())
-                        .unwrap_or_default(),
+                    created_at: doc.get_str("dCreation").unwrap_or_default().to_string(),
                 };
                 Ok(Some(report))
             }
