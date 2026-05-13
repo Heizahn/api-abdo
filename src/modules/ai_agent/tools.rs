@@ -83,11 +83,6 @@ pub struct ToolContext {
     /// `is_sandbox` antes de leer este campo).
     pub customer_explicit_zones: Vec<String>,
 
-    /// media_ids del burst actual (inbounds desde el último outbound).
-    /// Usado por build_turn_state para el HUD available_media_ids del sistema.
-    /// Vacío en sandbox.
-    pub recent_media_ids: Vec<String>,
-
     /// media_ids de TODOS los inbounds en la ventana reciente de la sesión.
     /// Más amplio que recent_media_ids: incluye imágenes enviadas en bursts
     /// anteriores del mismo turno (ej: la imagen que el LLM ya analizó pero

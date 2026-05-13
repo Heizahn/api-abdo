@@ -827,7 +827,6 @@ async fn run_dispatch(
         user_text
     };
     let mut customer_explicit_zones = customer_explicit_zones;
-    let mut recent_media_ids = recent_media_ids;
     let mut session_media_ids = session_media_ids;
 
     // ── Loop de dispatch con chain de transfers ─────────────────────────────
@@ -943,20 +942,6 @@ async fn run_dispatch(
                             effective_user_message = new_user_text;
                             customer_explicit_zones =
                                 guardrails::extract_customer_explicit_zones(&refreshed);
-                            // Media IDs: burst recargado para el HUD, ventana completa para el guardrail.
-                            recent_media_ids = {
-                                let mut seen = std::collections::LinkedList::new();
-                                let mut dedup = std::collections::HashSet::new();
-                                for m in &new_burst {
-                                    if let Some(mid) = m.media_id.as_deref() {
-                                        let mid = mid.trim();
-                                        if !mid.is_empty() && dedup.insert(mid.to_string()) {
-                                            seen.push_back(mid.to_string());
-                                        }
-                                    }
-                                }
-                                seen.into_iter().collect()
-                            };
                             session_media_ids = guardrails::extract_recent_media_ids(&refreshed);
                         }
                     }
@@ -1019,7 +1004,6 @@ async fn run_dispatch(
             agent_snapshot: agent_snapshot.clone(),
             default_ticket_category_id: active_agent.escalation.default_ticket_category_id.clone(),
             customer_explicit_zones: customer_explicit_zones.clone(),
-            recent_media_ids: recent_media_ids.clone(),
             session_media_ids: session_media_ids.clone(),
             workspace_enable_guardrails: wa_settings.enable_guardrails,
             customer_phone: conv.phone.clone(),

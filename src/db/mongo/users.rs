@@ -423,8 +423,12 @@ impl UserRepository for MongoDB {
         match result {
             None => Ok((None, false)),
             Some(doc) => {
-                // nRole is stored as f64 in Mongo; cast to f32 for the trait contract.
-                let role = doc.get("nRole").and_then(|v| v.as_f64()).map(|f| f as f32);
+                let role = doc.get("nRole").and_then(|v| match v {
+                    mongodb::bson::Bson::Double(d) => Some(*d as f32),
+                    mongodb::bson::Bson::Int32(i) => Some(*i as f32),
+                    mongodb::bson::Bson::Int64(i) => Some(*i as f32),
+                    _ => None,
+                });
                 let can_chat = doc
                     .get("bCanChat")
                     .and_then(|v| v.as_bool())
