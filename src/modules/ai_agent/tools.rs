@@ -572,21 +572,28 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
             }),
         )),
         T_CALCULATE_AMOUNT_BS => Some((
-            "Convierte un monto en USD a bolívares aplicando la tasa BCV vigente \
-             y el IVA configurado en el sistema. Llamar SIEMPRE que el cliente \
-             pregunte un precio en Bs — NUNCA inventes la tasa ni el total. \
-             Devuelve `amount_bs` (con IVA ya aplicado, este es el monto que \
-             debés mostrarle al cliente) más `bcv_rate` y `iva_percent` como \
-             info de transparencia.",
+            "Convierte montos entre USD y bolívares (BIDIRECCIONAL) aplicando la tasa \
+             BCV vigente y el IVA configurado. Llamar SIEMPRE que el cliente pregunte \
+             una conversión — NUNCA inventes la tasa ni el total. \
+             Pasá `amount_usd` para convertir USD→Bs, o `amount_bs` para convertir \
+             Bs→USD. Pasá EXACTAMENTE UNO de los dos, nunca ambos ni ninguno. \
+             El `amount_bs` (tanto input como output) SIEMPRE incluye IVA — es el \
+             monto real que el cliente paga o transfiere. \
+             El response devuelve siempre `amount_usd`, `amount_bs`, `bcv_rate`, \
+             `rate_date` e `iva_percent` como info de transparencia.",
             json!({
                 "type": "object",
                 "properties": {
                     "amount_usd": {
                         "type": "number",
-                        "description": "Monto en dólares a convertir. Debe ser mayor a 0."
+                        "description": "Monto en dólares a convertir a Bs. Mayor a 0. Mutuamente excluyente con amount_bs."
+                    },
+                    "amount_bs": {
+                        "type": "number",
+                        "description": "Monto en bolívares (CON IVA incluido) a convertir a USD. Mayor a 0. Mutuamente excluyente con amount_usd."
                     }
                 },
-                "required": ["amount_usd"]
+                "required": []
             }),
         )),
         T_GET_INSTALLATION_INFO => Some((
@@ -2699,7 +2706,10 @@ async fn exec_create_ticket(args: Value, ctx: &ToolContext, started: Instant) ->
 
 #[derive(Deserialize)]
 struct CalculateAmountBsArgs {
-    amount_usd: f64,
+    #[serde(default)]
+    amount_usd: Option<f64>,
+    #[serde(default)]
+    amount_bs: Option<f64>,
 }
 
 #[inline]
@@ -2713,12 +2723,12 @@ async fn exec_calculate_amount_bs(args: Value, ctx: &ToolContext, started: Insta
         Ok(v) => v,
         Err(e) => return ToolResult::err(format!("invalid_args:{}", e), started),
     };
-    let amount_usd = parsed.amount_usd;
 
-    // 2. Validate amount
-    if !(amount_usd > 0.0) {
-        // catches 0, negatives, NaN
-        return ToolResult::err("invalid_amount", started);
+    // 2. Validación exclusión mutua — ambos presentes o ninguno son error
+    match (parsed.amount_usd, parsed.amount_bs) {
+        (Some(_), Some(_)) => return ToolResult::err("ambiguous_input", started),
+        (None, None) => return ToolResult::err("amount_required", started),
+        _ => {}
     }
 
     // 3. Resolve BCV rate (Redis → DB fallback)
@@ -2744,16 +2754,31 @@ async fn exec_calculate_amount_bs(args: Value, ctx: &ToolContext, started: Insta
     };
     let iva_factor = tax.iva;
 
-    // 5. Compute — un solo monto final con IVA aplicado (mismo cálculo que el
-    //    endpoint v2). Devolver dos amounts (base + with_iva) en el JSON
-    //    confundía al LLM y mostraba el sin-IVA al cliente.
-    let amount_bs = round2(amount_usd * rate * iva_factor);
+    // 5. Bifurcación bidireccional — paso 2 ya descartó (Some,Some) y (None,None)
+    let (amount_usd, amount_bs) = match (parsed.amount_usd, parsed.amount_bs) {
+        (Some(usd), None) => {
+            if !(usd > 0.0) {
+                // catches 0, negatives, NaN
+                return ToolResult::err("invalid_amount", started);
+            }
+            (usd, round2(usd * rate * iva_factor))
+        }
+        (None, Some(bs)) => {
+            if !(bs > 0.0) {
+                return ToolResult::err("invalid_amount", started);
+            }
+            // bs se asume CON IVA (monto bruto que el cliente paga/transfiere)
+            (round2(bs / (rate * iva_factor)), bs)
+        }
+        _ => unreachable!(), // invariante garantizado por el paso 2
+    };
+
     let iva_percent = round2((iva_factor - 1.0) * 100.0);
 
     // 6. Date stamp (Caracas TZ — coherente con la clave diaria del cron BCV).
     let rate_date = crate::utils::timezone::VenezuelaDateTime::now().date_string_venezuela();
 
-    // 7. Result
+    // 7. Result — shape uniforme independientemente de la dirección
     ToolResult::ok(
         json!({
             "amount_usd":  amount_usd,
