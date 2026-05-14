@@ -2873,8 +2873,6 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
                 "ok": true,
                 "mode": "sandbox",
                 "payment_id": "sandbox-fake-payment",
-                "ticket_id": "sandbox-fake-ticket",
-                "warning": null,
                 "already_registered": false,
                 "amount_bs": amount_input_bs,
                 "amount_usd": amount_input_usd,
