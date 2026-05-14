@@ -2815,7 +2815,8 @@ struct ReportPaymentArgs {
     phone: Option<String>,
     #[serde(default)]
     debt_id: Option<String>,
-    payment_date: String,
+    #[serde(default)]
+    payment_date: Option<String>,
     /// Banco destino que figura en el comprobante (banco receptor del pago).
     #[serde(default)]
     destination_bank: Option<String>,
@@ -3341,9 +3342,21 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     let image_url = format!("/uploads/{}", unique_name);
 
     // 15. Parse payment_date — required; LLM must extract from voucher or ask user.
-    let payment_date: DateTime<Utc> = match parsed.payment_date.trim().parse::<DateTime<Utc>>() {
-        Ok(d) => d,
-        Err(_) => return ToolResult::err("payment_date_required: fecha no recibida o formato inválido. Extraela del comprobante (RFC3339, ej: 2026-05-14T10:30:00Z). Si el comprobante no muestra fecha, pedile la fecha al usuario.", started),
+    // None, empty string, whitespace-only, and malformed format all collapse to
+    // the same instructive error — consistent with the other optional fields in
+    // ReportPaymentArgs that use #[serde(default)] + Option<T>.
+    let payment_date: DateTime<Utc> = match parsed
+        .payment_date
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|d| d.parse::<DateTime<Utc>>().ok())
+    {
+        Some(d) => d,
+        None => return ToolResult::err(
+            "payment_date_required: fecha no recibida o formato inválido. Extraela del comprobante (RFC3339, ej: 2026-05-14T10:30:00Z). Si el comprobante no muestra fecha, pedile la fecha al usuario.",
+            started,
+        ),
     };
 
     // 16. Build PaymentReport

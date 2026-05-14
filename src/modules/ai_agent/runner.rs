@@ -767,6 +767,7 @@ pub async fn run_turn(
         });
 
         // Ejecutar cada tool call y agregar mensaje {role:"tool"} por call.
+        let logs_before = tool_call_logs.len();
         for tc in &tool_calls {
             let is_escalation =
                 tc.function.name == "request_human" || tc.function.name == "create_ticket";
@@ -864,6 +865,34 @@ pub async fn run_turn(
                 ..Default::default()
             });
         }
+
+        // ── Guardrail: report_payment falló ──────────────────────────────────
+        // Si report_payment devolvió success=false en esta iteración, el LLM
+        // podría alucinar "tu pago fue registrado" en el próximo turno de texto
+        // (el cliente ya subió el comprobante en turnos previos). Inyectamos un
+        // system note correctivo — mismo patrón que el bracket-retry de arriba.
+        if let Some(failed) = tool_call_logs[logs_before..]
+            .iter()
+            .find(|t| t.tool_name == "report_payment" && !t.success)
+        {
+            let error_code = failed.error.as_deref().unwrap_or("unknown_error");
+            tracing::warn!(
+                "[ai_agent.runner] report_payment falló (error={}) — inyectando system note anti-falsa-confirmación (iter={})",
+                error_code,
+                iter
+            );
+            messages.push(ChatMessage {
+                role: "system".into(),
+                content: Some(MessageContent::Text(format!(
+                    "IMPORTANTE: report_payment falló (error: `{}`). NO le confirmes al cliente \
+                     que el pago fue registrado — NO fue registrado. Debés pedirle los datos \
+                     faltantes o explicarle el problema antes de continuar.",
+                    error_code
+                ))),
+                ..Default::default()
+            });
+        }
+
         // Si escaló por create_ticket/request_human, continúa un turno más
         // para que el LLM produzca la despedida en texto.
     }
