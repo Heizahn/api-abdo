@@ -1761,7 +1761,7 @@ async fn send_live_response(
         wa_message_id: wa_id.clone(),
         direction: "out".to_string(),
         msg_type: "text".to_string(),
-        body: Some(text.to_string()),
+        body: Some(sanitized.clone()),
         media_id: None,
         media_mime_type: None,
         media_filename: None,
@@ -1789,7 +1789,7 @@ async fn send_live_response(
         .await
         .map_err(|e| format!("save_message: {}", e))?;
 
-    let preview = text.to_string();
+    let preview = sanitized.clone();
     let touch = ConversationTouch {
         preview: &preview,
         msg_type: &saved.msg_type,
@@ -2591,20 +2591,7 @@ mod handler_validator_tests {
 }
 
 /// Convierte `**texto**` (Markdown bold) en `*texto*` (WhatsApp bold).
-/// LLMs suelen emitir Markdown aunque el prompt pida formato WA.
-/// Splittear en "**" y rejuntar con "*" cubre todos los pares
-/// de apertura/cierre sin regex — eficiencia O(n).
+/// LLMs emiten Markdown aunque el prompt pida formato WA.
 fn md_bold_to_wa(text: &str) -> String {
-    if !text.contains("**") {
-        return text.to_string();
-    }
-    let parts: Vec<&str> = text.split("**").collect();
-    let mut out = String::with_capacity(text.len());
-    for (i, part) in parts.iter().enumerate() {
-        if i > 0 {
-            out.push('*');
-        }
-        out.push_str(part);
-    }
-    out
+    text.replace("**", "*")
 }
