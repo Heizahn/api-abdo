@@ -401,10 +401,7 @@ const TOOL_CATALOG: &[ToolMeta] = &[
         display_name: "Listar bancos emisores",
         ui_description: "Catálogo de bancos del país (BCV). Llamar ANTES de report_payment para que el cliente elija el banco emisor y pasar el id elegido en issuing_bank_id.",
         ui_category: "info",
-        // Prerequisito de report_payment: sin esta tool el LLM no tiene de
-        // dónde sacar el ObjectId del banco emisor. Se enciende por default
-        // para que agentes nuevos no queden bloqueados al reportar pagos.
-        default_enabled: true,
+        default_enabled: false,
         operational_category: ToolCategory::InfoLookup,
     },
 ];
