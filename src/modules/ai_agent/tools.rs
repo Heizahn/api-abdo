@@ -684,7 +684,7 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                     "bank":             { "type": "string", "description": "[DEPRECATED] Nombre libre del banco origen. Usar issuing_bank_id en su lugar." },
                     "phone":            { "type": "string", "description": "Teléfono asociado al pago móvil. Opcional." },
                     "debt_id":          { "type": "string", "description": "ObjectId hex de la deuda específica si el cliente la mencionó. Opcional — si falta, el reporte queda como abono a cuenta." },
-                    "payment_date":     { "type": "string", "description": "Fecha del pago en RFC3339 (ej: 2026-05-04T15:30:00Z). Opcional — default: ahora." },
+                    "payment_date":     { "type": "string", "description": "Fecha del pago en RFC3339 (ej: 2026-05-12T16:30:00Z). SIEMPRE léela del comprobante cuando sea visible — es la fecha que aparece en la pantalla de confirmación, el recibo o el mensaje del banco. Solo omitir si el comprobante no muestra fecha." },
                     "destination_bank": { "type": "string", "description": "Banco RECEPTOR / DESTINO del pago, tal como aparece en el comprobante. Opcional — si lo extraés del comprobante, pasalo para validación server-side. ATENCIÓN formato BDV: en comprobantes del app PagoMóvil BDV, el campo 'Banco' es el banco DESTINO (ej: '0134 - BANESCO'); 'Origen' es el número de cuenta de quien envió, NO el banco destino. El sistema rechaza con `destination_bank_mismatch` si no coincide con la cuenta del proveedor — en ese caso el error incluye qué banco se esperaba." },
                     "destination_phone": { "type": "string", "description": "Teléfono Pago Móvil DESTINO del comprobante. Opcional — si aparece en el comprobante, pasalo para validación." },
                     "destination_id":   { "type": "string", "description": "Cédula o RIF DESTINO del comprobante (a nombre de quién está configurado el Pago Móvil del proveedor). Siempre extraelo del comprobante cuando sea visible — omitirlo devuelve `destination_id_missing` si el método de pago tiene cédula configurada. Prefijo de letra (V-, J-, E-) opcional: el servidor normaliza." }
@@ -3409,12 +3409,19 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     }
     let image_url = format!("/uploads/{}", unique_name);
 
-    // 15. Parse payment_date
+    // 15. Parse payment_date — when LLM doesn't extract it from the voucher,
+    // default to today at midnight UTC (not Utc::now()) so the date is at least
+    // correct even if the exact time is unknown.
     let payment_date: DateTime<Utc> = parsed
         .payment_date
         .as_deref()
         .and_then(|d| d.parse::<DateTime<Utc>>().ok())
-        .unwrap_or_else(Utc::now);
+        .unwrap_or_else(|| {
+            let today = Utc::now().date_naive();
+            today
+                .and_time(chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+                .and_utc()
+        });
 
     // 16. Build PaymentReport
     // Clone reference and bank before they move into the report struct so we
@@ -3441,11 +3448,24 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         .clone()
         .or_else(|| parsed.bank.clone().filter(|s| !s.trim().is_empty()))
         .unwrap_or_default();
-    let report_phone_number: String = parsed
-        .phone
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| ctx.customer_phone.clone());
+    let report_phone_number: String = {
+        let raw = parsed
+            .phone
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| ctx.customer_phone.clone());
+        // Normalize Venezuelan E.164 → local format: 584XXXXXXXXX → 04XXXXXXXXX
+        let stripped = raw.trim().trim_start_matches('+');
+        if let Some(local) = stripped.strip_prefix("58") {
+            if local.len() == 10 {
+                format!("0{}", local)
+            } else {
+                raw
+            }
+        } else {
+            raw
+        }
+    };
     let ref_for_ticket = reference.clone();
     let bank_for_ticket = bank_origin.clone();
     let report = crate::models::payment::PaymentReport {
