@@ -444,24 +444,10 @@ async fn run_dispatch(
         })
         .collect();
 
-    // Media IDs del burst actual — para el HUD available_media_ids del sistema
-    // (le muestra al LLM qué imágenes puede usar en este turno).
-    let recent_media_ids: Vec<String> = {
-        let mut seen = std::collections::LinkedList::new();
-        let mut dedup = std::collections::HashSet::new();
-        for m in &burst {
-            if let Some(mid) = m.media_id.as_deref() {
-                let mid = mid.trim();
-                if !mid.is_empty() && dedup.insert(mid.to_string()) {
-                    seen.push_back(mid.to_string());
-                }
-            }
-        }
-        seen.into_iter().collect()
-    };
     // session_media_ids: todos los inbounds con imagen en la ventana reciente.
-    // Más amplio que recent_media_ids — el guardrail de report_payment acepta
-    // imágenes de bursts anteriores que el LLM ya analizó en el mismo turno.
+    // Se usa tanto en la HUD (available_media_ids) como en el guardrail de
+    // report_payment para que el LLM pueda referenciar fotos enviadas en
+    // bursts anteriores del mismo turno — sin tener que pedirlas de nuevo.
     let session_media_ids: Vec<String> = guardrails::extract_recent_media_ids(&recent);
 
     // High water mark: el _id más alto que la IA "vio" en su prompt. Empieza
@@ -505,14 +491,15 @@ async fn run_dispatch(
     }
     let user_text = burst_texts.join("\n");
 
-    // turn_state_owned se computa con el `history` final (post fresh-start/reopen)
-    // y los media_ids del burst actual — garantiza que turn_number y available_media_ids
-    // sean consistentes con lo que realmente ve el LLM.
+    // turn_state_owned: usa session_media_ids (ventana de recent completa) para
+    // que el LLM vea fotos enviadas en bursts anteriores dentro del mismo turno.
+    // La guardrail de report_payment ya acepta session_media_ids — el HUD debe
+    // coincidir para que el LLM no pida la foto de nuevo cuando ya la envió.
     let turn_state_owned: Option<String> = guardrails::build_turn_state(
         &history,
         &customer_explicit_zones,
         &customer_explicit_intents,
-        &recent_media_ids,
+        &session_media_ids,
     );
 
     // ── Per-conv: chequeo de turn limit ANTES del LLM ──────────────────────
@@ -1761,8 +1748,9 @@ async fn send_live_response(
         });
     }
 
+    let sanitized = md_bold_to_wa(text);
     let wa_id = svc
-        .send_text(customer_phone, text, None, false)
+        .send_text(customer_phone, &sanitized, None, false)
         .await
         .map_err(|e| format!("send_text: {}", e))?;
 
@@ -2600,4 +2588,23 @@ mod handler_validator_tests {
         );
         assert_eq!(esc.qualification_window_turns, 0);
     }
+}
+
+/// Convierte `**texto**` (Markdown bold) en `*texto*` (WhatsApp bold).
+/// LLMs suelen emitir Markdown aunque el prompt pida formato WA.
+/// Splittear en "**" y rejuntar con "*" cubre todos los pares
+/// de apertura/cierre sin regex — eficiencia O(n).
+fn md_bold_to_wa(text: &str) -> String {
+    if !text.contains("**") {
+        return text.to_string();
+    }
+    let parts: Vec<&str> = text.split("**").collect();
+    let mut out = String::with_capacity(text.len());
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            out.push('*');
+        }
+        out.push_str(part);
+    }
+    out
 }
