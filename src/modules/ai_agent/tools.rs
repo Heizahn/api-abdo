@@ -684,12 +684,12 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                     "bank":             { "type": "string", "description": "[DEPRECATED] Nombre libre del banco origen. Usar issuing_bank_id en su lugar." },
                     "phone":            { "type": "string", "description": "Teléfono asociado al pago móvil. Opcional." },
                     "debt_id":          { "type": "string", "description": "ObjectId hex de la deuda específica si el cliente la mencionó. Opcional — si falta, el reporte queda como abono a cuenta." },
-                    "payment_date":     { "type": "string", "description": "Fecha del pago en RFC3339 (ej: 2026-05-12T16:30:00Z). SIEMPRE léela del comprobante cuando sea visible — es la fecha que aparece en la pantalla de confirmación, el recibo o el mensaje del banco. Solo omitir si el comprobante no muestra fecha." },
+                    "payment_date":     { "type": "string", "description": "Fecha del pago en RFC3339 (ej: 2026-05-12T16:30:00Z). Extraela del comprobante — es la fecha en la pantalla de confirmación, el recibo o el mensaje del banco. Si el comprobante no muestra fecha, pedile la fecha al usuario antes de llamar esta tool." },
                     "destination_bank": { "type": "string", "description": "Banco RECEPTOR / DESTINO del pago, tal como aparece en el comprobante. Opcional — si lo extraés del comprobante, pasalo para validación server-side. ATENCIÓN formato BDV: en comprobantes del app PagoMóvil BDV, el campo 'Banco' es el banco DESTINO (ej: '0134 - BANESCO'); 'Origen' es el número de cuenta de quien envió, NO el banco destino. El sistema rechaza con `destination_bank_mismatch` si no coincide con la cuenta del proveedor — en ese caso el error incluye qué banco se esperaba." },
                     "destination_phone": { "type": "string", "description": "Teléfono Pago Móvil DESTINO del comprobante. Opcional — si aparece en el comprobante, pasalo para validación." },
                     "destination_id":   { "type": "string", "description": "Cédula o RIF DESTINO del comprobante (a nombre de quién está configurado el Pago Móvil del proveedor). Siempre extraelo del comprobante cuando sea visible — omitirlo devuelve `destination_id_missing` si el método de pago tiene cédula configurada. Prefijo de letra (V-, J-, E-) opcional: el servidor normaliza." }
                 },
-                "required": ["client_id", "reference", "media_id"]
+                "required": ["client_id", "reference", "media_id", "payment_date"]
             }),
         )),
         T_LIST_BANKS => Some((
@@ -2790,8 +2790,7 @@ struct ReportPaymentArgs {
     phone: Option<String>,
     #[serde(default)]
     debt_id: Option<String>,
-    #[serde(default)]
-    payment_date: Option<String>,
+    payment_date: String,
     /// Banco destino que figura en el comprobante (banco receptor del pago).
     #[serde(default)]
     destination_bank: Option<String>,
@@ -2801,97 +2800,6 @@ struct ReportPaymentArgs {
     /// Cédula/RIF destino que figura en el comprobante.
     #[serde(default)]
     destination_id: Option<String>,
-}
-
-// Crea un WaTicket en categoría `cobranzas_facturacion` sin cerrar la conversación.
-// Devuelve el ObjectId del ticket guardado, o un String de error.
-// IMPORTANTE: NO llama `close_conversation` — diferencia crítica vs `exec_create_ticket`.
-async fn create_cobranzas_ticket_internal(
-    ctx: &ToolContext,
-    payment_report_id: &ObjectId,
-    bank: &str,
-    reference: &str,
-    amount_bs: f64,
-    amount_usd: f64,
-) -> Result<ObjectId, String> {
-    let conv_id = ctx
-        .conversation_id
-        .ok_or_else(|| "conversation_id_missing".to_string())?;
-
-    let conv_doc = ctx
-        .state
-        .db
-        .find_conversation_by_id(&conv_id)
-        .await
-        .map_err(|e| format!("db_error:{}", e))?
-        .ok_or_else(|| "conversation_not_found".to_string())?;
-
-    let report_id_hex = payment_report_id.to_hex();
-    let bank_display = if bank.is_empty() {
-        "(no informado)"
-    } else {
-        bank
-    };
-    let reason = format!(
-        "Reporte de pago pendiente de validación. Banco: {}, Ref: {}, Monto: {} Bs / {} USD. PaymentReport ID: {}",
-        bank_display, reference, amount_bs, amount_usd, report_id_hex
-    );
-
-    let now = BsonDateTime::now();
-    let timeline = vec![WaTicketTimelineEntry {
-        action: "created".into(),
-        actor_id: ctx.ai_user_id.clone(),
-        actor_name: ctx.ai_user_name.clone(),
-        from_status: None,
-        to_status: Some("open".into()),
-        assigned_to_id: None,
-        assigned_to_name: None,
-        note: Some(format!(
-            "Auto-creado por report_payment. PaymentReport: {}",
-            report_id_hex
-        )),
-        created_at: now,
-    }];
-
-    let ticket = WaTicket {
-        id: None,
-        conversation_id: conv_id,
-        customer_phone: conv_doc.phone.clone(),
-        customer_name: conv_doc.name.clone(),
-        customer_id: conv_doc.client_id,
-        business_phone: conv_doc.business_phone.clone(),
-        created_by_id: ctx.ai_user_id.clone(),
-        created_by_name: ctx.ai_user_name.clone(),
-        assigned_to_id: None,
-        assigned_to_name: None,
-        category_id: Some("cobranzas_facturacion".into()),
-        category_label: Some("Cobranzas y Facturación".into()),
-        reason,
-        status: "open".into(),
-        resolution: None,
-        resolved_at: None,
-        closed_at: None,
-        transferred_from_id: None,
-        transferred_from_name: None,
-        idempotency_key: None,
-        tags: vec![
-            "escalado_ia".into(),
-            "auto_payment_report".into(),
-            format!("payment_report:{}", report_id_hex),
-        ],
-        created_at: now,
-        updated_at: now,
-        timeline,
-    };
-
-    let saved = ctx
-        .state
-        .db
-        .create_ticket(ticket)
-        .await
-        .map_err(|e| format!("db_error:{}", e))?;
-
-    saved.id.ok_or_else(|| "ticket_id_missing".to_string())
 }
 
 async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
@@ -3409,23 +3317,13 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     }
     let image_url = format!("/uploads/{}", unique_name);
 
-    // 15. Parse payment_date — when LLM doesn't extract it from the voucher,
-    // default to today at midnight UTC (not Utc::now()) so the date is at least
-    // correct even if the exact time is unknown.
-    let payment_date: DateTime<Utc> = parsed
-        .payment_date
-        .as_deref()
-        .and_then(|d| d.parse::<DateTime<Utc>>().ok())
-        .unwrap_or_else(|| {
-            let today = Utc::now().date_naive();
-            today
-                .and_time(chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap())
-                .and_utc()
-        });
+    // 15. Parse payment_date — required; LLM must extract from voucher or ask user.
+    let payment_date: DateTime<Utc> = match parsed.payment_date.trim().parse::<DateTime<Utc>>() {
+        Ok(d) => d,
+        Err(_) => return ToolResult::err("payment_date_required: fecha no recibida o formato inválido. Extraela del comprobante (RFC3339, ej: 2026-05-14T10:30:00Z). Si el comprobante no muestra fecha, pedile la fecha al usuario.", started),
+    };
 
     // 16. Build PaymentReport
-    // Clone reference and bank before they move into the report struct so we
-    // can pass them to create_cobranzas_ticket_internal afterwards.
     // bank_origin (legacy `sBank`): el campo `bank` del LLM está deprecated.
     // Cuando hay `issuing_bank_id` resuelto, usamos SIEMPRE el formato
     // canónico del catálogo ("0102 - BANCO DE VENEZUELA") y descartamos
@@ -3466,8 +3364,7 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
             raw
         }
     };
-    let ref_for_ticket = reference.clone();
-    let bank_for_ticket = bank_origin.clone();
+    let bank_origin_log = bank_origin.clone();
     let report = crate::models::payment::PaymentReport {
         id: None,
         id_client: Some(client_oid),
@@ -3516,30 +3413,6 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         }
     }
 
-    // 18. Best-effort ticket creation in cobranzas_facturacion.
-    // If the PaymentReport was saved successfully but ticket creation fails, we
-    // return ok=true with ticket_id=null and a warning. The orphaned PaymentReport
-    // (state="Pendiente") stays in DB for manual recovery — no rollback attempted.
-    let (ticket_id, ticket_warning) = match create_cobranzas_ticket_internal(
-        ctx,
-        &report_oid,
-        &bank_for_ticket,
-        &ref_for_ticket,
-        amount_bs,
-        amount_usd,
-    )
-    .await
-    {
-        Ok(tid) => (Some(tid.to_hex()), None::<String>),
-        Err(e) => {
-            tracing::warn!(
-                "[ai_agent.report_payment] ticket auto-create failed (PaymentReport {} created): {}",
-                payment_id, e
-            );
-            (None::<String>, Some("ticket_creation_failed".to_string()))
-        }
-    };
-
     // Trazabilidad estructurada del registro: una sola línea con todo lo
     // necesario para auditar el pago sin tener que hilar varios logs.
     // Incluye el OID del banco emisor resuelto (no el string que mandó el
@@ -3547,21 +3420,19 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     // clave para detectar discrepancias entre lo que mandó el LLM y lo que
     // termina en DB.
     tracing::info!(
-        "[ai_agent.report_payment] OK payment_id={} ticket_id={:?} client_id={} amount_bs={} amount_usd={} exchange_rate={} iva_rate={} issuing_bank_oid={:?} bank_origin='{}' phone_number='{}' reference='{}' debt_id={:?} is_advance={} ticket_warning={:?}",
+        "[ai_agent.report_payment] OK payment_id={} client_id={} amount_bs={} amount_usd={} exchange_rate={} iva_rate={} issuing_bank_oid={:?} bank_origin='{}' phone_number='{}' reference='{}' debt_id={:?} is_advance={}",
         payment_id,
-        ticket_id,
         client_oid.to_hex(),
         amount_bs,
         amount_usd,
         exchange_rate,
         iva_rate,
         parsed_issuing_bank_oid.map(|o| o.to_hex()),
-        bank_for_ticket,
+        bank_origin_log,
         report_phone_number,
         reference,
         id_debt_oid.map(|o| o.to_hex()),
         id_debt_oid.is_none(),
-        ticket_warning,
     );
 
     ToolResult::ok(
@@ -3569,8 +3440,6 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
             "ok": true,
             "mode": "live",
             "payment_id": payment_id,
-            "ticket_id": ticket_id,
-            "warning": ticket_warning,
             "already_registered": false,
             "amount_bs": amount_bs,
             "amount_usd": amount_usd,
