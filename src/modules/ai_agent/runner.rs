@@ -61,7 +61,7 @@ fn substitute_prompt(text: &str, vars: &PromptVariables) -> String {
 
 /// Modelo de OpenRouter que acepta `input_audio` content blocks.
 /// Se activa automáticamente cuando el burst incluye un mensaje de audio.
-const AUDIO_CAPABLE_MODEL: &str = "openai/gpt-4o-mini-audio-preview";
+const AUDIO_CAPABLE_MODEL: &str = "openai/gpt-4o-audio-preview";
 
 use super::{
     openrouter::{
