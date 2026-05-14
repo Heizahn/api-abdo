@@ -572,17 +572,24 @@ pub async fn run_turn(
     }
 
     // Si el burst tiene audio, override al modelo audio-capable de OpenRouter.
-    // gpt-4o-mini no acepta input_audio blocks — el audio-preview sí, mismo precio.
-    let has_audio = user_blocks
-        .iter()
-        .any(|b| matches!(b, ContentBlock::InputAudio { .. }));
-    let effective_model_id = if has_audio {
+    // gpt-4o-audio-preview no acepta imágenes; si el burst es mixto (audio+imagen)
+    // eliminamos los bloques de audio y usamos el modelo base para no bloquear la respuesta.
+    let has_audio = user_blocks.iter().any(|b| matches!(b, ContentBlock::InputAudio { .. }));
+    let has_image = user_blocks.iter().any(|b| matches!(b, ContentBlock::ImageUrl { .. }));
+    let effective_model_id = if has_audio && !has_image {
         tracing::info!(
             "[ai_agent.runner] audio detectado en burst — override model: {} → {}",
             agent.model.model_id,
             AUDIO_CAPABLE_MODEL
         );
         AUDIO_CAPABLE_MODEL.to_string()
+    } else if has_audio {
+        // burst mixto audio+imagen: audio-preview no soporta imágenes → omitir audio
+        tracing::warn!(
+            "[ai_agent.runner] burst mixto (audio+imagen) — audio omitido, usando modelo base"
+        );
+        user_blocks.retain(|b| !matches!(b, ContentBlock::InputAudio { .. }));
+        agent.model.model_id.clone()
     } else {
         agent.model.model_id.clone()
     };
