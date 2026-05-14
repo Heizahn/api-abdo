@@ -1025,6 +1025,18 @@ pub trait WhatsAppRepository {
         conversation_ids: Option<&[ObjectId]>,
     ) -> Result<Vec<i64>, String>;
 
+    /// Scan de recovery al arrancar: retorna conversaciones donde el último
+    /// mensaje fue inbound y la IA todavía no lo procesó. Criterios:
+    ///   - `last_message_direction == "in"`
+    ///   - `ai_disabled == false`
+    ///   - `status != "closed"`
+    ///   - `last_inbound_at >= cutoff` (ventana de 2h desde arranque)
+    ///   - `ai_last_processed_at` null o anterior a `last_inbound_at`
+    async fn find_orphaned_ai_conversations(
+        &self,
+        cutoff: mongodb::bson::DateTime,
+    ) -> Result<Vec<WaConversation>, String>;
+
     // ── realtime-pending-badges additions ────────────────────────────────────
 
     /// Cuenta conversaciones con `unread_count > 0`.

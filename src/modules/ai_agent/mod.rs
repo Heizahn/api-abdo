@@ -12,6 +12,7 @@ pub mod guardrails;
 pub mod handler;
 pub mod openrouter;
 pub mod pre_classifier;
+pub mod recovery;
 pub mod reference_normalize;
 pub mod runner;
 pub mod sandbox;

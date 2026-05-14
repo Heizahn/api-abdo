@@ -82,6 +82,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         modules::ai_agent::seed::run(state_for_ai_seed).await;
     });
 
+    // Recovery: re-dispatch inbound messages left unanswered after a crash.
+    let state_for_ai_recovery = state.clone();
+    tokio::spawn(async move {
+        modules::ai_agent::recovery::run_ai_recovery(state_for_ai_recovery).await;
+    });
+
     // Calentar el índice de divisiones políticas de Venezuela (LazyLock).
     // El costo es ~6KB RAM pagado una sola vez al arrancar.
     let _ = data::ve_political_divisions::DIVISIONS.len();

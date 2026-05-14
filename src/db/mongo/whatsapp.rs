@@ -2134,6 +2134,29 @@ impl WhatsAppRepository for MongoDB {
         Ok(inserted)
     }
 
+    async fn find_orphaned_ai_conversations(
+        &self,
+        cutoff: DateTime,
+    ) -> Result<Vec<WaConversation>, String> {
+        let filter = doc! {
+            "last_message_direction": "in",
+            "ai_disabled": false,
+            "status": { "$ne": "closed" },
+            "last_inbound_at": { "$gte": cutoff },
+            "$or": [
+                { "ai_last_processed_at": null },
+                { "$expr": { "$lt": ["$ai_last_processed_at", "$last_inbound_at"] } },
+            ],
+        };
+        self.wa_conversations()
+            .find(filter)
+            .await
+            .map_err(|e| e.to_string())?
+            .try_collect::<Vec<_>>()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     // ── realtime-pending-badges: T09 ─────────────────────────────────────────
 
     async fn count_unread_conversations(&self) -> Result<u64, String> {
