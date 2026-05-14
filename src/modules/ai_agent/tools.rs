@@ -3409,33 +3409,19 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     }
     let image_url = format!("/uploads/{}", unique_name);
 
-    // 15. Parse payment_date — LLM often omits it even when visible on the voucher.
-    // Fallback: look up the media message timestamp (same day as payment, much better
-    // than midnight today). Last resort: midnight UTC.
-    let payment_date: DateTime<Utc> = match parsed
+    // 15. Parse payment_date — when LLM doesn't extract it from the voucher,
+    // default to today at midnight UTC (not Utc::now()) so the date is at least
+    // correct even if the exact time is unknown.
+    let payment_date: DateTime<Utc> = parsed
         .payment_date
         .as_deref()
         .and_then(|d| d.parse::<DateTime<Utc>>().ok())
-    {
-        Some(d) => d,
-        None => ctx
-            .state
-            .db
-            .find_message_by_media_id(&parsed.media_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|msg| {
-                let ms = msg.timestamp.timestamp_millis();
-                chrono::DateTime::from_timestamp_millis(ms).unwrap_or_else(Utc::now)
-            })
-            .unwrap_or_else(|| {
-                let today = Utc::now().date_naive();
-                today
-                    .and_time(chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap())
-                    .and_utc()
-            }),
-    };
+        .unwrap_or_else(|| {
+            let today = Utc::now().date_naive();
+            today
+                .and_time(chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap())
+                .and_utc()
+        });
 
     // 16. Build PaymentReport
     // Clone reference and bank before they move into the report struct so we
