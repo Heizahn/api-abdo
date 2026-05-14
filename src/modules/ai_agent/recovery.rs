@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use mongodb::bson::DateTime;
+use mongodb::bson::{oid::ObjectId, DateTime};
 
 use crate::{
     db::WhatsAppRepository,
@@ -73,7 +73,7 @@ pub async fn run_ai_recovery(state: Arc<AppState>) {
         };
 
         let synthetic = WaMessage {
-            id: None,
+            id: Some(ObjectId::new()),
             conversation_id: conv_id,
             wa_message_id: format!("recovery_{}", conv_id.to_hex()),
             direction: "in".to_string(),
