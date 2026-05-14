@@ -687,7 +687,7 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                     "media_id":         { "type": "string", "description": "ID exacto del media de WhatsApp de la foto del comprobante. DEBE ser uno de los IDs listados en `[turn_state] available_media_ids` (numérico, ej: '1281788957402373'). PROHIBIDO inventar, usar placeholders ('...', 'image_0', 'media_X'), o pasar IDs que no estén en esa lista — el tool rechaza con `media_id_not_in_conversation`. Si el cliente no envió comprobante todavía, NO llames esta tool: pedile la foto primero." },
                     "amount_bs":        { "type": "number", "description": "Monto en bolívares. Mutuamente excluyente con amount_usd." },
                     "amount_usd":       { "type": "number", "description": "Monto en dólares. Mutuamente excluyente con amount_bs. PREFERÍ siempre `amount_bs` — el sistema deriva el USD internamente con el IVA correcto." },
-                    "issuing_bank_id":  { "type": "string", "description": "Banco EMISOR / ORIGEN del pago: aquel donde el cliente TIENE su cuenta y desde donde envió la transferencia. NO es el banco destino del proveedor. En el comprobante suele aparecer como 'banco origen', 'banco emisor', o 'desde'. ATENCIÓN comprobante app BDV: el campo 'Banco' en esa app es el banco DESTINO y 'Origen' es el número de cuenta de origen (no el nombre del banco emisor — resolverlo requiere conocer el prefijo, ej: 0102=BDV, 0134=Banesco). Pasá el ObjectId hex devuelto por list_banks (recomendado). El backend también acepta nombre o código BCV (ej: 'Banco de Venezuela' o '0102') y resuelve server-side. NO inventes un ObjectId hex; si no tenés el id exacto, pasá el nombre del banco en texto." },
+                    "issuing_bank_id":  { "type": "string", "description": "Banco EMISOR / ORIGEN del pago: aquel donde el cliente TIENE su cuenta y desde donde envió la transferencia. NO es el banco destino del proveedor. En el comprobante suele aparecer como 'banco origen', 'banco emisor', o 'desde'. ATENCIÓN comprobante app BDV: el campo 'Banco' en esa app es el banco DESTINO y 'Origen' es el número de cuenta de origen (no el nombre del banco emisor — resolverlo requiere conocer el prefijo, ej: 0102=BDV, 0134=Banesco). Pasá el ObjectId hex devuelto por list_banks (recomendado). El backend también acepta nombre o código BCV (ej: 'Banco de Venezuela' o '0102') y resuelve server-side. NO inventes un ObjectId hex; si no tenés el id exacto, pasá el nombre del banco en texto. — Si ves un prefijo de 4 dígitos en el comprobante (ej: '0134'), llamá list_banks(prefix: '0134') para resolver el banco antes de reportar." },
                     "bank":             { "type": "string", "description": "[DEPRECATED] Nombre libre del banco origen. Usar issuing_bank_id en su lugar." },
                     "phone":            { "type": "string", "description": "Teléfono asociado al pago móvil. Opcional." },
                     "debt_id":          { "type": "string", "description": "ObjectId hex de la deuda específica si el cliente la mencionó. Opcional — si falta, el reporte queda como abono a cuenta." },
@@ -700,13 +700,21 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
             }),
         )),
         T_LIST_BANKS => Some((
-            "Lista los bancos del catálogo nacional. Usar ANTES de report_payment para que \
-             el cliente elija el banco emisor (de dónde salió la transferencia). \
-             Pasar el id devuelto al campo issuing_bank_id de report_payment. \
-             Argumentos: ninguno.",
+            "Identificá el banco emisor de un comprobante pasando el prefijo de 4 dígitos \
+             (ej: '0134') o el nombre. Sin argumentos, devuelve la lista completa. \
+             Usar ANTES de report_payment; pasar el id devuelto al campo issuing_bank_id.",
             json!({
                 "type": "object",
-                "properties": {}
+                "properties": {
+                    "prefix": {
+                        "type": "string",
+                        "description": "Prefijo de 4 dígitos del banco emisor (ej: '0134'). Devuelve sólo el banco cuyo bank_code empieza con ese prefijo."
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Nombre o fragmento del nombre del banco (case-insensitive). Devuelve todos los que lo contengan."
+                    }
+                }
             }),
         )),
         _ => None,
@@ -1816,6 +1824,14 @@ async fn exec_get_payment_methods(args: Value, ctx: &ToolContext, started: Insta
 // Tool: list_banks
 // ============================================
 
+#[derive(Deserialize, Default)]
+struct ListBanksArgs {
+    #[serde(default)]
+    prefix: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
 /// Carga la lista de bancos para lookup interno (cache Redis → DB fallback).
 /// Devuelve `(ObjectId, bank_name, bank_code)`. La cache se popula como efecto
 /// secundario en el cache miss para que llamadas siguientes sean baratas.
@@ -1869,26 +1885,54 @@ async fn load_banks_for_lookup(
         .collect())
 }
 
-async fn exec_list_banks(_args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
+fn filter_banks(items: Vec<Value>, args: &ListBanksArgs) -> Vec<Value> {
+    if args.prefix.is_none() && args.name.is_none() {
+        return items;
+    }
+    items
+        .into_iter()
+        .filter(|item| {
+            let code = item["bank_code"].as_str().unwrap_or("").to_lowercase();
+            let name = item["bank_name"].as_str().unwrap_or("").to_lowercase();
+            let prefix_match = args
+                .prefix
+                .as_ref()
+                .map(|p| code.starts_with(&p.to_lowercase()))
+                .unwrap_or(true);
+            let name_match = args
+                .name
+                .as_ref()
+                .map(|n| name.contains(&n.to_lowercase()))
+                .unwrap_or(true);
+            prefix_match && name_match
+        })
+        .collect()
+}
+
+async fn exec_list_banks(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
+    let filter: ListBanksArgs = serde_json::from_value(args).unwrap_or_default();
+
     // 1. Sandbox short-circuit — return fixture banks before any DB call
     if ctx.is_sandbox {
-        return ToolResult::ok(
-            json!({
-                "items": [
-                    { "id": "000000000000000000000001", "bank_name": "Banesco", "bank_code": "0134" },
-                    { "id": "000000000000000000000002", "bank_name": "Banco de Venezuela", "bank_code": "0102" },
-                    { "id": "000000000000000000000003", "bank_name": "Mercantil", "bank_code": "0105" }
-                ]
-            }),
-            started,
-        );
+        let fixture: Vec<Value> = vec![
+            json!({ "id": "000000000000000000000001", "bank_name": "Banesco", "bank_code": "0134" }),
+            json!({ "id": "000000000000000000000002", "bank_name": "Banco de Venezuela", "bank_code": "0102" }),
+            json!({ "id": "000000000000000000000003", "bank_name": "Mercantil", "bank_code": "0105" }),
+        ];
+        let filtered = filter_banks(fixture, &filter);
+        return ToolResult::ok(json!({ "items": filtered }), started);
     }
 
     // 2. Redis cache hit?
     if let Some(cached) = ctx.state.redis.get_ai_list_banks_cache().await {
         if let Ok(parsed_val) = serde_json::from_str::<Value>(&cached) {
             tracing::info!("[ai_agent.list_banks] cache hit");
-            return ToolResult::ok(parsed_val, started);
+            let items: Vec<Value> = parsed_val["items"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let filtered = filter_banks(items, &filter);
+            return ToolResult::ok(json!({ "items": filtered }), started);
         }
     }
 
@@ -1898,7 +1942,7 @@ async fn exec_list_banks(_args: Value, ctx: &ToolContext, started: Instant) -> T
         Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
     };
 
-    // 4. Build response — only id, bank_name, bank_code (lean context per spec LB-1)
+    // 4. Build full item list — only id, bank_name, bank_code (lean context per spec LB-1)
     let items: Vec<Value> = banks
         .iter()
         .map(|b| {
@@ -1910,15 +1954,15 @@ async fn exec_list_banks(_args: Value, ctx: &ToolContext, started: Instant) -> T
         })
         .collect();
 
-    let response = json!({ "items": items });
-
-    // 5. Cache result — 24h TTL (catálogo BCV cambia rarísimo)
-    if let Ok(s) = serde_json::to_string(&response) {
+    // 5. Cache the FULL unfiltered list — 24h TTL (catálogo BCV cambia rarísimo)
+    if let Ok(s) = serde_json::to_string(&json!({ "items": items })) {
         ctx.state.redis.set_ai_list_banks_cache(&s, 86_400).await;
     }
 
+    // 6. Apply filter post-cache and return
+    let filtered = filter_banks(items, &filter);
     tracing::info!("[ai_agent.list_banks] live result, {} banks", banks.len());
-    ToolResult::ok(response, started)
+    ToolResult::ok(json!({ "items": filtered }), started)
 }
 
 #[cfg(test)]
