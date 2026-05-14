@@ -1394,10 +1394,14 @@ pub trait AiAgentRepository {
     /// Lee los últimos N mensajes de una conversación, ordenados por
     /// `timestamp` ASC (cronológico). Usado por el dispatch para armar el
     /// history que va al runner.
+    ///
+    /// `min_id`: cuando es `Some(oid)`, filtra a `_id >= oid` (reopen boundary).
+    /// `None` = ventana completa sin filtro inferior (comportamiento previo).
     async fn list_recent_messages_for_conversation(
         &self,
         conversation_id: &ObjectId,
         limit: i64,
+        min_id: Option<ObjectId>,
     ) -> Result<Vec<crate::models::whatsapp::WaMessage>, String>;
 
     // ─── AiPlans (datos de negocio editables) ──────────────────────────────

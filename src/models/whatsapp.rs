@@ -56,13 +56,6 @@ pub struct WaConversationAiState {
     #[serde(default)]
     pub failed_attempts: Vec<FailedAttempt>,
 
-    /// `true` durante los primeros turnos de una sesión reabierta.
-    /// Seteado en Turn 1 para que el [conv_reopen] se propague también
-    /// en Turn 2 (cuando `ai_conv_state` ya no es None). Se limpia a
-    /// `false` al finalizar Turn 2 o el siguiente turno que lo lea.
-    #[serde(default)]
-    pub reopen_pending: bool,
-
     /// Última vez que se modificó este estado (siempre seteado).
     pub updated_at: ChronoDateTime<Utc>,
 }
@@ -180,6 +173,11 @@ pub struct WaConversation {
         default
     )]
     pub ai_conv_state: Option<WaConversationAiState>,
+    /// Timestamp del último reopen. La IA filtra el history a mensajes
+    /// con `_id >= ObjectId::from_datetime(reopened_at)` para no arrastrar
+    /// contexto previo al reabrir. `None` en convs nunca reabiertas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reopened_at: Option<ChronoDateTime<Utc>>,
 }
 
 /// Registro "conversación abierta por agente X en fecha Y" (colección `WaConversationOpens`).

@@ -413,6 +413,7 @@ impl AiAgentRepository for MongoDB {
         &self,
         conversation_id: &ObjectId,
         limit: i64,
+        min_id: Option<ObjectId>,
     ) -> Result<Vec<WaMessage>, String> {
         // Sort por `_id` (ObjectId) — refleja el orden de inserción en el
         // back, no el `timestamp` de Meta. Necesario porque inbounds de Meta
@@ -420,13 +421,17 @@ impl AiAgentRepository for MongoDB {
         // después (cuando el cliente manda un mensaje mientras el bot
         // responde). El caller dispatch usa este orden para identificar
         // ráfagas pendientes correctamente.
+        let filter = match min_id {
+            Some(oid) => doc! { "conversation_id": conversation_id, "_id": { "$gte": oid } },
+            None => doc! { "conversation_id": conversation_id },
+        };
         let opts = FindOptions::builder()
             .sort(doc! { "_id": -1 })
             .limit(limit.max(1))
             .build();
         let mut items: Vec<WaMessage> = self
             .wa_messages_for_history()
-            .find(doc! { "conversation_id": conversation_id })
+            .find(filter)
             .with_options(opts)
             .await
             .map_err(|e| e.to_string())?

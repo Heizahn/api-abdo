@@ -493,7 +493,7 @@ impl WhatsAppRepository for MongoDB {
             .update_one(
                 doc! { "_id": id, "status": "closed" },
                 doc! {
-                    "$set": { "status": "pending", "ai_disabled": false },
+                    "$set": { "status": "pending", "ai_disabled": false, "reopened_at": DateTime::now() },
                     "$unset": {
                         "assigned_to": "",
                         "ai_active_agent_id": "",

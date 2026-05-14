@@ -109,12 +109,7 @@ pub fn dispatch_inbound_async(state: Arc<AppState>, inbound: WaMessage, workspac
             return;
         }
 
-        let reopen_from_state_early = conv
-            .ai_conv_state
-            .as_ref()
-            .map(|s| s.reopen_pending)
-            .unwrap_or(false);
-        let agent = match select_agent(&state, &conv, &workspace_id, reopen_from_state_early).await {
+        let agent = match select_agent(&state, &conv, &workspace_id).await {
             Some(a) => a,
             None => {
                 tracing::debug!(
@@ -234,6 +229,14 @@ async fn run_dispatch(
         .await?
         .ok_or_else(|| "conv no encontrada".to_string())?;
 
+    // Boundary de reopen: filtra el history a mensajes con _id >= oid para que
+    // la IA nunca vea mensajes de sesiones previas. None = conv nunca reabierta
+    // (ventana completa, sin regresión).
+    let reopen_min_id: Option<ObjectId> = conv.reopened_at.map(|dt| {
+        let secs = dt.timestamp().max(0) as u32;
+        ObjectId::from_parts(secs, [0; 5], [0; 3])
+    });
+
     if conv.ai_disabled {
         tracing::debug!(
             "[ai_agent.dispatch] conv {} pasó a ai_disabled durante debounce, skip",
@@ -302,7 +305,7 @@ async fn run_dispatch(
     };
     let recent = state
         .db
-        .list_recent_messages_for_conversation(&inbound.conversation_id, RECENT_WINDOW)
+        .list_recent_messages_for_conversation(&inbound.conversation_id, RECENT_WINDOW, reopen_min_id)
         .await?;
 
     // Último outbound del bot: define el inicio lógico de la ráfaga actual.
@@ -390,39 +393,6 @@ async fn run_dispatch(
         ))
     } else {
         None
-    };
-
-    // Detecta reopen: la IA ya respondió antes (prior_ai_turns > 0) pero
-    // ai_conv_state fue limpiado (reopen). El agente activo puede ser distinto
-    // Reopen detection: si la conversación fue cerrada y reabierta con history
-    // previo, truncamos el history a [] antes de pasarlo al LLM.
-    //
-    // Garantía dura: sin history no hay datos viejos que alucinar. El agente
-    // arranca limpio con solo el mensaje actual del cliente.
-    //
-    // `is_reopen_with_prior_ai` = Turn 1 (ai_conv_state era None).
-    // `reopen_from_state`       = Turn 2+ (flag persistido en WaConversationAiState).
-    // Ambos aplican el truncado — el flag se limpia al finalizar Turn 2.
-    let is_reopen_with_prior_ai =
-        prior_ai_turns > 0 && conv.ai_conv_state.is_none() && !history.is_empty();
-    let reopen_from_state = conv
-        .ai_conv_state
-        .as_ref()
-        .map(|s| s.reopen_pending)
-        .unwrap_or(false);
-    let should_truncate_history = is_reopen_with_prior_ai || reopen_from_state;
-
-    let history = if should_truncate_history {
-        tracing::info!(
-            "[ai_agent.dispatch] reopen detectado — history truncado (conv={}, prior_ai_turns={}, turns_descartados={}, from_state={})",
-            inbound.conversation_id.to_hex(),
-            prior_ai_turns,
-            history.len(),
-            reopen_from_state,
-        );
-        vec![]
-    } else {
-        history
     };
 
     // Burst: todos los inbounds que llegaron después del último outbound del bot,
@@ -884,7 +854,7 @@ async fn run_dispatch(
             // dispatch. Si recent no cambió, no actualizamos nada.
             match state
                 .db
-                .list_recent_messages_for_conversation(&inbound.conversation_id, RECENT_WINDOW)
+                .list_recent_messages_for_conversation(&inbound.conversation_id, RECENT_WINDOW, reopen_min_id)
                 .await
             {
                 Ok(refreshed) => {
@@ -1030,9 +1000,6 @@ async fn run_dispatch(
         } else {
             None
         };
-        // History ya fue truncado a [] si should_truncate_history — no hay nota
-        // de reopen que inyectar: sin history viejo no hay qué advertir.
-
         // agent_state: chequeamos si el agente activo ya respondió antes en
         // esta conv. Si sí, le inyectamos un bloque para que sepa que ya
         // saludó y no repita "¡Hola! Soy Carla..." en cada turno.
@@ -1301,28 +1268,11 @@ async fn run_dispatch(
         }
     }
 
-    // `reopen_pending_next`: qué valor escribir en el flag para el próximo turno.
-    // - Turn 1 (is_reopen_with_prior_ai): seteamos true → Turn 2 también trunca el history.
-    // - Turn 2+ (reopen_from_state): seteamos false → la sesión queda normalizada.
-    // - Sin reopen: None → no tocamos el flag.
-    let reopen_pending_next: Option<bool> = if is_reopen_with_prior_ai {
-        Some(true)
-    } else if reopen_from_state {
-        Some(false)
-    } else {
-        None
-    };
-
-    let needs_state_write = (wa_settings.enable_conversation_state && !all_state_patches.is_empty())
-        || reopen_pending_next.is_some();
+    let needs_state_write = wa_settings.enable_conversation_state && !all_state_patches.is_empty();
 
     if needs_state_write {
         let base = current_ai_conv_state.clone().unwrap_or_default();
-        let mut new_state = if wa_settings.enable_conversation_state && !all_state_patches.is_empty() {
-            apply_state_patches(base, &all_state_patches)
-        } else {
-            base
-        };
+        let mut new_state = apply_state_patches(base, &all_state_patches);
 
         // Transfer-reset: si el último step es "transferred_to_*" limpiamos el
         // intent para que el próximo agente en la cadena (o en el próximo turno)
@@ -1336,13 +1286,6 @@ async fn run_dispatch(
         {
             new_state.current_intent = None;
             new_state.intent_confidence = None;
-        }
-
-        // Persistir el flag de reopen para que el próximo turno también
-        // reciba history truncado aunque ai_conv_state ya no sea None.
-        if let Some(pending) = reopen_pending_next {
-            new_state.reopen_pending = pending;
-            new_state.updated_at = chrono::Utc::now();
         }
 
         if Some(&new_state) != current_ai_conv_state.as_ref() {
@@ -1628,7 +1571,7 @@ async fn run_dispatch(
     // disparamos otro dispatch para no dejar mensajes huérfanos.
     let pending = state
         .db
-        .list_recent_messages_for_conversation(&inbound.conversation_id, 5)
+        .list_recent_messages_for_conversation(&inbound.conversation_id, 5, reopen_min_id)
         .await
         .unwrap_or_default();
     if let Some(latest_pending) = pending
@@ -2025,31 +1968,28 @@ fn build_prompt_variables(
 /// 1. Si la conv ya tiene `ai_active_agent_id` y ese agente sigue habilitado → ese.
 /// 2. Sino, el `is_receptionist=true` enabled del workspace (si existe).
 /// 3. Sino, el más viejo `enabled` del workspace (fallback compat).
+///
+/// Convs reabiertas ya tienen `ai_active_agent_id = None` (limpiado por
+/// `reopen_conversation`), así que el routing al receptionist ocurre
+/// naturalmente sin necesidad de un flag especial.
 async fn select_agent(
     state: &Arc<AppState>,
     conv: &crate::models::whatsapp::WaConversation,
     workspace_id: &ObjectId,
-    skip_active_agent: bool,
 ) -> Option<AiAgent> {
-    if !skip_active_agent {
-        if let Some(active) = conv.ai_active_agent_id {
-            match state.db.find_ai_agent_by_id(&active).await {
-                Ok(Some(a)) if a.enabled => return Some(a),
-                Ok(_) => {
-                    tracing::debug!(
-                        "[ai_agent.dispatch] ai_active_agent_id={} deshabilitado/borrado, fallback",
-                        active.to_hex()
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!("[ai_agent.dispatch] lookup active agent: {}", e);
-                }
+    if let Some(active) = conv.ai_active_agent_id {
+        match state.db.find_ai_agent_by_id(&active).await {
+            Ok(Some(a)) if a.enabled => return Some(a),
+            Ok(_) => {
+                tracing::debug!(
+                    "[ai_agent.dispatch] ai_active_agent_id={} deshabilitado/borrado, fallback",
+                    active.to_hex()
+                );
+            }
+            Err(e) => {
+                tracing::warn!("[ai_agent.dispatch] lookup active agent: {}", e);
             }
         }
-    } else {
-        tracing::debug!(
-            "[ai_agent.dispatch] reopen Turn 2 — ignorando ai_active_agent_id, forzando receptionist"
-        );
     }
 
     if let Ok(Some(a)) = state.db.find_receptionist_for_workspace(workspace_id).await {
