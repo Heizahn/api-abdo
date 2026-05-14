@@ -177,7 +177,7 @@ pub struct WaConversation {
     /// con `_id >= ObjectId::from_datetime(reopened_at)` para no arrastrar
     /// contexto previo al reabrir. `None` en convs nunca reabiertas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reopened_at: Option<ChronoDateTime<Utc>>,
+    pub reopened_at: Option<DateTime>,
 }
 
 /// Registro "conversación abierta por agente X en fecha Y" (colección `WaConversationOpens`).

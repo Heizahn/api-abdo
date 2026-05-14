@@ -233,7 +233,7 @@ async fn run_dispatch(
     // la IA nunca vea mensajes de sesiones previas. None = conv nunca reabierta
     // (ventana completa, sin regresión).
     let reopen_min_id: Option<ObjectId> = conv.reopened_at.map(|dt| {
-        let secs = dt.timestamp().max(0) as u32;
+        let secs = (dt.timestamp_millis() / 1000).max(0) as u32;
         ObjectId::from_parts(secs, [0; 5], [0; 3])
     });
 
