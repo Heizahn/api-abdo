@@ -327,6 +327,7 @@ pub async fn sandbox_handler(
         &history,
         &message,
         &[],
+        &[], // burst_intents — sandbox has no burst
         faqs_inline.as_deref(),
         None, // customer_context
         None, // transfer_context

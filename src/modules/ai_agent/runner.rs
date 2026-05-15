@@ -488,6 +488,7 @@ pub async fn run_turn(
     history: &[ConvTurn],
     user_message: &str,
     user_media: &[MediaInput],
+    burst_intents: &[String],
     faqs_inline: Option<&str>,
     customer_context: Option<&str>,
     transfer_context: Option<&str>,
@@ -889,6 +890,50 @@ pub async fn run_turn(
                      faltantes o explicarle el problema antes de continuar.",
                     error_code
                 ))),
+                ..Default::default()
+            });
+        }
+
+        // ── Guardrail: imagen + intent "pago" sin report_payment ─────────────
+        // Si el cliente adjuntó imagen en este turno Y la ráfaga actual menciona
+        // pago Y `report_payment` está habilitada Y NO se llamó, le decimos al
+        // modelo que JUZGUE la imagen: si es comprobante, llama report_payment;
+        // si no, pide la foto del comprobante. NO inventamos datos.
+        // Mutuamente excluyente con el guardrail de arriba (ese requiere que
+        // report_payment SÍ se haya llamado y fallado — acá requiere que NO se
+        // haya llamado).
+        let user_media_had_image = user_media
+            .iter()
+            .any(|m| m.mime_type.starts_with("image/"));
+        let report_payment_enabled = agent
+            .tools
+            .iter()
+            .any(|t| t.enabled && t.name == "report_payment");
+        let report_payment_called_in_iter = tool_call_logs[logs_before..]
+            .iter()
+            .any(|t| t.tool_name == "report_payment");
+        let burst_intent_pago = burst_intents.iter().any(|i| i == "pago");
+
+        if user_media_had_image
+            && report_payment_enabled
+            && !report_payment_called_in_iter
+            && burst_intent_pago
+        {
+            tracing::warn!(
+                "[ai_agent.runner] imagen+intent_pago sin report_payment — inyectando system note de juicio multimodal (iter={})",
+                iter
+            );
+            messages.push(ChatMessage {
+                role: "system".into(),
+                content: Some(MessageContent::Text(
+                    "IMPORTANTE: el cliente adjuntó una imagen en este turno y mencionó pago. \
+                     Verificá si la imagen es realmente un comprobante de pago: si SÍ lo es, \
+                     extraé los datos (referencia, banco, monto, fecha) y llamá `report_payment`. \
+                     Si NO es un comprobante (ej: screenshot de velocidad, selfie, foto de cédula, \
+                     error de la app), respondele al cliente pidiéndole específicamente la foto \
+                     del comprobante de pago — NO llames `report_payment` con datos inventados."
+                        .to_string(),
+                )),
                 ..Default::default()
             });
         }

@@ -453,11 +453,81 @@ async fn run_dispatch(
     }
 
     if burst_texts.is_empty() && user_media.is_empty() {
-        tracing::info!(
-            "[ai_agent.dispatch] ráfaga sin contenido procesable (último msg_type={}); skip",
-            inbound.msg_type
+        let inbound_is_media = matches!(
+            inbound.msg_type.as_str(),
+            "image" | "audio" | "video" | "document"
         );
-        return Ok(());
+        if inbound_is_media {
+            // Set de media ya vistos por la IA en su último turno (idempotencia).
+            // Si no hay ai_conv_state previo, cualquier media huérfana es recuperable.
+            let already_seen: std::collections::HashSet<String> = match conv.ai_conv_state.as_ref() {
+                Some(s) => s
+                    .completed_actions
+                    .iter()
+                    .filter_map(|a| a.strip_prefix("media_seen:").map(String::from))
+                    .collect(),
+                None => std::collections::HashSet::new(),
+            };
+
+            // Candidatos: inbounds con media_id, _id <= last_out_oid (orphans),
+            // desc por _id, máx N=3. Excluye media ya procesada por la IA.
+            let mut orphans: Vec<&WaMessage> = recent
+                .iter()
+                .filter(|m| m.direction == "in")
+                .filter(|m| m.media_id.as_deref().map_or(false, |id| !id.is_empty()))
+                .filter(|m| match last_out_oid {
+                    Some(out_id) => m.id.map(|i| i <= out_id).unwrap_or(false),
+                    None => false,
+                })
+                .filter(|m| {
+                    m.media_id
+                        .as_deref()
+                        .map(|id| !already_seen.contains(id))
+                        .unwrap_or(false)
+                })
+                .collect();
+            orphans.sort_by(|a, b| b.id.cmp(&a.id));
+            orphans.truncate(3);
+
+            if !orphans.is_empty() {
+                for m in &orphans {
+                    let mut chunks = build_media_inputs(&state, &wa_settings, m).await;
+                    user_media.append(&mut chunks);
+                }
+                if !user_media.is_empty() {
+                    tracing::info!(
+                        "[ai_agent.dispatch] orphan-media recovery: {} mensaje(s) recuperados (conv={}, media_ids={:?})",
+                        orphans.len(),
+                        inbound.conversation_id.to_hex(),
+                        orphans
+                            .iter()
+                            .filter_map(|m| m.media_id.as_deref())
+                            .collect::<Vec<_>>(),
+                    );
+                    // FALL THROUGH: NO return. Dispatch continúa con user_media no vacío.
+                    // effective_user_message se setea más abajo con el fallback
+                    // `[attachment type=<msg_type>]` cuando user_text está vacío.
+                } else {
+                    tracing::warn!(
+                        "[ai_agent.dispatch] orphan-media recovery: {} candidato(s) pero build_media_inputs devolvió vacío para todos (ver warn previo de Fix A); skip",
+                        orphans.len()
+                    );
+                    return Ok(());
+                }
+            } else {
+                tracing::info!(
+                    "[ai_agent.dispatch] ráfaga sin contenido procesable + sin orphan media recuperable (último msg_type={}); skip",
+                    inbound.msg_type
+                );
+                return Ok(());
+            }
+        } else {
+            tracing::info!(
+                "[ai_agent.dispatch] ráfaga sin contenido procesable (último msg_type={}); skip",
+                inbound.msg_type
+            );
+            return Ok(());
+        }
     }
     let user_text = burst_texts.join("\n");
 
@@ -833,6 +903,8 @@ async fn run_dispatch(
     let last_output: Option<crate::modules::ai_agent::runner::RunnerOutput>;
     let last_agent: Option<AiAgent>;
     let mut cross_workspace_message: Option<String> = None;
+    let mut burst_intents: Vec<String> =
+        guardrails::extract_customer_explicit_intents_refs(&burst);
 
     loop {
         let active_agent_id = active_agent.id.ok_or_else(|| "agent sin _id".to_string())?;
@@ -900,6 +972,8 @@ async fn run_dispatch(
                             customer_explicit_zones =
                                 guardrails::extract_customer_explicit_zones(&refreshed);
                             session_media_ids = guardrails::extract_recent_media_ids(&refreshed);
+                            burst_intents =
+                                guardrails::extract_customer_explicit_intents_refs(&new_burst);
                         }
                     }
                     // Actualizar HWM al máximo _id del burst refrescado —
@@ -1037,6 +1111,7 @@ async fn run_dispatch(
             &history,
             &effective_user_message,
             &user_media,
+            &burst_intents,
             active_faqs_inline.as_deref(),
             customer_context.as_deref(),
             active_transfer_context.as_deref(),
@@ -1241,6 +1316,21 @@ async fn run_dispatch(
     let last_agent_id = last_agent
         .id
         .ok_or_else(|| "last_agent sin _id".to_string())?;
+
+    // Fix C idempotency: registrar media del turno en completed_actions
+    // para que dispatches posteriores de la misma ráfaga no re-procesen.
+    // Solo cuando user_media tiene contenido (al menos una descarga exitosa).
+    if !user_media.is_empty() {
+        for m in &burst {
+            if let Some(mid) = m.media_id.as_deref() {
+                if !mid.is_empty() {
+                    all_state_patches.push(StatePatch::AddCompletedAction(
+                        format!("media_seen:{}", mid),
+                    ));
+                }
+            }
+        }
+    }
 
     // ── Phase 2: fold state patches + persistir ai_conv_state ─────────────
     // Synthetic intent derivation (Spec 19.3): si el state aún no tiene
@@ -1602,7 +1692,16 @@ async fn build_media_inputs(
 ) -> Vec<MediaInput> {
     let media_id = match inbound.media_id.as_deref() {
         Some(m) if !m.is_empty() => m,
-        _ => return Vec::new(),
+        _ => {
+            tracing::warn!(
+                reason = "missing_media_id",
+                conversation_id = %inbound.conversation_id.to_hex(),
+                message_oid = ?inbound.id,
+                msg_type = %inbound.msg_type,
+                "[ai_agent.dispatch] build_media_inputs: media_id ausente o vacío",
+            );
+            return Vec::new();
+        }
     };
 
     // Gemini multimodal: image/audio/video/pdf van inline. El resto (sticker,
@@ -1618,6 +1717,15 @@ async fn build_media_inputs(
         _ => false,
     };
     if !supported {
+        tracing::warn!(
+            reason = "unsupported_msg_type",
+            conversation_id = %inbound.conversation_id.to_hex(),
+            message_oid = ?inbound.id,
+            msg_type = %inbound.msg_type,
+            mime_type = ?inbound.media_mime_type,
+            media_id = %media_id,
+            "[ai_agent.dispatch] build_media_inputs: msg_type no soportado para inline",
+        );
         return Vec::new();
     }
 
@@ -1625,7 +1733,13 @@ async fn build_media_inputs(
     let token = match decrypt_payload(&ai_agent_secret(), &wa_settings.access_token) {
         Some(t) => t,
         None => {
-            tracing::warn!("[ai_agent.dispatch] no se pudo descifrar access_token para media");
+            tracing::warn!(
+                reason = "token_decrypt_failed",
+                conversation_id = %inbound.conversation_id.to_hex(),
+                message_oid = ?inbound.id,
+                media_id = %media_id,
+                "[ai_agent.dispatch] build_media_inputs: no se pudo descifrar access_token para media",
+            );
             return Vec::new();
         }
     };
@@ -1648,9 +1762,13 @@ async fn build_media_inputs(
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(
-                "[ai_agent.dispatch] descarga de media {} falló: {}",
-                media_id,
-                e
+                reason = "download_failed",
+                conversation_id = %inbound.conversation_id.to_hex(),
+                message_oid = ?inbound.id,
+                msg_type = %inbound.msg_type,
+                media_id = %media_id,
+                error = %e,
+                "[ai_agent.dispatch] build_media_inputs: descarga de media falló",
             );
             return Vec::new();
         }

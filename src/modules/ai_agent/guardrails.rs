@@ -227,6 +227,28 @@ pub fn extract_customer_explicit_intents(messages: &[WaMessage]) -> Vec<String> 
     hits
 }
 
+/// Igual que `extract_customer_explicit_intents` pero acepta `&[&WaMessage]`
+/// para evitar clonar la ráfaga en el caller.
+pub fn extract_customer_explicit_intents_refs(messages: &[&WaMessage]) -> Vec<String> {
+    let buffer: String = messages
+        .iter()
+        .filter(|m| m.direction == "in")
+        .filter_map(|m| m.body.as_deref())
+        .map(|s| normalize_zone(s))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if buffer.is_empty() {
+        return Vec::new();
+    }
+    let mut hits: Vec<String> = Vec::new();
+    for (group, triggers) in INTENT_KEYWORDS {
+        if triggers.iter().any(|t| buffer.contains(t)) {
+            hits.push((*group).to_string());
+        }
+    }
+    hits
+}
+
 /// Construye el bloque `[turn_state]` body (sin la cabecera `[turn_state]`,
 /// que la pega `runner::build_system_instruction`). Devuelve `None` cuando
 /// es turn_number 1 y no hay zones, intents ni media — evitar inyectar HUD vacío.
