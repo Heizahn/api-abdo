@@ -33,6 +33,7 @@ use crate::{
     state::AppState,
 };
 
+use crate::cache::MEDIA_CACHE_MAX_BYTES;
 use super::assignment::assign_conversation;
 
 use super::service::WhatsAppService;
@@ -4724,14 +4725,9 @@ fn apply_media_relay(state: &Arc<AppState>, svc: WhatsAppService) -> WhatsAppSer
     }
 }
 
-/// Tamaño máximo para el prefetch automático del webhook. Encima de esto el
-/// binario se descarga on-demand en `get_media_handler` — evita inflar Redis
-/// con PDFs/videos pesados que el agente podría ni abrir.
-const MEDIA_PREFETCH_MAX_BYTES: u64 = 5 * 1024 * 1024; // 5 MB
-
 /// Tipos de mensaje que se prefetchean al llegar por webhook.
 /// Todos los tipos con media están incluidos — documentos también, pero el
-/// límite de 5 MB (`MEDIA_PREFETCH_MAX_BYTES`) deja fuera los PDFs pesados.
+/// límite de 5 MB (`MEDIA_CACHE_MAX_BYTES`) deja fuera los PDFs pesados.
 fn should_prefetch_media(msg_type: &str) -> bool {
     matches!(
         msg_type,
@@ -4806,12 +4802,12 @@ pub(crate) async fn prefetch_media(state: Arc<AppState>, business_phone: String,
     // Si Meta reporta tamaño y supera el límite, no cacheamos — lo bajará el
     // endpoint si el agente abre el media.
     if let Some(size) = info.file_size {
-        if size > MEDIA_PREFETCH_MAX_BYTES {
+        if size > MEDIA_CACHE_MAX_BYTES as u64 {
             tracing::debug!(
                 "prefetch_media({}): skip ({} bytes > {} max)",
                 media_id,
                 size,
-                MEDIA_PREFETCH_MAX_BYTES
+                MEDIA_CACHE_MAX_BYTES
             );
             return;
         }
@@ -4827,7 +4823,7 @@ pub(crate) async fn prefetch_media(state: Arc<AppState>, business_phone: String,
 
     // Guard tardío: si Meta no reportó `file_size` y el binario terminó siendo
     // grande, igual respetamos el límite.
-    if (bytes.len() as u64) > MEDIA_PREFETCH_MAX_BYTES {
+    if bytes.len() > MEDIA_CACHE_MAX_BYTES {
         return;
     }
 

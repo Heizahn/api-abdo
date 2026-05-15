@@ -3,6 +3,11 @@ use crate::utils::timezone::VenezuelaDateTime;
 use redis::{AsyncCommands, Client, RedisError};
 use sha2::{Digest, Sha256};
 
+/// Tamaño máximo del binario que el cache de media de WhatsApp acepta.
+/// Tope compartido entre `prefetch_media` (webhook) y `build_media_inputs`
+/// (AI dispatch). Es `usize` para comparar directo con `Vec::len()`.
+pub const MEDIA_CACHE_MAX_BYTES: usize = 5 * 1024 * 1024; // 5 MB
+
 #[derive(Clone)]
 pub struct RedisClient {
     client: Client,

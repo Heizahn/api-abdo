@@ -21,6 +21,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use mongodb::bson::{oid::ObjectId, DateTime as BsonDateTime};
 
 use crate::{
+    cache::MEDIA_CACHE_MAX_BYTES,
     crypto::aes::decrypt_payload,
     db::{
         AiAgentRepository, ConversationAiPatch, ConversationTouch, ProfileRepository,
@@ -1758,6 +1759,26 @@ async fn build_media_inputs(
         return Vec::new();
     }
 
+    // Cache-first: si el binario está en Redis, saltamos decrypt + Meta API
+    // completos. media_id de Meta son inmutables, así que el hit es safe.
+    if let Some((bytes, mime, _filename)) = state.redis.get_media_cache(media_id).await {
+        tracing::debug!(
+            event = "media_cache_hit",
+            conversation_id = %inbound.conversation_id.to_hex(),
+            message_oid = ?inbound.id,
+            media_id = %media_id,
+            mime = %mime,
+            bytes_len = bytes.len(),
+            "[ai_agent.dispatch] build_media_inputs: media cache hit"
+        );
+        let data_b64 = B64.encode(&bytes);
+        return vec![MediaInput {
+            mime_type: mime,
+            data_base64: data_b64,
+        }];
+    }
+    // Miss → fall through al path existente (decrypt + svc.download_media).
+
     // Descifrar access_token y armar service para descargar el media.
     let token = match decrypt_payload(&ai_agent_secret(), &wa_settings.access_token) {
         Some(t) => t,
@@ -1787,7 +1808,7 @@ async fn build_media_inputs(
         });
     }
 
-    let (bytes, mime, _filename) = match svc.download_media(media_id).await {
+    let (bytes, mime, filename) = match svc.download_media(media_id).await {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!(
@@ -1803,6 +1824,41 @@ async fn build_media_inputs(
         }
     };
 
+    // Backfill best-effort: si el binario cabe en el tope del cache (mismo
+    // 5 MB que aplica prefetch_media), lo escribimos en Redis para futuros
+    // dispatches del mismo media_id (orphan-recovery dentro del TTL de 30d).
+    // tokio::spawn → no bloquea el turno actual; falla silenciosa.
+    if bytes.len() <= MEDIA_CACHE_MAX_BYTES {
+        let redis = state.redis.clone();
+        let media_id_owned = media_id.to_string();
+        let bytes_owned = bytes.clone();
+        let mime_owned = mime.clone();
+        let filename_owned = filename.clone();
+        tokio::spawn(async move {
+            redis
+                .set_media_cache(
+                    &media_id_owned,
+                    &bytes_owned,
+                    &mime_owned,
+                    filename_owned.as_deref(),
+                )
+                .await;
+            // set_media_cache es best-effort (silent on Redis failure) — no
+            // log de success ni de error acá. La spec lo manda explícito.
+        });
+    } else {
+        tracing::debug!(
+            event = "media_backfill_skip_size",
+            conversation_id = %inbound.conversation_id.to_hex(),
+            message_oid = ?inbound.id,
+            media_id = %media_id,
+            bytes_len = bytes.len(),
+            limit = MEDIA_CACHE_MAX_BYTES,
+            "[ai_agent.dispatch] build_media_inputs: media backfill skipped: size over limit"
+        );
+    }
+
+    // Después del spawn, seguimos como antes: base64 + return.
     let data_b64 = B64.encode(&bytes);
     vec![MediaInput {
         mime_type: mime,
