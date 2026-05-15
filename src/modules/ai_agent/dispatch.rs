@@ -452,6 +452,11 @@ async fn run_dispatch(
         user_media.append(&mut chunks);
     }
 
+    // Media recuperados por el orphan-recovery branch. Vacío en el flujo normal.
+    // Se usa más abajo para emitir patches `media_seen:` para los orphans (idempotencia
+    // — sin esto, un re-dispatch del mismo orphan los re-procesaría).
+    let mut recovered_orphan_media_ids: Vec<String> = Vec::new();
+
     if burst_texts.is_empty() && user_media.is_empty() {
         let inbound_is_media = matches!(
             inbound.msg_type.as_str(),
@@ -470,7 +475,9 @@ async fn run_dispatch(
             };
 
             // Candidatos: inbounds con media_id, _id <= last_out_oid (orphans),
-            // desc por _id, máx N=3. Excluye media ya procesada por la IA.
+            // desc por _id, máx N=3. Excluye media ya procesada por la IA y tipos
+            // que `build_media_inputs` no soporta (documents no-PDF/text) — evita
+            // intentos inútiles que igual fallarían con `unsupported_msg_type`.
             let mut orphans: Vec<&WaMessage> = recent
                 .iter()
                 .filter(|m| m.direction == "in")
@@ -485,6 +492,15 @@ async fn run_dispatch(
                         .map(|id| !already_seen.contains(id))
                         .unwrap_or(false)
                 })
+                .filter(|m| match m.msg_type.as_str() {
+                    "image" | "audio" | "video" => true,
+                    "document" => m
+                        .media_mime_type
+                        .as_deref()
+                        .map(|mime| mime == "application/pdf" || mime.starts_with("text/"))
+                        .unwrap_or(false),
+                    _ => false,
+                })
                 .collect();
             orphans.sort_by(|a, b| b.id.cmp(&a.id));
             orphans.truncate(3);
@@ -495,14 +511,19 @@ async fn run_dispatch(
                     user_media.append(&mut chunks);
                 }
                 if !user_media.is_empty() {
+                    // Registrar media_ids recuperados para emitir patches `media_seen:`
+                    // después del chain loop. Sin esto, un re-dispatch del mismo orphan
+                    // entraría a recovery de nuevo (idempotencia incompleta — W1).
+                    recovered_orphan_media_ids.extend(
+                        orphans
+                            .iter()
+                            .filter_map(|m| m.media_id.as_deref().map(String::from)),
+                    );
                     tracing::info!(
                         "[ai_agent.dispatch] orphan-media recovery: {} mensaje(s) recuperados (conv={}, media_ids={:?})",
                         orphans.len(),
                         inbound.conversation_id.to_hex(),
-                        orphans
-                            .iter()
-                            .filter_map(|m| m.media_id.as_deref())
-                            .collect::<Vec<_>>(),
+                        recovered_orphan_media_ids,
                     );
                     // FALL THROUGH: NO return. Dispatch continúa con user_media no vacío.
                     // effective_user_message se setea más abajo con el fallback
@@ -1329,6 +1350,14 @@ async fn run_dispatch(
                     ));
                 }
             }
+        }
+        // En el path de orphan-recovery el burst está vacío (por definición del guard).
+        // Los media_ids recuperados viven en `recovered_orphan_media_ids` — emitimos
+        // sus patches acá también para cerrar la idempotencia del recovery (W1).
+        for mid in &recovered_orphan_media_ids {
+            all_state_patches.push(StatePatch::AddCompletedAction(
+                format!("media_seen:{}", mid),
+            ));
         }
     }
 
