@@ -396,11 +396,34 @@ async fn run_dispatch(
         None
     };
 
+    // conv_hex: hex del conversation_id — se computa aquí (antes del burst) para
+    // que el watermark read y los logs posteriores puedan usarlo sin re-computar.
+    let conv_hex = inbound.conversation_id.to_hex();
+
+    // Watermark persistido (Fix D): si existe, reemplaza last_out_oid como cota
+    // inferior del burst. Cold start / Redis miss / parse error → fallback a
+    // last_out_oid (comportamiento previo). Ver doc en redis_client.rs.
+    let watermark_opt: Option<ObjectId> = state.redis.get_ai_watermark(&conv_hex).await;
+    let effective_watermark: Option<ObjectId> = watermark_opt.or(last_out_oid);
+
+    match watermark_opt {
+        Some(w) => tracing::debug!(
+            "[ai_agent.dispatch] burst watermark hit (conv={}, watermark={})",
+            conv_hex,
+            w.to_hex()
+        ),
+        None => tracing::debug!(
+            "[ai_agent.dispatch] burst watermark miss → fallback last_out_oid={:?} (conv={})",
+            last_out_oid.map(|o| o.to_hex()),
+            conv_hex
+        ),
+    }
+
     // Burst: todos los inbounds que llegaron después del último outbound del bot,
     // ordenados por _id ascendente. Garantiza que imagen + texto enviados en
     // ráfaga rápida lleguen juntos al LLM aunque el debounce haya cancelado
     // el spawn de la imagen.
-    // Fallback: si no hay outbound, incluir todos los inbounds de la ventana.
+    // Fallback: si no hay outbound ni watermark, incluir todos los inbounds de la ventana.
     // Siempre incluimos al menos el inbound que disparó este dispatch (inbound_oid).
     let burst: Vec<&WaMessage> = recent
         .iter()
@@ -408,9 +431,9 @@ async fn run_dispatch(
             if m.direction != "in" {
                 return false;
             }
-            match last_out_oid {
-                Some(out_id) => m.id.map(|i| i > out_id).unwrap_or(false),
-                None => true,
+            match effective_watermark {
+                Some(lower) => m.id.map(|i| i > lower).unwrap_or(false),
+                None => true, // First-ever dispatch: no watermark, no outbound. Incluir todos.
             }
         })
         .collect();
@@ -565,7 +588,7 @@ async fn run_dispatch(
     );
 
     // ── Per-conv: chequeo de turn limit ANTES del LLM ──────────────────────
-    let conv_hex = inbound.conversation_id.to_hex();
+    // (conv_hex ya está disponible — hoisted antes del burst filter)
     if agent.limits.max_turns_per_conversation > 0 {
         let turns = state.redis.get_ai_turns_conv(&conv_hex).await;
         if turns >= agent.limits.max_turns_per_conversation as i64 {
@@ -1656,6 +1679,23 @@ async fn run_dispatch(
     };
 
     let last_is_live = matches!(last_agent.mode, AiAgentMode::Live);
+
+    // Persistir watermark (Fix D): guarda el max _id del burst que la IA "vio"
+    // en este dispatch (incluyendo chain reloads). El próximo dispatch lo lee
+    // como cota inferior en vez de last_out_oid → orphan-media ya no escapa.
+    // Se ejecuta para LIVE y SHADOW (la IA procesó los mensajes en ambos
+    // modos). Falla silenciosa: error → log WARN + fallback al next dispatch.
+    state
+        .redis
+        .set_ai_watermark(&conv_hex, &high_water_mark)
+        .await;
+    tracing::debug!(
+        "[ai_agent.dispatch] watermark persisted (conv={}, hwm={}, is_shadow={})",
+        conv_hex,
+        high_water_mark.to_hex(),
+        !last_is_live
+    );
+
     if !last_is_live {
         tracing::info!(
             "[ai_agent.dispatch] shadow → habría respondido (agent={}): {}",

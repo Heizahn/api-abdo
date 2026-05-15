@@ -1,3 +1,4 @@
+use mongodb::bson::oid::ObjectId;
 use crate::config::Config;
 use crate::utils::timezone::VenezuelaDateTime;
 use redis::{AsyncCommands, Client, RedisError};
@@ -651,10 +652,70 @@ impl RedisClient {
             format!("ai_agent:turns_conv:{}", conv_id),
             format!("ai_agent:id_attempts:{}", conv_id),
             format!("ai_agent:no_resolution:{}", conv_id),
+            format!("ai_agent:watermark:{}", conv_id), // Fix D
         ];
         for k in keys {
             let _: Result<(), _> = conn.del(k).await;
         }
+    }
+
+    // ── Per-conv: high-water mark del último inbound procesado por la IA ────
+    //
+    // Se persiste al final de cada dispatch exitoso (con el max _id del burst
+    // que la IA realmente vio en su prompt). El siguiente dispatch lo lee al
+    // armar el burst y lo usa como cota inferior en vez de last_out_oid.
+    // Resuelve la condición de carrera de orphan-media (Fix D, root cause de Fix C).
+    //
+    // TTL 7 días — alineado con los demás counters per-conv.
+    // Se limpia explícitamente en clear_ai_conv_counters (close/reopen/auto_escalate/transfer).
+
+    /// Devuelve el watermark persistido del conv (ObjectId hex). `None` si:
+    /// no existe (cold start), Redis está caído, parse falla, o cualquier otro
+    /// error. Política fail-open: el caller cae al fallback (last_out_oid).
+    pub async fn get_ai_watermark(&self, conv_id: &str) -> Option<ObjectId> {
+        let mut conn = self.client.get_multiplexed_async_connection().await.ok()?;
+        let key = format!("ai_agent:watermark:{}", conv_id);
+        let hex: Option<String> = conn.get(&key).await.ok().flatten();
+        let hex = hex?;
+        match ObjectId::parse_str(&hex) {
+            Ok(oid) => Some(oid),
+            Err(e) => {
+                tracing::warn!(
+                    "[redis] ai_watermark parse error (conv={}, raw={}): {}",
+                    conv_id,
+                    hex,
+                    e
+                );
+                None
+            }
+        }
+    }
+
+    /// Persiste watermark con TTL 7d. Best-effort: log WARN en error, sin Result.
+    pub async fn set_ai_watermark(&self, conv_id: &str, oid: &ObjectId) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("[redis] ai_watermark conn error (conv={}): {}", conv_id, e);
+                return;
+            }
+        };
+        let key = format!("ai_agent:watermark:{}", conv_id);
+        let res: Result<(), _> = conn.set_ex(&key, oid.to_hex(), 7 * 24 * 3600_u64).await;
+        if let Err(e) = res {
+            tracing::warn!("[redis] ai_watermark set error (conv={}): {}", conv_id, e);
+        }
+    }
+
+    /// Borra el watermark — invocado desde clear_ai_conv_counters al
+    /// reopen/close/escalate/transfer. Idempotente.
+    pub async fn clear_ai_watermark(&self, conv_id: &str) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let key = format!("ai_agent:watermark:{}", conv_id);
+        let _: Result<(), _> = conn.del(&key).await;
     }
 
     // ── Per-agent diario: turnos ────────────────────────────────────────────
