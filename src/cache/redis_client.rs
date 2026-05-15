@@ -707,17 +707,6 @@ impl RedisClient {
         }
     }
 
-    /// Borra el watermark — invocado desde clear_ai_conv_counters al
-    /// reopen/close/escalate/transfer. Idempotente.
-    pub async fn clear_ai_watermark(&self, conv_id: &str) {
-        let mut conn = match self.client.get_multiplexed_async_connection().await {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let key = format!("ai_agent:watermark:{}", conv_id);
-        let _: Result<(), _> = conn.del(&key).await;
-    }
-
     // ── Per-agent diario: turnos ────────────────────────────────────────────
 
     pub async fn incr_ai_turns_agent_daily(&self, agent_id: &str) -> i64 {
