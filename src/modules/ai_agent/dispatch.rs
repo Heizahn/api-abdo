@@ -7,7 +7,7 @@
 //! 3. Descargar multimedia si el inbound es image/audio/video/document.
 //! 4. Construir history desde `WaMessages` (últimos 20 textos).
 //! 5. Cargar FAQs del agente.
-//! 6. Llamar `run_turn` con texto + media (Gemini 1.5+ es multimodal).
+//! 6. Llamar `run_turn` con texto + media (modelo multimodal vía OpenRouter).
 //! 7. Persistir `AiInteraction` (siempre, independientemente del modo).
 //! 8. Si `mode=live`: enviar la respuesta por Meta + persistir el WaMessage
 //!    outbound + tocar la conv + broadcast WS.
@@ -469,7 +469,7 @@ async fn run_dispatch(
         .collect();
 
     // Multimedia inline: descargamos el media de cada mensaje de la ráfaga
-    // que tenga uno (Gemini soporta múltiples partes inline en un turno).
+    // que tenga uno (el modelo multimodal acepta múltiples partes inline en un turno).
     let mut user_media: Vec<MediaInput> = Vec::new();
     for m in &burst {
         let mut chunks = build_media_inputs(&state, &wa_settings, m).await;
@@ -1775,8 +1775,8 @@ fn is_inline_supported(msg_type: &str, mime: Option<&str>) -> bool {
     }
 }
 
-/// Construye los `MediaInput` para Gemini bajando el binario via Meta. Solo
-/// soporta tipos que Gemini procesa nativo. Si la descarga falla, devolvemos
+/// Construye los `MediaInput` para el LLM bajando el binario via Meta. Solo
+/// soporta tipos que el modelo multimodal procesa inline. Si la descarga falla, devolvemos
 /// vacío y la IA responderá solo al texto/caption.
 async fn build_media_inputs(
     state: &Arc<AppState>,
@@ -1797,7 +1797,7 @@ async fn build_media_inputs(
         }
     };
 
-    // Gemini multimodal: image/audio/video/pdf/image-as-document van inline.
+    // Modelo multimodal: image/audio/video/pdf/image-as-document van inline.
     // El resto (sticker, documents Office, etc) NO los pasamos como inline —
     // la IA puede responder al caption/contexto sin ver el binario.
     // Delega en is_inline_supported (ver fn para la tabla de verdad completa).

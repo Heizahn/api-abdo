@@ -1,7 +1,7 @@
 //! Tool registry + implementaciones del AI Agent (PR 2 — 4 tools).
 //!
 //! El loop (en `runner.rs`) llama `build_function_declarations` con los tools
-//! habilitados de la config y los pasa a Gemini. Cuando Gemini responde con un
+//! habilitados de la config y los pasa al LLM. Cuando el LLM responde con un
 //! `functionCall`, el loop invoca `execute_tool(name, args, ctx)` y reenvía el
 //! resultado serializado al siguiente turno.
 //!
@@ -230,7 +230,7 @@ impl ToolResult {
 }
 
 // ============================================
-// Schemas (JSON parameters) — los manda Gemini en cada call
+// Schemas (JSON parameters) — los manda el LLM en cada call
 // ============================================
 
 pub const T_LOOKUP_CUSTOMER: &str = "lookup_customer";
@@ -270,7 +270,7 @@ pub enum ToolCategory {
 /// - La categoría operativa que `dispatch.rs` lee
 /// - El flag `default_enabled` que se aplica al crear agentes nuevos
 ///
-/// El **prompt para Gemini** (description larga + JSON schema de parámetros)
+/// El **prompt para el LLM** (description larga + JSON schema de parámetros)
 /// vive aparte en `tool_default` — esa parte es prompt engineering y se
 /// mantiene separada del metadata UX para no colapsar dos contratos distintos.
 ///
@@ -282,7 +282,7 @@ pub struct ToolMeta {
     /// Etiqueta corta para el editor (UI).
     pub display_name: &'static str,
     /// Descripción human-friendly que la UI muestra como helper text.
-    /// NO es la description que va a Gemini — esa vive en `tool_default`.
+    /// NO es la description que va al LLM — esa vive en `tool_default`.
     pub ui_description: &'static str,
     /// Categoría visual para agrupar en la UI ("lookup", "info", "escalation",
     /// "transfer", "action").
@@ -296,7 +296,7 @@ pub struct ToolMeta {
 /// Catálogo único de tools soportadas. Agregar una tool nueva requiere:
 /// 1. Constante `T_*` arriba
 /// 2. Entrada acá
-/// 3. Arm en `tool_default` (descripción Gemini + params schema)
+/// 3. Arm en `tool_default` (descripción para el LLM + params schema)
 /// 4. Arm en `execute_tool` dispatch
 /// 5. Si tiene config del agente: arm en `tool_config_schema`
 const TOOL_CATALOG: &[ToolMeta] = &[
@@ -718,13 +718,13 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
     }
 }
 
-/// Construye los `FunctionDeclaration` que viajan a Gemini. Filtra por
+/// Construye los `FunctionDeclaration` que viajan al LLM. Filtra por
 /// `enabled = true` y aplica `description_override` cuando esté seteado.
 ///
 /// Para `transfer_to_agent` además inyecta:
 /// - `enum` con los IDs hex de `allowed_targets` (whitelist de IDs)
 /// - `description` enriquecida con el mapping `id → label` para que el modelo
-///   sepa qué especialidad representa cada hex. Sin esto Gemini elige IDs al
+///   sepa qué especialidad representa cada hex. Sin esto el LLM elige IDs al
 ///   azar (aunque estén en el enum) y la transferencia cae en el agente
 ///   equivocado.
 pub fn build_function_declarations(
@@ -1143,7 +1143,7 @@ struct CheckCoverageArgs {
     zone: String,
 }
 
-/// Zona cacheada en Redis para uso por `check_coverage`. Sin `id` — Gemini
+/// Zona cacheada en Redis para uso por `check_coverage`. Sin `id` — el LLM
 /// no lo necesita y reducir datos en el contexto del LLM es el objetivo.
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct CachedZone {
@@ -2501,7 +2501,7 @@ async fn exec_transfer_to_agent(args: Value, ctx: &ToolContext, started: Instant
     // sin heredar `no_resolution`, `id_attempts`, `turns_conv` del origen.
     // Lo hacemos acá (en el tool) en vez del dispatch para que el reset
     // ocurra SIEMPRE que se persiste el handoff — incluso si el chain en
-    // memoria falla a mitad por error transient de Gemini, el target ya
+    // memoria falla a mitad por error transient del LLM, el target ya
     // tiene counters limpios cuando el cliente reescriba.
     ctx.state
         .redis

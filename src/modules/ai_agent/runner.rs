@@ -1,6 +1,6 @@
 //! Loop runner del AI Agent.
 //!
-//! Un "turno" = un mensaje del cliente (`user`) → uno o más roundtrips a Gemini
+//! Un "turno" = un mensaje del cliente (`user`) → uno o más roundtrips al LLM (vía OpenRouter)
 //! con tool calls intermedios → respuesta final en texto.
 //!
 //! ```text
@@ -8,7 +8,7 @@
 //!             ▼
 //!         contents.push(user)
 //!         loop max_iterations:
-//!             resp = gemini(system + contents + tools)
+//!             resp = openrouter(system + contents + tools)
 //!             if resp tiene functionCall:
 //!                 contents.push(model functionCall)
 //!                 result = execute_tool(...)
@@ -62,6 +62,34 @@ fn substitute_prompt(text: &str, vars: &PromptVariables) -> String {
 /// Modelo de OpenRouter que acepta `input_audio` content blocks.
 /// Se activa automáticamente cuando el burst incluye un mensaje de audio.
 const AUDIO_CAPABLE_MODEL: &str = "openai/gpt-4o-audio-preview";
+
+/// Modelo de OpenRouter que acepta `image_url` content blocks (confirmado multimodal).
+/// Se activa cuando el burst incluye imagen, con prioridad sobre audio (D1' defensive).
+const VISION_CAPABLE_MODEL: &str = "openai/gpt-4o-mini";
+
+/// Selector puro. Decide qué modelo de OpenRouter usar para este turno.
+///
+/// Prioridad: **vision-first cuando hay imagen** (defensive D1' amended).
+/// `gpt-4o-mini` está confirmado como multimodal (vision + text).
+/// `gpt-4o-audio-preview` aceptando `image_url` NO está API-verificado —
+/// por eso en mixed (audio + image) preferimos VISION sobre AUDIO.
+///
+/// Trade-off: en mixed bursts el audio se descarta (gpt-4o-mini no procesa
+/// audio nativo). Caso extremo-raro en WhatsApp (audio + image en la misma
+/// ráfaga); image es la señal más accionable.
+///
+/// - has_image (solo o mixed) → VISION_CAPABLE_MODEL
+/// - has_audio (sin image)   → AUDIO_CAPABLE_MODEL
+/// - sin media               → base_model
+fn pick_effective_model(base_model: &str, has_audio: bool, has_image: bool) -> String {
+    if has_image {
+        VISION_CAPABLE_MODEL.to_string()
+    } else if has_audio {
+        AUDIO_CAPABLE_MODEL.to_string()
+    } else {
+        base_model.to_string()
+    }
+}
 
 use super::{
     openrouter::{
@@ -249,7 +277,7 @@ pub struct RunnerOutput {
     /// Tokens gastados en reasoning interno por modelos thinking. Separado de
     /// `output_tokens` (texto visible) para diagnosticar truncamiento.
     pub thinking_tokens: u32,
-    /// Phase 3a — tokens servidos desde caché implícito/explícito de Gemini.
+    /// Phase 3a — tokens servidos desde caché implícito del provider vía OpenRouter.
     pub cached_tokens: u32,
     pub total_tokens: u32,
     pub cost_usd_estimate: f64,
@@ -258,7 +286,7 @@ pub struct RunnerOutput {
     pub escalated: bool,
     #[allow(dead_code)]
     pub escalation_reason: Option<String>,
-    /// Eco del último `finishReason` de Gemini (`STOP`, `MAX_TOKENS`,
+    /// Eco del último `finish_reason` del modelo vía OpenRouter (`stop`, `length`,
     /// `SAFETY`, `OTHER`, ...). Útil para diagnosticar respuestas truncadas.
     pub finish_reason: Option<String>,
     /// Set cuando el turno terminó con un `transfer_to_agent` exitoso. El
@@ -572,28 +600,28 @@ pub async fn run_turn(
         user_blocks.push(m.to_content_block());
     }
 
-    // Si el burst tiene audio, override al modelo audio-capable de OpenRouter.
-    // gpt-4o-audio-preview no acepta imágenes; si el burst es mixto (audio+imagen)
-    // eliminamos los bloques de audio y usamos el modelo base para no bloquear la respuesta.
     let has_audio = user_blocks.iter().any(|b| matches!(b, ContentBlock::InputAudio { .. }));
     let has_image = user_blocks.iter().any(|b| matches!(b, ContentBlock::ImageUrl { .. }));
-    let effective_model_id = if has_audio && !has_image {
-        tracing::info!(
-            "[ai_agent.runner] audio detectado en burst — override model: {} → {}",
-            agent.model.model_id,
-            AUDIO_CAPABLE_MODEL
-        );
-        AUDIO_CAPABLE_MODEL.to_string()
-    } else if has_audio {
-        // burst mixto audio+imagen: audio-preview no soporta imágenes → omitir audio
-        tracing::warn!(
-            "[ai_agent.runner] burst mixto (audio+imagen) — audio omitido, usando modelo base"
-        );
+    let effective_model_id = pick_effective_model(&agent.model.model_id, has_audio, has_image);
+
+    // Mixed burst (audio+image) → vision-first (D1' defensive): strip audio blocks.
+    // gpt-4o-mini no procesa audio nativo; image es la señal más accionable.
+    if effective_model_id == VISION_CAPABLE_MODEL && has_audio {
         user_blocks.retain(|b| !matches!(b, ContentBlock::InputAudio { .. }));
-        agent.model.model_id.clone()
-    } else {
-        agent.model.model_id.clone()
-    };
+        tracing::warn!(
+            "[ai_agent.runner] mixed burst audio+image routed to vision; audio blocks stripped"
+        );
+    }
+
+    if effective_model_id != agent.model.model_id {
+        tracing::info!(
+            "[ai_agent.runner] override model: {} → {} (has_audio={}, has_image={})",
+            agent.model.model_id,
+            effective_model_id,
+            has_audio,
+            has_image
+        );
+    }
 
     let user_content = match user_blocks.len() {
         0 => MessageContent::Text(String::new()), // fallback defensivo
@@ -958,7 +986,7 @@ pub async fn run_turn(
     let total_cached_u32 = total_cached.max(0) as u32;
 
     let cost_usd_estimate = crate::models::ai_agent::estimate_cost_usd(
-        &agent.model.model_id,
+        &effective_model_id,
         total_in_u32,
         total_cached_u32,
         total_out_u32,
@@ -1085,5 +1113,42 @@ mod text_tool_invocation_tests {
     fn strip_is_idempotent_on_clean_text() {
         let text = "Tu saldo es Bs. 5.798,39. ¿Algo más?";
         assert_eq!(strip_text_tool_invocations(text), text);
+    }
+}
+
+#[cfg(test)]
+mod pick_effective_model_tests {
+    use super::{pick_effective_model, AUDIO_CAPABLE_MODEL, VISION_CAPABLE_MODEL};
+
+    #[test]
+    fn pick_effective_model_text_only_returns_base() {
+        let result = pick_effective_model("openai/gpt-oss-120b", false, false);
+        assert_eq!(result, "openai/gpt-oss-120b");
+    }
+
+    #[test]
+    fn pick_effective_model_audio_only_overrides_to_audio_model() {
+        let result = pick_effective_model("openai/gpt-oss-120b", true, false);
+        assert_eq!(result, AUDIO_CAPABLE_MODEL);
+    }
+
+    #[test]
+    fn pick_effective_model_image_only_overrides_to_vision_model() {
+        let result = pick_effective_model("openai/gpt-oss-120b", false, true);
+        assert_eq!(result, VISION_CAPABLE_MODEL);
+    }
+
+    #[test]
+    fn pick_effective_model_mixed_routes_to_vision_defensive() {
+        // D1' amended: vision-first on mixed (audio+image). Audio se descarta.
+        let result = pick_effective_model("openai/gpt-oss-120b", true, true);
+        assert_eq!(result, VISION_CAPABLE_MODEL);
+    }
+
+    #[test]
+    fn pick_effective_model_base_passthrough_when_compatible() {
+        // Back-compat: agente ya en gpt-4o-mini sin media → sin override.
+        let result = pick_effective_model("openai/gpt-4o-mini", false, false);
+        assert_eq!(result, "openai/gpt-4o-mini");
     }
 }

@@ -9,7 +9,7 @@ use crate::models::whatsapp::WaMessage;
 /// Mapping intent group → trigger substrings. Substrings ya normalizados
 /// (lowercase, sin tildes). Claves en español alineadas con los prompts
 /// del proyecto. Modificar con cuidado: cada cambio impacta el HUD que
-/// lee Gemini en CADA turno.
+/// lee el LLM en CADA turno.
 const INTENT_KEYWORDS: &[(&str, &[&str])] = &[
     ("internet", &["internet", "conexion", "wifi", "red"]),
     (

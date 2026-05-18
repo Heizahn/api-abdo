@@ -744,7 +744,7 @@ pub struct AiToolMetaItem {
     pub name: String,
     /// Etiqueta corta para el editor.
     pub display_name: String,
-    /// Descripción default que va a Gemini si el agente no usa
+    /// Descripción default que va al LLM si el agente no usa
     /// `description_override`. El front la muestra como helper text.
     pub description: String,
     /// Categoría visual para agrupar en la UI.

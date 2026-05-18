@@ -1605,7 +1605,7 @@ pub async fn get_ai_agent_metrics_handler(
             pre_classified_count: s.pre_classified_count,
             escalated_count: s.escalated_count,
             tool_calls_count: s.tool_calls_count,
-            // Spec 30.3: hit-rate del implicit caching de Gemini.
+            // Spec 30.3: hit-rate del implicit caching del provider vía OpenRouter.
             // 0.0 cuando no hay input (rango vacío) para evitar div-by-zero.
             cache_hit_rate: if s.total_input_tokens == 0 {
                 0.0

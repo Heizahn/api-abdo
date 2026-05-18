@@ -387,7 +387,7 @@ pub struct AiInteraction {
     /// Separado de `output_tokens` para diagnosticar truncamiento.
     #[serde(default)]
     pub thinking_tokens: u32,
-    /// Phase 3a. Tokens servidos desde el caché implícito/explícito de Gemini.
+    /// Phase 3a. Tokens servidos desde el caché implícito del provider vía OpenRouter.
     /// Ausente en docs legacy → 0 via `#[serde(default)]`.
     #[serde(default)]
     pub cached_tokens: u32,
@@ -1271,7 +1271,7 @@ pub struct AiAgentMetricsData {
     pub escalated_count: u64,
     pub tool_calls_count: u64,
     /// Spec 30.3: `total_cached_tokens / total_input_tokens` (0..1). 0.0 cuando
-    /// no hay input. Mide la efectividad del implicit caching de Gemini —
+    /// no hay input. Mide la efectividad del implicit caching del provider vía OpenRouter —
     /// idealmente ≥ 0.5 con prompts estables.
     pub cache_hit_rate: f64,
     pub pre_class_breakdown: AiAgentPreClassBreakdown,
@@ -1316,6 +1316,12 @@ const RATES_LLAMA_70B: ModelRates = ModelRates {
     output_per_m: 0.30,
     cached_input_per_m: 0.0,
 };
+// OpenRouter no diferencia caché para OSS models — 0.0 es fallback seguro.
+const RATES_GPT_OSS_120B: ModelRates = ModelRates {
+    input_per_m: 0.039,
+    output_per_m: 0.18,
+    cached_input_per_m: 0.0,
+};
 /// Fallback para modelos no reconocidos — usamos gpt-4o-mini rates como
 /// estimación conservadora.
 const RATES_DEFAULT: ModelRates = RATES_GPT4O_MINI;
@@ -1328,6 +1334,8 @@ fn rate_for_model(model_id: &str) -> ModelRates {
         RATES_CLAUDE_HAIKU
     } else if m.contains("llama") && m.contains("70b") {
         RATES_LLAMA_70B
+    } else if m.contains("gpt-oss-120b") {
+        RATES_GPT_OSS_120B
     } else {
         tracing::debug!(
             "[ai_agent] model_id '{}' no reconocido — usando RATES_DEFAULT (gpt-4o-mini)",
@@ -1474,5 +1482,25 @@ mod tests {
         let full_cost = estimate_cost_usd("openai/gpt-4o-mini", 1_000_000, 0, 0, 0);
         let cached_cost = estimate_cost_usd("openai/gpt-4o-mini", 1_000_000, 500_000, 0, 0);
         assert!(cached_cost < full_cost, "cached should cost less than full");
+    }
+
+    #[test]
+    fn rate_for_model_gpt_oss_120b_returns_oss_rates() {
+        let rates = rate_for_model("openai/gpt-oss-120b");
+        assert!(
+            (rates.input_per_m - 0.039).abs() < 1e-9,
+            "input_per_m should be 0.039, got {}",
+            rates.input_per_m
+        );
+        assert!(
+            (rates.output_per_m - 0.18).abs() < 1e-9,
+            "output_per_m should be 0.18, got {}",
+            rates.output_per_m
+        );
+        assert!(
+            (rates.cached_input_per_m - 0.0).abs() < 1e-9,
+            "cached_input_per_m should be 0.0, got {}",
+            rates.cached_input_per_m
+        );
     }
 }

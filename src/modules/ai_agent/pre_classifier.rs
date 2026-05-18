@@ -61,7 +61,7 @@ pub struct PreClassTokens {
 /// Resultado completo del pre-clasificador.
 #[derive(Debug, Clone)]
 pub struct PreClassResultFull {
-    /// Variante directamente desde Gemini (o `Ambiguous` en error de parse).
+    /// Variante directamente desde el LLM (o `Ambiguous` en error de parse).
     /// Guardada para auditoría en `AiInteraction.pre_class_result`.
     pub variant: PreClassResult,
     /// Igual que `variant`, pero coercida a `Ambiguous` si `confidence < 0.85`.
@@ -108,7 +108,7 @@ const PRE_CLASS_CONFIDENCE_THRESHOLD: f32 = 0.85;
 
 /// Clasifica el texto del mensaje en una de las 6 variantes de `PreClassResult`.
 ///
-/// Usa `gemini-2.5-flash-lite` con `temperature=0.0` y `max_output_tokens=80`
+/// Usa `openai/gpt-4o-mini` con `temperature=0.0` y `max_tokens=80`
 /// para máxima velocidad y costo mínimo. Si la confianza es < 0.85, la
 /// variante se coerce a `Ambiguous` (pero el valor original se preserva para
 /// auditoría). En caso de error de red o parse, retorna `Err(String)` y el
