@@ -2358,6 +2358,150 @@ mod tests {
             "menos de 4 chars = no fuzzy"
         );
     }
+
+    // ------------------------------------------------------------------
+    // Tests for build_already_registered_hint
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn build_already_registered_hint_other_client_returns_fraud_hint() {
+        let result = build_already_registered_hint(false, "Aprobado");
+        assert!(
+            result.contains("YA FUE USADA POR OTRO CLIENTE"),
+            "debe indicar uso por otro cliente"
+        );
+        assert!(
+            result.contains("request_human"),
+            "debe instruir a escalar con request_human"
+        );
+        assert!(
+            !result.contains("source"),
+            "no debe exponer el campo source"
+        );
+        assert!(
+            !result.contains("payments"),
+            "no debe mencionar la colección payments"
+        );
+        assert!(
+            !result.contains("payment_reports"),
+            "no debe mencionar payment_reports"
+        );
+        assert!(
+            result.len() <= 300,
+            "hint debe ser <= 300 chars, tiene {}",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn build_already_registered_hint_same_client_aprobado() {
+        let result = build_already_registered_hint(true, "Aprobado");
+        assert!(
+            result.contains("YA EXISTÍA APROBADO"),
+            "debe indicar que ya existía aprobado"
+        );
+        assert!(
+            result.contains("NO"),
+            "debe incluir directiva negativa NO"
+        );
+        assert!(
+            !result.contains("source"),
+            "no debe exponer el campo source"
+        );
+        assert!(
+            !result.contains("payments"),
+            "no debe mencionar la colección payments"
+        );
+        assert!(
+            !result.contains("payment_reports"),
+            "no debe mencionar payment_reports"
+        );
+        assert!(
+            result.len() <= 300,
+            "hint debe ser <= 300 chars, tiene {}",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn build_already_registered_hint_same_client_pendiente() {
+        let result = build_already_registered_hint(true, "Pendiente");
+        assert!(
+            result.contains("YA EXISTÍA"),
+            "debe indicar que ya existía"
+        );
+        assert!(
+            result.contains("REVISIÓN"),
+            "debe mencionar que está en revisión"
+        );
+        assert!(
+            !result.contains("source"),
+            "no debe exponer el campo source"
+        );
+        assert!(
+            !result.contains("payments"),
+            "no debe mencionar la colección payments"
+        );
+        assert!(
+            !result.contains("payment_reports"),
+            "no debe mencionar payment_reports"
+        );
+        assert!(
+            result.len() <= 300,
+            "hint debe ser <= 300 chars, tiene {}",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn build_already_registered_hint_same_client_other_state() {
+        let result = build_already_registered_hint(true, "Anulado");
+        assert!(
+            result.contains("YA EXISTÍA"),
+            "fallback debe indicar que ya existía"
+        );
+        assert!(
+            !result.contains("source"),
+            "no debe exponer el campo source"
+        );
+        assert!(
+            !result.contains("payments"),
+            "no debe mencionar la colección payments"
+        );
+        assert!(
+            !result.contains("payment_reports"),
+            "no debe mencionar payment_reports"
+        );
+        assert!(
+            result.len() <= 300,
+            "hint debe ser <= 300 chars, tiene {}",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn build_already_registered_hint_never_exposes_internal_fields() {
+        let branches = vec![
+            build_already_registered_hint(false, "Aprobado"),
+            build_already_registered_hint(true, "Aprobado"),
+            build_already_registered_hint(true, "Pendiente"),
+            build_already_registered_hint(true, "OtroEstado"),
+        ];
+        for hint in &branches {
+            assert!(
+                !hint.contains("source"),
+                "ninguna rama debe exponer 'source': {hint}"
+            );
+            assert!(
+                !hint.contains("payments"),
+                "ninguna rama debe mencionar 'payments': {hint}"
+            );
+            assert!(
+                !hint.contains("payment_reports"),
+                "ninguna rama debe mencionar 'payment_reports': {hint}"
+            );
+        }
+    }
 }
 
 // ============================================
@@ -2869,6 +3013,34 @@ struct ReportPaymentArgs {
     destination_id: Option<String>,
 }
 
+/// Construye el `_hint` imperativo que viaja en el JSON de `report_payment`
+/// cuando la referencia ya existe en DB (`already_registered: true`).
+/// Función pura — sin I/O ni estado global.
+fn build_already_registered_hint(is_same_client: bool, matched_state: &str) -> String {
+    if !is_same_client {
+        return "ESTA REFERENCIA YA FUE USADA POR OTRO CLIENTE — NO confirmar pago. \
+                Llamar `request_human` para escalar y decirle al cliente que se está verificando. \
+                NO exponer datos internos."
+            .to_string();
+    }
+    match matched_state {
+        "Aprobado" => {
+            "ESTE PAGO YA EXISTÍA APROBADO antes de este reporte — decir al cliente que \
+             su pago YA estaba registrado. NO decir 'pago registrado' como si fuera nuevo."
+                .to_string()
+        }
+        "Pendiente" => {
+            "ESTE PAGO YA EXISTÍA Y ESTÁ EN REVISIÓN — el equipo lo está validando. \
+             Dar tranquilidad al cliente sin alarma. NO pedir que reenvíe el comprobante."
+                .to_string()
+        }
+        other => format!(
+            "ESTE PAGO YA EXISTÍA (estado={other}) — comunicarlo como duplicado preexistente, \
+             NO como nuevo registro."
+        ),
+    }
+}
+
 async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
     use chrono::{DateTime, Utc};
     use tokio::fs::File;
@@ -3222,6 +3394,7 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
                     "Aprobado"
                 }
             };
+            let hint = build_already_registered_hint(match_info.is_same_client, normalized_state);
             return ToolResult::ok(
                 json!({
                     "ok": true,
@@ -3234,6 +3407,7 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
                     "matched_state_raw": match_info.s_state,
                     "matched_amount_bs": match_info.n_bs,
                     "matched_amount_usd": match_info.n_amount,
+                    "_hint": hint,
                 }),
                 started,
             )
