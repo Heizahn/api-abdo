@@ -25,6 +25,7 @@ use crate::{
     },
     models::{
         ai_agent::{AiAgent, AiAgentMode, AiInvoice, AiToolConfig, ConnectionType},
+        payment::PaymentMethod,
         whatsapp::{StatePatch, WaTicket, WaTicketTimelineEntry},
     },
     state::AppState,
@@ -154,6 +155,181 @@ fn bank_names_match(a: &str, b: &str) -> bool {
     let a_n = clean(a);
     let b_n = clean(b);
     !a_n.is_empty() && !b_n.is_empty() && (a_n == b_n || a_n.contains(&b_n) || b_n.contains(&a_n))
+}
+
+/// Error de validación de destino en `report_payment`.
+/// La prioridad de diagnóstico es: banco → teléfono → cédula.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DestinationMismatch {
+    NoMethods,
+    Bank { expected: Vec<String>, received: String },
+    Phone { expected: Vec<String>, received: String },
+    /// PII: `received` se guarda para diagnóstico interno, pero `to_error_string`
+    /// NO lo expone al LLM — evita que el id del proveedor llegue al cliente.
+    Id { received: String },
+}
+
+impl DestinationMismatch {
+    pub(crate) fn to_error_string(&self) -> Option<String> {
+        match self {
+            Self::NoMethods => None,
+            Self::Bank { expected, received } => Some(format!(
+                "destination_bank_mismatch: el comprobante dice '{}' pero la cuenta del proveedor está en '{}'. \
+                 Si leíste el comprobante de la app BDV, el campo 'Banco' muestra el banco DESTINO y \
+                 'Origen' es el número de cuenta de origen (no el nombre del banco emisor). \
+                 Verificá que extrajiste correctamente el banco receptor del comprobante.",
+                received,
+                expected.join(" / ")
+            )),
+            Self::Phone { expected, received } => Some(format!(
+                "destination_phone_mismatch: el comprobante dice '{}' pero la cuenta del proveedor usa '{}'.",
+                received,
+                expected.join(" / ")
+            )),
+            // PII guard: no echoes expected id — the provider's C.I./RIF must not reach the customer.
+            Self::Id { received: _ } => Some("destination_id_mismatch".to_string()),
+        }
+    }
+}
+
+/// Valida los campos de destino extraídos del comprobante contra la lista de
+/// métodos de pago activos del proveedor.
+///
+/// Cascada de filtros (orden = prioridad): banco → teléfono → cédula.
+/// Si todas las etapas pasan (o no hay campo para esa etapa), retorna el
+/// primer método superviviente.
+///
+/// **Invariante del llamador**: si los tres `dest_*` son `None`, no llamar
+/// esta función; la cascada retorna vacuosamente `Ok(methods[0])` pero es
+/// semánticamente incorrecto.
+pub(crate) fn match_destination_against_methods<'a>(
+    dest_bank: Option<&str>,
+    dest_phone: Option<&str>,
+    dest_id: Option<&str>,
+    methods: &'a [&PaymentMethod],
+) -> Result<&'a PaymentMethod, DestinationMismatch> {
+    if methods.is_empty() {
+        return Err(DestinationMismatch::NoMethods);
+    }
+
+    // Stage 1 — bank
+    let after_bank: Vec<&PaymentMethod> = if let Some(db) = dest_bank {
+        let filtered: Vec<&PaymentMethod> = methods
+            .iter()
+            .copied()
+            .filter(|m| bank_names_match(db, &m.bank_name))
+            .collect();
+        if filtered.is_empty() {
+            return Err(DestinationMismatch::Bank {
+                expected: methods.iter().map(|m| m.bank_name.clone()).collect(),
+                received: db.to_string(),
+            });
+        }
+        filtered
+    } else {
+        methods.to_vec()
+    };
+
+    // Stage 2 — phone
+    let after_phone: Vec<&PaymentMethod> = if let Some(dp) = dest_phone {
+        let norm_dp = normalize_phone_for_comparison(dp);
+        let filtered: Vec<&PaymentMethod> = after_bank
+            .iter()
+            .copied()
+            .filter(|m| normalize_phone_for_comparison(&m.phone) == norm_dp)
+            .collect();
+        if filtered.is_empty() {
+            return Err(DestinationMismatch::Phone {
+                expected: after_bank.iter().map(|m| m.phone.clone()).collect(),
+                received: dp.to_string(),
+            });
+        }
+        filtered
+    } else {
+        after_bank
+    };
+
+    // Stage 3 — id
+    let after_id: Vec<&PaymentMethod> = if let Some(di) = dest_id {
+        let norm_di = normalize_id_for_comparison(di);
+        let filtered: Vec<&PaymentMethod> = after_phone
+            .iter()
+            .copied()
+            .filter(|m| {
+                let pm_id = m.id_number.trim();
+                // Vacuous match: provider has no id configured → skip id check.
+                if pm_id.is_empty() {
+                    return true;
+                }
+                let norm_pm = normalize_id_for_comparison(pm_id);
+                !norm_di.is_empty() && !norm_pm.is_empty() && norm_di == norm_pm
+            })
+            .collect();
+        if filtered.is_empty() {
+            return Err(DestinationMismatch::Id {
+                received: di.to_string(),
+            });
+        }
+        filtered
+    } else {
+        after_phone
+    };
+
+    Ok(after_id[0])
+}
+
+/// Carga los métodos de pago activos del proveedor del cliente dado.
+/// Fail-open: retorna `vec![]` en cualquier error de DB o configuración
+/// incompleta. El caller trata vacío como "skip destination validation".
+async fn load_active_payment_methods_for_owner(
+    ctx: &ToolContext,
+    client_oid: &ObjectId,
+) -> Vec<PaymentMethod> {
+    let owner = match ctx.state.db.find_client_owner_by_id(client_oid).await {
+        Ok(Some(o)) => o,
+        Ok(None) => return vec![],
+        Err(e) => {
+            tracing::warn!(
+                "[ai_agent.report_payment] find_client_owner_by_id error for client {}: {}",
+                client_oid.to_hex(),
+                e
+            );
+            return vec![];
+        }
+    };
+    let user_info = match ctx
+        .state
+        .db
+        .find_user_payment_info_by_id(&owner.id_owner)
+        .await
+    {
+        Ok(Some(u)) => u,
+        Ok(None) => return vec![],
+        Err(e) => {
+            tracing::warn!(
+                "[ai_agent.report_payment] find_user_payment_info_by_id error for owner {}: {}",
+                owner.id_owner,
+                e
+            );
+            return vec![];
+        }
+    };
+    let pm_id = match user_info.id_payment_method {
+        Some(id) => id,
+        None => return vec![],
+    };
+    match ctx.state.db.find_payment_method_by_id(&pm_id).await {
+        Ok(Some(pm)) if pm.is_active => vec![pm],
+        Ok(_) => vec![],
+        Err(e) => {
+            tracing::warn!(
+                "[ai_agent.report_payment] find_payment_method_by_id error for pm {}: {}",
+                pm_id.to_hex(),
+                e
+            );
+            vec![]
+        }
+    }
 }
 
 /// Verifica que `client_oid` pertenece al teléfono de la conversación actual.
@@ -689,9 +865,9 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                     "phone":            { "type": "string", "description": "Teléfono asociado al pago móvil. Opcional." },
                     "debt_id":          { "type": "string", "description": "ObjectId hex de la deuda específica si el cliente la mencionó. Opcional — si falta, el reporte queda como abono a cuenta." },
                     "payment_date":     { "type": "string", "description": "Fecha del pago en RFC3339 (ej: 2026-05-12T16:30:00Z). Extraela del comprobante — es la fecha en la pantalla de confirmación, el recibo o el mensaje del banco. Si el comprobante no muestra fecha, pedile la fecha al usuario antes de llamar esta tool." },
-                    "destination_bank": { "type": "string", "description": "Banco RECEPTOR / DESTINO del pago, tal como aparece en el comprobante. Opcional — si lo extraés del comprobante, pasalo para validación server-side. ATENCIÓN formato BDV: en comprobantes del app PagoMóvil BDV, el campo 'Banco' es el banco DESTINO (ej: '0134 - BANESCO'); 'Origen' es el número de cuenta de quien envió, NO el banco destino. El sistema rechaza con `destination_bank_mismatch` si no coincide con la cuenta del proveedor — en ese caso el error incluye qué banco se esperaba." },
-                    "destination_phone": { "type": "string", "description": "Teléfono Pago Móvil DESTINO del comprobante. Opcional — si aparece en el comprobante, pasalo para validación." },
-                    "destination_id":   { "type": "string", "description": "Cédula o RIF DESTINO del comprobante (a nombre de quién está configurado el Pago Móvil del proveedor). Siempre extraelo del comprobante cuando sea visible — omitirlo devuelve `destination_id_missing` si el método de pago tiene cédula configurada. Prefijo de letra (V-, J-, E-) opcional: el servidor normaliza." }
+                    "destination_bank": { "type": "string", "description": "Banco RECEPTOR / DESTINO del pago, tal como aparece en el comprobante. Opcional — si lo extraés del comprobante, pasalo para validación server-side. ATENCIÓN formato BDV: en comprobantes del app PagoMóvil BDV, el campo 'Banco' es el banco DESTINO (ej: '0134 - BANESCO'); 'Origen' es el número de cuenta de quien envió, NO el banco destino. El servidor valida server-side y, si no coincide con la cuenta del proveedor, devuelve `destination_bank_mismatch`." },
+                    "destination_phone": { "type": "string", "description": "Teléfono Pago Móvil DESTINO del comprobante. Opcional — si lo extraés del comprobante, pasalo para validación server-side. El servidor valida; mismatch → `destination_phone_mismatch`." },
+                    "destination_id":   { "type": "string", "description": "Cédula o RIF DESTINO del comprobante (a nombre de quién está configurado el Pago Móvil del proveedor). Opcional — pasalo cuando aparezca en el comprobante; el servidor valida internamente contra los datos del proveedor. El cliente NUNCA debe proporcionar este dato. Prefijo de letra (V-, J-, E-) opcional: el servidor normaliza." }
                 },
                 "required": ["client_id", "reference", "media_id", "payment_date"]
             }),
@@ -2502,6 +2678,202 @@ mod tests {
             );
         }
     }
+
+    // ── destination matching tests ──────────────────────────────────────────
+
+    fn make_pm(bank: &str, phone: &str, id: &str) -> PaymentMethod {
+        PaymentMethod {
+            id: None,
+            bank_name: bank.to_string(),
+            phone: phone.to_string(),
+            id_number: id.to_string(),
+            account_name: "Test".to_string(),
+            is_active: true,
+        }
+    }
+
+    #[test]
+    fn test_destination_match_all_fields_ok() {
+        let pm = make_pm("Banesco", "04141234567", "V-12345678");
+        let refs = vec![&pm];
+        let result = match_destination_against_methods(
+            Some("Banesco"),
+            Some("04141234567"),
+            Some("V-12345678"),
+            &refs,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_destination_match_phone_only_ok() {
+        let pm = make_pm("Banesco", "04141234567", "V-12345678");
+        let refs = vec![&pm];
+        let result = match_destination_against_methods(None, Some("04141234567"), None, &refs);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_destination_match_bank_mismatch_returns_bank_error() {
+        let pm = make_pm("Banesco", "04141234567", "V-12345678");
+        let refs = vec![&pm];
+        let result = match_destination_against_methods(Some("BDV"), None, None, &refs);
+        match result {
+            Err(DestinationMismatch::Bank { expected, received }) => {
+                assert_eq!(received, "BDV");
+                assert!(expected.contains(&"Banesco".to_string()));
+                let err_str = DestinationMismatch::Bank { expected, received }
+                    .to_error_string()
+                    .unwrap();
+                assert!(
+                    err_str.starts_with("destination_bank_mismatch:"),
+                    "debe empezar con el prefijo: {err_str}"
+                );
+                assert!(err_str.contains("Banesco"), "debe mencionar el banco esperado");
+            }
+            other => panic!("se esperaba Bank mismatch, se obtuvo: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_destination_match_phone_mismatch_returns_phone_error() {
+        let pm = make_pm("Banesco", "04141234567", "V-12345678");
+        let refs = vec![&pm];
+        let result =
+            match_destination_against_methods(Some("Banesco"), Some("04140000000"), None, &refs);
+        match result {
+            Err(DestinationMismatch::Phone { .. }) => {
+                let err_str = result.unwrap_err().to_error_string().unwrap();
+                assert!(
+                    err_str.starts_with("destination_phone_mismatch:"),
+                    "debe empezar con el prefijo: {err_str}"
+                );
+            }
+            other => panic!("se esperaba Phone mismatch, se obtuvo: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_destination_match_id_mismatch_returns_id_error() {
+        let pm = make_pm("Banesco", "04141234567", "V-12345678");
+        let refs = vec![&pm];
+        let result = match_destination_against_methods(
+            Some("Banesco"),
+            Some("04141234567"),
+            Some("V-99999999"),
+            &refs,
+        );
+        match result {
+            Err(DestinationMismatch::Id { received }) => {
+                assert_eq!(received, "V-99999999");
+                let err_str = DestinationMismatch::Id {
+                    received: received.clone(),
+                }
+                .to_error_string()
+                .unwrap();
+                assert_eq!(err_str, "destination_id_mismatch");
+            }
+            other => panic!("se esperaba Id mismatch, se obtuvo: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_destination_match_empty_methods_returns_no_methods() {
+        let result = match_destination_against_methods(Some("Banesco"), None, None, &[]);
+        match result {
+            Err(DestinationMismatch::NoMethods) => {
+                assert!(
+                    DestinationMismatch::NoMethods.to_error_string().is_none(),
+                    "NoMethods debe retornar None (fail-open)"
+                );
+            }
+            other => panic!("se esperaba NoMethods, se obtuvo: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_destination_match_multi_method_one_matches_returns_ok() {
+        let pm1 = make_pm("Banesco", "04141234567", "V-11111111");
+        let pm2 = make_pm("Banco de Venezuela", "04129999999", "V-22222222");
+        let refs = vec![&pm1, &pm2];
+        let result = match_destination_against_methods(
+            Some("Banco de Venezuela"),
+            Some("04129999999"),
+            None,
+            &refs,
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().bank_name, "Banco de Venezuela");
+    }
+
+    #[test]
+    fn test_destination_match_multi_method_none_match_returns_bank_error() {
+        let pm1 = make_pm("Banesco", "04141234567", "V-11111111");
+        let pm2 = make_pm("Banco de Venezuela", "04129999999", "V-22222222");
+        let refs = vec![&pm1, &pm2];
+        let result = match_destination_against_methods(Some("Mercantil"), None, None, &refs);
+        match result {
+            Err(DestinationMismatch::Bank { expected, received }) => {
+                assert_eq!(received, "Mercantil");
+                assert_eq!(expected.len(), 2);
+                let err_str = DestinationMismatch::Bank {
+                    expected: expected.clone(),
+                    received: received.clone(),
+                }
+                .to_error_string()
+                .unwrap();
+                assert!(
+                    err_str.contains(" / "),
+                    "los bancos esperados deben estar separados por ' / ': {err_str}"
+                );
+            }
+            other => panic!("se esperaba Bank mismatch multi, se obtuvo: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_destination_match_id_skip_when_pm_id_empty() {
+        let pm = make_pm("Banesco", "04141234567", "");
+        let refs = vec![&pm];
+        let result = match_destination_against_methods(
+            Some("Banesco"),
+            Some("04141234567"),
+            Some("V-99999999"),
+            &refs,
+        );
+        assert!(
+            result.is_ok(),
+            "id_number vacío debe hacer vacuous match; se obtuvo: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_destination_mismatch_id_error_does_not_leak_expected_id() {
+        let pm = make_pm("Banesco", "04141234567", "V-27605298");
+        let refs = vec![&pm];
+        let result = match_destination_against_methods(
+            Some("Banesco"),
+            Some("04141234567"),
+            Some("V-99999999"),
+            &refs,
+        );
+        let err_str = result
+            .unwrap_err()
+            .to_error_string()
+            .expect("Id mismatch debe tener error string");
+        assert_eq!(
+            err_str, "destination_id_mismatch",
+            "el error debe ser exactamente el token, sin datos del proveedor"
+        );
+        assert!(
+            !err_str.contains("27605298"),
+            "no debe filtrar dígitos del id del proveedor"
+        );
+        assert!(
+            !err_str.contains("V-27"),
+            "no debe filtrar prefijo+dígitos del id del proveedor"
+        );
+    }
 }
 
 // ============================================
@@ -3249,66 +3621,20 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         }
     };
 
-    // 7b. Destination validation — only if the LLM extracted destination fields from the receipt.
-    // Validates destination fields against the provider's configured payment method.
-    // Fail-open on DB errors or unconfigured methods; fail-closed when the method
-    // is resolved and a configured field (id_number) is missing or unparseable.
+    // 7b. Destination validation — only if the LLM extracted destination fields.
+    // Matches against the provider's configured PaymentMethod(s). Fail-open if
+    // the provider has no method configured (step 9 surfaces `payment_method_not_configured`).
     {
         let dest_bank = parsed.destination_bank.as_deref().map(str::trim).filter(|s| !s.is_empty());
         let dest_phone = parsed.destination_phone.as_deref().map(str::trim).filter(|s| !s.is_empty());
         let dest_id = parsed.destination_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
-
-        if let Ok(Some(owner)) = ctx.state.db.find_client_owner_by_id(&client_oid).await {
-            if let Ok(Some(user_info)) = ctx.state.db.find_user_payment_info_by_id(&owner.id_owner).await {
-                if let Some(pm_id) = user_info.id_payment_method {
-                    if let Ok(Some(pm)) = ctx.state.db.find_payment_method_by_id(&pm_id).await {
-                        if pm.is_active {
-                            if let Some(db) = dest_bank {
-                                if !bank_names_match(db, &pm.bank_name) {
-                                    return ToolResult::err(
-                                        format!(
-                                            "destination_bank_mismatch: el comprobante dice '{}' pero la cuenta del proveedor está en '{}'. \
-                                             Si leíste el comprobante de la app BDV, el campo 'Banco' muestra el banco DESTINO y \
-                                             'Origen' es el número de cuenta de origen (no el nombre del banco emisor). \
-                                             Verificá que extrajiste correctamente el banco receptor del comprobante.",
-                                            db, pm.bank_name
-                                        ),
-                                        started,
-                                    );
-                                }
-                            }
-                            if let Some(dp) = dest_phone {
-                                if normalize_phone_for_comparison(dp)
-                                    != normalize_phone_for_comparison(&pm.phone)
-                                {
-                                    return ToolResult::err("destination_phone_mismatch", started);
-                                }
-                            }
-                            let db_id = pm.id_number.trim();
-                            if !db_id.is_empty() {
-                                match dest_id {
-                                    None => {
-                                        return ToolResult::err("destination_id_missing", started)
-                                    }
-                                    Some(di) => {
-                                        let norm_provided = normalize_id_for_comparison(di);
-                                        let norm_db = normalize_id_for_comparison(db_id);
-                                        if norm_provided.is_empty() || norm_db.is_empty() {
-                                            return ToolResult::err(
-                                                "destination_id_unparseable",
-                                                started,
-                                            );
-                                        }
-                                        if norm_provided != norm_db {
-                                            return ToolResult::err(
-                                                "destination_id_mismatch",
-                                                started,
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
+        if dest_bank.is_some() || dest_phone.is_some() || dest_id.is_some() {
+            let methods = load_active_payment_methods_for_owner(ctx, &client_oid).await;
+            if !methods.is_empty() {
+                let refs: Vec<&PaymentMethod> = methods.iter().collect();
+                if let Err(mismatch) = match_destination_against_methods(dest_bank, dest_phone, dest_id, &refs) {
+                    if let Some(err) = mismatch.to_error_string() {
+                        return ToolResult::err(err, started);
                     }
                 }
             }
