@@ -573,7 +573,7 @@ async fn run_dispatch(
     // que el LLM vea fotos enviadas en bursts anteriores dentro del mismo turno.
     // La guardrail de report_payment ya acepta session_media_ids — el HUD debe
     // coincidir para que el LLM no pida la foto de nuevo cuando ya la envió.
-    let turn_state_owned: Option<String> = guardrails::build_turn_state(
+    let mut turn_state_owned: Option<String> = guardrails::build_turn_state(
         &history,
         &customer_explicit_zones,
         &customer_explicit_intents,
@@ -1007,13 +1007,38 @@ async fn run_dispatch(
                                 new_user_text.len()
                             );
                             effective_user_message = new_user_text;
-                            customer_explicit_zones =
-                                guardrails::extract_customer_explicit_zones(&refreshed);
-                            session_media_ids = guardrails::extract_recent_media_ids(&refreshed);
                             burst_intents =
                                 guardrails::extract_customer_explicit_intents_refs(&new_burst);
                         }
                     }
+                    // Refrescar media + HUD SIEMPRE (independiente de que el texto
+                    // haya cambiado). Sin esto, una imagen que llegó entre Sofía
+                    // y Andrea avanzaba el HWM pero `user_media` quedaba con el
+                    // snapshot inicial → Andrea pedía la foto al cliente.
+                    let mut new_user_media: Vec<MediaInput> = Vec::new();
+                    for m in &new_burst {
+                        let mut chunks = build_media_inputs(&state, &wa_settings, m).await;
+                        new_user_media.append(&mut chunks);
+                    }
+                    if new_user_media.len() != user_media.len() {
+                        tracing::info!(
+                            "[ai_agent.dispatch] media recargado en chain step {} ({} → {} inputs, conv={})",
+                            chain_count,
+                            user_media.len(),
+                            new_user_media.len(),
+                            inbound.conversation_id.to_hex()
+                        );
+                    }
+                    user_media = new_user_media;
+                    customer_explicit_zones =
+                        guardrails::extract_customer_explicit_zones(&refreshed);
+                    session_media_ids = guardrails::extract_recent_media_ids(&refreshed);
+                    turn_state_owned = guardrails::build_turn_state(
+                        &history,
+                        &customer_explicit_zones,
+                        &customer_explicit_intents,
+                        &session_media_ids,
+                    );
                     // Actualizar HWM al máximo _id del burst refrescado —
                     // así el follow-up post-dispatch sabe hasta dónde
                     // llegó la cadena de chain reloads.
