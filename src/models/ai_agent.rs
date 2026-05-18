@@ -1192,7 +1192,7 @@ pub struct TestConnectionData {
 pub enum TestConnectionSource {
     /// `api_key` vino en el body.
     Body,
-    /// Se descifró desde `AiAgent.model.api_key_encrypted`.
+    /// Se descifró desde `AiConfig.openrouter_api_key` (global, encrypted).
     Stored,
 }
 

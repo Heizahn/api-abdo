@@ -1153,8 +1153,8 @@ pub async fn delete_ai_agent_faq_handler(
     request_body = TestConnectionRequest,
     responses(
         (status = 200, description = "Conexión OK", body = TestConnectionResponse),
-        (status = 422, description = "Falta api_key"),
         (status = 502, description = "ai_auth_failed / ai_model_not_found / ai_upstream_unreachable / ai_rate_limited"),
+        (status = 503, description = "ai_global_config_missing — no hay api_key en el body ni AiConfig.openrouter_api_key configurado"),
     )
 )]
 pub async fn test_connection_raw_handler(
@@ -1164,17 +1164,20 @@ pub async fn test_connection_raw_handler(
 ) -> Result<Json<TestConnectionResponse>, ApiError> {
     require_superadmin(&current_user)?;
 
-    let api_key = body
+    // Body wins if api_key is present and non-empty; otherwise fall back to AiConfig.openrouter_api_key.
+    // Mirrors the exact pattern used in test_connection_for_agent_handler.
+    let body_key = body
         .api_key
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| ApiError::ValidationError {
-            code: "missing_field".into(),
-            field: "api_key".into(),
-            message: "`api_key` es requerido".into(),
-        })?
-        .to_string();
+        .filter(|s| !s.is_empty());
+    let (api_key, source) = match body_key {
+        Some(k) => (k.to_string(), TestConnectionSource::Body),
+        None => (
+            resolve_ai_api_key(&state).await?,
+            TestConnectionSource::Stored,
+        ),
+    };
 
     let model_id = body
         .model_id
@@ -1203,7 +1206,7 @@ pub async fn test_connection_raw_handler(
         data: TestConnectionData {
             reachable: true,
             model_id,
-            source: TestConnectionSource::Body,
+            source,
         },
     }))
 }
