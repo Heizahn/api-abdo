@@ -40,7 +40,7 @@ use super::service::WhatsAppService;
 use super::ws::{
     broadcast_all, broadcast_except, broadcast_to_chat_users, build_template_created_event,
     build_template_deleted_event, build_template_updated_event, emit_to_phone_number_agents,
-    ConversacionNoLeidaData, WsServerEvent,
+    send_to_user, ConversacionNoLeidaData, WsServerEvent,
 };
 
 /// Cooldown que aplica el back cuando Meta rebota con error 131049
@@ -2488,6 +2488,9 @@ pub async fn take_conversation_handler(
         // toma nueva: broadcast_except es suficiente (el tomador ya tiene la resp).
         if is_takeover {
             broadcast_all(&state.ws_registry, &ev).await;
+            let json = serde_json::to_string(&ev).unwrap_or_default();
+            send_to_user(&state.ws_registry, &claims.id, json).await;
+            tracing::debug!("[take/takeover] targeted push sent to {}", claims.id);
         } else {
             broadcast_except(&state.ws_registry, &claims.id, &ev).await;
         }
@@ -2620,6 +2623,9 @@ pub async fn transfer_conversation_handler(
         conversation: conv_item.clone(),
     };
     broadcast_all(&state.ws_registry, &ev).await;
+    let json = serde_json::to_string(&ev).unwrap_or_default();
+    send_to_user(&state.ws_registry, &payload.user_id, json).await;
+    tracing::debug!("[transfer] targeted push sent to {}", payload.user_id);
 
     record_conv_event(
         &state,

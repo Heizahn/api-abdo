@@ -726,3 +726,48 @@ async fn send_error(state: &Arc<AppState>, user_id: &str, error: &str) {
     )
     .await;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::mpsc::unbounded_channel;
+    use tokio::sync::RwLock;
+
+    fn make_registry() -> WsRegistry {
+        Arc::new(RwLock::new(HashMap::new()))
+    }
+
+    /// Normal delivery: sender present, receiver gets exact payload.
+    #[tokio::test]
+    async fn send_to_user_delivers_to_existing_user() {
+        let registry = make_registry();
+        let (tx, mut rx) = unbounded_channel::<String>();
+        registry.write().await.insert("u1".to_string(), tx);
+
+        send_to_user(&registry, "u1", "payload".to_string()).await;
+
+        assert_eq!(rx.recv().await, Some("payload".to_string()));
+    }
+
+    /// Silent when user absent: empty registry, must not panic.
+    #[tokio::test]
+    async fn send_to_user_silent_when_user_absent() {
+        let registry = make_registry();
+        // Should return normally without panic
+        send_to_user(&registry, "no-such-user", "payload".to_string()).await;
+    }
+
+    /// Silent when sender closed: receiver dropped, must not panic.
+    #[tokio::test]
+    async fn send_to_user_silent_when_sender_closed() {
+        let registry = make_registry();
+        let (tx, rx) = unbounded_channel::<String>();
+        registry.write().await.insert("u2".to_string(), tx);
+        drop(rx);
+
+        // Sender is closed — should return normally without panic
+        send_to_user(&registry, "u2", "payload".to_string()).await;
+    }
+}
