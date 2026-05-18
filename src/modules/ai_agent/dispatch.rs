@@ -516,15 +516,8 @@ async fn run_dispatch(
                         .map(|id| !already_seen.contains(id))
                         .unwrap_or(false)
                 })
-                .filter(|m| match m.msg_type.as_str() {
-                    "image" | "audio" | "video" => true,
-                    "document" => m
-                        .media_mime_type
-                        .as_deref()
-                        .map(|mime| mime == "application/pdf" || mime.starts_with("text/"))
-                        .unwrap_or(false),
-                    _ => false,
-                })
+                // Delega en is_inline_supported (ver fn para la tabla de verdad completa).
+                .filter(|m| is_inline_supported(m.msg_type.as_str(), m.media_mime_type.as_deref()))
                 .collect();
             orphans.sort_by(|a, b| b.id.cmp(&a.id));
             orphans.truncate(3);
@@ -1752,6 +1745,36 @@ async fn run_dispatch(
     Ok(())
 }
 
+/// Predicado puro: devuelve `true` si el par `(msg_type, mime)` corresponde a
+/// un media que los modelos vision-capable de OpenRouter pueden procesar inline.
+///
+/// Verdad aceptada:
+/// - `image` | `audio` | `video` (cualquier mime / sin mime) → true
+/// - `document` + `application/pdf`  → true
+/// - `document` + `text/*`           → true
+/// - `document` + `image/*`          → true  (e.g. drag&drop JPG en WhatsApp Desktop)
+/// - `document` + `audio/*`          → true
+/// - `document` + `video/*`          → true
+/// - `document` + Office / sin mime  → false
+/// - `sticker` / desconocido         → false
+///
+/// Sin I/O, sin efectos secundarios. Usada en ambos sitios de filtro de media.
+fn is_inline_supported(msg_type: &str, mime: Option<&str>) -> bool {
+    match msg_type {
+        "image" | "audio" | "video" => true,
+        "document" => mime
+            .map(|m| {
+                m == "application/pdf"
+                    || m.starts_with("text/")
+                    || m.starts_with("image/")
+                    || m.starts_with("audio/")
+                    || m.starts_with("video/")
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
 /// Construye los `MediaInput` para Gemini bajando el binario via Meta. Solo
 /// soporta tipos que Gemini procesa nativo. Si la descarga falla, devolvemos
 /// vacío y la IA responderá solo al texto/caption.
@@ -1774,18 +1797,12 @@ async fn build_media_inputs(
         }
     };
 
-    // Gemini multimodal: image/audio/video/pdf van inline. El resto (sticker,
-    // documents Office, etc) NO los pasamos como inline — la IA puede
-    // responder al caption/contexto sin ver el binario.
-    let supported = match inbound.msg_type.as_str() {
-        "image" | "audio" | "video" => true,
-        "document" => inbound
-            .media_mime_type
-            .as_deref()
-            .map(|m| m == "application/pdf" || m.starts_with("text/"))
-            .unwrap_or(false),
-        _ => false,
-    };
+    // Gemini multimodal: image/audio/video/pdf/image-as-document van inline.
+    // El resto (sticker, documents Office, etc) NO los pasamos como inline —
+    // la IA puede responder al caption/contexto sin ver el binario.
+    // Delega en is_inline_supported (ver fn para la tabla de verdad completa).
+    let supported =
+        is_inline_supported(inbound.msg_type.as_str(), inbound.media_mime_type.as_deref());
     if !supported {
         tracing::warn!(
             reason = "unsupported_msg_type",
@@ -2645,6 +2662,83 @@ mod tests {
             outcome,
             DispatchOutcome::Increment,
             "at window boundary (prior == window) normal evaluation should apply"
+        );
+    }
+
+    // ── is_inline_supported truth table ───────────────────────────────────
+
+    #[test]
+    fn is_inline_supported_plain_types_pass() {
+        assert!(is_inline_supported("image", None), "image/None should be true");
+        assert!(is_inline_supported("audio", None), "audio/None should be true");
+        assert!(is_inline_supported("video", None), "video/None should be true");
+    }
+
+    #[test]
+    fn is_inline_supported_document_pdf_text_pass() {
+        assert!(
+            is_inline_supported("document", Some("application/pdf")),
+            "document/application/pdf should be true"
+        );
+        assert!(
+            is_inline_supported("document", Some("text/plain")),
+            "document/text/plain should be true"
+        );
+        assert!(
+            is_inline_supported("document", Some("text/csv")),
+            "document/text/csv should be true"
+        );
+    }
+
+    #[test]
+    fn is_inline_supported_document_image_mime_pass() {
+        // W2 fix: image-as-document (e.g. drag&drop JPG in WhatsApp Desktop)
+        assert!(
+            is_inline_supported("document", Some("image/jpeg")),
+            "document/image/jpeg should be true"
+        );
+        assert!(
+            is_inline_supported("document", Some("image/png")),
+            "document/image/png should be true"
+        );
+    }
+
+    #[test]
+    fn is_inline_supported_document_audio_video_pass() {
+        assert!(
+            is_inline_supported("document", Some("audio/ogg")),
+            "document/audio/ogg should be true"
+        );
+        assert!(
+            is_inline_supported("document", Some("video/mp4")),
+            "document/video/mp4 should be true"
+        );
+    }
+
+    #[test]
+    fn is_inline_supported_rejects_invalid() {
+        assert!(
+            !is_inline_supported(
+                "document",
+                Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            ),
+            "document/vnd.openxmlformats should be false"
+        );
+        assert!(
+            !is_inline_supported("document", Some("application/msword")),
+            "document/application/msword should be false"
+        );
+        assert!(
+            !is_inline_supported("document", None),
+            "document/None should be false"
+        );
+        assert!(
+            !is_inline_supported("sticker", None),
+            "sticker/None should be false"
+        );
+        assert!(
+            !is_inline_supported("unknown_type", None),
+            "unknown_type/None should be false"
         );
     }
 }
