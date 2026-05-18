@@ -38,7 +38,7 @@ use crate::{
         ai_agent::{
             AiAgent, AiAgentDeleteResponse, AiAgentFaq, AiAgentFaqItem, AiAgentFaqListResponse,
             AiAgentFaqResponse, AiAgentItem, AiAgentMetricsDailyBucketDto, AiAgentMetricsData,
-            AiAgentMetricsResponse, AiAgentMode, AiAgentModelItem, AiAgentModelsListResponse,
+            AiAgentMetricsResponse, AiAgentMode,
             AiAgentPreClassBreakdown, AiAgentResponse, AiAgentsListResponse, AiConfigDto,
             AiConfigPatchRequest, AiConfigResponse, AiEscalationRules, AiLimits, AiModelConfig,
             AiPersonality, AiSchedule, AiToolConfig, CreateAiAgentFaqRequest, CreateAiAgentRequest,
@@ -72,96 +72,6 @@ const FAQ_TAGS_MAX_COUNT: usize = 16;
 const TEST_TIMEOUT_MAX: u32 = 30;
 const DEFAULT_TEST_MODEL: &str = "openai/gpt-4o-mini";
 
-// ============================================
-// ModelMetadata — lista curada de modelos OpenRouter
-// ============================================
-
-/// Metadata de un modelo disponible en OpenRouter (lista curada, no fetch live).
-#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
-pub struct ModelMetadata {
-    /// Slug del modelo en OpenRouter (ej. `openai/gpt-4o-mini`).
-    pub slug: String,
-    /// Nombre amigable para mostrar en la UI.
-    pub label: String,
-    /// Descripción corta para el SUPERADMIN.
-    pub description: String,
-    /// Tokens máximos de contexto.
-    pub context_window: u32,
-    /// Precio de entrada por millón de tokens (USD).
-    pub input_price_per_million: f64,
-    /// Precio de salida por millón de tokens (USD).
-    pub output_price_per_million: f64,
-    /// Soporta imágenes en el contexto.
-    pub supports_vision: bool,
-    /// Soporta function calling / tools.
-    pub supports_tools: bool,
-}
-
-/// Lista curada de modelos OpenRouter disponibles para los agentes.
-/// Hardcoded — no hace fetch live a `/models`. Cuando se quiera agregar
-/// un modelo nuevo, cambiar acá + actualizar `estimate_cost_usd` en models/ai_agent.rs.
-pub fn curated_models() -> Vec<ModelMetadata> {
-    vec![
-        ModelMetadata {
-            slug: "openai/gpt-4o-mini".into(),
-            label: "GPT-4o mini".into(),
-            description: "Recomendado: rápido, económico, soporta visión y tools".into(),
-            context_window: 128_000,
-            input_price_per_million: 0.15,
-            output_price_per_million: 0.60,
-            supports_vision: true,
-            supports_tools: true,
-        },
-        ModelMetadata {
-            slug: "anthropic/claude-haiku-4.5".into(),
-            label: "Claude Haiku 4.5".into(),
-            description: "Alternativa Anthropic; rápida; soporta tools y visión".into(),
-            context_window: 200_000,
-            input_price_per_million: 1.0,
-            output_price_per_million: 5.0,
-            supports_vision: true,
-            supports_tools: true,
-        },
-        ModelMetadata {
-            slug: "meta-llama/llama-3.3-70b-instruct".into(),
-            label: "Llama 3.3 70B Instruct".into(),
-            description: "Open-weight; económico para texto puro; sin visión nativa".into(),
-            context_window: 128_000,
-            input_price_per_million: 0.12,
-            output_price_per_million: 0.30,
-            supports_vision: false,
-            supports_tools: true,
-        },
-    ]
-}
-
-/// Convierte la lista curada de `ModelMetadata` al shape legacy `AiAgentModelItem`
-/// para mantener compatibilidad con el contrato de respuesta existente.
-fn curated_models_as_items() -> Vec<AiAgentModelItem> {
-    curated_models()
-        .into_iter()
-        .enumerate()
-        .map(|(i, m)| AiAgentModelItem {
-            id: m.slug.clone(),
-            display_name: m.label,
-            description: m.description,
-            // context_window es el límite de entrada del modelo.
-            input_token_limit: m.context_window,
-            // output_token_limit: usamos un máximo razonable de 4096 (valor
-            // típico de agents config); no expuesto directamente por OpenRouter.
-            output_token_limit: 4096,
-            supports_function_calling: m.supports_tools,
-            // OpenRouter soporta mensajes de sistema en todos los modelos.
-            supports_system_instruction: true,
-            // version: tomamos la parte post-slash del slug (ej. "gpt-4o-mini").
-            version: m.slug.split('/').nth(1).unwrap_or("").to_string(),
-            // El primer modelo de la lista es el recomendado (gpt-4o-mini).
-            recommended: i == 0,
-            // OpenRouter no tiene free tier equivalente al de Google AI Studio.
-            free_tier: false,
-        })
-        .collect()
-}
 
 fn require_superadmin(u: &User) -> Result<(), ApiError> {
     if u.role != SUPERADMIN_ROLE {
@@ -1380,81 +1290,6 @@ pub async fn test_connection_for_agent_handler(
     }))
 }
 
-// ============================================
-// LIST MODELS — raw (pre-creación)
-// ============================================
-
-/// Query params legacy (campos ignorados en OpenRouter mode, mantenidos por
-/// compatibilidad con clientes que aún los envían).
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-pub struct ListModelsRawQuery {
-    #[serde(default)]
-    pub api_key: Option<String>,
-    #[serde(default)]
-    pub include_paid: Option<bool>,
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/auth-user/whatsapp/ai-agent/models",
-    tag = "WhatsApp — AI Agent",
-    security(("bearerAuth" = [])),
-    responses(
-        (status = 200, description = "Modelos disponibles (lista curada)", body = AiAgentModelsListResponse),
-    )
-)]
-pub async fn list_models_raw_handler(
-    State(_state): State<Arc<AppState>>,
-    Extension(current_user): Extension<User>,
-    Query(_q): Query<ListModelsRawQuery>,
-) -> Result<Json<AiAgentModelsListResponse>, ApiError> {
-    require_superadmin(&current_user)?;
-    // OpenRouter: lista curada, sin fetch live. Cualquier SUPERADMIN la ve.
-    Ok(Json(AiAgentModelsListResponse {
-        ok: true,
-        data: curated_models_as_items(),
-    }))
-}
-
-// ============================================
-// LIST MODELS por agente
-// ============================================
-
-#[utoipa::path(
-    get,
-    path = "/v1/auth-user/whatsapp/ai-agent/agents/{id}/models",
-    tag = "WhatsApp — AI Agent",
-    security(("bearerAuth" = [])),
-    params(
-        ("id" = String, Path, description = "ObjectId hex del agente"),
-    ),
-    responses(
-        (status = 200, description = "Modelos disponibles (lista curada OpenRouter)", body = AiAgentModelsListResponse),
-        (status = 404, description = "agent_not_found"),
-    )
-)]
-pub async fn list_models_for_agent_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(current_user): Extension<User>,
-    Path(id): Path<String>,
-) -> Result<Json<AiAgentModelsListResponse>, ApiError> {
-    require_superadmin(&current_user)?;
-    let oid = parse_oid(&id, "id")?;
-    // Verificar que el agente existe (mantiene semántica 404).
-    state
-        .db
-        .find_ai_agent_by_id(&oid)
-        .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or_else(agent_not_found)?;
-
-    // OpenRouter: lista curada, sin fetch live.
-    Ok(Json(AiAgentModelsListResponse {
-        ok: true,
-        data: curated_models_as_items(),
-    }))
-}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Phase 3a — Metrics handler

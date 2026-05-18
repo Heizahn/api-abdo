@@ -74,10 +74,6 @@ pub fn user_routes() -> Router<Arc<AppState>> {
             post(handler::test_connection_for_agent_handler),
         )
         .route(
-            "/v1/auth-user/whatsapp/ai-agent/agents/:id/models",
-            get(handler::list_models_for_agent_handler),
-        )
-        .route(
             "/v1/auth-user/whatsapp/ai-agent/agents/:id/sandbox",
             post(sandbox::sandbox_handler),
         )
@@ -89,10 +85,6 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/auth-user/whatsapp/ai-agent/test-connection",
             post(handler::test_connection_raw_handler),
-        )
-        .route(
-            "/v1/auth-user/whatsapp/ai-agent/models",
-            get(handler::list_models_raw_handler),
         )
         // Discovery: tools disponibles para que el editor del front no hardcodee
         .route(

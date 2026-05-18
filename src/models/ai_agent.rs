@@ -1202,30 +1202,6 @@ pub struct TestConnectionResponse {
     pub data: TestConnectionData,
 }
 
-// ─── List models ────────────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
-pub struct AiAgentModelItem {
-    pub id: String,
-    pub display_name: String,
-    pub description: String,
-    pub input_token_limit: u32,
-    pub output_token_limit: u32,
-    pub supports_function_calling: bool,
-    pub supports_system_instruction: bool,
-    pub version: String,
-    pub recommended: bool,
-    /// `true` cuando el modelo está disponible en el plan free de Google AI
-    /// Studio. Determinado por whitelist hardcoded en el back. Si Google
-    /// cambia los tiers, hay que actualizar la lista.
-    pub free_tier: bool,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
-pub struct AiAgentModelsListResponse {
-    pub ok: bool,
-    pub data: Vec<AiAgentModelItem>,
-}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Phase 3a — Metrics response DTOs

@@ -4,7 +4,7 @@ use crate::db::mongo::{PaymentDetails, ResultGroupedByDate};
 use crate::models::ai_agent::{
     AiAgentDeleteResponse, AiAgentFaqItem, AiAgentFaqListResponse, AiAgentFaqResponse, AiAgentItem,
     AiAgentMetricsDailyBucketDto, AiAgentMetricsData, AiAgentMetricsResponse, AiAgentMode,
-    AiAgentModelItem, AiAgentModelsListResponse, AiAgentPreClassBreakdown, AiAgentPurpose,
+    AiAgentPreClassBreakdown, AiAgentPurpose,
     AiAgentResponse, AiAgentsListResponse, AiBusinessDataDeleteResponse, AiConfigDto,
     AiConfigPatchRequest, AiConfigResponse, AiCoverageZoneItem, AiCoverageZoneResponse,
     AiCoverageZonesListResponse, AiEscalationRulesDto, AiEscalationRulesInput,
@@ -67,7 +67,6 @@ use crate::models::whatsapp::{
 };
 use crate::models::zabbix::{MonthlyTraffic, ZabbixTrafficResponse};
 use crate::modules::ai_agent::business_data::{AiToolMetaItem, AiToolsListResponse};
-use crate::modules::ai_agent::handler::ModelMetadata;
 use crate::modules::ai_agent::sandbox::{
     SandboxData, SandboxHistoryEntry, SandboxRequest, SandboxResponse, SandboxToolCall,
     SandboxUsage,
@@ -198,8 +197,6 @@ use crate::modules::whatsapp::handler::ResetAiStateResponse;
         crate::modules::ai_agent::handler::get_ai_agent_metrics_handler,
         crate::modules::ai_agent::handler::test_connection_raw_handler,
         crate::modules::ai_agent::handler::test_connection_for_agent_handler,
-        crate::modules::ai_agent::handler::list_models_raw_handler,
-        crate::modules::ai_agent::handler::list_models_for_agent_handler,
         crate::modules::ai_agent::handler::get_ai_config_handler,
         crate::modules::ai_agent::handler::patch_ai_config_handler,
         // AI Agent — datos de negocio (planes, cobertura) + discovery de tools
@@ -331,8 +328,6 @@ use crate::modules::whatsapp::handler::ResetAiStateResponse;
             // AI Agent — Test connection
             TestConnectionRequest, TestConnectionResponse, TestConnectionData,
             TestConnectionSource,
-            // AI Agent — List models
-            AiAgentModelItem, AiAgentModelsListResponse, ModelMetadata,
             // AI Agent — Global config
             AiConfigDto, AiConfigPatchRequest, AiConfigResponse,
             // AI Agent — Phase 3a (Pre-classifier + Metrics)

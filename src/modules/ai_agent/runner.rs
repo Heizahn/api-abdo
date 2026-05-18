@@ -67,6 +67,11 @@ const AUDIO_CAPABLE_MODEL: &str = "openai/gpt-4o-audio-preview";
 /// Se activa cuando el burst incluye imagen, con prioridad sobre audio (D1' defensive).
 const VISION_CAPABLE_MODEL: &str = "openai/gpt-4o-mini";
 
+/// Modelo para turnos text-only. Single source of truth — hardcoded en código,
+/// no configurable por agente. Para cambiar el modelo: editar esta constante + redeploy.
+/// El field `AiAgent.model.model_id` en DB queda como dato muerto (back-compat).
+const TEXT_ONLY_MODEL: &str = "openai/gpt-oss-120b";
+
 /// Selector puro. Decide qué modelo de OpenRouter usar para este turno.
 ///
 /// Prioridad: **vision-first cuando hay imagen** (defensive D1' amended).
@@ -80,14 +85,14 @@ const VISION_CAPABLE_MODEL: &str = "openai/gpt-4o-mini";
 ///
 /// - has_image (solo o mixed) → VISION_CAPABLE_MODEL
 /// - has_audio (sin image)   → AUDIO_CAPABLE_MODEL
-/// - sin media               → base_model
-fn pick_effective_model(base_model: &str, has_audio: bool, has_image: bool) -> String {
+/// - sin media               → TEXT_ONLY_MODEL (hardcoded, D1)
+fn pick_effective_model(has_audio: bool, has_image: bool) -> String {
     if has_image {
         VISION_CAPABLE_MODEL.to_string()
     } else if has_audio {
         AUDIO_CAPABLE_MODEL.to_string()
     } else {
-        base_model.to_string()
+        TEXT_ONLY_MODEL.to_string()
     }
 }
 
@@ -602,7 +607,7 @@ pub async fn run_turn(
 
     let has_audio = user_blocks.iter().any(|b| matches!(b, ContentBlock::InputAudio { .. }));
     let has_image = user_blocks.iter().any(|b| matches!(b, ContentBlock::ImageUrl { .. }));
-    let effective_model_id = pick_effective_model(&agent.model.model_id, has_audio, has_image);
+    let effective_model_id = pick_effective_model(has_audio, has_image);
 
     // Mixed burst (audio+image) → vision-first (D1' defensive): strip audio blocks.
     // gpt-4o-mini no procesa audio nativo; image es la señal más accionable.
@@ -1118,37 +1123,32 @@ mod text_tool_invocation_tests {
 
 #[cfg(test)]
 mod pick_effective_model_tests {
-    use super::{pick_effective_model, AUDIO_CAPABLE_MODEL, VISION_CAPABLE_MODEL};
+    use super::{pick_effective_model, AUDIO_CAPABLE_MODEL, TEXT_ONLY_MODEL, VISION_CAPABLE_MODEL};
 
     #[test]
-    fn pick_effective_model_text_only_returns_base() {
-        let result = pick_effective_model("openai/gpt-oss-120b", false, false);
+    fn pick_effective_model_text_only_returns_hardcoded() {
+        // D1: text-only always returns TEXT_ONLY_MODEL regardless of any agent config.
+        let result = pick_effective_model(false, false);
+        assert_eq!(result, TEXT_ONLY_MODEL);
         assert_eq!(result, "openai/gpt-oss-120b");
     }
 
     #[test]
     fn pick_effective_model_audio_only_overrides_to_audio_model() {
-        let result = pick_effective_model("openai/gpt-oss-120b", true, false);
+        let result = pick_effective_model(true, false);
         assert_eq!(result, AUDIO_CAPABLE_MODEL);
     }
 
     #[test]
     fn pick_effective_model_image_only_overrides_to_vision_model() {
-        let result = pick_effective_model("openai/gpt-oss-120b", false, true);
+        let result = pick_effective_model(false, true);
         assert_eq!(result, VISION_CAPABLE_MODEL);
     }
 
     #[test]
     fn pick_effective_model_mixed_routes_to_vision_defensive() {
         // D1' amended: vision-first on mixed (audio+image). Audio se descarta.
-        let result = pick_effective_model("openai/gpt-oss-120b", true, true);
+        let result = pick_effective_model(true, true);
         assert_eq!(result, VISION_CAPABLE_MODEL);
-    }
-
-    #[test]
-    fn pick_effective_model_base_passthrough_when_compatible() {
-        // Back-compat: agente ya en gpt-4o-mini sin media → sin override.
-        let result = pick_effective_model("openai/gpt-4o-mini", false, false);
-        assert_eq!(result, "openai/gpt-4o-mini");
     }
 }
