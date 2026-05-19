@@ -471,9 +471,17 @@ async fn run_dispatch(
     // Multimedia inline: descargamos el media de cada mensaje de la ráfaga
     // que tenga uno (el modelo multimodal acepta múltiples partes inline en un turno).
     let mut user_media: Vec<MediaInput> = Vec::new();
+    let mut current_turn_media_ids: Vec<String> = Vec::new();
     for m in &burst {
-        let mut chunks = build_media_inputs(&state, &wa_settings, m).await;
-        user_media.append(&mut chunks);
+        let chunks = build_media_inputs(&state, &wa_settings, m).await;
+        if !chunks.is_empty() {
+            if let Some(mid) = m.media_id.as_deref() {
+                if !mid.is_empty() {
+                    current_turn_media_ids.push(mid.to_string());
+                }
+            }
+        }
+        user_media.extend(chunks);
     }
 
     // Media recuperados por el orphan-recovery branch. Vacío en el flujo normal.
@@ -524,8 +532,15 @@ async fn run_dispatch(
 
             if !orphans.is_empty() {
                 for m in &orphans {
-                    let mut chunks = build_media_inputs(&state, &wa_settings, m).await;
-                    user_media.append(&mut chunks);
+                    let chunks = build_media_inputs(&state, &wa_settings, m).await;
+                    if !chunks.is_empty() {
+                        if let Some(mid) = m.media_id.as_deref() {
+                            if !mid.is_empty() {
+                                current_turn_media_ids.push(mid.to_string());
+                            }
+                        }
+                    }
+                    user_media.extend(chunks);
                 }
                 if !user_media.is_empty() {
                     // Registrar media_ids recuperados para emitir patches `media_seen:`
@@ -1016,9 +1031,17 @@ async fn run_dispatch(
                     // y Andrea avanzaba el HWM pero `user_media` quedaba con el
                     // snapshot inicial → Andrea pedía la foto al cliente.
                     let mut new_user_media: Vec<MediaInput> = Vec::new();
+                    let mut new_current_turn_media_ids: Vec<String> = Vec::new();
                     for m in &new_burst {
-                        let mut chunks = build_media_inputs(&state, &wa_settings, m).await;
-                        new_user_media.append(&mut chunks);
+                        let chunks = build_media_inputs(&state, &wa_settings, m).await;
+                        if !chunks.is_empty() {
+                            if let Some(mid) = m.media_id.as_deref() {
+                                if !mid.is_empty() {
+                                    new_current_turn_media_ids.push(mid.to_string());
+                                }
+                            }
+                        }
+                        new_user_media.extend(chunks);
                     }
                     if new_user_media.len() != user_media.len() {
                         tracing::info!(
@@ -1030,6 +1053,7 @@ async fn run_dispatch(
                         );
                     }
                     user_media = new_user_media;
+                    current_turn_media_ids = new_current_turn_media_ids;
                     customer_explicit_zones =
                         guardrails::extract_customer_explicit_zones(&refreshed);
                     session_media_ids = guardrails::extract_recent_media_ids(&refreshed);
@@ -1101,6 +1125,7 @@ async fn run_dispatch(
             session_media_ids: session_media_ids.clone(),
             workspace_enable_guardrails: wa_settings.enable_guardrails,
             customer_phone: conv.phone.clone(),
+            current_turn_media_ids: current_turn_media_ids.clone(),
         };
 
         // FAQs y prompt_vars del agente activo (assistant_name cambia entre

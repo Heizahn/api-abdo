@@ -91,6 +91,19 @@ pub struct ToolContext {
     /// Usado por el guardrail de report_payment. Vacío en sandbox.
     pub session_media_ids: Vec<String>,
 
+    /// Media IDs of messages whose media content was loaded into `user_media`
+    /// for THIS dispatch turn (initial burst, chain-reload refresh from commit
+    /// 043af17, OR orphan-media recovery). Distinct from `session_media_ids`
+    /// which spans the whole recent window. Used by `exec_report_payment`'s
+    /// stale-media guard to reject LLM picks of older media_ids when fresh
+    /// images exist in the current turn.
+    ///
+    /// Populator sites in dispatch.rs:
+    ///   1. Initial burst build (~line 471).
+    ///   2. Chain reload media refresh (~line 1018).
+    ///   3. Orphan-media recovery branch (~line 526).
+    pub current_turn_media_ids: Vec<String>,
+
     /// Toggle del workspace para guardrails server-side (Phase 1).
     /// Resuelto desde `WaSettings.enable_guardrails` en dispatch. Los
     /// agentes acatan la política del workspace al que pertenecen.
@@ -155,6 +168,14 @@ fn bank_names_match(a: &str, b: &str) -> bool {
     let a_n = clean(a);
     let b_n = clean(b);
     !a_n.is_empty() && !b_n.is_empty() && (a_n == b_n || a_n.contains(&b_n) || b_n.contains(&a_n))
+}
+
+/// Returns true when the LLM-provided media_id is "stale" for this dispatch turn:
+/// there's at least one fresh media loaded this turn AND the provided id isn't
+/// one of them. Falls through (returns false) when no fresh media exists — that
+/// case is handled by the session-scope `media_id_not_in_conversation` guard.
+fn is_media_id_stale(provided: &str, current_turn: &[String]) -> bool {
+    !current_turn.is_empty() && !current_turn.iter().any(|m| m == provided)
 }
 
 /// Error de validación de destino en `report_payment`.
@@ -2874,6 +2895,37 @@ mod tests {
             "no debe filtrar prefijo+dígitos del id del proveedor"
         );
     }
+
+    #[test]
+    fn test_media_id_stale_when_picked_old_id_with_fresh_image_in_turn() {
+        let current = vec!["M2".to_string()];
+        assert!(is_media_id_stale("M1", &current));
+    }
+
+    #[test]
+    fn test_media_id_not_stale_when_picked_current_turn_id() {
+        let current = vec!["M2".to_string()];
+        assert!(!is_media_id_stale("M2", &current));
+    }
+
+    #[test]
+    fn test_media_id_not_stale_when_current_turn_empty() {
+        let current: Vec<String> = Vec::new();
+        assert!(!is_media_id_stale("M1", &current));
+    }
+
+    #[test]
+    fn test_media_id_stale_with_multiple_current_turn_ids() {
+        let current = vec!["M1".to_string(), "M2".to_string()];
+        assert!(is_media_id_stale("M3", &current));
+    }
+
+    #[test]
+    fn test_media_id_not_stale_with_multiple_current_turn_ids() {
+        let current = vec!["M1".to_string(), "M2".to_string()];
+        assert!(!is_media_id_stale("M1", &current));
+        assert!(!is_media_id_stale("M2", &current));
+    }
 }
 
 // ============================================
@@ -3449,6 +3501,24 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     // 2. Validate media_id non-empty
     if parsed.media_id.trim().is_empty() {
         return ToolResult::err("image_required", started);
+    }
+
+    // 2.a Stale-media guard: when the LLM picks a media_id from `available_media_ids`
+    // that does NOT correspond to any image loaded in THIS turn, reject. Catches the
+    // bug where the HUD lists multiple images (e.g. customer sent receipt-1 then
+    // receipt-2) and the LLM grabs a stale one. Falls through when `current_turn_media_ids`
+    // is empty (no fresh media this turn) so legitimate older-image references still pass
+    // via the `session_media_ids` check below.
+    if ctx.workspace_enable_guardrails && !ctx.is_sandbox {
+        let mid = parsed.media_id.trim();
+        if is_media_id_stale(mid, &ctx.current_turn_media_ids) {
+            return ToolResult::err(
+                "media_id_stale_turn: el media_id no corresponde a la imagen del turno actual. \
+                 Usá el media_id de la imagen MÁS RECIENTE de available_media_ids — la que recién analizaste. \
+                 NO reportes con un media_id de un comprobante anterior.",
+                started,
+            );
+        }
     }
 
     // 2.b GUARDRAIL: media_id debe ser uno que el cliente haya enviado en
