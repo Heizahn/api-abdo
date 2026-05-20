@@ -516,7 +516,7 @@ const TOOL_CATALOG: &[ToolMeta] = &[
     ToolMeta {
         name: T_LIST_PLANS,
         display_name: "Listar planes de internet",
-        ui_description: "Catálogo de planes (sin precio). Para uso típico del agente de Ventas.",
+        ui_description: "Catálogo de planes con precio mensual en USD y Bs (IVA + tasa BCV incluidos). Para uso típico del agente de Ventas.",
         ui_category: "info",
         default_enabled: false,
         operational_category: ToolCategory::InfoLookup,
@@ -741,8 +741,9 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
             }),
         )),
         T_LIST_PLANS => Some((
-            "Lista los planes de internet residenciales disponibles (nombre, velocidad, dispositivos recomendados, beneficios). \
-             NO incluye precios — el back filtra esa info. Si el cliente pregunta el costo, decirle que el precio se confirma con el equipo comercial.",
+            "Lista los planes de internet residenciales disponibles: nombre, velocidad (Mbps), dispositivos recomendados, beneficios y PRECIO mensual \
+             en USD (`price_usd`) y en bolívares (`price_bs`, ya con IVA y tasa BCV vigente). Los precios vienen listos para mostrar — NO necesitás \
+             `calculate_amount_bs` para los planes.",
             json!({
                 "type": "object",
                 "properties": {}
@@ -1293,40 +1294,93 @@ async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) ->
 // Tool: list_plans
 // ============================================
 
-async fn exec_list_plans(_args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
-    if let Some(cached) = ctx.state.redis.get_ai_plans_cache().await {
-        if let Ok(parsed) = serde_json::from_str::<Value>(&cached) {
-            return ToolResult::ok(parsed, started)
-                .with_patches(vec![StatePatch::AddCompletedAction("list_plans".into())]);
-        }
-    }
-
-    let plans = match ctx.state.db.list_ai_plans(true).await {
-        Ok(p) => p,
-        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+/// Resuelve `(tasa_bcv, factor_iva)` con el mismo contrato que
+/// `exec_calculate_amount_bs`: tasa Redis → DB fallback, IVA del tax `DEFAULT`.
+/// Devuelve `None` si la tasa o el IVA no están disponibles — el caller decide
+/// si degrada (ej: `list_plans` responde solo en USD).
+async fn resolve_rate_iva(ctx: &ToolContext) -> Option<(f64, f64)> {
+    let rate: f64 = match ctx.state.redis.get_exchange_rate().await {
+        Ok(Some(r)) => r,
+        _ => ctx.state.db.get_latest_exchange_rate().await.ok()?,
     };
-    let items: Vec<Value> = plans
-        .iter()
-        .map(|p| {
-            json!({
-                "name": p.name,
-                "mbps": p.mbps,
-                "devices_recommendation": p.devices_recommendation,
-                "benefits": p.benefits,
-                "price_usd": p.price_usd,
-            })
+    if rate == 0.0 {
+        return None;
+    }
+    let iva_factor = match ctx.state.db.find_tax_by_id(None).await {
+        Ok(Some(t)) => t.iva,
+        _ => return None,
+    };
+    Some((rate, iva_factor))
+}
+
+async fn exec_list_plans(_args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
+    // Items base (price_usd) — lo único que se cachea. El Bs se computa fresco en
+    // cada llamada para que nunca quede viejo cuando cambia la tasa BCV.
+    let base_items: Vec<Value> = match ctx
+        .state
+        .redis
+        .get_ai_plans_cache()
+        .await
+        .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
+    {
+        Some(items) => items,
+        None => {
+            let plans = match ctx.state.db.list_ai_plans(true).await {
+                Ok(p) => p,
+                Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+            };
+            let items: Vec<Value> = plans
+                .iter()
+                .map(|p| {
+                    json!({
+                        "name": p.name,
+                        "mbps": p.mbps,
+                        "devices_recommendation": p.devices_recommendation,
+                        "benefits": p.benefits,
+                        "price_usd": p.price_usd,
+                    })
+                })
+                .collect();
+            if let Ok(s) = serde_json::to_string(&items) {
+                ctx.state
+                    .redis
+                    .set_ai_plans_cache(&s, AI_BUSINESS_CACHE_TTL_SECS)
+                    .await;
+            }
+            items
+        }
+    };
+
+    // Convertir cada precio a Bs server-side (tasa BCV vigente + IVA). Así el
+    // agente NO necesita llamar `calculate_amount_bs` por plan — esa cadena era
+    // la que reventaba MAX_ITERATIONS al cotizar "todos los planes".
+    let rate_iva = resolve_rate_iva(ctx).await;
+    let items: Vec<Value> = base_items
+        .into_iter()
+        .map(|mut item| {
+            if let Some((rate, iva_factor)) = rate_iva {
+                if let Some(usd) = item.get("price_usd").and_then(Value::as_f64) {
+                    item["price_bs"] = json!(round2(usd * rate * iva_factor));
+                }
+            }
+            item
         })
         .collect();
-    let response = json!({
-        "items": items,
-        "note": "price_usd es el precio mensual en USD. Usá calculate_amount_bs para convertir a Bs con la tasa BCV + IVA vigente.",
-    });
-    if let Ok(s) = serde_json::to_string(&response) {
-        ctx.state
-            .redis
-            .set_ai_plans_cache(&s, AI_BUSINESS_CACHE_TTL_SECS)
-            .await;
-    }
+
+    let response = match rate_iva {
+        Some((rate, iva_factor)) => json!({
+            "items": items,
+            "bcv_rate": rate,
+            "rate_date": crate::utils::timezone::VenezuelaDateTime::now().date_string_venezuela(),
+            "iva_percent": round2((iva_factor - 1.0) * 100.0),
+            "note": "price_bs ya incluye IVA y tasa BCV vigente — listo para mostrar. NO llames calculate_amount_bs para estos precios.",
+        }),
+        None => json!({
+            "items": items,
+            "note": "Tasa BCV no disponible ahora; solo price_usd. Si el cliente necesita Bs, usá calculate_amount_bs.",
+        }),
+    };
+
     ToolResult::ok(response, started)
         .with_patches(vec![StatePatch::AddCompletedAction("list_plans".into())])
 }

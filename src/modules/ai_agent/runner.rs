@@ -155,9 +155,33 @@ impl MediaInput {
     }
 }
 
-/// Cap defensivo para evitar loops infinitos. Si la IA gira pidiendo tools sin
-/// converger, escalamos por `max_iterations_reached`.
-const MAX_ITERATIONS: u32 = 5;
+/// Cap de rondas de tools por turno. Si el modelo agota el cap sin redactar una
+/// respuesta final, hacemos una **síntesis forzada sin tools** (ver `run_turn`)
+/// que lo obliga a cerrar con lo que ya juntó, antes de caer al fallback
+/// `max_iterations_reached`. Subido de 5 → 8: cotizar "todos los planes"
+/// gastaba 5 slots y nunca convergía (ahora `list_plans` ya trae el Bs).
+const MAX_ITERATIONS: u32 = 8;
+
+/// Extrae el texto plano del `content` de un mensaje del assistant, sea `Text`
+/// o bloques. `String::new()` si no hay texto. Compartido por el loop principal
+/// y la síntesis final forzada.
+fn extract_message_text(content: Option<MessageContent>) -> String {
+    match content {
+        Some(MessageContent::Text(s)) => s,
+        Some(MessageContent::Blocks(blocks)) => blocks
+            .into_iter()
+            .filter_map(|b| {
+                if let ContentBlock::Text { text } = b {
+                    Some(text)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(""),
+        None => String::new(),
+    }
+}
 
 /// Reintentos máximos cuando el LLM emite `[transfer_to_agent → ...]` o
 /// `<<TOOL_CALL: foo(...)>>` como TEXTO PLANO (en vez de llamar la función).
@@ -726,21 +750,7 @@ pub async fn run_turn(
 
         if tool_calls.is_empty() {
             // Respuesta final en texto.
-            let text = match assistant_msg.content {
-                Some(MessageContent::Text(s)) => s,
-                Some(MessageContent::Blocks(blocks)) => blocks
-                    .into_iter()
-                    .filter_map(|b| {
-                        if let ContentBlock::Text { text } = b {
-                            Some(text)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join(""),
-                None => String::new(),
-            };
+            let text = extract_message_text(assistant_msg.content);
 
             // ── Defensa "tool-call-as-text" ─────────────────────────────────
             // gpt-4o-mini a veces emite `[transfer_to_agent → Pagos, ...]` o
@@ -975,9 +985,58 @@ pub async fn run_turn(
         // para que el LLM produzca la despedida en texto.
     }
 
+    // ── Síntesis final forzada ───────────────────────────────────────────────
+    // El loop se agotó pidiendo tools sin redactar respuesta. En vez de mentirle
+    // al cliente con un "te derivo" que NO ocurre (esto solo loguea `escalated`,
+    // no llama auto_escalate), hacemos UNA llamada extra SIN tools que obliga al
+    // modelo a cerrar con todo lo que ya juntó en el historial. Casi siempre
+    // tenía la data suficiente — solo le faltaba el empujón a responder.
+    if response_text.is_none() {
+        tracing::warn!(
+            "[ai_agent.runner] MAX_ITERATIONS sin texto final — forzando síntesis sin tools"
+        );
+        let synth_req = ChatCompletionRequest {
+            model: effective_model_id.clone(),
+            messages: messages.clone(),
+            tools: None,
+            tool_choice: None,
+            response_format: None,
+            temperature: Some(agent.model.temperature),
+            max_tokens: Some(agent.model.max_tokens),
+            stream: None,
+        };
+        match or_client.complete(&synth_req).await {
+            Ok(resp) => {
+                let usage = resp.usage.unwrap_or_default();
+                total_in += usage.prompt_tokens;
+                total_out += usage.completion_tokens;
+                total_cached += usage
+                    .prompt_tokens_details
+                    .as_ref()
+                    .map(|d| d.cached_tokens)
+                    .unwrap_or(0);
+                if let Some(choice) = resp.choices.into_iter().next() {
+                    finish_reason = choice.finish_reason.clone();
+                    let text = extract_message_text(choice.message.content);
+                    let cleaned = if detect_text_tool_invocations(&text).is_empty() {
+                        text
+                    } else {
+                        strip_text_tool_invocations(&text)
+                    };
+                    if !cleaned.trim().is_empty() {
+                        response_text = Some(cleaned);
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("[ai_agent.runner] síntesis final falló: {}", e),
+        }
+    }
+
+    // Fallback honesto: solo si ni la síntesis pudo redactar. NO promete un
+    // traspaso (este path no escala de verdad) — pide reformular.
     if response_text.is_none() {
         response_text = Some(
-            "Disculpá, no logré resolverlo en este momento. Te derivo con un compañero del equipo."
+            "Disculpá, se me complicó procesar tu consulta. ¿Podés reformularla o darme un poco más de detalle?"
                 .to_string(),
         );
         escalated = true;
@@ -1054,6 +1113,32 @@ fn truncate_summary(value: &serde_json::Value) -> String {
         s
     } else {
         format!("{}…(truncated)", &s[..500])
+    }
+}
+
+#[cfg(test)]
+mod extract_message_text_tests {
+    use super::extract_message_text;
+    use crate::modules::ai_agent::openrouter::{ContentBlock, MessageContent};
+
+    #[test]
+    fn plain_text_passes_through() {
+        let c = Some(MessageContent::Text("hola".into()));
+        assert_eq!(extract_message_text(c), "hola");
+    }
+
+    #[test]
+    fn joins_text_blocks_and_skips_non_text() {
+        let c = Some(MessageContent::Blocks(vec![
+            ContentBlock::Text { text: "a".into() },
+            ContentBlock::Text { text: "b".into() },
+        ]));
+        assert_eq!(extract_message_text(c), "ab");
+    }
+
+    #[test]
+    fn none_yields_empty_string() {
+        assert_eq!(extract_message_text(None), "");
     }
 }
 
