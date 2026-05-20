@@ -663,6 +663,42 @@ impl WhatsAppRepository for MongoDB {
         Ok(res)
     }
 
+    async fn intervene_conversation(
+        &self,
+        id: &ObjectId,
+        agent_id: &str,
+    ) -> Result<Option<WaConversation>, String> {
+        use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+        let opts = FindOneAndUpdateOptions::builder()
+            .return_document(ReturnDocument::After)
+            .build();
+
+        // Sólo conv atendida por la IA: status=pending y ai_disabled=false.
+        // ai_active_agent_id NO se toca (pausa reversible); aiConvState tampoco.
+        // El filtro hace el chequeo atómico — si no matchea, otro actor cambió
+        // el estado entre el pre-check del handler y este write.
+        let filter = doc! {
+            "_id": id,
+            "status": "pending",
+            "ai_disabled": false,
+        };
+        let update = doc! {
+            "$set": {
+                "assigned_to": agent_id,
+                "status": "in_progress",
+                "ai_disabled": true,
+            }
+        };
+        let res = self
+            .wa_conversations()
+            .find_one_and_update(filter, update)
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(res)
+    }
+
     async fn reset_unread(&self, id: &ObjectId) -> Result<(), String> {
         self.wa_conversations()
             .update_one(doc! { "_id": id }, doc! { "$set": { "unread_count": 0 } })

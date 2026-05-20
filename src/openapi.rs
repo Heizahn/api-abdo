@@ -76,7 +76,7 @@ use crate::modules::calculations::handler::{
 };
 use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingResponse};
 use crate::modules::payments::handler::RejectReportRequest;
-use crate::modules::whatsapp::handler::ResetAiStateResponse;
+use crate::modules::whatsapp::handler::{InterveneData, InterveneResponse, ResetAiStateResponse};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -151,6 +151,7 @@ use crate::modules::whatsapp::handler::ResetAiStateResponse;
         crate::modules::whatsapp::handler::close_conversation_handler,
         crate::modules::whatsapp::handler::reopen_conversation_handler,
         crate::modules::whatsapp::handler::reset_ai_conv_state_handler,
+        crate::modules::whatsapp::handler::intervene_conversation_handler,
         crate::modules::whatsapp::handler::initiate_conversation_handler,
         crate::modules::whatsapp::handler::list_transferable_agents_handler,
         crate::modules::whatsapp::handler::list_settings_handler,
@@ -351,6 +352,8 @@ use crate::modules::whatsapp::handler::ResetAiStateResponse;
             AiToolMetaItem, AiToolsListResponse,
             // AI Agent — conversation state
             ResetAiStateResponse,
+            InterveneResponse,
+            InterveneData,
         )
     ),
     tags(

@@ -731,6 +731,17 @@ pub trait WhatsAppRepository {
         id: &ObjectId,
         agent_id: &str,
     ) -> Result<Option<WaConversation>, String>;
+    /// Take-over manual de una conversación atendida por la IA. Atómico:
+    /// asigna al agente, fuerza `status = "in_progress"` y `ai_disabled = true`.
+    /// CONSERVA `ai_active_agent_id` (la pausa es reversible) y `aiConvState`.
+    /// Filtro defensivo: sólo aplica si `status = "pending"` y `ai_disabled = false`
+    /// (= IA atendiendo). Retorna `Some(conv)` con el doc post-update, o `None`
+    /// si el filtro no matcheó (otro actor cambió el estado).
+    async fn intervene_conversation(
+        &self,
+        id: &ObjectId,
+        agent_id: &str,
+    ) -> Result<Option<WaConversation>, String>;
     async fn reset_unread(&self, id: &ObjectId) -> Result<(), String>;
     async fn update_message_status(
         &self,

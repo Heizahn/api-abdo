@@ -7296,6 +7296,148 @@ pub async fn reset_ai_conv_state_handler(
 }
 
 // ============================================
+// INTERVENIR (take-over manual de IA → humano)
+// ============================================
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct InterveneData {
+    pub conversation_id: String,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct InterveneResponse {
+    pub ok: bool,
+    pub data: InterveneData,
+}
+
+/// Take-over manual: el agente humano interrumpe a la IA y se queda con la
+/// conversación. En un solo shot: asigna al caller, pasa a `in_progress` y
+/// setea `ai_disabled=true`. CONSERVA `ai_active_agent_id` (pausa reversible).
+/// Emite `CHAT_TOMADO` (assigned_to + status) + `IA_PAUSADA{reason:"manual"}`.
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/conversations/{id}/intervene",
+    tag = "WhatsApp — Conversaciones",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ObjectId hex de la conversación")),
+    responses(
+        (status = 200, description = "Take-over OK: conv asignada al caller, status in_progress, IA pausada", body = InterveneResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Requiere bCanChat"),
+        (status = 404, description = "conversation_not_found"),
+        (status = 409, description = "ai_not_active (la IA no atiende esta conv) o dispatch_in_progress (turno IA en vuelo)"),
+    )
+)]
+pub async fn intervene_conversation_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+) -> Result<Json<InterveneResponse>, ApiError> {
+    require_can_chat(&state, &claims.id).await?;
+
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+
+    let existing = state
+        .db
+        .find_conversation_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| {
+            ApiError::domain_simple(
+                StatusCode::NOT_FOUND,
+                "conversation_not_found",
+                "Conversación no encontrada.",
+            )
+        })?;
+
+    // Gate: la IA debe estar atendiendo (status=pending && !ai_disabled). Si ya
+    // está pausada o un humano la tomó (in_progress) o está cerrada → ai_not_active.
+    if existing.ai_disabled || existing.status != "pending" {
+        return Err(ApiError::domain_simple(
+            StatusCode::CONFLICT,
+            "ai_not_active",
+            "La IA no está atendiendo esta conversación (ya pausada, tomada por un humano o cerrada).",
+        ));
+    }
+
+    // Lock — evita pisarse con un dispatch en vuelo. Si está tomado, el turno IA
+    // está corriendo: que el front reintente en unos segundos.
+    if !state.redis.try_lock_ai_dispatch(&id).await {
+        return Err(ApiError::domain_simple(
+            StatusCode::CONFLICT,
+            "dispatch_in_progress",
+            "El agente IA está procesando esta conversación. Reintentá en unos segundos.",
+        ));
+    }
+
+    // Take-over atómico dentro del lock. ai_active_agent_id y aiConvState quedan intactos.
+    let taken = state.db.intervene_conversation(&oid, &claims.id).await;
+
+    state.redis.release_ai_dispatch_lock(&id).await;
+
+    let conv = match taken {
+        Ok(Some(c)) => c,
+        // El filtro atómico no matcheó: otro actor cambió el estado entre el
+        // pre-check y el lock. Para el caller es lo mismo que ai_not_active.
+        Ok(None) => {
+            return Err(ApiError::domain_simple(
+                StatusCode::CONFLICT,
+                "ai_not_active",
+                "La IA dejó de atender esta conversación antes de la intervención.",
+            ));
+        }
+        Err(e) => return Err(ApiError::DatabaseError(e)),
+    };
+
+    // La conv pasa a manos del caller → sube su carga (espejo de /take).
+    state.redis.incr_agent_load(&claims.id).await;
+
+    // Auditoría.
+    record_conv_event(
+        &state,
+        WaConversationEventInput {
+            conversation_id: &oid,
+            business_phone: &conv.business_phone,
+            event_type: "ai_intervened",
+            actor_id: Some(claims.id.as_str()),
+            actor_name: Some(claims.name.as_str()),
+            target_id: Some(claims.id.as_str()),
+            target_name: Some(claims.name.as_str()),
+            note: Some("Take-over manual de conversación atendida por IA"),
+        },
+    )
+    .await;
+
+    // WS — dos eventos, ambos broadcast_all (los handlers ya existen en el front):
+    // 1) CHAT_TOMADO — assigned_to + status (patchea sidebar/cache).
+    let ev_tomado = WsServerEvent::ChatTomado {
+        conversation_id: id.clone(),
+        taken_by: claims.id.clone(),
+        taken_by_name: Some(claims.name.clone()),
+        status: conv.status.clone(),
+        previous_status: "pending".to_string(),
+    };
+    broadcast_all(&state.ws_registry, &ev_tomado).await;
+
+    // 2) IA_PAUSADA — ai_disabled (actualiza el indicador IA del chat).
+    let ev_pausada = WsServerEvent::IaPausada {
+        conversation_id: id.clone(),
+        reason: "manual".to_string(),
+        by: claims.id.clone(),
+    };
+    broadcast_all(&state.ws_registry, &ev_pausada).await;
+
+    tracing::info!("[whatsapp] intervene manual (conv={}, by={})", id, claims.id);
+
+    Ok(Json(InterveneResponse {
+        ok: true,
+        data: InterveneData {
+            conversation_id: id,
+        },
+    }))
+}
+
+// ============================================
 // REACCIONES A MENSAJES
 // ============================================
 

@@ -76,6 +76,10 @@ pub fn user_routes() -> Router<Arc<AppState>> {
             "/v1/auth-user/whatsapp/conversations/:id/agent-state/reset",
             post(handler::reset_ai_conv_state_handler),
         )
+        .route(
+            "/v1/auth-user/whatsapp/conversations/:id/intervene",
+            post(handler::intervene_conversation_handler),
+        )
         // Iniciar una conversación (agente outbound first) — siempre template
         .route(
             "/v1/auth-user/whatsapp/conversations/initiate",
