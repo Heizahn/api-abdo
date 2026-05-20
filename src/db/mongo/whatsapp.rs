@@ -459,14 +459,6 @@ impl WhatsAppRepository for MongoDB {
             .map_err(|e| e.to_string())
     }
 
-    async fn update_conversation_status(&self, id: &ObjectId, status: &str) -> Result<(), String> {
-        self.wa_conversations()
-            .update_one(doc! { "_id": id }, doc! { "$set": { "status": status } })
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
     async fn close_conversation(&self, id: &ObjectId) -> Result<(), String> {
         self.wa_conversations()
             .update_one(

@@ -682,7 +682,6 @@ pub trait WhatsAppRepository {
         cursor: Option<&str>,
         limit: i64,
     ) -> Result<Vec<WaMessage>, String>;
-    async fn update_conversation_status(&self, id: &ObjectId, status: &str) -> Result<(), String>;
     /// Cierra la conversación: status="closed" y libera al agente (`$unset assigned_to`).
     async fn close_conversation(&self, id: &ObjectId) -> Result<(), String>;
     /// Reabre una conversación cerrada → pending. No-op si ya no estaba cerrada.

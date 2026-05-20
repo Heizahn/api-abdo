@@ -1129,7 +1129,9 @@ pub async fn get_conversation_messages_handler(
 ) -> Result<Json<ConversationMessagesResponse>, ApiError> {
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
-    let conv = state
+    // Verificar existencia (404 si no existe). No bindeamos: leer mensajes ya
+    // no depende del estado de la conv (sin transición pending → in_progress).
+    state
         .db
         .find_conversation_by_id(&oid)
         .await
@@ -1137,7 +1139,6 @@ pub async fn get_conversation_messages_handler(
         .ok_or(ApiError::NotFound)?;
 
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
-    let is_first_page = q.cursor.is_none();
 
     let messages = state
         .db
@@ -1161,32 +1162,16 @@ pub async fn get_conversation_messages_handler(
     };
 
     // Registrar "chat abierto" por este agente (siempre, incluso en paginaciones).
+    // Esto es tracking de lectura — NO toca ownership ni status.
     if let Err(e) = state.db.record_conversation_open(&claims.id, &oid).await {
         tracing::warn!("record_conversation_open error: {}", e);
     }
 
-    // Transición pending → in_progress: sólo en la primera página, si el
-    // agente actual es el asignado y la conversación sigue pending. El detalle
-    // actualizado se obtiene con GET /conversations/:id — acá solo emitimos el
-    // evento WS para que la UI reaccione.
-    if is_first_page
-        && conv.status == "pending"
-        && conv.assigned_to.as_deref() == Some(claims.id.as_str())
-    {
-        if let Err(e) = state
-            .db
-            .update_conversation_status(&oid, "in_progress")
-            .await
-        {
-            tracing::warn!("update_conversation_status error: {}", e);
-        } else {
-            let ev = WsServerEvent::ChatEstadoCambio {
-                conversation_id: id.clone(),
-                new_status: "in_progress".to_string(),
-            };
-            broadcast_all(&state.ws_registry, &ev).await;
-        }
-    }
+    // NOTA: leer una conversación NO la toma ni cambia su status. La transición
+    // pending → in_progress ocurre SOLO vía acciones explícitas: POST /take,
+    // POST /intervene (y el reopen+take de envío sobre conv cerrada). Antes el
+    // GET transicionaba si el lector era el asignado, lo que "tomaba" la conv
+    // (y pausaba la IA) con solo abrirla. Removido a propósito.
 
     Ok(Json(ConversationMessagesResponse {
         ok: true,
