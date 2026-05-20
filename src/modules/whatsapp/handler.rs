@@ -2344,7 +2344,7 @@ pub async fn mark_read_handler(
     security(("bearerAuth" = [])),
     params(("id" = String, Path, description = "ID de la conversación")),
     responses(
-        (status = 200, description = "Conversación tomada, reasignada o reabierta. Idempotente si ya era del agente. Acepta: `pending` (toma/reasignación) y `closed` (reopen+take, transiciona a `in_progress`).", body = TakeConversationResponse),
+        (status = 200, description = "Conversación tomada, reasignada o reabierta. Acepta: `pending` (toma/reasignación, transiciona a `in_progress`) y `closed` (reopen+take, también transiciona a `in_progress`).", body = TakeConversationResponse),
         (status = 409, description = "La conversación no es tomable (está en `in_progress`)"),
         (status = 404, description = "Conversación no encontrada"),
         (status = 401, description = "No autorizado"),
@@ -2375,7 +2375,8 @@ pub async fn take_conversation_handler(
         return Err(ApiError::ConversationNotTakeable);
     }
 
-    // `take_conversation` acepta `pending` (toma/reasignación) y `closed` (reopen+take).
+    // `take_conversation` acepta `pending` (toma/reasignación) y `closed`
+    // (reopen+take). En ambos casos el resultado queda en `in_progress`.
     let taken = state
         .db
         .take_conversation(&oid, &claims.id)
@@ -2469,7 +2470,7 @@ pub async fn take_conversation_handler(
             }
         };
         // is_takeover: broadcast_all para que el agente destino también reciba
-        // el status actualizado (pending) sin depender solo de la respuesta HTTP.
+        // el status actualizado (`in_progress`) sin depender solo de la respuesta HTTP.
         // toma nueva: broadcast_except es suficiente (el tomador ya tiene la resp).
         if is_takeover {
             broadcast_all(&state.ws_registry, &ev).await;

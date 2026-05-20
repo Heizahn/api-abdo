@@ -723,8 +723,9 @@ pub trait WhatsAppRepository {
         id: &ObjectId,
         assigned_to: Option<&str>,
     ) -> Result<(), String>;
-    /// Intenta tomar una conversación pendiente. Retorna `None` si ya estaba asignada a otro
-    /// (o no estaba en status `pending`), `Some(conv)` si la toma fue exitosa.
+    /// Intenta tomar una conversación tomable (`pending` o `closed`).
+    /// Al tomarla, la asigna al agente y la pasa a `status = "in_progress"`.
+    /// Retorna `None` si otro actor la movió fuera de esos estados antes del update.
     async fn take_conversation(
         &self,
         id: &ObjectId,

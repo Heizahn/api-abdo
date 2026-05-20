@@ -629,20 +629,14 @@ impl WhatsAppRepository for MongoDB {
             .build();
 
         // Atómico: acepta `pending` (toma/reasignación) y `closed` (reopen+take).
-        // - Si era `pending`:  asigna el agente, deja `status` intacto.
-        // - Si era `closed`:   asigna el agente y fuerza `status = "in_progress"`.
-        // Idempotente: tomar mi propia conv `pending` devuelve el doc sin cambios.
+        // En ambos casos asigna el agente y fuerza `status = "in_progress"`.
+        // Idempotente sólo para la ventana race pre-update: si otro actor la
+        // mueve fuera de `pending|closed`, el filtro deja de matchear.
         let filter = doc! { "_id": id, "status": { "$in": ["pending", "closed"] } };
         let pipeline = vec![doc! {
             "$set": {
                 "assigned_to": agent_id,
-                "status": {
-                    "$cond": [
-                        { "$eq": ["$status", "closed"] },
-                        "in_progress",
-                        "$status"
-                    ]
-                }
+                "status": "in_progress"
             }
         }];
         let res = self
