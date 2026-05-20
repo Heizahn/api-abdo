@@ -13,6 +13,10 @@ use super::ws::{broadcast_all, WsServerEvent};
 /// los que están desconectados, incluso si tienen más carga. Si nadie está
 /// online, hace fallback a min-load global para que la conv quede asignada y
 /// aparezca en la cola del agente cuando se conecte.
+///
+/// Importante: esta auto-asignación NO implica que un humano haya "tomado" la
+/// conversación. La conv permanece en `pending` para que la IA pueda atender
+/// primero y el front no la marque prematuramente como `in_progress`.
 pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents: Vec<String>) {
     let conv_id_str = conv_id.to_hex();
 
@@ -113,12 +117,13 @@ pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents
         .flatten()
         .map(|u| u.name);
 
-    // Broadcast: conversación tomada (auto-asignada). El front filtra por `taken_by`.
+    // Broadcast: conversación auto-asignada. Aunque reutilizamos CHAT_TOMADO
+    // para patchear caches del front, el status real sigue siendo `pending`.
     let event = WsServerEvent::ChatTomado {
         conversation_id: conv_id_str,
         taken_by: chosen_agent,
         taken_by_name,
-        status: "in_progress".to_string(),
+        status: "pending".to_string(),
         previous_status: "pending".to_string(),
     };
     broadcast_all(&state.ws_registry, &event).await;

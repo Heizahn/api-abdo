@@ -178,6 +178,17 @@ fn is_media_id_stale(provided: &str, current_turn: &[String]) -> bool {
     !current_turn.is_empty() && !current_turn.iter().any(|m| m == provided)
 }
 
+/// Devuelve `true` cuando `provided` pertenece a la sesión pero NO es el media
+/// más reciente visto en la ventana actual. Se usa en `report_payment` para
+/// evitar que el LLM vuelva a usar un comprobante viejo después de que el
+/// cliente corrigió y mandó una imagen nueva.
+fn is_media_id_stale_in_session(provided: &str, session: &[String]) -> bool {
+    match session.last() {
+        Some(latest) => latest != provided && session.iter().any(|m| m == provided),
+        None => false,
+    }
+}
+
 /// Error de validación de destino en `report_payment`.
 /// La prioridad de diagnóstico es: banco → teléfono → cédula.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3584,6 +3595,33 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         }
     }
 
+    // 2.c Session recency guard: aunque este turno sea solo de texto, si en la
+    // conversación ya apareció una imagen MÁS nueva que la provista, usamos la
+    // más reciente. Esto evita que el backend termine guardando el comprobante
+    // viejo cuando el cliente corrigió con "me equivoqué", mandó otra imagen y
+    // luego siguió confirmando datos por texto.
+    let effective_media_id: String = if ctx.workspace_enable_guardrails && !ctx.is_sandbox {
+        let provided = parsed.media_id.trim();
+        if is_media_id_stale_in_session(provided, &ctx.session_media_ids) {
+            let corrected = ctx
+                .session_media_ids
+                .last()
+                .cloned()
+                .unwrap_or_else(|| provided.to_string());
+            tracing::warn!(
+                "[ai_agent.report_payment] overriding stale session media_id: provided='{}' corrected='{}' session_media_ids={:?}",
+                provided,
+                corrected,
+                ctx.session_media_ids
+            );
+            corrected
+        } else {
+            provided.to_string()
+        }
+    } else {
+        parsed.media_id.trim().to_string()
+    };
+
     // 3. Normalize reference — extract canonical numeric run (WI-5)
     let reference = match crate::modules::ai_agent::reference_normalize::extract_canonical_reference(
         parsed.reference.trim(),
@@ -3977,7 +4015,7 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
             secret: secret.clone(),
         });
     }
-    let (bytes, mime, _filename) = match svc.download_media(&parsed.media_id).await {
+    let (bytes, mime, _filename) = match svc.download_media(&effective_media_id).await {
         Ok(t) => t,
         Err(e) => return ToolResult::err(format!("image_download_failed:{}", e), started),
     };
