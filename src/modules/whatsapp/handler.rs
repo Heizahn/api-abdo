@@ -32,6 +32,7 @@ use crate::{
     error::ApiError,
     models::whatsapp::*,
     state::AppState,
+    utils::get_bson_amount::get_bson_amount,
 };
 
 use crate::cache::MEDIA_CACHE_MAX_BYTES;
@@ -1188,7 +1189,7 @@ pub async fn get_conversation_client_link_handler(
             name: doc.get_str("sName").unwrap_or_default().to_string(),
             phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
             status: doc.get_str("sState").ok().map(|s| s.to_string()),
-            balance: doc.get_f64("nBalance").ok(),
+            balance: doc.contains_key("nBalance").then(|| get_bson_amount(&doc, "nBalance")),
         })
         .filter(|item| !item.id.is_empty())
         .collect();
