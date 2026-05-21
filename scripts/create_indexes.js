@@ -390,6 +390,44 @@ print("");
 // ============================================
 print("📦 Colección: WaMessages (auditoría)");
 
+// Dedupe/idempotencia fuerte del webhook y de envíos persistidos. El backend
+// hace upsert por `wa_message_id`, así que este índice evita scans y protege
+// contra duplicados si llegan webhooks/retries concurrentes.
+db.WaMessages.createIndex(
+  { "wa_message_id": 1 },
+  { name: "idx_wamsgs_wa_id", unique: true, background: true }
+);
+print("  ✅ WaMessages.wa_message_id (unique)");
+
+// Timeline principal del chat: get_messages filtra por conversation_id y
+// ordena por timestamp desc + _id desc (cursor pagination del front).
+db.WaMessages.createIndex(
+  { "conversation_id": 1, "timestamp": -1, "_id": -1 },
+  { name: "idx_wamsgs_conv_timestamp_oid_desc", background: true }
+);
+print("  ✅ WaMessages.conversation_id + timestamp desc + _id desc");
+
+// History del dispatch IA: list_recent_messages_for_conversation usa
+// conversation_id y ordena por _id desc (orden real de inserción).
+db.WaMessages.createIndex(
+  { "conversation_id": 1, "_id": -1 },
+  { name: "idx_wamsgs_conv_oid_desc", background: true }
+);
+print("  ✅ WaMessages.conversation_id + _id desc");
+
+// Idempotencia de envíos manuales/retries del panel. Sparse porque la mayoría
+// de mensajes no usan idempotency_key.
+db.WaMessages.createIndex(
+  { "conversation_id": 1, "idempotency_key": 1 },
+  {
+    name: "idx_wamsgs_conv_idempotency",
+    unique: true,
+    sparse: true,
+    background: true
+  }
+);
+print("  ✅ WaMessages.conversation_id + idempotency_key (unique, sparse)");
+
 // Filtros típicos de auditoría: rango de fechas + agente.
 db.WaMessages.createIndex(
   { "timestamp": -1, "sent_by": 1 },
@@ -410,6 +448,23 @@ print("");
 // COLECCIÓN: WaConversations — badge de no leídas
 // ============================================
 print("📦 Colección: WaConversations");
+
+// Identidad natural de la conversación: un chat por (cliente, número negocio).
+// El webhook hace upsert con estos dos campos; unique evita duplicados por
+// carreras o reintentos.
+db.WaConversations.createIndex(
+  { "phone": 1, "business_phone": 1 },
+  { name: "idx_waconv_phone_business", unique: true, background: true }
+);
+print("  ✅ WaConversations.phone + business_phone (unique)");
+
+// Bandeja principal del front: get_conversations filtra típicamente por
+// status / assigned_to / business_phone y ordena por last_message_at desc.
+db.WaConversations.createIndex(
+  { "status": 1, "assigned_to": 1, "business_phone": 1, "last_message_at": -1, "_id": -1 },
+  { name: "idx_waconv_listing", background: true }
+);
+print("  ✅ WaConversations.status + assigned_to + business_phone + last_message_at desc + _id desc");
 
 // count_unread_conversations: índice parcial — solo cubre docs con unread_count > 0.
 // Requiere MongoDB ≥ 3.2 (confirmado: cluster en 8.0.8).
