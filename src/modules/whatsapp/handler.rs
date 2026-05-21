@@ -3570,7 +3570,13 @@ pub async fn get_media_handler(
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::NotFound)?;
 
-    // 3. Settings del negocio (auth del agente).
+    // 3. Gate de acceso al módulo: SUPERADMIN siempre, o cualquier usuario
+    // con `bCanChat == true`. No exigimos pertenecer a `WaSettings.agents`
+    // para descargar media; eso era demasiado restrictivo para supervisión y
+    // operación normal del panel.
+    require_can_chat(&state, &claims.id).await?;
+
+    // 4. Settings del negocio (credenciales del número).
     let settings = state
         .db
         .find_wa_settings_by_phone(&conv.business_phone)
@@ -3583,11 +3589,7 @@ pub async fn get_media_handler(
             ))
         })?;
 
-    if !settings.agents.iter().any(|id| id == &claims.id) {
-        return Err(ApiError::Forbidden);
-    }
-
-    // 4. Hot path: cache de Redis. Los media_id son inmutables, así que el
+    // 5. Hot path: cache de Redis. Los media_id son inmutables, así que el
     // primero que haya abierto el media (o el prefetch del webhook) ya lo dejó.
     let t0 = std::time::Instant::now();
     if let Some((bytes, mime, remote_filename)) = state.redis.get_media_cache(&media_id).await {
@@ -3606,7 +3608,7 @@ pub async fn get_media_handler(
         return Ok(build_media_response(bytes, &mime, &filename));
     }
 
-    // 4.5. Miss + prefetch posiblemente en vuelo: si el lock ya está tomado,
+    // 5.5. Miss + prefetch posiblemente en vuelo: si el lock ya está tomado,
     // hay otra tarea bajándolo. Esperamos ~2s en polls de 100ms a ver si
     // aparece en cache antes de disparar una segunda descarga al Worker.
     if !state.redis.try_lock_media_prefetch(&media_id).await {
@@ -3652,7 +3654,7 @@ pub async fn get_media_handler(
         media_id: media_id.clone(),
     };
 
-    // 5. Cache miss → descargar de Meta.
+    // 6. Cache miss → descargar de Meta.
     if settings.phone_number_id.is_empty() || settings.access_token.is_empty() {
         return Err(ApiError::Internal(
             "wa_settings sin phone_number_id o access_token configurados".into(),
