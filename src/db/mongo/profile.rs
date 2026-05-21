@@ -201,7 +201,24 @@ impl ProfileRepository for MongoDB {
     }
 
     async fn find_clients_by_phone(&self, s_phone: &str) -> Result<Vec<Client>, String> {
-        let filter = doc! { "sPhone": s_phone };
+        let filter = if let Some(core) = phone_core(s_phone) {
+            let spaced_core = core
+                .chars()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join("\\D*");
+            let pattern = format!(r"^\D*(\+?58|0)?\D*{}$", spaced_core);
+            doc! {
+                "sPhone": {
+                    "$regex": bson::Regex {
+                        pattern,
+                        options: String::new(),
+                    }
+                }
+            }
+        } else {
+            doc! { "sPhone": s_phone }
+        };
         let mut cursor = self
             .customers()
             .find(filter)
