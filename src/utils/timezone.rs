@@ -15,9 +15,7 @@ pub struct VenezuelaDateTime {
 impl VenezuelaDateTime {
     /// Crea una nueva instancia con la fecha/hora actual de Venezuela
     pub fn now() -> Self {
-        Self {
-            utc: Utc::now(),
-        }
+        Self { utc: Utc::now() }
     }
 
     /// Crea desde un DateTime UTC
@@ -40,7 +38,12 @@ impl VenezuelaDateTime {
     /// Obtiene solo la fecha en formato YYYY-MM-DD en hora de Venezuela
     pub fn date_string_venezuela(&self) -> String {
         let vz_time = self.in_venezuela();
-        format!("{:04}-{:02}-{:02}", vz_time.year(), vz_time.month(), vz_time.day())
+        format!(
+            "{:04}-{:02}-{:02}",
+            vz_time.year(),
+            vz_time.month(),
+            vz_time.day()
+        )
     }
 
     /// Obtiene fecha y hora formateada en Venezuela
@@ -111,14 +114,7 @@ pub mod utils {
 
         // Crear fecha a las 00:00:00 en Venezuela
         let start_of_day = VENEZUELA_TZ
-            .with_ymd_and_hms(
-                vz_now.year(),
-                vz_now.month(),
-                vz_now.day(),
-                0,
-                0,
-                0,
-            )
+            .with_ymd_and_hms(vz_now.year(), vz_now.month(), vz_now.day(), 0, 0, 0)
             .unwrap();
 
         VenezuelaDateTime {
@@ -133,14 +129,7 @@ pub mod utils {
 
         // Crear fecha a las 23:59:59 en Venezuela
         let end_of_day = VENEZUELA_TZ
-            .with_ymd_and_hms(
-                vz_now.year(),
-                vz_now.month(),
-                vz_now.day(),
-                23,
-                59,
-                59,
-            )
+            .with_ymd_and_hms(vz_now.year(), vz_now.month(), vz_now.day(), 23, 59, 59)
             .unwrap();
 
         VenezuelaDateTime {
@@ -158,7 +147,9 @@ pub mod utils {
         minute: u32,
         second: u32,
     ) -> Option<VenezuelaDateTime> {
-        let vz_dt = VENEZUELA_TZ.with_ymd_and_hms(year, month, day, hour, minute, second).single()?;
+        let vz_dt = VENEZUELA_TZ
+            .with_ymd_and_hms(year, month, day, hour, minute, second)
+            .single()?;
 
         Some(VenezuelaDateTime {
             utc: vz_dt.with_timezone(&Utc),

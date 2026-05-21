@@ -2,7 +2,11 @@ use super::MongoDB;
 use crate::db::mongo::ResultGroupedByDate;
 use crate::db::ProfileRepository;
 use crate::domain::customer::{Customer, CustomerView};
-use crate::models::db::{ActiveClientBalance, Client, ClientDetail, ClientListItem, ClientOnu, ClientStatusHistoryItem, CustomerInfoItem, SolvencyCounts, Tax};
+use crate::models::ai_agent::AiClientLookup;
+use crate::models::db::{
+    ActiveClientBalance, Client, ClientDetail, ClientListItem, ClientOnu, ClientStatusHistoryItem,
+    CustomerInfoItem, SolvencyCounts, Tax,
+};
 use crate::utils::get_bson_amount::get_bson_amount;
 use crate::utils::timezone::VenezuelaDateTime;
 use async_trait::async_trait;
@@ -13,6 +17,28 @@ use mongodb::bson::{doc, oid::ObjectId};
 use mongodb::error::Error as MongoError;
 use mongodb::Collection;
 use std::collections::HashMap;
+
+/// Extrae los últimos 10 dígitos de un teléfono venezolano — el "core" local
+/// que es invariante entre formatos (`584144271554` / `04144271554` /
+/// `+58 414-427-1554` / `(0414) 427-1554` / etc. todos tienen core `4144271554`).
+/// Devuelve `None` si el input no tiene al menos 10 dígitos.
+fn phone_core(phone: &str) -> Option<String> {
+    let digits: String = phone.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() < 10 {
+        return None;
+    }
+    // Últimos 10 dígitos.
+    Some(
+        digits
+            .chars()
+            .rev()
+            .take(10)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect(),
+    )
+}
 
 /// Format a raw DNI/RIF value into a prefixed string like `V-12345678` or `J-50001234`.
 /// If the value already has a letter prefix followed by `-`, it is returned as-is.
@@ -66,8 +92,133 @@ impl ProfileRepository for MongoDB {
         })
     }
 
+    async fn get_client_names_by_ids(
+        &self,
+        ids: &[ObjectId],
+    ) -> Result<HashMap<ObjectId, String>, String> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let filter = doc! { "_id": { "$in": ids } };
+        let projection = doc! { "_id": 1, "sName": 1 };
+        let mut cursor = self
+            .customers()
+            .find(filter)
+            .projection(projection)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut out = HashMap::with_capacity(ids.len());
+        while let Some(doc) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            if let Ok(id) = doc.get_object_id("_id") {
+                let name = doc.get_str("sName").unwrap_or_default().trim().to_string();
+                if !name.is_empty() {
+                    out.insert(id, name);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    async fn get_client_names_by_phones(
+        &self,
+        phones: &[String],
+    ) -> Result<HashMap<String, String>, String> {
+        if phones.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        // Para cada teléfono de entrada: extraer el core (últimos 10 dígitos)
+        // y armar un regex que matchee cualquier formato donde esos 10 dígitos
+        // aparezcan "al final lógico" del sPhone, tolerando prefijos venezolanos
+        // (58 / +58 / 0) y caracteres no numéricos intercalados (espacios,
+        // guiones, paréntesis).
+        //
+        // Ejemplo: core="4144271554" matchea:
+        //   "4144271554", "04144271554", "584144271554", "+584144271554",
+        //   "0414-427-1554", "+58 (414) 427 1554", etc.
+        //
+        // Costo: Mongo no usa el índice de `sPhone` con este regex. Es full
+        // scan de la colección pero con evaluación rápida por doc. Aceptable
+        // para los batches típicos del módulo de WhatsApp (listados de
+        // 20-100 conversaciones).
+        let mut regex_bsons: Vec<bson::Bson> = Vec::with_capacity(phones.len());
+        let mut core_to_input: HashMap<String, String> = HashMap::new();
+        for p in phones {
+            let core = match phone_core(p) {
+                Some(c) => c,
+                None => continue,
+            };
+            // Interponer `\D*` entre cada dígito del core para tolerar
+            // separadores (espacios, guiones, paréntesis, puntos).
+            let spaced_core: String = core
+                .chars()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join("\\D*");
+            // Anchors: opcionalmente el prefijo internacional `+58`, `58` o el
+            // local `0`, luego el core. `$` al final exige que sea el final
+            // del string → evita falsos positivos con strings más largos.
+            let pattern = format!(r"^\D*(\+?58|0)?\D*{}$", spaced_core);
+            let re = bson::Regex {
+                pattern,
+                options: String::new(),
+            };
+            regex_bsons.push(bson::Bson::RegularExpression(re));
+            core_to_input.entry(core).or_insert_with(|| p.clone());
+        }
+        if regex_bsons.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let filter = doc! { "sPhone": { "$in": regex_bsons } };
+        let projection = doc! { "sPhone": 1, "sName": 1 };
+        let mut cursor = self
+            .customers()
+            .find(filter)
+            .projection(projection)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut out: HashMap<String, String> = HashMap::with_capacity(phones.len());
+        while let Some(doc) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            let db_phone = doc.get_str("sPhone").unwrap_or_default().to_string();
+            let name = doc.get_str("sName").unwrap_or_default().trim().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            // Recuperar el input original correspondiente: extraemos core del
+            // sPhone devuelto por la DB y lo usamos como key del mapa inverso.
+            let core = match phone_core(&db_phone) {
+                Some(c) => c,
+                None => continue,
+            };
+            let input_key = match core_to_input.get(&core) {
+                Some(k) => k.clone(),
+                None => continue,
+            };
+            out.entry(input_key).or_insert(name);
+        }
+        Ok(out)
+    }
+
     async fn find_clients_by_phone(&self, s_phone: &str) -> Result<Vec<Client>, String> {
-        let filter = doc! { "sPhone": s_phone };
+        let filter = if let Some(core) = phone_core(s_phone) {
+            let spaced_core = core
+                .chars()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join("\\D*");
+            let pattern = format!(r"^\D*(\+?58|0)?\D*{}$", spaced_core);
+            doc! {
+                "sPhone": {
+                    "$regex": bson::Regex {
+                        pattern,
+                        options: String::new(),
+                    }
+                }
+            }
+        } else {
+            doc! { "sPhone": s_phone }
+        };
         let mut cursor = self
             .customers()
             .find(filter)
@@ -166,7 +317,8 @@ impl ProfileRepository for MongoDB {
                 "sName": 1,
                 "sPhone": 1,
                 "idTax": 1,
-                "nBalance": 1 // Si el balance es un campo directo del cliente, tómalo.
+                "nBalance": 1,
+                "sState": 1
             }},
         ];
 
@@ -197,7 +349,7 @@ impl ProfileRepository for MongoDB {
                 "pipeline": [
                     doc! { "$match": {
                         "$expr": { "$eq": ["$idClient", "$$client_id"] },
-                        "sState": "Activo" 
+                        "sState": "Activo"
                     }},
                     doc! { "$project": {
                         "_id": 1, "sReason": 1, "nBs": 1, "sState": 1, "dCreation": 1,
@@ -213,7 +365,7 @@ impl ProfileRepository for MongoDB {
                 "pipeline": [
                     doc! { "$match": {
                         "$expr": { "$eq": ["$idClient", "$$client_id"] },
-                        "sState": "Pendiente" 
+                        "sState": "Pendiente"
                     }},
                     doc! { "$lookup": {
                         "from": "Debts",
@@ -307,7 +459,10 @@ impl ProfileRepository for MongoDB {
         ];
 
         let collection: Collection<Document> = self.db.collection("Clients");
-        let mut cursor = collection.aggregate(pipeline).await.map_err(|e| e.to_string())?;
+        let mut cursor = collection
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
 
         if let Some(Ok(doc)) = cursor.next().await {
             return Ok(SolvencyCounts {
@@ -317,20 +472,24 @@ impl ProfileRepository for MongoDB {
             });
         }
 
-        Ok(SolvencyCounts { solventes: 0, morosos: 0, suspendidos: 0 })
+        Ok(SolvencyCounts {
+            solventes: 0,
+            morosos: 0,
+            suspendidos: 0,
+        })
     }
 
-    async fn find_active_clients_for_closing(&self, owner_id: Option<&str>) -> Result<Vec<ActiveClientBalance>, String> {
+    async fn find_active_clients_for_closing(
+        &self,
+        owner_id: Option<&str>,
+    ) -> Result<Vec<ActiveClientBalance>, String> {
         let mut filter = doc! { "sState": "Activo" };
         if let Some(owner) = owner_id {
             filter.insert("idOwner", owner);
         }
         let collection: Collection<Document> = self.db.collection("Clients");
 
-        let mut cursor = collection
-            .find(filter)
-            .await
-            .map_err(|e| e.to_string())?;
+        let mut cursor = collection.find(filter).await.map_err(|e| e.to_string())?;
 
         let mut clients = Vec::new();
         while let Some(Ok(doc)) = cursor.next().await {
@@ -471,9 +630,7 @@ impl ProfileRepository for MongoDB {
                 .and_then(|id| plans.get(&id.to_hex()));
 
             let plan_name = plan_entry.map(|(name, _)| name.clone());
-            let plan_price = plan_entry
-                .map(|(_, price)| *price)
-                .filter(|&v| v > 0.0);
+            let plan_price = plan_entry.map(|(_, price)| *price).filter(|&v| v > 0.0);
 
             clients.push(ClientListItem {
                 id,
@@ -559,9 +716,18 @@ impl ProfileRepository for MongoDB {
             .and_then(|v| v.as_document())
             .cloned();
 
-        let plan_name = plan_doc.as_ref().and_then(|d| d.get_str("sName").ok()).map(|s| s.to_string());
-        let plan_price = plan_doc.as_ref().map(|d| get_bson_amount(d, "nAmount")).filter(|&v| v > 0.0);
-        let plan_mbps = plan_doc.as_ref().map(|d| get_bson_amount(d, "nMBPS")).filter(|&v| v > 0.0);
+        let plan_name = plan_doc
+            .as_ref()
+            .and_then(|d| d.get_str("sName").ok())
+            .map(|s| s.to_string());
+        let plan_price = plan_doc
+            .as_ref()
+            .map(|d| get_bson_amount(d, "nAmount"))
+            .filter(|&v| v > 0.0);
+        let plan_mbps = plan_doc
+            .as_ref()
+            .map(|d| get_bson_amount(d, "nMBPS"))
+            .filter(|&v| v > 0.0);
 
         // Sector
         let sector_name = raw
@@ -588,15 +754,34 @@ impl ProfileRepository for MongoDB {
             .and_then(|v| v.as_document())
             .cloned();
 
-        let onu_ip  = onu_doc.as_ref().and_then(|d| d.get_str("sIp").ok()).filter(|s| !s.is_empty()).map(|s| s.to_string());
-        let onu_sn  = onu_doc.as_ref().and_then(|d| d.get_str("sSn").ok()).filter(|s| !s.is_empty()).map(|s| s.to_string());
-        let onu_mac = onu_doc.as_ref().and_then(|d| d.get_str("sMac").ok()).filter(|s| !s.is_empty()).map(|s| s.to_string());
+        let onu_ip = onu_doc
+            .as_ref()
+            .and_then(|d| d.get_str("sIp").ok())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let onu_sn = onu_doc
+            .as_ref()
+            .and_then(|d| d.get_str("sSn").ok())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        let onu_mac = onu_doc
+            .as_ref()
+            .and_then(|d| d.get_str("sMac").ok())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
 
         // sn del cliente viene del documento Clients, no de Onus
-        let client_sn = raw.get_str("sSn").ok().filter(|s| !s.is_empty()).map(|s| s.to_string());
+        let client_sn = raw
+            .get_str("sSn")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
 
         let onu = onu_doc.as_ref().map(|d| ClientOnu {
-            id: d.get_object_id("_id").map(|o| o.to_hex()).unwrap_or_default(),
+            id: d
+                .get_object_id("_id")
+                .map(|o| o.to_hex())
+                .unwrap_or_default(),
             sn: onu_sn.clone(),
             mac: onu_mac.clone(),
             ip: onu_ip.clone(),
@@ -613,13 +798,23 @@ impl ProfileRepository for MongoDB {
         let tax_id = raw.get_object_id("idTax").ok().map(|o| o.to_hex());
 
         let detail = ClientDetail {
-            id: raw.get_object_id("_id").map(|o| o.to_hex()).unwrap_or_default(),
+            id: raw
+                .get_object_id("_id")
+                .map(|o| o.to_hex())
+                .unwrap_or_default(),
             name: raw.get_str("sName").unwrap_or_default().to_string(),
-            dni: raw.get_str("sDni").ok().filter(|s| !s.is_empty())
+            dni: raw
+                .get_str("sDni")
+                .ok()
+                .filter(|s| !s.is_empty())
                 .or_else(|| raw.get_str("sRif").ok().filter(|s| !s.is_empty()))
                 .map(|s| s.to_string()),
             phone: raw.get_str("sPhone").unwrap_or_default().to_string(),
-            email: raw.get_str("sEmail").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            email: raw
+                .get_str("sEmail")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
             status,
             balance,
             ip: onu_ip,
@@ -628,9 +823,21 @@ impl ProfileRepository for MongoDB {
             mac: onu_mac,
             client_type: raw.get_str("sType").ok().map(|s| s.to_string()),
             payment: Some(get_bson_amount(&raw, "nPayment")).filter(|&v| v != 0.0),
-            address: raw.get_str("sAddress").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
-            gps: raw.get_str("sGps").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
-            commentary: raw.get_str("sCommentary").ok().filter(|s| !s.is_empty()).map(|s| s.to_string()),
+            address: raw
+                .get_str("sAddress")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
+            gps: raw
+                .get_str("sGps")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
+            commentary: raw
+                .get_str("sCommentary")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
             subscription_id,
             sector_id,
             owner_id: owner_id_val,
@@ -755,7 +962,9 @@ impl ProfileRepository for MongoDB {
             doc! { "$sort": { "_sortDate": -1 } },
         ];
 
-        let mut cursor = self.db.collection::<Document>("ClientStatusHistory")
+        let mut cursor = self
+            .db
+            .collection::<Document>("ClientStatusHistory")
             .aggregate(pipeline)
             .await
             .map_err(|e| e.to_string())?;
@@ -763,7 +972,8 @@ impl ProfileRepository for MongoDB {
         let mut results = Vec::new();
         while let Some(Ok(doc)) = cursor.next().await {
             let actor_name = doc
-                .get_array("actor").ok()
+                .get_array("actor")
+                .ok()
                 .and_then(|arr| arr.first())
                 .and_then(|v| v.as_document())
                 .and_then(|d| d.get_str("sName").ok())
@@ -771,10 +981,19 @@ impl ProfileRepository for MongoDB {
                 .unwrap_or_default();
 
             let item = ClientStatusHistoryItem {
-                id: doc.get_object_id("_id").map(|o| o.to_hex()).unwrap_or_default(),
-                client_id: doc.get_object_id("idClient").map(|o| o.to_hex()).unwrap_or_default(),
+                id: doc
+                    .get_object_id("_id")
+                    .map(|o| o.to_hex())
+                    .unwrap_or_default(),
+                client_id: doc
+                    .get_object_id("idClient")
+                    .map(|o| o.to_hex())
+                    .unwrap_or_default(),
                 state: doc.get_str("sState").unwrap_or_default().to_string(),
-                previous_state: doc.get_str("sPreviousState").unwrap_or_default().to_string(),
+                previous_state: doc
+                    .get_str("sPreviousState")
+                    .unwrap_or_default()
+                    .to_string(),
                 actor_name,
                 created_at: doc.get_str("dCreation").unwrap_or_default().to_string(),
             };
@@ -782,5 +1001,120 @@ impl ProfileRepository for MongoDB {
         }
 
         Ok(results)
+    }
+
+    async fn find_clients_for_ai_lookup(
+        &self,
+        phone: Option<&str>,
+        identification: Option<&str>,
+    ) -> Result<Vec<AiClientLookup>, String> {
+        // Hard cap: el AI nunca debería ver más de 10 — si hay más, el LLM
+        // se confunde y elige mal. Si el cliente real tiene 11+ servicios,
+        // habría que rediseñar.
+        const LIMIT: i64 = 10;
+
+        let phone_clean = phone.map(str::trim).filter(|s| !s.is_empty());
+        let id_clean = identification.map(str::trim).filter(|s| !s.is_empty());
+
+        if phone_clean.is_none() && id_clean.is_none() {
+            return Ok(Vec::new());
+        }
+
+        let mut or_clauses: Vec<Document> = Vec::new();
+
+        if let Some(p) = phone_clean {
+            or_clauses.push(doc! { "sPhone": p });
+            // Match permisivo por core (últimos 10 dígitos) para tolerar
+            // formatos distintos (con/sin +58, paréntesis, etc.).
+            if let Some(core) = phone_core(p) {
+                or_clauses.push(doc! { "sPhone": { "$regex": &core, "$options": "i" } });
+            }
+        }
+
+        if let Some(id) = id_clean {
+            // Cédula: el cliente puede ingresar `12345678` o `V-12345678` o
+            // `j-50001234`. Match contra crudo y con prefijo en sDni y sRif.
+            let raw = id.to_string();
+            let with_v = format_dni(id, "sDni");
+            let with_j = format_dni(id, "sRif");
+            or_clauses.push(doc! { "sDni": &raw });
+            or_clauses.push(doc! { "sRif": &raw });
+            or_clauses.push(doc! { "sDni": &with_v });
+            or_clauses.push(doc! { "sRif": &with_j });
+        }
+
+        let filter = doc! { "$or": or_clauses };
+        let opts = mongodb::options::FindOptions::builder()
+            .projection(doc! {
+                "_id": 1, "sPhone": 1, "sName": 1,
+                "sDni": 1, "sRif": 1, "sState": 1, "nBalance": 1,
+                "sAddress": 1,
+            })
+            .limit(LIMIT)
+            .build();
+
+        let mut cursor = self
+            .customers()
+            .find(filter)
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut out = Vec::new();
+        while let Some(Ok(doc)) = cursor.next().await {
+            let id_obj = match doc.get_object_id("_id") {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+            // Identification: sDni con `V-` preferido; fallback sRif con su prefijo.
+            let identification = doc
+                .get_str("sDni")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|v| format_dni(v, "sDni"))
+                .or_else(|| {
+                    doc.get_str("sRif")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .map(|v| format_dni(v, "sRif"))
+                });
+            // Balance: get_bson_amount maneja int/double/decimal128 sin pérdida.
+            // Sólo derivamos el flag booleano — el monto crudo en USD no se
+            // expone al LLM para evitar que lo reporte como "Bs." sin convertir.
+            let balance = get_bson_amount(&doc, "nBalance");
+            let has_pending_debt = balance < 0.0;
+
+            let address = doc
+                .get_str("sAddress")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string);
+            out.push(AiClientLookup {
+                client_id: id_obj.to_hex(),
+                name: doc
+                    .get_str("sName")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+                identification,
+                phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
+                status: doc.get_str("sState").unwrap_or_default().to_string(),
+                has_pending_debt,
+                address,
+            });
+        }
+        Ok(out)
+    }
+
+    // ── realtime-pending-badges: T08 ─────────────────────────────────────────
+
+    async fn update_client_balance(&self, id: ObjectId, balance: f64) -> Result<(), String> {
+        let collection: mongodb::Collection<mongodb::bson::Document> =
+            self.db.collection("Clients");
+        collection
+            .update_one(doc! { "_id": id }, doc! { "$set": { "nBalance": balance } })
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
     }
 }

@@ -1,16 +1,15 @@
 use async_trait::async_trait;
+use chrono::Duration;
 use mongodb::bson::doc;
 use mongodb::bson::oid::ObjectId;
-use chrono::Duration;
 
 use super::MongoDB; // Acceso al struct padre
-use crate::db::AuthRepository;
 use crate::auth::claims::VerificationCode;
+use crate::db::AuthRepository;
 use crate::utils::timezone::VenezuelaDateTime;
 
 #[async_trait]
 impl AuthRepository for MongoDB {
-
     async fn store_verification_code(&self, phone: &str, code: &u32) -> mongodb::error::Result<()> {
         let now = VenezuelaDateTime::now();
         let expires = now.add_duration(Duration::minutes(60));

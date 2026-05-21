@@ -1,10 +1,10 @@
-pub mod sms;
-pub mod whatsapp;
-pub mod timezone;
-pub mod get_bson_amount;
 pub mod bcv_scraper;
+pub mod get_bson_amount;
+pub mod sms;
+pub mod timezone;
+pub mod whatsapp;
 
-use rand::{Rng, rng};
+use rand::{rng, Rng};
 
 /// Genera un código de verificación de 6 dígitos
 pub fn generate_verification_code() -> u32 {

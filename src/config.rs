@@ -42,6 +42,20 @@ pub struct Config {
     //Zabbix
     pub zabbix_url: String,
     pub zabbix_token: String,
+
+    // Cloudflare Worker Relay (genérico)
+    // Si ambas están seteadas, las llamadas a hosts externos (lookaside.fbsbx.com,
+    // openrouter.ai, etc.) pasan por el worker en lugar de conectar directo.
+    // Existe porque desde la VM en Venezuela el ISP bloquea esos hosts.
+    // Hosts permitidos los define el worker en `ALLOWED_HOST_SUFFIXES`.
+    pub relay_url: Option<String>,
+    pub relay_secret: Option<String>,
+
+    // Meta App ID — usado por la Resumable Upload API para subir media de
+    // headers de templates. URL: `/{whatsapp_app_id}/uploads`. Si no está
+    // seteada, el endpoint de upload responde 503 con código `app_id_not_configured`
+    // y el resto del módulo WhatsApp sigue funcionando.
+    pub whatsapp_app_id: Option<String>,
 }
 
 impl Config {
@@ -109,6 +123,23 @@ impl Config {
             //Zabbix
             zabbix_url: env::var("ZABBIX_URL").expect("Falta ZABBIX_URL en .env"),
             zabbix_token: env::var("ZABBIX_TOKEN").expect("Falta ZABBIX_TOKEN en .env"),
+
+            // Cloudflare Worker Relay — opcional. Si no están seteadas, las
+            // llamadas a hosts externos (Meta media, OpenRouter) van directo.
+            // Se aceptan los nombres legacy `WA_MEDIA_RELAY_URL` /
+            // `WA_MEDIA_RELAY_SECRET` como fallback durante la transición.
+            relay_url: env::var("RELAY_URL")
+                .or_else(|_| env::var("WA_MEDIA_RELAY_URL"))
+                .ok()
+                .filter(|s| !s.is_empty()),
+            relay_secret: env::var("RELAY_SECRET")
+                .or_else(|_| env::var("WA_MEDIA_RELAY_SECRET"))
+                .ok()
+                .filter(|s| !s.is_empty()),
+
+            // Meta App ID — opcional. Si falta, el endpoint de upload de
+            // header media responde 503; el resto sigue funcionando.
+            whatsapp_app_id: env::var("WHATSAPP_APP_ID").ok().filter(|s| !s.is_empty()),
         }
     }
 

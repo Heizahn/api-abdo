@@ -2,7 +2,7 @@ use super::MongoDB;
 use crate::db::OnuRepository;
 use crate::models::db::{OnuForUpdateIp, OnuIdentity, OnuIpUpdate};
 
-use crate::services::zte_parse_update::OnuDetected;
+use crate::modules::network::zte::parser::OnuDetected;
 use async_trait::async_trait;
 use futures::TryStreamExt;
 use mongodb::{

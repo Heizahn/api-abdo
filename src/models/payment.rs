@@ -1,12 +1,13 @@
 use chrono::{DateTime, Utc};
 use mongodb::bson::oid::ObjectId;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 // ============================================
 // Check Reference
 // ============================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CheckReferenceRequest {
     #[serde(rename = "idClient")]
     pub id_client: String,
@@ -16,23 +17,23 @@ pub struct CheckReferenceRequest {
 
 /// Resultado de la búsqueda de referencia en DB (retornado por el repositorio)
 pub struct ReferenceMatchInfo {
-    pub source: String,          // "payments" | "payment_reports"
+    pub source: String, // "payments" | "payment_reports"
     pub is_same_client: bool,
-    pub s_name: Option<String>,  // nombre del cliente si es diferente
-    pub s_reference: String,     // la referencia que coincidió en DB
+    pub s_name: Option<String>, // nombre del cliente si es diferente
+    pub s_reference: String,    // la referencia que coincidió en DB
     pub n_amount: f64,
     pub n_bs: f64,
     pub s_state: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct CheckReferenceResponse {
     pub ok: bool,
     pub message: String,
     pub data: CheckReferenceData,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct CheckReferenceData {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -41,7 +42,7 @@ pub struct CheckReferenceData {
     pub details: Option<ReferenceDetails>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ReferenceDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "sName")]
@@ -72,13 +73,13 @@ pub struct PaymentMethod {
     pub is_active: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct PaymentMethodResponse {
     pub ok: bool,
     pub data: Option<PagoMovilData>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct PagoMovilData {
     pub id: String,
     pub bank_name: String,
@@ -93,16 +94,17 @@ where
     serializer.serialize_str(&oid.to_hex())
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct Bank {
     #[serde(rename(deserialize = "_id", serialize = "id"))]
     #[serde(serialize_with = "serialize_oid_as_string")]
+    #[schema(value_type = String, example = "65a7f8d9c3e2a1b4d6f8e0c5")]
     pub id: ObjectId,
     pub bank_code: String,
     pub bank_name: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct BankListResponse {
     pub ok: bool,
     pub data: Vec<Bank>,
@@ -161,7 +163,20 @@ pub struct PaymentReport {
     pub exchange_rate: f64,
 
     #[serde(rename = "sState")]
-    pub state: String, // "Pendiente", "Aprobado", "Rechazado"
+    pub state: String, // "Pendiente", "Verificado", "Rechazado"
+
+    #[serde(rename = "sRejectionReason", default)]
+    pub rejection_reason: Option<String>,
+
+    #[serde(rename = "idCreator", skip_serializing_if = "Option::is_none", default)]
+    pub id_creator: Option<String>,
+
+    #[serde(
+        rename = "idIssuingBank",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub id_issuing_bank: Option<ObjectId>,
 
     #[serde(rename = "dCreation")]
     pub created_at: DateTime<Utc>,

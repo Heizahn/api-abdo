@@ -1,6 +1,6 @@
 use aes_gcm::aead::{Aead, AeadCore, OsRng};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce}; // AES-GCM 256 bits
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use sha2::{Digest, Sha256};
 
 fn key32_from(secret: &str) -> [u8; 32] {

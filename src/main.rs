@@ -1,24 +1,23 @@
 // Core modules
 mod auth;
+mod cache;
 mod config;
 mod crypto;
+mod data;
 mod db;
 mod domain;
 mod error;
 mod state;
 // Axum modules
 mod axum_router;
-mod cache;
-mod handlers;
 mod middleware;
 mod models;
+mod modules;
+mod openapi;
 mod utils;
 
 // Cron modules
 mod cron_bcv;
-mod cron_mikrotik;
-mod cron_zte;
-mod services;
 
 use config::Config;
 use state::AppState;
@@ -58,8 +57,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state_for_mikrotik = state.clone();
     tokio::spawn(async move {
-        cron_mikrotik::run_mikrotik_sync_task(state_for_mikrotik).await;
+        modules::network::mikrotik::cron::run_mikrotik_sync_task(state_for_mikrotik).await;
     });
+
+    let state_for_waba = state.clone();
+    tokio::spawn(async move {
+        modules::whatsapp::backfill::run_waba_backfill(state_for_waba).await;
+    });
+
+    let state_for_last_inbound = state.clone();
+    tokio::spawn(async move {
+        modules::whatsapp::backfill::run_last_inbound_backfill(state_for_last_inbound).await;
+    });
+
+    let state_for_conv_events = state.clone();
+    tokio::spawn(async move {
+        modules::whatsapp::backfill::run_conversation_events_backfill(state_for_conv_events).await;
+    });
+
+    // Seed lazy de planes y zonas de cobertura para el AI Agent. Solo
+    // inserta si las colecciones están vacías.
+    let state_for_ai_seed = state.clone();
+    tokio::spawn(async move {
+        modules::ai_agent::seed::run(state_for_ai_seed).await;
+    });
+
+    // Recovery: re-dispatch inbound messages left unanswered after a crash.
+    let state_for_ai_recovery = state.clone();
+    tokio::spawn(async move {
+        modules::ai_agent::recovery::run_ai_recovery(state_for_ai_recovery).await;
+    });
+
+    // Calentar el índice de divisiones políticas de Venezuela (LazyLock).
+    // El costo es ~6KB RAM pagado una sola vez al arrancar.
+    let _ = data::ve_political_divisions::DIVISIONS.len();
 
     tracing::info!("✅ Conexiones establecidas");
     // 4. Construir router de Axum
@@ -72,7 +103,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
     // 6. Iniciar servidor
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

@@ -1,6 +1,6 @@
-use std::env;
-use reqwest;
 use anyhow::Result;
+use reqwest;
+use std::env;
 
 /// Envía un SMS con el código de verificación
 pub async fn send_sms(phone: &str, code: u32) -> Result<()> {
@@ -49,8 +49,15 @@ pub async fn send_sms(phone: &str, code: u32) -> Result<()> {
 
     if !response.status().is_success() {
         let status = response.status();
-        let error_body = response.text().await.unwrap_or_else(|_| "sin cuerpo".to_string());
-        tracing::error!("Error enviando SMS. Status: {}. Body: {}", status, error_body);
+        let error_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "sin cuerpo".to_string());
+        tracing::error!(
+            "Error enviando SMS. Status: {}. Body: {}",
+            status,
+            error_body
+        );
         return Err(anyhow::anyhow!("SMS provider returned error: {}", status));
     }
 

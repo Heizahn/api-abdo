@@ -1,0 +1,6 @@
+name = "wa-media-relay"
+main = "worker.js"
+compatibility_date = "2025-10-01"
+
+# Sin KV, sin D1, sin bindings exóticos — solo un fetch transparente.
+# El secret se setea con: wrangler secret put RELAY_SECRET

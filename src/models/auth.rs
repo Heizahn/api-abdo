@@ -1,15 +1,17 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 // ============================================
 // VERIFY NUMBER
 // ============================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct VerifyNumberRequest {
+    /// Número de teléfono venezolano (ej: "04141234567")
     pub phone: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct VerifyNumberResponse {
     pub ok: bool,
     pub exists: bool,
@@ -23,13 +25,14 @@ pub struct VerifyNumberResponse {
 // LOGIN
 // ============================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct LoginRequest {
     pub phone: String,
+    /// Código de 6 dígitos recibido por WhatsApp/SMS
     pub code: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LoginResponse {
     pub ok: bool,
     pub exists: bool,
@@ -40,12 +43,12 @@ pub struct LoginResponse {
 // REFRESH
 // ============================================
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct RefreshRequest {
     pub refresh_token: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RefreshResponse {
     pub ok: bool,
     pub tokens: TokenPair,
@@ -55,7 +58,7 @@ pub struct RefreshResponse {
 // SHARED TYPES
 // ============================================
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct TokenPair {
     #[serde(rename = "accessToken")]
     pub access_token: String,

@@ -1,10 +1,12 @@
 use crate::db::mongo::ResultGroupedByDate;
+use crate::models::receivable::RejectedPayment;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 // ============================================
 // CLIENT SUMMARY (GET /v1/profile/me/clients)
 // ============================================
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ClientData {
     pub id: String,
     pub name: String,
@@ -12,21 +14,22 @@ pub struct ClientData {
     pub id_tax: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ClientSummary {
     pub client: ClientData,
     pub balance_ves: f64,
     pub last_payments: Vec<ResultGroupedByDate>,
+    pub rejected_payments: Vec<RejectedPayment>,
 }
 
 // Estructura de respuesta principal
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct MeGroupResponse {
     pub ok: bool,
     pub clients: Vec<ClientSummary>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct MePhoneResponse {
     pub ok: bool,
     pub phone: String,

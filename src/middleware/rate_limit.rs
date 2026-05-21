@@ -1,8 +1,6 @@
 use governor::middleware::NoOpMiddleware;
 use tower_governor::{
-    governor::GovernorConfigBuilder,
-    key_extractor::SmartIpKeyExtractor,
-    GovernorLayer,
+    governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor, GovernorLayer,
 };
 
 /// Crea un rate limiter general para la API
@@ -18,7 +16,7 @@ use tower_governor::{
 //             .finish()
 //             .expect("Failed to create rate limiter config"),
 //     ));
-// 
+//
 //     GovernorLayer { config }
 // }
 

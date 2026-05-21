@@ -1,5 +1,6 @@
 use mongodb::bson::{oid::ObjectId, DateTime};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 // ============================================
 // Database Models
@@ -27,7 +28,7 @@ pub struct ActiveClientBalance {
     pub n_balance: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct LatestPayment {
     pub id: String,
     pub created_at: String,
@@ -39,7 +40,7 @@ pub struct LatestPayment {
     pub creator_name: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct SolvencyCounts {
     pub solventes: u32,
     pub morosos: u32,
@@ -84,6 +85,12 @@ pub struct Payment {
     pub s_state: String,
     #[serde(rename = "nBs")]
     pub n_bs: f64,
+    /// Razón descriptiva del pago (calculada por `calculate_payment_reason`).
+    #[serde(rename = "sReason", default)]
+    pub s_reason: Option<String>,
+    /// Cliente al que pertenece el pago.
+    #[serde(rename = "idClient", default)]
+    pub id_client: Option<ObjectId>,
 }
 
 #[allow(dead_code)]
@@ -94,7 +101,7 @@ pub struct ActiveDebtResponse {
     pub active_debt_amount: f64,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct PingResponse {
     pub ok: bool,
     pub message: String,
@@ -110,13 +117,13 @@ pub struct Tax {
     pub iva: f64,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct LatestVersionResponse {
     pub ok: bool,
     pub data: LatestVersion,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
 pub struct LatestVersion {
     pub latest_version_code: i32,
     pub update_url: String,
@@ -160,12 +167,12 @@ pub struct OnuIpUpdate {
     pub new_ip: String,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct BcvResponse {
     pub bcv: f64,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct ClientOnu {
     pub id: String,
     pub sn: Option<String>,
@@ -177,7 +184,7 @@ pub struct ClientOnu {
     pub olt_id: Option<String>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct ClientDetail {
     pub id: String,
     pub name: String,
@@ -217,7 +224,7 @@ pub struct ClientDetail {
     pub onu: Option<ClientOnu>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct ClientListItem {
     pub id: String,
     pub name: String,
@@ -229,7 +236,7 @@ pub struct ClientListItem {
     pub plan_price: Option<f64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ClientStatusHistoryItem {
     pub id: String,
     pub client_id: String,
@@ -239,7 +246,7 @@ pub struct ClientStatusHistoryItem {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct CustomerInfoItem {
     pub id: String,
     pub razon_social: String,
@@ -247,4 +254,115 @@ pub struct CustomerInfoItem {
     pub direccion: Option<String>,
     pub email: Option<String>,
     pub telefono: Option<String>,
+}
+
+// ============================================
+// PaymentReport view models (realtime-pending-badges)
+// ============================================
+
+/// Row item returned by `list_payment_reports` (GET /v1/auth-user/payments-reports).
+/// Includes all PaymentReport doc fields + denormalized client and editor names.
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct PaymentReportListItem {
+    pub id: String,
+    pub id_client: Option<String>,
+    pub id_payment_method: Option<String>,
+    pub id_debt: Option<String>,
+    pub reference: String,
+    pub payment_date: String,
+    pub amount_bs: f64,
+    pub bank_origin: String,
+    pub phone_number: String,
+    pub image_url: String,
+    pub amount_usd: f64,
+    pub exchange_rate: f64,
+    pub state: String,
+    pub rejection_reason: Option<String>,
+    pub id_creator: Option<String>,
+    pub id_editor: Option<String>,
+    pub id_payment: Option<String>,
+    pub id_issuing_bank: Option<String>,
+    pub created_at: String,
+    // Denormalized
+    pub client_name: Option<String>,
+    pub editor_name: Option<String>,
+}
+
+/// Full PaymentReport doc returned by `find_report_by_id` (used by approve/reject handlers).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PaymentReportFull {
+    #[serde(rename = "_id")]
+    pub _id: ObjectId,
+    #[serde(rename = "idClient")]
+    pub id_client: Option<ObjectId>,
+    #[serde(rename = "idPaymentMethod")]
+    pub id_payment_method: Option<ObjectId>,
+    #[serde(rename = "idDebt")]
+    pub id_debt: Option<ObjectId>,
+    #[serde(rename = "sReference")]
+    pub reference: String,
+    #[serde(rename = "dPaymentDate")]
+    pub payment_date: String,
+    #[serde(rename = "nBs")]
+    pub amount_bs: f64,
+    #[serde(rename = "sBank")]
+    pub bank_origin: String,
+    #[serde(rename = "sPhone")]
+    pub phone_number: String,
+    #[serde(rename = "sImageUrl")]
+    pub image_url: String,
+    #[serde(rename = "nAmountUSD")]
+    pub amount_usd: f64,
+    #[serde(rename = "nExchangeRate")]
+    pub exchange_rate: f64,
+    #[serde(rename = "sState")]
+    pub state: String,
+    #[serde(rename = "sRejectionReason", default)]
+    pub rejection_reason: Option<String>,
+    #[serde(rename = "idCreator", default)]
+    pub id_creator: Option<String>,
+    #[serde(rename = "idEditor", default)]
+    pub id_editor: Option<String>,
+    #[serde(rename = "idPayment", default)]
+    pub id_payment: Option<ObjectId>,
+    #[serde(rename = "idIssuingBank", default)]
+    pub id_issuing_bank: Option<ObjectId>,
+    #[serde(rename = "dCreation")]
+    pub created_at: String,
+}
+
+/// Projection used by `find_payments_for_match_by_client`:
+/// only { _id, sReference, idPaymentReport, idPaymentMethod }.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PaymentForMatch {
+    #[serde(rename = "_id")]
+    pub _id: ObjectId,
+    #[serde(rename = "sReference")]
+    pub s_reference: String,
+    #[serde(rename = "idPaymentReport", default)]
+    pub id_payment_report: Option<ObjectId>,
+    #[serde(rename = "idPaymentMethod", default)]
+    pub id_payment_method: Option<ObjectId>,
+}
+
+/// PartPayment joined with the linked Payment's sState.
+/// Returned by `find_part_payments_by_debt`.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PartPaymentWithPaymentState {
+    #[serde(rename = "_id")]
+    pub _id: ObjectId,
+    #[serde(rename = "idDebt")]
+    pub id_debt: ObjectId,
+    #[serde(rename = "idPayment")]
+    pub id_payment: ObjectId,
+    #[serde(rename = "nAmount")]
+    pub n_amount: f64,
+    /// `sState` from the linked Payment doc.
+    pub payment_state: String,
+}
+
+/// Returned by `PaymentsService::create_payment`.
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct PaymentCreateResult {
+    pub payment_id: String,
 }
