@@ -45,6 +45,10 @@ pub fn user_routes() -> Router<Arc<AppState>> {
             get(handler::get_conversation_handler),
         )
         .route(
+            "/v1/auth-user/whatsapp/conversations/:id/client-link",
+            get(handler::get_conversation_client_link_handler),
+        )
+        .route(
             "/v1/auth-user/whatsapp/conversations/:id/messages",
             get(handler::get_conversation_messages_handler),
         )

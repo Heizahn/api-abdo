@@ -44,6 +44,7 @@ use crate::models::users::{
     UserResponseEnvelope,
 };
 use crate::models::whatsapp::{
+    ConversationClientLinkData, ConversationClientLinkItem, ConversationClientLinkResponse,
     ConversationDetailResponse, ConversationItem, ConversationMessagesResponse, ConversationStats,
     ConversationStatsResponse, ConversationsListResponse, CreateQuickReplyRequest,
     CreateSettingsRequest, CreateTicketRequest, CreateWaTemplateRequest, DeleteWaTemplateData,
@@ -143,6 +144,7 @@ use crate::modules::whatsapp::handler::{InterveneData, InterveneResponse, ResetA
         crate::modules::whatsapp::handler::list_conversations_handler,
         crate::modules::whatsapp::handler::conversations_stats_handler,
         crate::modules::whatsapp::handler::get_conversation_handler,
+        crate::modules::whatsapp::handler::get_conversation_client_link_handler,
         crate::modules::whatsapp::handler::get_conversation_messages_handler,
         crate::modules::whatsapp::handler::send_message_handler,
         crate::modules::whatsapp::handler::mark_read_handler,
@@ -272,6 +274,7 @@ use crate::modules::whatsapp::handler::{InterveneData, InterveneResponse, ResetA
             // WhatsApp — Responses
             ConversationsListResponse,
             ConversationDetailResponse,
+            ConversationClientLinkResponse, ConversationClientLinkData, ConversationClientLinkItem,
             ConversationMessagesResponse,
             ConversationStats, ConversationStatsResponse,
             SendMessageResponse, SendMessageData,

@@ -907,6 +907,38 @@ pub struct ConversationDetailResponse {
     pub data: ConversationItem,
 }
 
+/// Item de resolución "número de chat -> servicio(s) cliente" para que el
+/// front pueda redirigir directo o abrir un selector cuando el teléfono
+/// corresponde a múltiples servicios.
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct ConversationClientLinkItem {
+    pub id: String,
+    pub name: String,
+    pub phone: String,
+    pub status: Option<String>,
+    pub balance: Option<f64>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ConversationClientLinkData {
+    /// `true` cuando el teléfono permite redirigir o abrir selector de servicios.
+    /// `false` cuando no existe ningún cliente asociado y el front debe ocultar la acción.
+    pub available: bool,
+    /// `single` → redirección directa al cliente.
+    /// `multiple` → abrir selector/lista de servicios.
+    /// `none` → no se encontró cliente por el teléfono de la conversación.
+    pub resolution_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    pub services: Vec<ConversationClientLinkItem>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ConversationClientLinkResponse {
+    pub ok: bool,
+    pub data: ConversationClientLinkData,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ConversationMessagesResponse {
     pub ok: bool,
