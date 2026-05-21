@@ -3938,8 +3938,10 @@ fn infer_type_from_mime(mime: &str) -> Option<&'static str> {
 ///   `WaSettings` (phone_number_id + token) usar para subir. Meta asocia el
 ///   `media_id` al phone_number_id que lo creó.
 ///
-/// Autorización: el agente debe estar en `WaSettings.agents` del business_phone
-/// de la conversación.
+/// Autorización: cualquier usuario con `bCanChat == true` puede subir media
+/// para luego enviarlo en la conversación. Los `SUPERADMIN` también pasan
+/// aunque tengan `bCanChat=false`. Usuarios sin acceso al módulo no pueden
+/// subir media ni enviar mensajes.
 #[utoipa::path(
     post,
     path = "/v1/auth-user/whatsapp/media",
@@ -3953,7 +3955,7 @@ fn infer_type_from_mime(mime: &str) -> Option<&'static str> {
     responses(
         (status = 200, description = "Media subido", body = MediaUploadResponse),
         (status = 400, description = "Falta un campo o es inválido"),
-        (status = 403, description = "Agente no asignado al número de negocio"),
+        (status = 403, description = "El usuario no tiene acceso al módulo de chat"),
         (status = 404, description = "Conversación no encontrada"),
         (status = 422, description = "Validación falló: campo requerido vacío, tamaño excedido, o MIME no soportado"),
     )
@@ -3963,6 +3965,8 @@ pub async fn upload_media_handler(
     Extension(claims): Extension<UserProfileClaims>,
     mut multipart: Multipart,
 ) -> Result<Json<MediaUploadResponse>, ApiError> {
+    require_can_chat(&state, &claims.id).await?;
+
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut file_mime: Option<String> = None;
     let mut file_name: Option<String> = None;
@@ -4075,7 +4079,9 @@ pub async fn upload_media_handler(
         });
     }
 
-    // Autorización: resolver conversación y validar membresía en WaSettings.
+    // Resolver conversación/número para decidir contra qué `WaSettings`
+    // subimos el binario a Meta. La autorización ya quedó validada con
+    // `require_can_chat`.
     let conv_oid = ObjectId::parse_str(&conv_id_str)
         .map_err(|_| ApiError::BadRequest("conversation_id inválido".into()))?;
     let conv = state
@@ -4084,20 +4090,6 @@ pub async fn upload_media_handler(
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or(ApiError::NotFound)?;
-    let settings = state
-        .db
-        .find_wa_settings_by_phone(&conv.business_phone)
-        .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or_else(|| {
-            ApiError::Internal(format!(
-                "wa_settings no encontrado para {}",
-                conv.business_phone
-            ))
-        })?;
-    if !settings.agents.iter().any(|id| id == &claims.id) {
-        return Err(ApiError::Forbidden);
-    }
 
     // SHA-256 del binario — el front lo usa para deduplicar reenvíos idénticos.
     let sha256_hex = {
