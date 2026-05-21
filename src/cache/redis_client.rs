@@ -800,6 +800,16 @@ impl RedisClient {
             .unwrap_or(None);
         result.is_some()
     }
+
+    /// Libera el lock de auto-asignación de una conversación. Idempotente.
+    pub async fn release_conversation_lock(&self, conv_id: &str) {
+        let mut conn = match self.client.get_multiplexed_async_connection().await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let key = format!("wa:lock:conv:{}", conv_id);
+        let _: Result<(), _> = conn.del(key).await;
+    }
 }
 
 /// Genera la clave Redis para la tasa de cambio BCV, con scope de fecha venezolana.

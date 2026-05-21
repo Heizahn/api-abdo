@@ -712,7 +712,10 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
              cobranza. El campo `amount_bs` es Bs listos para mostrar al cliente — NO lo \
              conviertas, NO le agregues IVA, NO lo trates como USD. NUNCA inventar números \
              — siempre llamar este tool. NUNCA respondas un saldo sin haber llamado este tool \
-             antes en la conversación.",
+             antes en la conversación. Si el cliente pregunta 'qué debo', 'cuánto debo', \
+             'saldo' o 'deuda', PRIMERO respondé de forma directa con el monto pendiente \
+             en Bs. y, si aplica, resumí las deudas. NO saltes automáticamente a dar datos \
+             de pago ni a preguntar si quiere pagar, a menos que el cliente lo pida.",
             json!({
                 "type": "object",
                 "properties": {

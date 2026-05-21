@@ -937,6 +937,35 @@ pub async fn run_turn(
             });
         }
 
+        // ── Guardrail: consulta de saldo/deuda tras get_invoices ────────────
+        // Cuando el cliente pregunta "qué debo", "saldo", "deuda" o similar,
+        // queremos que Andrea responda primero con el monto pendiente en Bs.
+        // y no que salte automáticamente a ofrecer datos de pago si el cliente
+        // todavía no los pidió.
+        let get_invoices_succeeded_in_iter = tool_call_logs[logs_before..]
+            .iter()
+            .any(|t| t.tool_name == "get_invoices" && t.success);
+        let burst_intent_saldo = burst_intents.iter().any(|i| i == "saldo");
+        let burst_intent_pago = burst_intents.iter().any(|i| i == "pago");
+        if get_invoices_succeeded_in_iter && burst_intent_saldo && !burst_intent_pago {
+            tracing::debug!(
+                "[ai_agent.runner] saldo/deuda + get_invoices OK — inyectando system note de respuesta directa (iter={})",
+                iter
+            );
+            messages.push(ChatMessage {
+                role: "system".into(),
+                content: Some(MessageContent::Text(
+                    "IMPORTANTE: el cliente está preguntando su saldo/deuda. \
+                     Respondé PRIMERO de forma directa con lo que debe en Bs. \
+                     usando el resultado de `get_invoices`. Si hay varias deudas, \
+                     resumilas claramente. NO des datos de pago ni preguntes si \
+                     quiere pagar a menos que el cliente lo pida explícitamente."
+                        .to_string(),
+                )),
+                ..Default::default()
+            });
+        }
+
         // ── Guardrail: imagen + intent "pago" sin report_payment ─────────────
         // Si el cliente adjuntó imagen en este turno Y la ráfaga actual menciona
         // pago Y `report_payment` está habilitada Y NO se llamó, le decimos al
@@ -955,8 +984,6 @@ pub async fn run_turn(
         let report_payment_called_in_iter = tool_call_logs[logs_before..]
             .iter()
             .any(|t| t.tool_name == "report_payment");
-        let burst_intent_pago = burst_intents.iter().any(|i| i == "pago");
-
         if user_media_had_image
             && report_payment_enabled
             && !report_payment_called_in_iter

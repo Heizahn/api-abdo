@@ -126,6 +126,17 @@ fn describe_reqwest_error(ctx: &str, e: reqwest::Error) -> anyhow::Error {
     anyhow::anyhow!("{}{}: {}", ctx, flag_str, chain)
 }
 
+/// Extrae el `wa_message_id` de una respuesta exitosa de Meta.
+/// Si el shape cambia o falta `messages[0].id`, lo tratamos como error
+/// explícito para no persistir outbounds "sent" con ID vacío.
+fn extract_wa_message_id(ctx: &str, json: &serde_json::Value) -> Result<String> {
+    json["messages"][0]["id"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow::anyhow!("Meta {} response sin messages[0].id", ctx))
+}
+
 /// `true` si el error es un fallo transitorio en la capa de transporte que vale
 /// la pena reintentar: connect timeout, reset de conexión, body corrupto, etc.
 /// Deja pasar errores "de aplicación" (4xx/5xx) que no se resuelven con retry.
@@ -256,9 +267,7 @@ impl WhatsAppService {
             .json()
             .await
             .map_err(|e| describe_reqwest_error("send_text response decode", e))?;
-        let wa_id = json["messages"][0]["id"].as_str().unwrap_or("").to_string();
-
-        Ok(wa_id)
+        extract_wa_message_id("send_text", &json)
     }
 
     /// Envía una plantilla aprobada a un número (fuera de la ventana de 24h).
@@ -311,9 +320,7 @@ impl WhatsAppService {
             .json()
             .await
             .map_err(|e| describe_reqwest_error("send_template response decode", e))?;
-        let wa_id = json["messages"][0]["id"].as_str().unwrap_or("").to_string();
-
-        Ok(wa_id)
+        extract_wa_message_id("send_template", &json)
     }
 
     /// Verifica el par `(phone_number_id, access_token)` contra Meta.
@@ -529,9 +536,7 @@ impl WhatsAppService {
             .json()
             .await
             .map_err(|e| describe_reqwest_error("send_interactive response decode", e))?;
-        let wa_id = json["messages"][0]["id"].as_str().unwrap_or("").to_string();
-
-        Ok(wa_id)
+        extract_wa_message_id("send_interactive", &json)
     }
 
     /// Sube un binario a Meta (`POST /{phone_number_id}/media`) y devuelve el
@@ -638,8 +643,7 @@ impl WhatsAppService {
             .json()
             .await
             .map_err(|e| describe_reqwest_error(ctx, e))?;
-        let wa_id = json["messages"][0]["id"].as_str().unwrap_or("").to_string();
-        Ok(wa_id)
+        extract_wa_message_id(ctx, &json)
     }
 
     /// Envía una imagen (media previamente subido con `upload_media`).

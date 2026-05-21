@@ -883,6 +883,17 @@ async fn run_dispatch(
                 agent_id.to_hex(),
                 e
             );
+            if is_live {
+                escalation::auto_escalate(
+                    &state,
+                    &inbound.conversation_id,
+                    &agent,
+                    escalation::REASON_CRITICAL_TOOL_FAILURE,
+                    Some("Configuración global de IA no disponible"),
+                    false,
+                )
+                .await;
+            }
             return Ok(());
         }
     };
@@ -1723,23 +1734,19 @@ async fn run_dispatch(
 
     let last_is_live = matches!(last_agent.mode, AiAgentMode::Live);
 
-    // Persistir watermark (Fix D): guarda el max _id del burst que la IA "vio"
-    // en este dispatch (incluyendo chain reloads). El próximo dispatch lo lee
-    // como cota inferior en vez de last_out_oid → orphan-media ya no escapa.
-    // Se ejecuta para LIVE y SHADOW (la IA procesó los mensajes en ambos
-    // modos). Falla silenciosa: error → log WARN + fallback al next dispatch.
-    state
-        .redis
-        .set_ai_watermark(&conv_hex, &high_water_mark)
-        .await;
-    tracing::debug!(
-        "[ai_agent.dispatch] watermark persisted (conv={}, hwm={}, is_shadow={})",
-        conv_hex,
-        high_water_mark.to_hex(),
-        !last_is_live
-    );
-
     if !last_is_live {
+        // En shadow sí persistimos de inmediato: no hay envío a Meta que pueda
+        // fallar después, y el objetivo es que el próximo dispatch no vuelva a
+        // reprocesar el mismo burst.
+        state
+            .redis
+            .set_ai_watermark(&conv_hex, &high_water_mark)
+            .await;
+        tracing::debug!(
+            "[ai_agent.dispatch] watermark persisted (conv={}, hwm={}, is_shadow=true)",
+            conv_hex,
+            high_water_mark.to_hex()
+        );
         tracing::info!(
             "[ai_agent.dispatch] shadow → habría respondido (agent={}): {}",
             last_agent_id.to_hex(),
@@ -1764,7 +1771,29 @@ async fn run_dispatch(
             inbound.conversation_id.to_hex(),
             e
         );
+        escalation::auto_escalate(
+            &state,
+            &inbound.conversation_id,
+            &last_agent,
+            escalation::REASON_CRITICAL_TOOL_FAILURE,
+            Some("No se pudo enviar la respuesta de la IA por WhatsApp"),
+            false,
+        )
+        .await;
+        return Ok(());
     }
+
+    // Live: sólo marcamos watermark después de que el outbound fue aceptado
+    // y persistido. Así evitamos "consumir" el burst si Meta falla al enviar.
+    state
+        .redis
+        .set_ai_watermark(&conv_hex, &high_water_mark)
+        .await;
+    tracing::debug!(
+        "[ai_agent.dispatch] watermark persisted (conv={}, hwm={}, is_shadow=false)",
+        conv_hex,
+        high_water_mark.to_hex()
+    );
 
     // ── Follow-up check: mensajes que llegaron DURANTE este dispatch ───────
     // Si un cliente envió otro mensaje mientras corría el LLM, su scheduled
