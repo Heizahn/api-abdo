@@ -104,6 +104,9 @@ impl WhatsAppRepository for MongoDB {
             "business_phone": business_phone,
             "status": "pending",
             "unread_count": 0,
+            // Compat legacy (backend anterior): mantener espejo camelCase
+            // mientras conviven formatos de documento en producción.
+            "unreadCount": 0,
             "created_at": now,
             "last_message_at": now,
         };
@@ -144,7 +147,6 @@ impl WhatsAppRepository for MongoDB {
         touch: ConversationTouch<'_>,
     ) -> Result<(), String> {
         let ts = touch.last_message_at.unwrap_or_else(DateTime::now);
-        let unread_update: i32 = if touch.increment_unread { 1 } else { 0 };
 
         let mut set_doc = doc! {
             "last_message_at": ts,
@@ -182,7 +184,6 @@ impl WhatsAppRepository for MongoDB {
 
         let mut update_doc = doc! {
             "$set": set_doc,
-            "$inc": { "unread_count": unread_update },
         };
         if !unset_doc.is_empty() {
             update_doc.insert("$unset", unset_doc);
@@ -192,6 +193,39 @@ impl WhatsAppRepository for MongoDB {
             .update_one(doc! { "_id": id }, update_doc)
             .await
             .map_err(|e| e.to_string())?;
+
+        if touch.increment_unread {
+            // Incremento robusto para datos legacy:
+            // - acepta unread_count o unreadCount
+            // - tolera tipos no numéricos (onError=0)
+            // - sincroniza snake_case y camelCase para transición.
+            let unread_next_expr = doc! {
+                "$add": [
+                    {
+                        "$convert": {
+                            "input": { "$ifNull": ["$unread_count", "$unreadCount"] },
+                            "to": "int",
+                            "onError": 0,
+                            "onNull": 0
+                        }
+                    },
+                    1
+                ]
+            };
+
+            self.wa_conversations()
+                .update_one(
+                    doc! { "_id": id },
+                    vec![doc! {
+                        "$set": {
+                            "unread_count": unread_next_expr.clone(),
+                            "unreadCount": unread_next_expr
+                        }
+                    }],
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+        }
 
         Ok(())
     }
@@ -687,7 +721,10 @@ impl WhatsAppRepository for MongoDB {
 
     async fn reset_unread(&self, id: &ObjectId) -> Result<(), String> {
         self.wa_conversations()
-            .update_one(doc! { "_id": id }, doc! { "$set": { "unread_count": 0 } })
+            .update_one(
+                doc! { "_id": id },
+                doc! { "$set": { "unread_count": 0, "unreadCount": 0 } },
+            )
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -2183,7 +2220,22 @@ impl WhatsAppRepository for MongoDB {
 
     async fn count_unread_conversations(&self) -> Result<u64, String> {
         self.wa_conversations()
-            .count_documents(doc! { "unread_count": { "$gt": 0 }, "status": { "$ne": "closed" } })
+            .count_documents(doc! {
+                "$and": [
+                    {
+                        "$or": [
+                            { "unread_count": { "$gt": 0 } },
+                            { "unreadCount": { "$gt": 0 } }
+                        ]
+                    },
+                    {
+                        "$nor": [
+                            { "status": "closed" },
+                            { "sStatus": "closed" }
+                        ]
+                    }
+                ]
+            })
             .await
             .map_err(|e| e.to_string())
     }
