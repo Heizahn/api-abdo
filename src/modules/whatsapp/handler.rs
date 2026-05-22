@@ -5952,7 +5952,7 @@ pub struct TemplatesListQuery {
         (status = 200, description = "Plantilla creada", body = WaTemplateResponse),
         (status = 400, description = "Datos inválidos (name_required, name_invalid, invalid_component)"),
         (status = 401, description = "No autorizado"),
-        (status = 403, description = "Sólo SUPERADMIN"),
+        (status = 403, description = "Requiere bCanChat"),
         (status = 404, description = "phone_number_not_found"),
         (status = 409, description = "name_already_exists"),
         (status = 502, description = "meta_rejected"),
@@ -5963,8 +5963,8 @@ pub async fn create_template_handler(
     Extension(claims): Extension<UserProfileClaims>,
     Json(body): Json<CreateWaTemplateRequest>,
 ) -> Result<Json<WaTemplateResponse>, ApiError> {
-    // Auth: SUPERADMIN
-    let creator = require_superadmin(&state, &claims.id).await?;
+    // Auth: bCanChat (superadmin bypass implícito en require_can_chat)
+    let creator = require_can_chat(&state, &claims.id).await?;
 
     // 1. Validar name_input no vacío
     if body.name_input.trim().is_empty() {
@@ -7096,7 +7096,7 @@ async fn swap_header_handles_in_components(
         (status = 200, description = "Media persistida en GridFS", body = HeaderMediaUploadResponse),
         (status = 400, description = "invalid_file_type | invalid_format | file_required | file_empty"),
         (status = 401, description = "No autorizado"),
-        (status = 403, description = "Sólo SUPERADMIN"),
+        (status = 403, description = "Requiere bCanChat"),
         (status = 404, description = "phone_number_not_found"),
         (status = 413, description = "file_too_large"),
         (status = 503, description = "app_id_not_configured"),
@@ -7108,7 +7108,7 @@ pub async fn upload_template_header_media_handler(
     mut multipart: Multipart,
 ) -> Result<Json<HeaderMediaUploadResponse>, ApiError> {
     // Auth
-    let uploader = require_superadmin(&state, &claims.id).await?;
+    let uploader = require_can_chat(&state, &claims.id).await?;
 
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut file_mime: Option<String> = None;
