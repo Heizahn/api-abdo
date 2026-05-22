@@ -17,6 +17,8 @@ use crate::{
     state::{AppState, WsRegistry},
 };
 
+const WS_OUTBOX_CAPACITY: usize = 512;
+
 // ============================================
 // TIPOS DE EVENTOS
 // ============================================
@@ -332,18 +334,24 @@ pub async fn send_to_agent(registry: &WsRegistry, agent_id: &str, event: &WsServ
             return;
         }
     };
-    let registry = registry.read().await;
-    if let Some(sender) = registry.get(agent_id) {
-        let _ = sender.send(json);
+    let sender = {
+        let registry = registry.read().await;
+        registry.get(agent_id).cloned()
+    };
+    if let Some(sender) = sender {
+        let _ = sender.try_send(json);
     }
 }
 
 /// Envía un payload JSON (string) a un agente específico.
 /// Drop silencioso si el agente no está conectado.
 pub async fn send_to_user(registry: &WsRegistry, user_id: &str, payload: String) {
-    let registry = registry.read().await;
-    if let Some(sender) = registry.get(user_id) {
-        let _ = sender.send(payload);
+    let sender = {
+        let registry = registry.read().await;
+        registry.get(user_id).cloned()
+    };
+    if let Some(sender) = sender {
+        let _ = sender.try_send(payload);
     }
 }
 
@@ -394,7 +402,7 @@ pub async fn broadcast_all(registry: &WsRegistry, event: &WsServerEvent) {
     };
     let registry = registry.read().await;
     for sender in registry.values() {
-        let _ = sender.send(json.clone());
+        let _ = sender.try_send(json.clone());
     }
 }
 
@@ -469,7 +477,7 @@ pub async fn broadcast_except(registry: &WsRegistry, skip_agent_id: &str, event:
         if agent_id == skip_agent_id {
             continue;
         }
-        let _ = sender.send(json.clone());
+        let _ = sender.try_send(json.clone());
     }
 }
 
@@ -516,7 +524,7 @@ async fn handle_socket(
     user_name: String,
 ) {
     let (mut sink, mut stream) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = mpsc::channel::<String>(WS_OUTBOX_CAPACITY);
 
     // Registrar en WsRegistry
     {
@@ -732,7 +740,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use tokio::sync::mpsc::unbounded_channel;
+    use tokio::sync::mpsc;
     use tokio::sync::RwLock;
 
     fn make_registry() -> WsRegistry {
@@ -743,7 +751,7 @@ mod tests {
     #[tokio::test]
     async fn send_to_user_delivers_to_existing_user() {
         let registry = make_registry();
-        let (tx, mut rx) = unbounded_channel::<String>();
+        let (tx, mut rx) = mpsc::channel::<String>(8);
         registry.write().await.insert("u1".to_string(), tx);
 
         send_to_user(&registry, "u1", "payload".to_string()).await;
@@ -763,7 +771,7 @@ mod tests {
     #[tokio::test]
     async fn send_to_user_silent_when_sender_closed() {
         let registry = make_registry();
-        let (tx, rx) = unbounded_channel::<String>();
+        let (tx, rx) = mpsc::channel::<String>(8);
         registry.write().await.insert("u2".to_string(), tx);
         drop(rx);
 

@@ -27,6 +27,7 @@ use crate::{
 // 0.0 = superadmin, 1.0 = contador, 1.5 = contador-mensajero.
 // Float equality is safe: these are exact sums of powers of 2.
 const REPORT_ROLES: &[f32] = &[0.0_f32, 1.0_f32, 1.5_f32];
+const DEFAULT_PAYMENT_REPORT_MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024; // 20MB
 
 /// Returns true if the role is authorised to manage payment reports.
 #[inline]
@@ -35,6 +36,79 @@ fn has_report_access(role: Option<f32>) -> bool {
         Some(r) => REPORT_ROLES.contains(&r),
         None => false,
     }
+}
+
+#[inline]
+fn payment_report_max_image_bytes() -> usize {
+    std::env::var("PAYMENT_REPORT_MAX_IMAGE_BYTES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(DEFAULT_PAYMENT_REPORT_MAX_IMAGE_BYTES)
+}
+
+async fn persist_payment_report_image(
+    mut field: axum::extract::multipart::Field<'_>,
+) -> Result<String, ApiError> {
+    let content_type = field.content_type().unwrap_or("image/jpeg").to_string();
+    let extension = match content_type.as_str() {
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "jpg",
+    };
+
+    let unique_name = format!("{}.{}", Uuid::new_v4(), extension);
+    let file_path = format!("uploads/{}", unique_name);
+    let mut file = File::create(&file_path)
+        .await
+        .map_err(|_| ApiError::InternalServerError)?;
+
+    let max_bytes = payment_report_max_image_bytes();
+    let mut total_bytes = 0usize;
+
+    loop {
+        let chunk = field
+            .chunk()
+            .await
+            .map_err(|_| ApiError::BadRequest("Error leyendo imagen".into()))?;
+        let Some(chunk) = chunk else { break };
+
+        total_bytes = total_bytes.saturating_add(chunk.len());
+        if total_bytes > max_bytes {
+            let _ = tokio::fs::remove_file(&file_path).await;
+            return Err(ApiError::domain_with_details(
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                "image_too_large",
+                "La imagen supera el tamaño máximo permitido",
+                serde_json::json!({
+                    "max_bytes": max_bytes,
+                    "received_bytes": total_bytes
+                }),
+            ));
+        }
+
+        file.write_all(&chunk)
+            .await
+            .map_err(|_| ApiError::InternalServerError)?;
+    }
+
+    if total_bytes == 0 {
+        let _ = tokio::fs::remove_file(&file_path).await;
+        return Err(ApiError::BadRequest("La imagen llego vacia al servidor".into()));
+    }
+
+    file.flush()
+        .await
+        .map_err(|_| ApiError::InternalServerError)?;
+
+    tracing::info!(
+        "Imagen recibida: {} bytes, tipo: {}",
+        total_bytes,
+        content_type
+    );
+
+    Ok(format!("/uploads/{}", unique_name))
 }
 
 #[utoipa::path(
@@ -319,45 +393,7 @@ pub async fn report_payment_handler(
         let name = field.name().unwrap_or("").to_string();
 
         if name == "image" {
-            let content_type = field.content_type().unwrap_or("image/jpeg").to_string();
-            let extension = match content_type.as_str() {
-                "image/png" => "png",
-                "image/webp" => "webp",
-                "image/gif" => "gif",
-                _ => "jpg",
-            };
-            let unique_name = format!("{}.{}", Uuid::new_v4(), extension);
-            let file_path = format!("uploads/{}", unique_name);
-
-            let data = field
-                .bytes()
-                .await
-                .map_err(|_| ApiError::InternalServerError)?;
-
-            if data.is_empty() {
-                tracing::error!("Imagen recibida esta vacia (0 bytes)");
-                return Err(ApiError::BadRequest(
-                    "La imagen llego vacia al servidor".into(),
-                ));
-            }
-
-            tracing::info!(
-                "Imagen recibida: {} bytes, tipo: {}",
-                data.len(),
-                content_type
-            );
-
-            let mut file = File::create(&file_path)
-                .await
-                .map_err(|_| ApiError::InternalServerError)?;
-            file.write_all(&data)
-                .await
-                .map_err(|_| ApiError::InternalServerError)?;
-            file.flush()
-                .await
-                .map_err(|_| ApiError::InternalServerError)?;
-
-            saved_image_path = Some(format!("/uploads/{}", unique_name));
+            saved_image_path = Some(persist_payment_report_image(field).await?);
         } else {
             let text = field.text().await.unwrap_or_default();
             match name.as_str() {
@@ -542,45 +578,7 @@ pub async fn report_payment_user_handler(
         let name = field.name().unwrap_or("").to_string();
 
         if name == "image" {
-            let content_type = field.content_type().unwrap_or("image/jpeg").to_string();
-            let extension = match content_type.as_str() {
-                "image/png" => "png",
-                "image/webp" => "webp",
-                "image/gif" => "gif",
-                _ => "jpg",
-            };
-            let unique_name = format!("{}.{}", Uuid::new_v4(), extension);
-            let file_path = format!("uploads/{}", unique_name);
-
-            let data = field
-                .bytes()
-                .await
-                .map_err(|_| ApiError::InternalServerError)?;
-
-            if data.is_empty() {
-                tracing::error!("Imagen recibida esta vacia (0 bytes)");
-                return Err(ApiError::BadRequest(
-                    "La imagen llego vacia al servidor".into(),
-                ));
-            }
-
-            tracing::info!(
-                "Imagen recibida: {} bytes, tipo: {}",
-                data.len(),
-                content_type
-            );
-
-            let mut file = File::create(&file_path)
-                .await
-                .map_err(|_| ApiError::InternalServerError)?;
-            file.write_all(&data)
-                .await
-                .map_err(|_| ApiError::InternalServerError)?;
-            file.flush()
-                .await
-                .map_err(|_| ApiError::InternalServerError)?;
-
-            saved_image_path = Some(format!("/uploads/{}", unique_name));
+            saved_image_path = Some(persist_payment_report_image(field).await?);
         } else {
             let text = field.text().await.unwrap_or_default();
             match name.as_str() {
@@ -800,17 +798,18 @@ pub async fn approve_payment_report_handler(
         )
     })?;
 
-    // 2. Fetch report
+    // 2. Acquire lock de aprobación para evitar carreras.
+    let lock_token = Uuid::new_v4().to_string();
     let report: PaymentReportFull = state
         .db
-        .find_report_by_id(report_oid)
+        .acquire_report_approval_lock(report_oid, &lock_token, 120_000)
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(|| {
             ApiError::domain_simple(
-                axum::http::StatusCode::NOT_FOUND,
-                "report_not_found",
-                "Reporte de pago no encontrado",
+                axum::http::StatusCode::CONFLICT,
+                "report_locked_or_not_found",
+                "El reporte está siendo procesado por otro usuario o no existe",
             )
         })?;
 
@@ -850,7 +849,7 @@ pub async fn approve_payment_report_handler(
             && (payment_ref.ends_with(&report_ref) || report_ref.ends_with(&payment_ref))
     });
 
-    let message: &str = if let Some(matched_payment) = matched {
+    let process_result: Result<&str, ApiError> = if let Some(matched_payment) = matched {
         // MATCH — check whether the payment is already linked to a report
         let already_linked = matched_payment.id_payment_report.is_some();
 
@@ -861,7 +860,7 @@ pub async fn approve_payment_report_handler(
                 .await
                 .map_err(ApiError::DatabaseError)?;
         }
-        "Reporte marcado como verificado (el pago ya existía en sistema)"
+        Ok("Reporte marcado como verificado (el pago ya existía en sistema)")
     } else {
         // NO MATCH — create a new payment
         let now_iso = BsonDateTime::now().to_string();
@@ -905,15 +904,37 @@ pub async fn approve_payment_report_handler(
         let svc = PaymentsService::new(state.db.clone());
         svc.create_payment(payment_input, report.id_debt).await?;
 
-        "Reporte aprobado y nuevo pago creado exitosamente"
+        Ok("Reporte aprobado y nuevo pago creado exitosamente")
     };
 
-    // 6. Transition report → Verificado
-    state
+    let message = match process_result {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = state
+                .db
+                .release_report_approval_lock(report_oid, &lock_token)
+                .await;
+            return Err(e);
+        }
+    };
+
+    // 6. Transition report → Verificado (validando ownership del lock)
+    let changed = state
         .db
-        .update_report_state(report_oid, "Verificado", &claims.id, None)
+        .finalize_report_approval(report_oid, &lock_token, &claims.id)
         .await
         .map_err(ApiError::DatabaseError)?;
+    if !changed {
+        let _ = state
+            .db
+            .release_report_approval_lock(report_oid, &lock_token)
+            .await;
+        return Err(ApiError::domain_simple(
+            axum::http::StatusCode::CONFLICT,
+            "report_lock_lost",
+            "Se perdió el lock de aprobación. Reintentá.",
+        ));
+    }
 
     // 7. Count pending + emit REPORTE_PAGO_PENDIENTE
     let pending_total = state.db.count_pending_reports().await.unwrap_or(0);
