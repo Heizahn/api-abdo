@@ -255,7 +255,7 @@ pub enum WsServerEvent {
     ReportePagoPendiente { data: ReportePagoPendienteData },
 
     /// Evento reactivo: cambio en el conteo de conversaciones con mensajes no leídos.
-    /// Audience: bCanChat == true. Fan-out vía `broadcast_to_chat_users`.
+    /// Audience: bCanChat == true OR nRole == 0 (superadmin). Fan-out vía `broadcast_to_chat_users`.
     ///
     /// Emit sites (// EMIT BADGE: CONVERSACION_NO_LEIDA):
     /// - whatsapp/handler.rs (after touch_conversation(increment_unread=true))
@@ -264,7 +264,7 @@ pub enum WsServerEvent {
     ConversacionNoLeida { data: ConversacionNoLeidaData },
 
     /// Evento reactivo: cambio en el conteo de tickets con status "open".
-    /// Audience: bCanChat == true. Fan-out vía `broadcast_to_chat_users`.
+    /// Audience: bCanChat == true OR nRole == 0 (superadmin). Fan-out vía `broadcast_to_chat_users`.
     ///
     /// Emit sites (// EMIT BADGE: TICKET_PENDIENTE):
     /// - whatsapp/tickets.rs::create_ticket_handler (after insert)
@@ -435,7 +435,8 @@ pub async fn broadcast_to_roles(
     Ok(())
 }
 
-/// Broadcast un payload JSON pre-serializado a todos los usuarios con `bCanChat == true`.
+/// Broadcast un payload JSON pre-serializado a todos los usuarios con acceso al inbox WA:
+/// `bCanChat == true` o `nRole == 0` (superadmin).
 ///
 /// Filtros DB: visible == true, bIsBot != true.
 /// Best-effort: fallas de envío por usuario son silenciosas.
@@ -552,6 +553,7 @@ async fn handle_socket(
 
         let role_eligible =
             matches!(role_opt, Some(r) if r == 0.0_f32 || r == 1.0_f32 || r == 1.5_f32);
+        let wa_eligible = can_chat || matches!(role_opt, Some(r) if r == 0.0_f32);
 
         let (reports, unread, tickets) = tokio::join!(
             async {
@@ -562,14 +564,14 @@ async fn handle_socket(
                 }
             },
             async {
-                if can_chat {
+                if wa_eligible {
                     state.db.count_unread_conversations().await.unwrap_or(0)
                 } else {
                     0
                 }
             },
             async {
-                if can_chat {
+                if wa_eligible {
                     state.db.count_open_tickets().await.unwrap_or(0)
                 } else {
                     0

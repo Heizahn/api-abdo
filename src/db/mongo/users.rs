@@ -92,6 +92,14 @@ fn can_chat_or_filter(can_chat: bool) -> Vec<Document> {
         .collect()
 }
 
+fn superadmin_role_or_filter() -> Vec<Document> {
+    vec![
+        doc! { "nRole": 0.0_f64 },
+        doc! { "nRole": 0_i32 },
+        doc! { "nRole": 0_i64 },
+    ]
+}
+
 pub(crate) fn last_user_cursor(users: &[User]) -> Option<String> {
     users.last().map(|u| encode_user_cursor(&u.name, &u.id))
 }
@@ -456,14 +464,11 @@ impl UserRepository for MongoDB {
             "visible": true,
             "bIsBot": { "$ne": true },
         };
+        let mut audience = can_chat_or_filter(true);
+        audience.extend(superadmin_role_or_filter());
         filter.insert(
             "$or",
-            Bson::Array(
-                can_chat_or_filter(true)
-                    .into_iter()
-                    .map(Bson::Document)
-                    .collect(),
-            ),
+            Bson::Array(audience.into_iter().map(Bson::Document).collect()),
         );
         let users: Vec<Document> = collection
             .find(filter)
