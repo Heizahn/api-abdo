@@ -25,9 +25,8 @@ use crate::{
     auth::user_jwt::UserProfileClaims,
     crypto::aes::{decrypt_payload, encrypt_payload},
     db::{
-        ProfileRepository,
-        StoreTemplateMediaInput, WaTemplateListFilter, WaTemplateMediaRepository,
-        WaTemplateRepository, WaTemplateUpdatePatch, WhatsAppRepository,
+        ProfileRepository, StoreTemplateMediaInput, WaTemplateListFilter,
+        WaTemplateMediaRepository, WaTemplateRepository, WaTemplateUpdatePatch, WhatsAppRepository,
     },
     error::ApiError,
     models::whatsapp::*,
@@ -35,8 +34,8 @@ use crate::{
     utils::get_bson_amount::get_bson_amount,
 };
 
-use crate::cache::MEDIA_CACHE_MAX_BYTES;
 use super::assignment::assign_conversation;
+use crate::cache::MEDIA_CACHE_MAX_BYTES;
 
 use super::service::WhatsAppService;
 use super::ws::{
@@ -414,10 +413,7 @@ pub async fn receive_webhook(
                             .get("message_id")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
-                        let emoji = reaction
-                            .get("emoji")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
+                        let emoji = reaction.get("emoji").and_then(|v| v.as_str()).unwrap_or("");
                         if target_wamid.is_empty() {
                             tracing::warn!("[webhook] reaction sin message_id, ignorando");
                             continue;
@@ -446,10 +442,7 @@ pub async fn receive_webhook(
                                 );
                             }
                             Err(e) => {
-                                tracing::error!(
-                                    "[webhook] update_message_reactions error: {}",
-                                    e
-                                );
+                                tracing::error!("[webhook] update_message_reactions error: {}", e);
                             }
                         }
                         continue; // CRÍTICO: no caer en el resto del loop (no upsert, no touch, no insert).
@@ -1170,9 +1163,7 @@ pub async fn get_conversation_client_link_handler(
         }));
     }
 
-    let seed_id = conv
-        .client_id
-        .unwrap_or_else(|| clients[0]._id);
+    let seed_id = conv.client_id.unwrap_or_else(|| clients[0]._id);
     let raw = state
         .db
         .get_clients_by_phone_group(seed_id.to_hex())
@@ -1189,7 +1180,9 @@ pub async fn get_conversation_client_link_handler(
             name: doc.get_str("sName").unwrap_or_default().to_string(),
             phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
             status: doc.get_str("sState").ok().map(|s| s.to_string()),
-            balance: doc.contains_key("nBalance").then(|| get_bson_amount(&doc, "nBalance")),
+            balance: doc
+                .contains_key("nBalance")
+                .then(|| get_bson_amount(&doc, "nBalance")),
         })
         .filter(|item| !item.id.is_empty())
         .collect();
@@ -7517,7 +7510,11 @@ pub async fn intervene_conversation_handler(
     };
     broadcast_all(&state.ws_registry, &ev_pausada).await;
 
-    tracing::info!("[whatsapp] intervene manual (conv={}, by={})", id, claims.id);
+    tracing::info!(
+        "[whatsapp] intervene manual (conv={}, by={})",
+        id,
+        claims.id
+    );
 
     Ok(Json(InterveneResponse {
         ok: true,
@@ -7568,8 +7565,9 @@ pub async fn react_message_handler(
     use axum::http::StatusCode;
 
     // 1. Parsear ObjectId
-    let oid = ObjectId::parse_str(&id)
-        .map_err(|_| ApiError::domain_simple(StatusCode::BAD_REQUEST, "invalid_id", "id inválido"))?;
+    let oid = ObjectId::parse_str(&id).map_err(|_| {
+        ApiError::domain_simple(StatusCode::BAD_REQUEST, "invalid_id", "id inválido")
+    })?;
 
     // 2. Cargar el WaMessage target
     let message = state
@@ -7578,7 +7576,11 @@ pub async fn react_message_handler(
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(|| {
-            ApiError::domain_simple(StatusCode::NOT_FOUND, "message_not_found", "Mensaje no encontrado")
+            ApiError::domain_simple(
+                StatusCode::NOT_FOUND,
+                "message_not_found",
+                "Mensaje no encontrado",
+            )
         })?;
 
     // 3. Cargar la conversación para obtener customer_phone + business_phone
@@ -7599,12 +7601,18 @@ pub async fn react_message_handler(
     let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
 
     // 5. Llamar a Meta (Meta acepta emoji vacío para remover)
-    wa.send_reaction(&conv.phone, &message.wa_message_id, &body.emoji).await?;
+    wa.send_reaction(&conv.phone, &message.wa_message_id, &body.emoji)
+        .await?;
 
     // 6. Aplicar update en DB (sólo si Meta aceptó)
     let updated = state
         .db
-        .update_message_reactions(&message.wa_message_id, "agent", &body.emoji, Some(&claims.name))
+        .update_message_reactions(
+            &message.wa_message_id,
+            "agent",
+            &body.emoji,
+            Some(&claims.name),
+        )
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(|| {

@@ -306,7 +306,11 @@ async fn run_dispatch(
     };
     let recent = state
         .db
-        .list_recent_messages_for_conversation(&inbound.conversation_id, RECENT_WINDOW, reopen_min_id)
+        .list_recent_messages_for_conversation(
+            &inbound.conversation_id,
+            RECENT_WINDOW,
+            reopen_min_id,
+        )
         .await?;
 
     // Último outbound del bot: define el inicio lógico de la ráfaga actual.
@@ -497,7 +501,8 @@ async fn run_dispatch(
         if inbound_is_media {
             // Set de media ya vistos por la IA en su último turno (idempotencia).
             // Si no hay ai_conv_state previo, cualquier media huérfana es recuperable.
-            let already_seen: std::collections::HashSet<String> = match conv.ai_conv_state.as_ref() {
+            let already_seen: std::collections::HashSet<String> = match conv.ai_conv_state.as_ref()
+            {
                 Some(s) => s
                     .completed_actions
                     .iter()
@@ -967,8 +972,7 @@ async fn run_dispatch(
     let last_output: Option<crate::modules::ai_agent::runner::RunnerOutput>;
     let last_agent: Option<AiAgent>;
     let mut cross_workspace_message: Option<String> = None;
-    let mut burst_intents: Vec<String> =
-        guardrails::extract_customer_explicit_intents_refs(&burst);
+    let mut burst_intents: Vec<String> = guardrails::extract_customer_explicit_intents_refs(&burst);
 
     loop {
         let active_agent_id = active_agent.id.ok_or_else(|| "agent sin _id".to_string())?;
@@ -990,7 +994,11 @@ async fn run_dispatch(
             // dispatch. Si recent no cambió, no actualizamos nada.
             match state
                 .db
-                .list_recent_messages_for_conversation(&inbound.conversation_id, RECENT_WINDOW, reopen_min_id)
+                .list_recent_messages_for_conversation(
+                    &inbound.conversation_id,
+                    RECENT_WINDOW,
+                    reopen_min_id,
+                )
                 .await
             {
                 Ok(refreshed) => {
@@ -1004,7 +1012,9 @@ async fn run_dispatch(
                     let new_burst: Vec<&WaMessage> = refreshed
                         .iter()
                         .filter(|m| {
-                            if m.direction != "in" { return false; }
+                            if m.direction != "in" {
+                                return false;
+                            }
                             match refreshed_last_out_oid {
                                 Some(out_id) => m.id.map(|i| i > out_id).unwrap_or(false),
                                 None => true,
@@ -1423,9 +1433,10 @@ async fn run_dispatch(
         for m in &burst {
             if let Some(mid) = m.media_id.as_deref() {
                 if !mid.is_empty() {
-                    all_state_patches.push(StatePatch::AddCompletedAction(
-                        format!("media_seen:{}", mid),
-                    ));
+                    all_state_patches.push(StatePatch::AddCompletedAction(format!(
+                        "media_seen:{}",
+                        mid
+                    )));
                 }
             }
         }
@@ -1433,9 +1444,10 @@ async fn run_dispatch(
         // Los media_ids recuperados viven en `recovered_orphan_media_ids` — emitimos
         // sus patches acá también para cerrar la idempotencia del recovery (W1).
         for mid in &recovered_orphan_media_ids {
-            all_state_patches.push(StatePatch::AddCompletedAction(
-                format!("media_seen:{}", mid),
-            ));
+            all_state_patches.push(StatePatch::AddCompletedAction(format!(
+                "media_seen:{}",
+                mid
+            )));
         }
     }
 
@@ -1880,8 +1892,10 @@ async fn build_media_inputs(
     // El resto (sticker, documents Office, etc) NO los pasamos como inline —
     // la IA puede responder al caption/contexto sin ver el binario.
     // Delega en is_inline_supported (ver fn para la tabla de verdad completa).
-    let supported =
-        is_inline_supported(inbound.msg_type.as_str(), inbound.media_mime_type.as_deref());
+    let supported = is_inline_supported(
+        inbound.msg_type.as_str(),
+        inbound.media_mime_type.as_deref(),
+    );
     if !supported {
         tracing::warn!(
             reason = "unsupported_msg_type",
@@ -2748,9 +2762,18 @@ mod tests {
 
     #[test]
     fn is_inline_supported_plain_types_pass() {
-        assert!(is_inline_supported("image", None), "image/None should be true");
-        assert!(is_inline_supported("audio", None), "audio/None should be true");
-        assert!(is_inline_supported("video", None), "video/None should be true");
+        assert!(
+            is_inline_supported("image", None),
+            "image/None should be true"
+        );
+        assert!(
+            is_inline_supported("audio", None),
+            "audio/None should be true"
+        );
+        assert!(
+            is_inline_supported("video", None),
+            "video/None should be true"
+        );
     }
 
     #[test]

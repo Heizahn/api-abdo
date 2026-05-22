@@ -3,7 +3,8 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
-    response::IntoResponse,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -11,7 +12,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::{
-    auth::user_jwt::UserJwtService,
+    auth::{
+        http_auth::{compat_ws_query_enabled, read_access_token, AuthAudience},
+        user_jwt::UserJwtService,
+    },
     db::{SalesRepository, UserRepository, WhatsAppRepository},
     models::whatsapp::{ConversationItem, MessageItem, TicketItem},
     state::{AppState, WsRegistry},
@@ -488,33 +492,36 @@ pub async fn broadcast_except(registry: &WsRegistry, skip_agent_id: &str, event:
 
 #[derive(Deserialize)]
 pub struct WsConnectParams {
-    token: String,
+    token: Option<String>,
 }
 
-/// GET /v1/ws/chat?token=<user_jwt>
-/// Upgrade a WebSocket. Valida JWT de staff/admin via query param.
+/// GET /v1/ws/chat
+/// Upgrade a WebSocket. Auth primaria vía cookie HttpOnly.
+/// `?token=` se acepta sólo en ventana de compatibilidad temporal.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
-    Query(params): Query<WsConnectParams>,
-) -> impl IntoResponse {
-    // Validar JWT antes del upgrade
+    headers: HeaderMap,
+    query: Option<Query<WsConnectParams>>,
+) -> Response {
+    let cookie_token = read_access_token(&headers, &state.config, AuthAudience::Staff);
+    let query_token = if compat_ws_query_enabled(&state.config) {
+        query.and_then(|q| q.0.token)
+    } else {
+        None
+    };
+
+    let Some(token) = cookie_token.or(query_token) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+
+    // Validar JWT antes del upgrade.
     let jwt = UserJwtService::new();
-    match jwt.verify_token(&params.token) {
-        Ok(claims) => {
-            ws.on_upgrade(move |socket| handle_socket(socket, state, claims.id, claims.name))
-        }
-        Err(_) => {
-            // No podemos retornar error HTTP después del upgrade — rechazamos antes
-            ws.on_upgrade(|mut socket| async move {
-                let err = serde_json::to_string(&WsServerEvent::Error {
-                    error: "token_invalido".to_string(),
-                })
-                .unwrap_or_default();
-                let _ = socket.send(Message::Text(err)).await;
-                let _ = socket.close().await;
-            })
-        }
+    match jwt.verify_token(&token) {
+        Ok(claims) => ws
+            .on_upgrade(move |socket| handle_socket(socket, state, claims.id, claims.name))
+            .into_response(),
+        Err(_) => StatusCode::UNAUTHORIZED.into_response(),
     }
 }
 

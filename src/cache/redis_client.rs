@@ -1,6 +1,6 @@
-use mongodb::bson::oid::ObjectId;
 use crate::config::Config;
 use crate::utils::timezone::VenezuelaDateTime;
+use mongodb::bson::oid::ObjectId;
 use redis::{AsyncCommands, Client, RedisError};
 use sha2::{Digest, Sha256};
 
@@ -12,6 +12,13 @@ pub const MEDIA_CACHE_MAX_BYTES: usize = 5 * 1024 * 1024; // 5 MB
 #[derive(Clone)]
 pub struct RedisClient {
     client: Client,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshSessionRotateOutcome {
+    Rotated,
+    Missing,
+    ReuseDetected,
 }
 
 impl RedisClient {
@@ -55,6 +62,95 @@ impl RedisClient {
     pub async fn invalidate_user_summary(&self, user_id: &str) -> Result<(), RedisError> {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
         let key = format!("summary:user:{}", user_id);
+        let _: () = conn.del(key).await?;
+        Ok(())
+    }
+
+    // ============================================
+    // Auth — refresh token rotation
+    // ============================================
+
+    /// Guarda/actualiza la sesión refresh activa de una familia.
+    /// Valor: "<user_id>|<jti>" con TTL igual a la expiración del refresh.
+    pub async fn set_refresh_session(
+        &self,
+        realm: &str,
+        family: &str,
+        user_id: &str,
+        jti: &str,
+        ttl_secs: u64,
+    ) -> Result<(), RedisError> {
+        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let key = refresh_family_key(realm, family);
+        let value = format!("{}|{}", user_id, jti);
+        conn.set_ex(key, value, ttl_secs).await
+    }
+
+    /// Rota atómicamente el refresh token activo de una familia.
+    ///
+    /// Retorna:
+    /// - Rotated: el `current_jti` era el activo y fue reemplazado por `new_jti`.
+    /// - Missing: no existe sesión (expirada/cerrada).
+    /// - ReuseDetected: llegó un refresh viejo/reutilizado; la familia se invalida.
+    pub async fn rotate_refresh_session(
+        &self,
+        realm: &str,
+        family: &str,
+        user_id: &str,
+        current_jti: &str,
+        new_jti: &str,
+        ttl_secs: u64,
+    ) -> Result<RefreshSessionRotateOutcome, RedisError> {
+        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let key = refresh_family_key(realm, family);
+        let expected = format!("{}|{}", user_id, current_jti);
+        let new_value = format!("{}|{}", user_id, new_jti);
+
+        let script = redis::Script::new(
+            r#"
+                local key = KEYS[1]
+                local expected = ARGV[1]
+                local replacement = ARGV[2]
+                local ttl = tonumber(ARGV[3])
+
+                local current = redis.call("GET", key)
+                if not current then
+                    return 0
+                end
+                if current ~= expected then
+                    redis.call("DEL", key)
+                    return -1
+                end
+
+                redis.call("SET", key, replacement, "EX", ttl)
+                return 1
+            "#,
+        );
+
+        let status: i64 = script
+            .key(key)
+            .arg(expected)
+            .arg(new_value)
+            .arg(ttl_secs as i64)
+            .invoke_async(&mut conn)
+            .await?;
+
+        let outcome = match status {
+            1 => RefreshSessionRotateOutcome::Rotated,
+            0 => RefreshSessionRotateOutcome::Missing,
+            _ => RefreshSessionRotateOutcome::ReuseDetected,
+        };
+        Ok(outcome)
+    }
+
+    #[allow(dead_code)]
+    pub async fn clear_refresh_session_family(
+        &self,
+        realm: &str,
+        family: &str,
+    ) -> Result<(), RedisError> {
+        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let key = refresh_family_key(realm, family);
         let _: () = conn.del(key).await?;
         Ok(())
     }
@@ -851,4 +947,8 @@ fn ai_models_cache_key(workspace_id: &str, api_key: &str) -> String {
 fn exchange_rate_key() -> String {
     let today = VenezuelaDateTime::now().date_string_venezuela();
     format!("exchange_rate:bcv:{}", today)
+}
+
+fn refresh_family_key(realm: &str, family: &str) -> String {
+    format!("auth:refresh:{}:family:{}", realm, family)
 }

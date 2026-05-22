@@ -6,7 +6,14 @@ use axum::{
 };
 use std::sync::Arc;
 
-use crate::{auth::user_jwt::UserJwtService, db::UserRepository, state::AppState};
+use crate::{
+    auth::{
+        http_auth::{read_access_token, AuthAudience},
+        user_jwt::UserJwtService,
+    },
+    db::UserRepository,
+    state::AppState,
+};
 
 /// Rol sentinel para usuarios revocados: si `nRole == -1.0`, el user no puede
 /// autenticarse ni hacer requests, aunque tenga un JWT vivo. Diferente de
@@ -18,19 +25,12 @@ pub async fn user_jwt_auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let auth_header = req
-        .headers()
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    let token = auth_header
-        .strip_prefix("Bearer ")
+    let token = read_access_token(req.headers(), &state.config, AuthAudience::Staff)
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     let jwt_service = UserJwtService::new();
     let claims = jwt_service
-        .verify_token(token)
+        .verify_token(&token)
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     // Gate "sin acceso": lee el rol vivo de DB. Un JWT emitido cuando el

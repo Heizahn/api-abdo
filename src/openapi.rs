@@ -4,18 +4,18 @@ use crate::db::mongo::{PaymentDetails, ResultGroupedByDate};
 use crate::models::ai_agent::{
     AiAgentDeleteResponse, AiAgentFaqItem, AiAgentFaqListResponse, AiAgentFaqResponse, AiAgentItem,
     AiAgentMetricsDailyBucketDto, AiAgentMetricsData, AiAgentMetricsResponse, AiAgentMode,
-    AiAgentPreClassBreakdown, AiAgentPurpose,
-    AiAgentResponse, AiAgentsListResponse, AiBusinessDataDeleteResponse, AiConfigDto,
-    AiConfigPatchRequest, AiConfigResponse, AiCoverageZoneItem, AiCoverageZoneResponse,
-    AiCoverageZonesListResponse, AiEscalationRulesDto, AiEscalationRulesInput,
-    AiInstallationConfigItem, AiInstallationConfigResponse, AiInstallationConfigsListResponse,
-    AiLimitsDto, AiLimitsInput, AiModelConfigDto, AiModelConfigInput, AiPersonalityDto,
-    AiPersonalityInput, AiPlanItem, AiPlanResponse, AiPlansListResponse, AiPromotionItem,
-    AiPromotionResponse, AiPromotionsListResponse, AiScheduleDto, AiScheduleInput, AiToolConfigDto,
-    AiToolConfigInput, ConnectionType, CreateAiAgentFaqRequest, CreateAiAgentRequest,
-    CreateAiCoverageZoneRequest, CreateAiPlanRequest, CreateAiPromotionRequest,
-    PoliticalDivisionItem, PoliticalDivisionsResponse, TestConnectionData, TestConnectionRequest,
-    TestConnectionResponse, TestConnectionSource, UpdateAiAgentFaqRequest, UpdateAiAgentRequest,
+    AiAgentPreClassBreakdown, AiAgentPurpose, AiAgentResponse, AiAgentsListResponse,
+    AiBusinessDataDeleteResponse, AiConfigDto, AiConfigPatchRequest, AiConfigResponse,
+    AiCoverageZoneItem, AiCoverageZoneResponse, AiCoverageZonesListResponse, AiEscalationRulesDto,
+    AiEscalationRulesInput, AiInstallationConfigItem, AiInstallationConfigResponse,
+    AiInstallationConfigsListResponse, AiLimitsDto, AiLimitsInput, AiModelConfigDto,
+    AiModelConfigInput, AiPersonalityDto, AiPersonalityInput, AiPlanItem, AiPlanResponse,
+    AiPlansListResponse, AiPromotionItem, AiPromotionResponse, AiPromotionsListResponse,
+    AiScheduleDto, AiScheduleInput, AiToolConfigDto, AiToolConfigInput, ConnectionType,
+    CreateAiAgentFaqRequest, CreateAiAgentRequest, CreateAiCoverageZoneRequest,
+    CreateAiPlanRequest, CreateAiPromotionRequest, PoliticalDivisionItem,
+    PoliticalDivisionsResponse, TestConnectionData, TestConnectionRequest, TestConnectionResponse,
+    TestConnectionSource, UpdateAiAgentFaqRequest, UpdateAiAgentRequest,
     UpdateAiCoverageZoneRequest, UpdateAiInstallationConfigRequest, UpdateAiPlanRequest,
     UpdateAiPromotionRequest,
 };
@@ -83,10 +83,10 @@ use crate::modules::whatsapp::handler::{InterveneData, InterveneResponse, ResetA
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.2.0",
-        description = "API REST para gestión de clientes ISP. Autenticación via JWT.\n\n\
-            **Clientes**: usar token del header `Authorization: Bearer <token>`\n\
-            **Staff/Admin**: misma cabecera, token emitido por `/v1/auth-user/login`"
+        version = "0.3.0",
+        description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
+            **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
+            **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
     ),
     paths(
         // Auth — Clientes

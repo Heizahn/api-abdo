@@ -1,8 +1,20 @@
-use axum::{extract::State, Json};
+use axum::{
+    extract::State,
+    http::{header::SET_COOKIE, HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
+    Json,
+};
 use std::sync::Arc;
 
 use crate::{
-    auth::service::AuthService,
+    auth::{
+        http_auth::{
+            build_auth_cookie, build_clear_cookie, read_refresh_token, AuthAudience,
+            CLIENT_ACCESS_COOKIE, CLIENT_REFRESH_COOKIE,
+        },
+        service::AuthService,
+    },
+    cache::RefreshSessionRotateOutcome,
     crypto::jwt::{JwtCfg, JwtService},
     db::AuthRepository,
     error::ApiError,
@@ -107,7 +119,7 @@ pub async fn verify_number_handler(
 pub async fn login_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     let now_vz = VenezuelaDateTime::now();
     tracing::info!(
         "[{}] login request for phone: {}",
@@ -155,12 +167,24 @@ pub async fn login_handler(
     }
 
     let jwt = JwtService::new(JwtCfg::from_env());
+    let family = uuid::Uuid::new_v4().to_string();
 
     let (access_token, access_exp) =
         jwt.issue_encrypted_access(&customer.id, None, &["me:read", "payments:create"]);
+    let (refresh_token, refresh_exp, jti) = jwt.issue_encrypted_refresh(&customer.id, &family);
 
-    let family = uuid::Uuid::new_v4().to_string();
-    let (refresh_token, refresh_exp, _jti) = jwt.issue_encrypted_refresh(&customer.id, &family);
+    let ttl = ttl_from_exp(refresh_exp);
+    state
+        .redis
+        .set_refresh_session(
+            AuthAudience::Client.redis_realm(),
+            &family,
+            &customer.id,
+            &jti,
+            ttl,
+        )
+        .await
+        .map_err(ApiError::from)?;
 
     tracing::info!(
         "Login successful for user: {} at {} (Venezuela)",
@@ -168,7 +192,7 @@ pub async fn login_handler(
         now_vz.datetime_string_venezuela()
     );
 
-    Ok(Json(LoginResponse {
+    let payload = LoginResponse {
         ok: true,
         exists: true,
         tokens: TokenPair {
@@ -177,7 +201,10 @@ pub async fn login_handler(
             refresh_token,
             refresh_exp,
         },
-    }))
+    };
+    let tokens = payload.tokens.clone();
+
+    Ok(response_with_client_auth_cookies(&state, payload, &tokens))
 }
 
 #[utoipa::path(
@@ -187,47 +214,177 @@ pub async fn login_handler(
     request_body = RefreshRequest,
     responses(
         (status = 200, description = "Tokens renovados", body = RefreshResponse),
-        (status = 401, description = "Refresh token inválido o expirado"),
+        (status = 401, description = "Refresh inválido/expirado/reutilizado"),
     )
 )]
 pub async fn refresh_handler(
-    State(_state): State<Arc<AppState>>,
-    Json(payload): Json<RefreshRequest>,
-) -> Result<Json<RefreshResponse>, ApiError> {
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    payload: Option<Json<RefreshRequest>>,
+) -> Result<Response, ApiError> {
     let now_vz = VenezuelaDateTime::now();
     tracing::info!(
         "[{}] refresh token request",
         now_vz.datetime_string_venezuela()
     );
 
+    let body_token = payload.as_ref().and_then(|v| v.refresh_token.as_deref());
+    let raw_refresh =
+        match read_refresh_token(&headers, &state.config, AuthAudience::Client, body_token) {
+            Some(v) => v,
+            None => {
+                return Ok(refresh_error_response(
+                    &state,
+                    "invalid_refresh_token",
+                    "No se encontró refresh token",
+                ));
+            }
+        };
+
     let jwt = JwtService::new(JwtCfg::from_env());
 
-    let refresh_claims = jwt
-        .verify_encrypted_refresh_verbose(&payload.refresh_token)
-        .map_err(|e| {
-            tracing::error!("Refresh token verification failed: {:?}", e);
-            ApiError::Unauthorized("invalid_refresh_token".to_string())
-        })?;
+    let refresh_claims = match jwt.verify_encrypted_refresh_verbose(&raw_refresh) {
+        Ok(v) => v,
+        Err(_) => {
+            return Ok(refresh_error_response(
+                &state,
+                "invalid_refresh_token",
+                "Refresh token inválido",
+            ));
+        }
+    };
 
     let (access_token, access_exp) =
         jwt.issue_encrypted_access(&refresh_claims.sub, None, &["me:read", "payments:create"]);
 
-    let (new_refresh_token, refresh_exp, _new_jti) =
+    let (new_refresh_token, refresh_exp, new_jti) =
         jwt.issue_encrypted_refresh(&refresh_claims.sub, &refresh_claims.fam);
 
-    tracing::info!(
-        "Tokens refreshed successfully for user: {} at {} (Venezuela)",
-        refresh_claims.sub,
-        now_vz.datetime_string_venezuela()
-    );
+    let rotate_result = state
+        .redis
+        .rotate_refresh_session(
+            AuthAudience::Client.redis_realm(),
+            &refresh_claims.fam,
+            &refresh_claims.sub,
+            &refresh_claims.jti,
+            &new_jti,
+            ttl_from_exp(refresh_exp),
+        )
+        .await;
 
-    Ok(Json(RefreshResponse {
-        ok: true,
-        tokens: TokenPair {
-            access_token,
-            access_exp,
-            refresh_token: new_refresh_token,
-            refresh_exp,
-        },
-    }))
+    let rotate_result = match rotate_result {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::error!("Refresh rotation redis error: {}", err);
+            return Err(ApiError::from(err));
+        }
+    };
+
+    match rotate_result {
+        RefreshSessionRotateOutcome::Rotated => {
+            tracing::info!(
+                "Tokens refreshed successfully for user: {} at {} (Venezuela)",
+                refresh_claims.sub,
+                now_vz.datetime_string_venezuela()
+            );
+
+            let response_body = RefreshResponse {
+                ok: true,
+                tokens: TokenPair {
+                    access_token,
+                    access_exp,
+                    refresh_token: new_refresh_token,
+                    refresh_exp,
+                },
+            };
+            let tokens = response_body.tokens.clone();
+            Ok(response_with_client_auth_cookies(
+                &state,
+                response_body,
+                &tokens,
+            ))
+        }
+        RefreshSessionRotateOutcome::Missing => Ok(refresh_error_response(
+            &state,
+            "session_expired",
+            "La sesión expiró, inicia sesión nuevamente",
+        )),
+        RefreshSessionRotateOutcome::ReuseDetected => Ok(refresh_error_response(
+            &state,
+            "refresh_token_reused",
+            "Se detectó reutilización de refresh token; inicia sesión nuevamente",
+        )),
+    }
+}
+
+fn response_with_client_auth_cookies<T: serde::Serialize>(
+    state: &Arc<AppState>,
+    body: T,
+    tokens: &TokenPair,
+) -> Response {
+    let json = Json(body);
+    let mut response = json.into_response();
+    append_client_auth_cookies(&state.config, response.headers_mut(), tokens);
+    response
+}
+
+fn append_client_auth_cookies(
+    cfg: &crate::config::Config,
+    headers: &mut HeaderMap,
+    pair: &TokenPair,
+) {
+    push_set_cookie(
+        headers,
+        build_auth_cookie(
+            cfg,
+            CLIENT_ACCESS_COOKIE,
+            &pair.access_token,
+            ttl_from_exp(pair.access_exp) as i64,
+            "/",
+        ),
+    );
+    push_set_cookie(
+        headers,
+        build_auth_cookie(
+            cfg,
+            CLIENT_REFRESH_COOKIE,
+            &pair.refresh_token,
+            ttl_from_exp(pair.refresh_exp) as i64,
+            "/v1/auth",
+        ),
+    );
+}
+
+fn refresh_error_response(state: &Arc<AppState>, code: &str, message: &str) -> Response {
+    let mut response = (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({
+            "ok": false,
+            "error": code,
+            "code": code,
+            "message": message
+        })),
+    )
+        .into_response();
+
+    push_set_cookie(
+        response.headers_mut(),
+        build_clear_cookie(&state.config, CLIENT_ACCESS_COOKIE, "/"),
+    );
+    push_set_cookie(
+        response.headers_mut(),
+        build_clear_cookie(&state.config, CLIENT_REFRESH_COOKIE, "/v1/auth"),
+    );
+    response
+}
+
+fn push_set_cookie(headers: &mut HeaderMap, cookie: String) {
+    if let Ok(value) = HeaderValue::from_str(&cookie) {
+        headers.append(SET_COOKIE, value);
+    }
+}
+
+fn ttl_from_exp(exp: i64) -> u64 {
+    let now = JwtService::now();
+    exp.saturating_sub(now).max(1) as u64
 }

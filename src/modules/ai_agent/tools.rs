@@ -194,11 +194,19 @@ fn is_media_id_stale_in_session(provided: &str, session: &[String]) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DestinationMismatch {
     NoMethods,
-    Bank { expected: Vec<String>, received: String },
-    Phone { expected: Vec<String>, received: String },
+    Bank {
+        expected: Vec<String>,
+        received: String,
+    },
+    Phone {
+        expected: Vec<String>,
+        received: String,
+    },
     /// PII: `received` se guarda para diagnóstico interno, pero `to_error_string`
     /// NO lo expone al LLM — evita que el id del proveedor llegue al cliente.
-    Id { received: String },
+    Id {
+        received: String,
+    },
 }
 
 impl DestinationMismatch {
@@ -2189,10 +2197,7 @@ async fn exec_list_banks(args: Value, ctx: &ToolContext, started: Instant) -> To
     if let Some(cached) = ctx.state.redis.get_ai_list_banks_cache().await {
         if let Ok(parsed_val) = serde_json::from_str::<Value>(&cached) {
             tracing::info!("[ai_agent.list_banks] cache hit");
-            let items: Vec<Value> = parsed_val["items"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
+            let items: Vec<Value> = parsed_val["items"].as_array().cloned().unwrap_or_default();
             let filtered = filter_banks(items, &filter);
             return ToolResult::ok(json!({ "items": filtered }), started);
         }
@@ -2665,10 +2670,7 @@ mod tests {
             result.contains("YA EXISTÍA APROBADO"),
             "debe indicar que ya existía aprobado"
         );
-        assert!(
-            result.contains("NO"),
-            "debe incluir directiva negativa NO"
-        );
+        assert!(result.contains("NO"), "debe incluir directiva negativa NO");
         assert!(
             !result.contains("source"),
             "no debe exponer el campo source"
@@ -2691,10 +2693,7 @@ mod tests {
     #[test]
     fn build_already_registered_hint_same_client_pendiente() {
         let result = build_already_registered_hint(true, "Pendiente");
-        assert!(
-            result.contains("YA EXISTÍA"),
-            "debe indicar que ya existía"
-        );
+        assert!(result.contains("YA EXISTÍA"), "debe indicar que ya existía");
         assert!(
             result.contains("REVISIÓN"),
             "debe mencionar que está en revisión"
@@ -2818,7 +2817,10 @@ mod tests {
                     err_str.starts_with("destination_bank_mismatch:"),
                     "debe empezar con el prefijo: {err_str}"
                 );
-                assert!(err_str.contains("Banesco"), "debe mencionar el banco esperado");
+                assert!(
+                    err_str.contains("Banesco"),
+                    "debe mencionar el banco esperado"
+                );
             }
             other => panic!("se esperaba Bank mismatch, se obtuvo: {other:?}"),
         }
@@ -3516,16 +3518,12 @@ fn build_already_registered_hint(is_same_client: bool, matched_state: &str) -> S
             .to_string();
     }
     match matched_state {
-        "Aprobado" => {
-            "ESTE PAGO YA EXISTÍA APROBADO antes de este reporte — decir al cliente que \
+        "Aprobado" => "ESTE PAGO YA EXISTÍA APROBADO antes de este reporte — decir al cliente que \
              su pago YA estaba registrado. NO decir 'pago registrado' como si fuera nuevo."
-                .to_string()
-        }
-        "Pendiente" => {
-            "ESTE PAGO YA EXISTÍA Y ESTÁ EN REVISIÓN — el equipo lo está validando. \
+            .to_string(),
+        "Pendiente" => "ESTE PAGO YA EXISTÍA Y ESTÁ EN REVISIÓN — el equipo lo está validando. \
              Dar tranquilidad al cliente sin alarma. NO pedir que reenvíe el comprobante."
-                .to_string()
-        }
+            .to_string(),
         other => format!(
             "ESTE PAGO YA EXISTÍA (estado={other}) — comunicarlo como duplicado preexistente, \
              NO como nuevo registro."
@@ -3790,14 +3788,28 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
     // Matches against the provider's configured PaymentMethod(s). Fail-open if
     // the provider has no method configured (step 9 surfaces `payment_method_not_configured`).
     {
-        let dest_bank = parsed.destination_bank.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let dest_phone = parsed.destination_phone.as_deref().map(str::trim).filter(|s| !s.is_empty());
-        let dest_id = parsed.destination_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let dest_bank = parsed
+            .destination_bank
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let dest_phone = parsed
+            .destination_phone
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let dest_id = parsed
+            .destination_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
         if dest_bank.is_some() || dest_phone.is_some() || dest_id.is_some() {
             let methods = load_active_payment_methods_for_owner(ctx, &client_oid).await;
             if !methods.is_empty() {
                 let refs: Vec<&PaymentMethod> = methods.iter().collect();
-                if let Err(mismatch) = match_destination_against_methods(dest_bank, dest_phone, dest_id, &refs) {
+                if let Err(mismatch) =
+                    match_destination_against_methods(dest_bank, dest_phone, dest_id, &refs)
+                {
                     if let Some(err) = mismatch.to_error_string() {
                         return ToolResult::err(err, started);
                     }

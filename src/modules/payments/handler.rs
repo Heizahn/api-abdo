@@ -95,7 +95,9 @@ async fn persist_payment_report_image(
 
     if total_bytes == 0 {
         let _ = tokio::fs::remove_file(&file_path).await;
-        return Err(ApiError::BadRequest("La imagen llego vacia al servidor".into()));
+        return Err(ApiError::BadRequest(
+            "La imagen llego vacia al servidor".into(),
+        ));
     }
 
     file.flush()

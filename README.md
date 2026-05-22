@@ -1,4 +1,4 @@
-# API ABDO v0.2.0 - High Performance REST API
+# API ABDO v0.3.0 - High Performance REST API
 
 API REST de alto rendimiento construida con Rust, Axum, MongoDB y Redis.
 
