@@ -124,17 +124,30 @@ pub struct UserLoginRequest {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct UserLoginResponse {
+    /// Legacy field (compatibilidad): mismo valor que `access_token`.
     pub token: String,
+    pub access_token: String,
+    pub refresh_token: String,
+    pub access_exp: i64,
+    pub refresh_exp: i64,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RefreshTokenRequest {
-    pub token: String,
+    /// Nuevo campo recomendado.
+    pub refresh_token: Option<String>,
+    /// Legacy fallback (temporal).
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct RefreshTokenResponse {
+    /// Legacy field (compatibilidad): mismo valor que `access_token`.
     pub token: String,
+    pub access_token: String,
+    pub refresh_token: String,
+    pub access_exp: i64,
+    pub refresh_exp: i64,
 }
 
 /// Shape devuelto por el CRUD de usuarios (`/v1/auth-user/users*`).

@@ -303,6 +303,34 @@ pub trait SalesRepository {
     /// Busca un `PaymentReport` por `_id`. Retorna el doc completo o `None`.
     async fn find_report_by_id(&self, id: ObjectId) -> Result<Option<PaymentReportFull>, String>;
 
+    /// Toma lock de aprobación para un `PaymentReport` (evita doble aprobación
+    /// concurrente). Retorna el doc si logró adquirir el lock.
+    ///
+    /// `stale_after_ms`: si existe lock más viejo que este umbral, se permite
+    /// tomarlo nuevamente (recover tras crash del proceso).
+    async fn acquire_report_approval_lock(
+        &self,
+        id: ObjectId,
+        lock_token: &str,
+        stale_after_ms: i64,
+    ) -> Result<Option<PaymentReportFull>, String>;
+
+    /// Libera lock de aprobación si el `lock_token` coincide.
+    async fn release_report_approval_lock(
+        &self,
+        id: ObjectId,
+        lock_token: &str,
+    ) -> Result<(), String>;
+
+    /// Finaliza la aprobación (setea `Verificado` + editor + edición) y libera
+    /// lock en una sola operación, validando ownership del lock.
+    async fn finalize_report_approval(
+        &self,
+        id: ObjectId,
+        lock_token: &str,
+        editor_id: &str,
+    ) -> Result<bool, String>;
+
     /// Actualiza el estado de un `PaymentReport`. Además setea `idEditor`, `dEdition`,
     /// y opcionalmente `sRejectionReason` (solo cuando `new_state == "Rechazado"`).
     async fn update_report_state(

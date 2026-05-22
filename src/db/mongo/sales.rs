@@ -776,6 +776,124 @@ impl SalesRepository for MongoDB {
         }
     }
 
+    async fn acquire_report_approval_lock(
+        &self,
+        id: ObjectId,
+        lock_token: &str,
+        stale_after_ms: i64,
+    ) -> Result<Option<PaymentReportFull>, String> {
+        use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+
+        let collection = self.db.collection::<Document>("PaymentReports");
+        let now = DateTime::now();
+        let stale_before = DateTime::from_millis(now.timestamp_millis() - stale_after_ms);
+
+        // Solo lockeamos reportes no verificados y con lock ausente o stale.
+        let filter = doc! {
+            "_id": id,
+            "sState": { "$ne": "Verificado" },
+            "$or": [
+                { "approval_lock": { "$exists": false } },
+                { "approval_lock.at": { "$lt": stale_before } }
+            ]
+        };
+
+        let update = doc! {
+            "$set": {
+                "approval_lock": {
+                    "token": lock_token,
+                    "at": now
+                }
+            }
+        };
+
+        let opts = FindOneAndUpdateOptions::builder()
+            .return_document(ReturnDocument::After)
+            .build();
+
+        let result = collection
+            .find_one_and_update(filter, update)
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        match result {
+            None => Ok(None),
+            Some(doc) => {
+                let report = PaymentReportFull {
+                    _id: doc.get_object_id("_id").unwrap_or_else(|_| ObjectId::new()),
+                    id_client: doc.get_object_id("idClient").ok(),
+                    id_payment_method: doc.get_object_id("idPaymentMethod").ok(),
+                    id_debt: doc.get_object_id("idDebt").ok(),
+                    reference: doc.get_str("sReference").unwrap_or_default().to_string(),
+                    payment_date: doc.get_str("dPaymentDate").unwrap_or_default().to_string(),
+                    amount_bs: get_bson_amount(&doc, "nBs"),
+                    bank_origin: doc.get_str("sBank").unwrap_or_default().to_string(),
+                    phone_number: doc.get_str("sPhone").unwrap_or_default().to_string(),
+                    image_url: doc.get_str("sImageUrl").unwrap_or_default().to_string(),
+                    amount_usd: get_bson_amount(&doc, "nAmountUSD"),
+                    exchange_rate: get_bson_amount(&doc, "nExchangeRate"),
+                    state: doc.get_str("sState").unwrap_or_default().to_string(),
+                    rejection_reason: doc.get_str("sRejectionReason").ok().map(|s| s.to_string()),
+                    id_creator: doc.get_str("idCreator").ok().map(|s| s.to_string()),
+                    id_editor: doc.get_str("idEditor").ok().map(|s| s.to_string()),
+                    id_payment: doc.get_object_id("idPayment").ok(),
+                    id_issuing_bank: doc.get_object_id("idIssuingBank").ok(),
+                    created_at: doc.get_str("dCreation").unwrap_or_default().to_string(),
+                };
+                Ok(Some(report))
+            }
+        }
+    }
+
+    async fn release_report_approval_lock(
+        &self,
+        id: ObjectId,
+        lock_token: &str,
+    ) -> Result<(), String> {
+        let collection = self.db.collection::<Document>("PaymentReports");
+        collection
+            .update_one(
+                doc! { "_id": id, "approval_lock.token": lock_token },
+                doc! { "$unset": { "approval_lock": "" } },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    async fn finalize_report_approval(
+        &self,
+        id: ObjectId,
+        lock_token: &str,
+        editor_id: &str,
+    ) -> Result<bool, String> {
+        let collection = self.db.collection::<Document>("PaymentReports");
+        let now = DateTime::now();
+        let res = collection
+            .update_one(
+                doc! {
+                    "_id": id,
+                    "approval_lock.token": lock_token,
+                    "sState": { "$ne": "Verificado" }
+                },
+                doc! {
+                    "$set": {
+                        "sState": "Verificado",
+                        "idEditor": editor_id,
+                        "dEdition": now
+                    },
+                    "$unset": {
+                        "approval_lock": "",
+                        "sRejectionReason": ""
+                    }
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(res.modified_count > 0)
+    }
+
     async fn update_report_state(
         &self,
         id: ObjectId,

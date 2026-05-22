@@ -125,6 +125,14 @@ db.Payments.createIndex(
 );
 print("  ✅ Payments.idClient + sReference");
 
+// Blindaje anti-duplicado de aprobaciones concurrentes:
+// cada PaymentReport sólo puede vincularse a un Payment.
+db.Payments.createIndex(
+  { "idPaymentReport": 1 },
+  { name: "idx_payments_report_unique", unique: true, sparse: true, background: true }
+);
+print("  ✅ Payments.idPaymentReport (unique, sparse)");
+
 print("");
 
 // ============================================
@@ -217,6 +225,20 @@ db.Users.createIndex(
   { name: "idx_users_role", background: true }
 );
 print("  ✅ Users.nRole");
+
+// Broadcast badge events por roles visibles/no-bot.
+db.Users.createIndex(
+  { "visible": 1, "bIsBot": 1, "nRole": 1 },
+  { name: "idx_users_visible_bot_role", background: true }
+);
+print("  ✅ Users.visible + bIsBot + nRole");
+
+// Broadcast badge events por usuarios con chat habilitado.
+db.Users.createIndex(
+  { "visible": 1, "bIsBot": 1, "bCanChat": 1 },
+  { name: "idx_users_visible_bot_chat", background: true }
+);
+print("  ✅ Users.visible + bIsBot + bCanChat");
 
 print("");
 

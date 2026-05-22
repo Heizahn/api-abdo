@@ -65,11 +65,20 @@ pub async fn login_handler(
     }
 
     let jwt_service = UserJwtService::new();
-    let token = jwt_service
-        .generate_token(&user.id, &user.name, user.role)
+    let (access_token, access_exp) = jwt_service
+        .generate_access_token(&user.id, &user.name, user.role)
+        .map_err(|e| ApiError::Internal(e))?;
+    let (refresh_token, refresh_exp) = jwt_service
+        .generate_refresh_token(&user.id)
         .map_err(|e| ApiError::Internal(e))?;
 
-    Ok(Json(UserLoginResponse { token }))
+    Ok(Json(UserLoginResponse {
+        token: access_token.clone(),
+        access_token,
+        refresh_token,
+        access_exp,
+        refresh_exp,
+    }))
 }
 
 async fn get_user_by_id(state: &Arc<AppState>, id: &str) -> Result<Option<User>, ApiError> {
@@ -96,8 +105,13 @@ pub async fn refresh_token_handler(
 ) -> Result<Json<RefreshTokenResponse>, ApiError> {
     let jwt_service = UserJwtService::new();
 
+    let raw_refresh = payload
+        .refresh_token
+        .or(payload.token)
+        .ok_or(ApiError::Unauthorized("Token inválido".to_string()))?;
+
     let claims = jwt_service
-        .decode_ignoring_exp(&payload.token)
+        .verify_refresh_token(&raw_refresh)
         .map_err(|_| ApiError::Unauthorized("Token inválido".to_string()))?;
 
     let user = get_user_by_id(&state, &claims.id)
@@ -109,11 +123,20 @@ pub async fn refresh_token_handler(
         return Err(ApiError::Unauthorized("Usuario sin acceso".to_string()));
     }
 
-    let new_token = jwt_service
-        .generate_token(&user.id, &user.name, user.role)
+    let (access_token, access_exp) = jwt_service
+        .generate_access_token(&user.id, &user.name, user.role)
+        .map_err(|e| ApiError::Internal(e))?;
+    let (refresh_token, refresh_exp) = jwt_service
+        .generate_refresh_token(&user.id)
         .map_err(|e| ApiError::Internal(e))?;
 
-    Ok(Json(RefreshTokenResponse { token: new_token }))
+    Ok(Json(RefreshTokenResponse {
+        token: access_token.clone(),
+        access_token,
+        refresh_token,
+        access_exp,
+        refresh_exp,
+    }))
 }
 
 #[utoipa::path(
