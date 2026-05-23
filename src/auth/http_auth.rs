@@ -105,10 +105,9 @@ pub fn read_access_token(
     audience: AuthAudience,
 ) -> Option<String> {
     read_cookie(headers, audience.access_cookie_name()).or_else(|| {
-        // Los clientes móviles dependen de Authorization: Bearer y no de cookies.
-        // Para `Client` se mantiene soporte permanente; para `Staff` sigue bajo ventana de compat.
-        let allow_bearer = matches!(audience, AuthAudience::Client) || compat_bearer_enabled(cfg);
-        allow_bearer.then(|| read_bearer(headers)).flatten()
+        compat_bearer_enabled(cfg)
+            .then(|| read_bearer(headers))
+            .flatten()
     })
 }
 
