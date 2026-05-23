@@ -34,8 +34,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .allow_headers([
             axum::http::header::ACCEPT,
             axum::http::header::AUTHORIZATION,
+            axum::http::header::CACHE_CONTROL,
             axum::http::header::CONTENT_TYPE,
             axum::http::header::ORIGIN,
+            axum::http::header::PRAGMA,
             axum::http::header::HeaderName::from_static("idempotency-key"),
             axum::http::header::HeaderName::from_static("x-requested-with"),
         ]);
