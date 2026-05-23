@@ -22,6 +22,10 @@ use crate::{
 };
 
 const WS_OUTBOX_CAPACITY: usize = 512;
+const NO_ACCESS_ROLE: f32 = -1.0;
+const SUPERADMIN_ROLE: f32 = 0.0;
+const ACCOUNTING_ROLE: f32 = 1.0;
+const ACCOUNTING_MESSAGING_ROLE: f32 = 1.5;
 
 // ============================================
 // TIPOS DE EVENTOS
@@ -517,12 +521,30 @@ pub async fn ws_handler(
 
     // Validar JWT antes del upgrade.
     let jwt = UserJwtService::new();
-    match jwt.verify_token(&token) {
-        Ok(claims) => ws
-            .on_upgrade(move |socket| handle_socket(socket, state, claims.id, claims.name))
-            .into_response(),
-        Err(_) => StatusCode::UNAUTHORIZED.into_response(),
+    let claims = match jwt.verify_token(&token) {
+        Ok(c) => c,
+        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+
+    // Gate explícito de acceso WS (panel interno):
+    // - usuario visible y no bot
+    // - rol válido (nRole != -1)
+    // - acceso por chat (bCanChat) o rol interno elegible para panel (0/1/1.5)
+    let user = match state.db.find_user_by_id(&claims.id).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let role_eligible = user.role == SUPERADMIN_ROLE
+        || user.role == ACCOUNTING_ROLE
+        || user.role == ACCOUNTING_MESSAGING_ROLE;
+    let ws_eligible = user.can_chat || role_eligible;
+    if !user.visible || user.is_bot || user.role == NO_ACCESS_ROLE || !ws_eligible {
+        return StatusCode::FORBIDDEN.into_response();
     }
+
+    ws.on_upgrade(move |socket| handle_socket(socket, state, claims.id, claims.name))
+        .into_response()
 }
 
 async fn handle_socket(
