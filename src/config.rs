@@ -27,6 +27,8 @@ pub struct Config {
     // Logging
     pub rust_log: String,
     pub log_format: String,
+    pub frontend_origins: Vec<String>,
+    pub cors_allow_credentials: bool,
 
     //System
     pub id_simcot: String,
@@ -117,6 +119,11 @@ impl Config {
             // Logging
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info,api_abdo=debug".to_string()),
             log_format: env::var("LOG_FORMAT").unwrap_or_else(|_| "json".to_string()),
+            frontend_origins: parse_csv_env(
+                "FRONTEND_ORIGINS",
+                vec!["http://localhost:5173".to_string()],
+            ),
+            cors_allow_credentials: parse_bool_env("CORS_ALLOW_CREDENTIALS", true),
 
             //System
             id_simcot: env::var("ID_SIMCOT").unwrap_or_else(|_| "".to_string()),
@@ -175,6 +182,24 @@ fn parse_bool_env(key: &str, default_value: bool) -> bool {
             raw.to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "on"
         ),
+        Err(_) => default_value,
+    }
+}
+
+fn parse_csv_env(key: &str, default_value: Vec<String>) -> Vec<String> {
+    match env::var(key) {
+        Ok(raw) => {
+            let values: Vec<String> = raw
+                .split(',')
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .collect();
+            if values.is_empty() {
+                default_value
+            } else {
+                values
+            }
+        }
         Err(_) => default_value,
     }
 }
