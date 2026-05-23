@@ -1,5 +1,4 @@
 use crate::{
-    auth::http_auth::{auth_input_debug, read_access_token, AuthAudience},
     crypto::jwt::{JwtCfg, JwtService},
     state::AppState,
 };
@@ -14,68 +13,48 @@ use std::sync::Arc;
 
 /// Middleware de autenticación JWT
 pub async fn jwt_auth_middleware(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     mut req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let route = req.uri().path().to_string();
-    let auth_debug = auth_input_debug(req.headers(), AuthAudience::Client);
-    tracing::debug!(
-        target: "auth",
-        route = %route,
-        audience = "client",
-        has_authorization_header = auth_debug.has_authorization_header,
-        has_cookie_header = auth_debug.has_cookie_header,
-        has_access_cookie = auth_debug.has_access_cookie,
-        has_bearer_token = auth_debug.has_bearer_token,
-        "Procesando autenticación JWT (cliente)"
-    );
+    tracing::debug!("🔐 JWT Middleware: Procesando autenticación");
 
-    let token =
-        read_access_token(req.headers(), &state.config, AuthAudience::Client).ok_or_else(|| {
-            tracing::warn!(
-                target: "auth",
-                route = %route,
-                audience = "client",
-                has_authorization_header = auth_debug.has_authorization_header,
-                has_cookie_header = auth_debug.has_cookie_header,
-                has_access_cookie = auth_debug.has_access_cookie,
-                has_bearer_token = auth_debug.has_bearer_token,
-                "Missing auth token (cookie/header)"
-            );
-            StatusCode::UNAUTHORIZED
-        })?;
+    // Extraer header Authorization
+    let auth_header = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
 
-    // Verificar JWT
-    let jwt = JwtService::new(JwtCfg::from_env());
-    let claims = jwt.decode_encrypted_verbose(&token).map_err(|e| {
-        tracing::error!(
-            target: "auth",
-            route = %route,
-            audience = "client",
-            error = ?e,
-            "JWT verification failed"
-        );
+    tracing::debug!("🔐 Authorization header: {:?}", auth_header);
+
+    let auth_header = auth_header.ok_or_else(|| {
+        tracing::warn!("❌ Missing Authorization header");
+        StatusCode::UNAUTHORIZED
+    })?;
+
+    // Extraer token del formato "Bearer <token>"
+    let token = auth_header.strip_prefix("Bearer ").ok_or_else(|| {
+        tracing::warn!("❌ Invalid Authorization format (expected 'Bearer <token>')");
         StatusCode::UNAUTHORIZED
     })?;
 
     tracing::debug!(
-        target: "auth",
-        route = %route,
-        audience = "client",
-        user_id = %claims.sub,
-        "JWT válido"
+        "🔐 Token extraído (primeros 20 chars): {}...",
+        &token[..20.min(token.len())]
     );
+
+    // Verificar JWT
+    let jwt = JwtService::new(JwtCfg::from_env());
+    let claims = jwt.decode_encrypted_verbose(token).map_err(|e| {
+        tracing::error!("❌ JWT verification failed: {:?}", e);
+        StatusCode::UNAUTHORIZED
+    })?;
+
+    tracing::debug!("✅ JWT válido para user: {}", claims.sub);
 
     // Verificar expiración
     if claims.exp < JwtService::now() {
-        tracing::warn!(
-            target: "auth",
-            route = %route,
-            audience = "client",
-            user_id = %claims.sub,
-            "JWT expired"
-        );
+        tracing::warn!("❌ JWT expired for user: {}", claims.sub);
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -89,20 +68,8 @@ pub async fn jwt_auth_middleware(
     let user_id = claims.sub.clone();
     req.extensions_mut().insert(claims);
 
-    tracing::debug!(
-        target: "auth",
-        route = %route,
-        audience = "client",
-        user_id = %user_id,
-        "Claims insertados en extensions"
-    );
-    tracing::info!(
-        target: "auth",
-        route = %route,
-        audience = "client",
-        user_id = %user_id,
-        "Autenticación exitosa"
-    );
+    tracing::debug!("✅ Claims insertados en extensions para user: {}", user_id);
+    tracing::info!("✅ Autenticación exitosa para user: {}", user_id);
 
     // Continuar con el siguiente middleware/handler
     Ok(next.run(req).await)

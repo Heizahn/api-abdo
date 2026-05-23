@@ -45,9 +45,7 @@ pub struct LoginResponse {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct RefreshRequest {
-    /// Compat temporal: durante migración puede venir en body.
-    /// El flujo recomendado usa cookie HttpOnly.
-    pub refresh_token: Option<String>,
+    pub refresh_token: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
