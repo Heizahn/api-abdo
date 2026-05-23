@@ -22,37 +22,37 @@ use crate::{
 };
 
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let mut cors = if state.config.cors_allow_credentials && !state.config.frontend_origins.is_empty()
-    {
-        CorsLayer::new()
-            .allow_methods([
-                axum::http::Method::GET,
-                axum::http::Method::POST,
-                axum::http::Method::PUT,
-                axum::http::Method::PATCH,
-                axum::http::Method::DELETE,
-                axum::http::Method::OPTIONS,
-            ])
-            .allow_headers([
-                axum::http::header::ACCEPT,
-                axum::http::header::AUTHORIZATION,
-                axum::http::header::CACHE_CONTROL,
-                axum::http::header::CONTENT_TYPE,
-                axum::http::header::ORIGIN,
-                axum::http::header::PRAGMA,
-                axum::http::header::COOKIE,
-                axum::http::header::HeaderName::from_static("idempotency-key"),
-                axum::http::header::HeaderName::from_static("x-requested-with"),
-                axum::http::header::HeaderName::from_static("x-refresh-token"),
-                axum::http::header::HeaderName::from_static("x-csrf-token"),
-                axum::http::header::HeaderName::from_static("x-client-version"),
-            ])
-            .allow_credentials(true)
-    } else {
-        CorsLayer::new().allow_methods(Any).allow_headers(Any)
-    };
+    let cors_client = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    let mut cors_admin = CorsLayer::new()
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::PATCH,
+            axum::http::Method::DELETE,
+            axum::http::Method::OPTIONS,
+        ])
+        .allow_headers([
+            axum::http::header::ACCEPT,
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CACHE_CONTROL,
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::ORIGIN,
+            axum::http::header::PRAGMA,
+            axum::http::header::COOKIE,
+            axum::http::header::HeaderName::from_static("idempotency-key"),
+            axum::http::header::HeaderName::from_static("x-requested-with"),
+            axum::http::header::HeaderName::from_static("x-refresh-token"),
+            axum::http::header::HeaderName::from_static("x-csrf-token"),
+            axum::http::header::HeaderName::from_static("x-client-version"),
+        ]);
+
     if state.config.frontend_origins.is_empty() {
-        cors = cors.allow_origin(Any);
+        cors_admin = cors_admin.allow_origin(Any);
     } else {
         let origins: Vec<HeaderValue> = state
             .config
@@ -64,27 +64,38 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             tracing::warn!(
                 "FRONTEND_ORIGINS no tiene valores válidos; usando allow_origin(Any) temporalmente"
             );
-            cors = cors.allow_origin(Any);
+            cors_admin = cors_admin.allow_origin(Any);
         } else {
-            cors = cors.allow_origin(origins);
+            cors_admin = cors_admin.allow_origin(origins);
         }
     }
-    if state.config.cors_allow_credentials && state.config.frontend_origins.is_empty() {
-        tracing::warn!(
-            "CORS_ALLOW_CREDENTIALS=true pero FRONTEND_ORIGINS vacío; se omite allow_credentials para evitar '*' con credenciales"
-        );
+
+    if state.config.cors_allow_credentials {
+        if state.config.frontend_origins.is_empty() {
+            tracing::warn!(
+                "CORS_ALLOW_CREDENTIALS=true pero FRONTEND_ORIGINS vacío; se omite allow_credentials para evitar '*' con credenciales"
+            );
+        } else {
+            cors_admin = cors_admin.allow_credentials(true);
+        }
     }
 
-    let auth_rate_limit =
+    let auth_rate_limit_client =
+        rate_limit::create_auth_rate_limiter(state.config.rate_limit_auth_per_minute);
+    let auth_rate_limit_admin =
         rate_limit::create_auth_rate_limiter(state.config.rate_limit_auth_per_minute);
 
-    // Rutas públicas con rate limit
-    let public = Router::new()
+    // Rutas públicas de cliente (móvil/webview)
+    let client_public = Router::new()
         .merge(auth_client::routes())
-        .merge(auth_user::public_routes())
         .merge(calculations::routes())
         .merge(api_utils::public_routes())
-        .layer(auth_rate_limit);
+        .layer(auth_rate_limit_client);
+
+    // Rutas públicas de admin (login/refresh)
+    let admin_public = Router::new()
+        .merge(auth_user::public_routes())
+        .layer(auth_rate_limit_admin);
 
     // Webhook de WhatsApp (público, sin rate limit — Meta reenvía si recibe != 200)
     let webhook = whatsapp::webhook_routes();
@@ -119,19 +130,27 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             jwt_auth_middleware,
         ));
 
-    public
-        .merge(webhook)
-        .merge(ws)
+    let admin_scope = Router::new()
+        .merge(admin_public)
         .merge(user_protected)
+        .layer(cors_admin);
+
+    let client_scope = Router::new()
+        .merge(client_public)
         .merge(client_protected)
         .merge(api_utils::static_routes())
+        .layer(cors_client);
+
+    client_scope
+        .merge(admin_scope)
+        .merge(webhook)
+        .merge(ws)
         .merge(SwaggerUi::new("/docs").url("/docs/openapi.json", ApiDoc::openapi()))
         .layer(
             ServiceBuilder::new()
                 .layer(SecureClientIpSource::RightmostXForwardedFor.into_extension())
                 .layer(TraceLayer::new_for_http())
-                .layer(CompressionLayer::new())
-                .layer(cors),
+                .layer(CompressionLayer::new()),
         )
         .with_state(state)
 }
