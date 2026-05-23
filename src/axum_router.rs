@@ -1,3 +1,4 @@
+use axum::http::HeaderValue;
 use axum::{middleware, Router};
 use axum_client_ip::SecureClientIpSource;
 use std::sync::Arc;
@@ -21,10 +22,34 @@ use crate::{
 };
 
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let mut cors = CorsLayer::new().allow_methods(Any).allow_headers(Any);
+    if state.config.frontend_origins.is_empty() {
+        cors = cors.allow_origin(Any);
+    } else {
+        let origins: Vec<HeaderValue> = state
+            .config
+            .frontend_origins
+            .iter()
+            .filter_map(|o| o.parse::<HeaderValue>().ok())
+            .collect();
+        if origins.is_empty() {
+            tracing::warn!(
+                "FRONTEND_ORIGINS no tiene valores válidos; usando allow_origin(Any) temporalmente"
+            );
+            cors = cors.allow_origin(Any);
+        } else {
+            cors = cors.allow_origin(origins);
+        }
+    }
+    if state.config.cors_allow_credentials {
+        if state.config.frontend_origins.is_empty() {
+            tracing::warn!(
+                "CORS_ALLOW_CREDENTIALS=true pero FRONTEND_ORIGINS vacío; se omite allow_credentials para evitar '*' con credenciales"
+            );
+        } else {
+            cors = cors.allow_credentials(true);
+        }
+    }
 
     let auth_rate_limit =
         rate_limit::create_auth_rate_limiter(state.config.rate_limit_auth_per_minute);

@@ -112,6 +112,10 @@ pub fn read_access_token(
     })
 }
 
+pub fn read_staff_access_token(headers: &HeaderMap) -> Option<String> {
+    read_cookie(headers, STAFF_ACCESS_COOKIE).or_else(|| read_bearer(headers))
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthInputDebug {
     pub has_authorization_header: bool,
@@ -142,6 +146,24 @@ pub fn read_refresh_token(
     let allow_refresh_body =
         matches!(audience, AuthAudience::Client) || compat_refresh_body_enabled(cfg);
     if allow_refresh_body {
+        if let Some(token) = body_fallback.map(str::trim).filter(|v| !v.is_empty()) {
+            return Some(token.to_string());
+        }
+    }
+
+    None
+}
+
+pub fn read_staff_refresh_token(
+    headers: &HeaderMap,
+    cfg: &Config,
+    body_fallback: Option<&str>,
+) -> Option<String> {
+    if let Some(token) = read_cookie(headers, STAFF_REFRESH_COOKIE) {
+        return Some(token);
+    }
+
+    if compat_refresh_body_enabled(cfg) {
         if let Some(token) = body_fallback.map(str::trim).filter(|v| !v.is_empty()) {
             return Some(token.to_string());
         }

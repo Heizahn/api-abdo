@@ -12,7 +12,7 @@ use time::OffsetDateTime;
 use crate::{
     auth::{
         http_auth::{
-            build_auth_cookie, build_clear_cookie, read_refresh_token, AuthAudience,
+            build_auth_cookie, build_clear_cookie, read_staff_refresh_token, AuthAudience,
             STAFF_ACCESS_COOKIE, STAFF_REFRESH_COOKIE,
         },
         user_jwt::{UserJwtService, UserProfileClaims},
@@ -146,7 +146,7 @@ pub async fn refresh_token_handler(
         .and_then(|p| p.refresh_token.as_deref().or(p.token.as_deref()));
 
     let raw_refresh =
-        match read_refresh_token(&headers, &state.config, AuthAudience::Staff, body_token) {
+        match read_staff_refresh_token(&headers, &state.config, body_token) {
             Some(v) => v,
             None => {
                 return Ok(refresh_error_response(

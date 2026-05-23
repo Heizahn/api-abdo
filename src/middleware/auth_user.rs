@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::{
     auth::{
-        http_auth::{auth_input_debug, read_access_token, read_bearer, AuthAudience},
+        http_auth::{auth_input_debug, read_staff_access_token, AuthAudience},
         user_jwt::UserJwtService,
     },
     db::UserRepository,
@@ -38,10 +38,7 @@ pub async fn user_jwt_auth_middleware(
         "Procesando autenticación JWT (staff)"
     );
 
-    let token = read_access_token(req.headers(), &state.config, AuthAudience::Staff)
-        // App del sistema (móvil/escritorio) usa Authorization: Bearer, sin depender de cookies.
-        .or_else(|| read_bearer(req.headers()))
-        .ok_or_else(|| {
+    let token = read_staff_access_token(req.headers()).ok_or_else(|| {
             tracing::warn!(
                 target: "auth",
                 route = %route,
