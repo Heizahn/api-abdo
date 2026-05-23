@@ -1,11 +1,10 @@
-use axum::http::HeaderValue;
 use axum::{middleware, Router};
 use axum_client_ip::SecureClientIpSource;
 use std::sync::Arc;
 use tower::ServiceBuilder;
 use tower_http::{
     compression::CompressionLayer,
-    cors::{Any, CorsLayer},
+    cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer},
     trace::TraceLayer,
 };
 use utoipa::OpenApi;
@@ -22,63 +21,13 @@ use crate::{
 };
 
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let cors_client = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
-
-    let mut cors_admin = CorsLayer::new()
-        .allow_methods([
-            axum::http::Method::GET,
-            axum::http::Method::POST,
-            axum::http::Method::PUT,
-            axum::http::Method::PATCH,
-            axum::http::Method::DELETE,
-            axum::http::Method::OPTIONS,
-        ])
-        .allow_headers([
-            axum::http::header::ACCEPT,
-            axum::http::header::AUTHORIZATION,
-            axum::http::header::CACHE_CONTROL,
-            axum::http::header::CONTENT_TYPE,
-            axum::http::header::ORIGIN,
-            axum::http::header::PRAGMA,
-            axum::http::header::COOKIE,
-            axum::http::header::HeaderName::from_static("idempotency-key"),
-            axum::http::header::HeaderName::from_static("x-requested-with"),
-            axum::http::header::HeaderName::from_static("x-refresh-token"),
-            axum::http::header::HeaderName::from_static("x-csrf-token"),
-            axum::http::header::HeaderName::from_static("x-client-version"),
-        ]);
-
-    if state.config.frontend_origins.is_empty() {
-        cors_admin = cors_admin.allow_origin(Any);
-    } else {
-        let origins: Vec<HeaderValue> = state
-            .config
-            .frontend_origins
-            .iter()
-            .filter_map(|o| o.parse::<HeaderValue>().ok())
-            .collect();
-        if origins.is_empty() {
-            tracing::warn!(
-                "FRONTEND_ORIGINS no tiene valores válidos; usando allow_origin(Any) temporalmente"
-            );
-            cors_admin = cors_admin.allow_origin(Any);
-        } else {
-            cors_admin = cors_admin.allow_origin(origins);
-        }
-    }
-
-    if state.config.cors_allow_credentials {
-        if state.config.frontend_origins.is_empty() {
-            tracing::warn!(
-                "CORS_ALLOW_CREDENTIALS=true pero FRONTEND_ORIGINS vacío; se omite allow_credentials para evitar '*' con credenciales"
-            );
-        } else {
-            cors_admin = cors_admin.allow_credentials(true);
-        }
-    }
+    // Modo bypass CORS para estabilizar producción: refleja origen/métodos/headers
+    // de la solicitud y permite credenciales (cookies/authorization).
+    let cors_permissive = CorsLayer::new()
+        .allow_origin(AllowOrigin::mirror_request())
+        .allow_methods(AllowMethods::mirror_request())
+        .allow_headers(AllowHeaders::mirror_request())
+        .allow_credentials(true);
 
     let auth_rate_limit_client =
         rate_limit::create_auth_rate_limiter(state.config.rate_limit_auth_per_minute);
@@ -130,19 +79,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             jwt_auth_middleware,
         ));
 
-    let admin_scope = Router::new()
-        .merge(admin_public)
-        .merge(user_protected)
-        .layer(cors_admin);
-
-    let client_scope = Router::new()
+    Router::new()
         .merge(client_public)
         .merge(client_protected)
+        .merge(admin_public)
+        .merge(user_protected)
         .merge(api_utils::static_routes())
-        .layer(cors_client);
-
-    client_scope
-        .merge(admin_scope)
         .merge(webhook)
         .merge(ws)
         .merge(SwaggerUi::new("/docs").url("/docs/openapi.json", ApiDoc::openapi()))
@@ -152,5 +94,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 .layer(TraceLayer::new_for_http())
                 .layer(CompressionLayer::new()),
         )
+        .layer(cors_permissive)
         .with_state(state)
 }
