@@ -1,5 +1,6 @@
 /target
 .env
+<<<<<<< HEAD
 .claude/*
 !.claude/skills/
 .idea
@@ -10,3 +11,8 @@
 
 # Example HTTP
 example.http
+=======
+.claude/
+.idea
+/uploads
+>>>>>>> 630956f82c62e1ca3653085a006940b4665c5fab
