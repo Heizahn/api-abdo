@@ -86,11 +86,17 @@ pub fn read_bearer(headers: &HeaderMap) -> Option<String> {
     let auth = headers
         .get(axum::http::header::AUTHORIZATION)?
         .to_str()
-        .ok()?;
-    auth.strip_prefix("Bearer ")
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(ToString::to_string)
+        .ok()?
+        .trim();
+    let (scheme, token) = auth.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return None;
+    }
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    Some(token.to_string())
 }
 
 pub fn read_access_token(
@@ -99,10 +105,28 @@ pub fn read_access_token(
     audience: AuthAudience,
 ) -> Option<String> {
     read_cookie(headers, audience.access_cookie_name()).or_else(|| {
-        compat_bearer_enabled(cfg)
-            .then(|| read_bearer(headers))
-            .flatten()
+        // Los clientes móviles dependen de Authorization: Bearer y no de cookies.
+        // Para `Client` se mantiene soporte permanente; para `Staff` sigue bajo ventana de compat.
+        let allow_bearer = matches!(audience, AuthAudience::Client) || compat_bearer_enabled(cfg);
+        allow_bearer.then(|| read_bearer(headers)).flatten()
     })
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthInputDebug {
+    pub has_authorization_header: bool,
+    pub has_cookie_header: bool,
+    pub has_access_cookie: bool,
+    pub has_bearer_token: bool,
+}
+
+pub fn auth_input_debug(headers: &HeaderMap, audience: AuthAudience) -> AuthInputDebug {
+    AuthInputDebug {
+        has_authorization_header: headers.contains_key(axum::http::header::AUTHORIZATION),
+        has_cookie_header: headers.contains_key(axum::http::header::COOKIE),
+        has_access_cookie: read_cookie(headers, audience.access_cookie_name()).is_some(),
+        has_bearer_token: read_bearer(headers).is_some(),
+    }
 }
 
 pub fn read_refresh_token(

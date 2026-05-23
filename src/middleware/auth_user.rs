@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::{
     auth::{
-        http_auth::{read_access_token, AuthAudience},
+        http_auth::{auth_input_debug, read_access_token, AuthAudience},
         user_jwt::UserJwtService,
     },
     db::UserRepository,
@@ -25,13 +25,47 @@ pub async fn user_jwt_auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    let route = req.uri().path().to_string();
+    let auth_debug = auth_input_debug(req.headers(), AuthAudience::Staff);
+    tracing::debug!(
+        target: "auth",
+        route = %route,
+        audience = "staff",
+        has_authorization_header = auth_debug.has_authorization_header,
+        has_cookie_header = auth_debug.has_cookie_header,
+        has_access_cookie = auth_debug.has_access_cookie,
+        has_bearer_token = auth_debug.has_bearer_token,
+        "Procesando autenticación JWT (staff)"
+    );
+
     let token = read_access_token(req.headers(), &state.config, AuthAudience::Staff)
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .ok_or_else(|| {
+            tracing::warn!(
+                target: "auth",
+                route = %route,
+                audience = "staff",
+                has_authorization_header = auth_debug.has_authorization_header,
+                has_cookie_header = auth_debug.has_cookie_header,
+                has_access_cookie = auth_debug.has_access_cookie,
+                has_bearer_token = auth_debug.has_bearer_token,
+                "Missing auth token (cookie/header)"
+            );
+            StatusCode::UNAUTHORIZED
+        })?;
 
     let jwt_service = UserJwtService::new();
     let claims = jwt_service
         .verify_token(&token)
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+        .map_err(|err| {
+            tracing::warn!(
+                target: "auth",
+                route = %route,
+                audience = "staff",
+                error = ?err,
+                "JWT verification failed"
+            );
+            StatusCode::UNAUTHORIZED
+        })?;
 
     // Gate "sin acceso": lee el rol vivo de DB. Un JWT emitido cuando el
     // user era válido deja de funcionar apenas le seteen `nRole = -1` en DB,
@@ -44,6 +78,13 @@ pub async fn user_jwt_auth_middleware(
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     if user.role == NO_ACCESS_ROLE {
+        tracing::warn!(
+            target: "auth",
+            route = %route,
+            audience = "staff",
+            user_id = %claims.id,
+            "Access denied by sentinel role"
+        );
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -52,6 +93,13 @@ pub async fn user_jwt_auth_middleware(
     // el rol/flags actuales (ej. CRUD de users).
     req.extensions_mut().insert(claims);
     req.extensions_mut().insert(user);
+
+    tracing::info!(
+        target: "auth",
+        route = %route,
+        audience = "staff",
+        "Autenticación exitosa"
+    );
 
     Ok(next.run(req).await)
 }
