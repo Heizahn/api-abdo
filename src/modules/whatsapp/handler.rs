@@ -3014,25 +3014,77 @@ pub async fn initiate_conversation_handler(
 ) -> Result<Json<SendMessageResponse>, ApiError> {
     require_can_chat(&state, &claims.id).await?;
 
-    let workspace_oid = ObjectId::parse_str(payload.business_phone_id.trim())
-        .map_err(|_| ApiError::BadRequest("business_phone_id inválido".into()))?;
+    let business_phone_id = payload.business_phone_id.trim().to_string();
+    tracing::info!(
+        user_id = %claims.id,
+        business_phone_id = %business_phone_id,
+        expected_field = "WaSettings._id (ObjectId hex de 24 chars)",
+        lookup = "find_wa_settings_by_id({_id: ObjectId(...)})",
+        "initiate: validando workspace emisor para template outbound"
+    );
+    let workspace_oid = ObjectId::parse_str(&business_phone_id).map_err(|_| {
+        tracing::warn!(
+            user_id = %claims.id,
+            business_phone_id = %business_phone_id,
+            expected_field = "WaSettings._id (ObjectId hex de 24 chars)",
+            hint = "No enviar WaSettings.phone_number_id (Meta) ni phone E.164",
+            "initiate: business_phone_id invalido para parse ObjectId"
+        );
+        ApiError::BadRequest("business_phone_id inválido".into())
+    })?;
 
-    let settings = state
+    let settings_opt = state
         .db
         .find_wa_settings_by_id(&workspace_oid)
         .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or(ApiError::NotFound)?;
+        .map_err(ApiError::DatabaseError)?;
+    let settings = match settings_opt {
+        Some(s) => s,
+        None => {
+            tracing::warn!(
+                user_id = %claims.id,
+                workspace_id = %workspace_oid.to_hex(),
+                lookup = "find_wa_settings_by_id({_id: ObjectId(...)})",
+                "initiate: workspace no encontrado por _id"
+            );
+            return Err(ApiError::NotFound);
+        }
+    };
+    tracing::info!(
+        user_id = %claims.id,
+        workspace_id = %workspace_oid.to_hex(),
+        phone_number_id = %settings.phone_number_id,
+        active = settings.active,
+        agents_count = settings.agents.len(),
+        "initiate: workspace resuelto para envio de template"
+    );
 
     if !settings.agents.iter().any(|a| a == &claims.id) {
+        tracing::warn!(
+            user_id = %claims.id,
+            workspace_id = %workspace_oid.to_hex(),
+            "initiate: usuario autenticado no pertenece al workspace.agents"
+        );
         return Err(ApiError::Forbidden);
     }
 
     if !settings.active {
+        tracing::warn!(
+            user_id = %claims.id,
+            workspace_id = %workspace_oid.to_hex(),
+            "initiate: workspace inactivo"
+        );
         return Err(ApiError::BadRequest("workspace inactivo".into()));
     }
 
     if settings.phone_number_id.is_empty() || settings.access_token.is_empty() {
+        tracing::warn!(
+            user_id = %claims.id,
+            workspace_id = %workspace_oid.to_hex(),
+            phone_number_id_empty = settings.phone_number_id.is_empty(),
+            access_token_empty = settings.access_token.is_empty(),
+            "initiate: workspace sin credenciales WhatsApp completas"
+        );
         return Err(ApiError::BadRequest(
             "workspace sin phone_number_id o access_token configurados".into(),
         ));
