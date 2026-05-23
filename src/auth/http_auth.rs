@@ -105,9 +105,10 @@ pub fn read_access_token(
     audience: AuthAudience,
 ) -> Option<String> {
     read_cookie(headers, audience.access_cookie_name()).or_else(|| {
-        compat_bearer_enabled(cfg)
-            .then(|| read_bearer(headers))
-            .flatten()
+        // Cliente móvil no depende de cookies: siempre permitimos Bearer como fallback.
+        // En staff mantenemos la ventana de compatibilidad.
+        let allow_bearer = matches!(audience, AuthAudience::Client) || compat_bearer_enabled(cfg);
+        allow_bearer.then(|| read_bearer(headers)).flatten()
     })
 }
 
@@ -138,7 +139,9 @@ pub fn read_refresh_token(
         return Some(token);
     }
 
-    if compat_refresh_body_enabled(cfg) {
+    let allow_refresh_body =
+        matches!(audience, AuthAudience::Client) || compat_refresh_body_enabled(cfg);
+    if allow_refresh_body {
         if let Some(token) = body_fallback.map(str::trim).filter(|v| !v.is_empty()) {
             return Some(token.to_string());
         }
