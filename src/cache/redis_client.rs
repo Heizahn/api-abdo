@@ -18,6 +18,9 @@ pub struct RedisClient {
 pub enum RefreshSessionRotateOutcome {
     Rotated,
     Missing,
+    /// El token presentado ya fue rotado recientemente por el mismo usuario
+    /// (race de requests concurrentes). No implica robo del token.
+    Stale,
     ReuseDetected,
 }
 
@@ -112,12 +115,19 @@ impl RedisClient {
                 local expected = ARGV[1]
                 local replacement = ARGV[2]
                 local ttl = tonumber(ARGV[3])
+                local user_prefix = ARGV[4]
 
                 local current = redis.call("GET", key)
                 if not current then
                     return 0
                 end
                 if current ~= expected then
+                    -- Si el valor activo pertenece al mismo usuario/familia,
+                    -- tratamos esto como race benigno (stale old-jti), no
+                    -- como reutilización maliciosa.
+                    if string.sub(current, 1, string.len(user_prefix)) == user_prefix then
+                        return 2
+                    end
                     redis.call("DEL", key)
                     return -1
                 end
@@ -132,12 +142,14 @@ impl RedisClient {
             .arg(expected)
             .arg(new_value)
             .arg(ttl_secs as i64)
+            .arg(format!("{}|", user_id))
             .invoke_async(&mut conn)
             .await?;
 
         let outcome = match status {
             1 => RefreshSessionRotateOutcome::Rotated,
             0 => RefreshSessionRotateOutcome::Missing,
+            2 => RefreshSessionRotateOutcome::Stale,
             _ => RefreshSessionRotateOutcome::ReuseDetected,
         };
         Ok(outcome)

@@ -225,6 +225,10 @@ pub async fn refresh_token_handler(
             "session_expired",
             "La sesión expiró, inicia sesión nuevamente",
         )),
+        RefreshSessionRotateOutcome::Stale => Ok(refresh_soft_error_response(
+            "refresh_in_progress",
+            "Se detectó una renovación concurrente; reintenta la solicitud",
+        )),
         RefreshSessionRotateOutcome::ReuseDetected => Ok(refresh_error_response(
             &state,
             "refresh_token_reused",
@@ -377,6 +381,22 @@ fn refresh_error_response(state: &Arc<AppState>, code: &str, message: &str) -> R
         build_clear_cookie(&state.config, STAFF_REFRESH_COOKIE, "/v1/auth-user"),
     );
     response
+}
+
+/// Error de refresh sin limpieza de cookies (p.ej. race benigno).
+/// Evita desloguear al usuario cuando hubo dos refresh concurrentes y uno de
+/// ellos ya rotó correctamente la sesión.
+fn refresh_soft_error_response(code: &str, message: &str) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "ok": false,
+            "error": code,
+            "code": code,
+            "message": message
+        })),
+    )
+        .into_response()
 }
 
 fn push_set_cookie(headers: &mut HeaderMap, cookie: String) {
