@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::{
     auth::{
-        http_auth::{auth_input_debug, read_staff_access_token, AuthAudience},
+        http_auth::{auth_input_debug, read_staff_access_token, STAFF_ACCESS_COOKIE},
         user_jwt::UserJwtService,
     },
     db::UserRepository,
@@ -26,7 +26,7 @@ pub async fn user_jwt_auth_middleware(
     next: Next,
 ) -> Result<Response, StatusCode> {
     let route = req.uri().path().to_string();
-    let auth_debug = auth_input_debug(req.headers(), AuthAudience::Staff);
+    let auth_debug = auth_input_debug(req.headers(), STAFF_ACCESS_COOKIE);
     tracing::debug!(
         target: "auth",
         route = %route,

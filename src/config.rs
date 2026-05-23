@@ -63,7 +63,6 @@ pub struct Config {
     pub auth_cookie_secure: bool,
     pub auth_cookie_same_site: String,
     pub auth_cookie_domain: Option<String>,
-    pub auth_compat_allow_bearer: bool,
     pub auth_compat_allow_refresh_body: bool,
     pub auth_compat_allow_ws_query: bool,
     pub auth_compat_until: Option<String>,
@@ -164,7 +163,6 @@ impl Config {
             auth_cookie_domain: env::var("AUTH_COOKIE_DOMAIN")
                 .ok()
                 .filter(|v| !v.trim().is_empty()),
-            auth_compat_allow_bearer: parse_bool_env("AUTH_COMPAT_ALLOW_BEARER", true),
             auth_compat_allow_refresh_body: parse_bool_env("AUTH_COMPAT_ALLOW_REFRESH_BODY", true),
             auth_compat_allow_ws_query: parse_bool_env("AUTH_COMPAT_ALLOW_WS_QUERY", true),
             auth_compat_until: env::var("AUTH_COMPAT_UNTIL")

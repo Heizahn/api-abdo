@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     auth::{
-        http_auth::{compat_ws_query_enabled, read_access_token, AuthAudience},
+        http_auth::{compat_ws_query_enabled, read_staff_access_token},
         user_jwt::UserJwtService,
     },
     db::{SalesRepository, UserRepository, WhatsAppRepository},
@@ -508,7 +508,7 @@ pub async fn ws_handler(
     headers: HeaderMap,
     query: Option<Query<WsConnectParams>>,
 ) -> Response {
-    let cookie_token = read_access_token(&headers, &state.config, AuthAudience::Staff);
+    let cookie_token = read_staff_access_token(&headers);
     let query_token = if compat_ws_query_enabled(&state.config) {
         query.and_then(|q| q.0.token)
     } else {

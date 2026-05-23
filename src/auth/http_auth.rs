@@ -5,41 +5,7 @@ use crate::config::Config;
 
 pub const STAFF_ACCESS_COOKIE: &str = "abdo_staff_at";
 pub const STAFF_REFRESH_COOKIE: &str = "abdo_staff_rt";
-pub const CLIENT_ACCESS_COOKIE: &str = "abdo_client_at";
-pub const CLIENT_REFRESH_COOKIE: &str = "abdo_client_rt";
-
-#[derive(Debug, Clone, Copy)]
-pub enum AuthAudience {
-    Staff,
-    Client,
-}
-
-impl AuthAudience {
-    pub fn access_cookie_name(self) -> &'static str {
-        match self {
-            Self::Staff => STAFF_ACCESS_COOKIE,
-            Self::Client => CLIENT_ACCESS_COOKIE,
-        }
-    }
-
-    pub fn refresh_cookie_name(self) -> &'static str {
-        match self {
-            Self::Staff => STAFF_REFRESH_COOKIE,
-            Self::Client => CLIENT_REFRESH_COOKIE,
-        }
-    }
-
-    pub fn redis_realm(self) -> &'static str {
-        match self {
-            Self::Staff => "staff",
-            Self::Client => "client",
-        }
-    }
-}
-
-pub fn compat_bearer_enabled(cfg: &Config) -> bool {
-    cfg.auth_compat_allow_bearer && compat_window_is_open(cfg)
-}
+pub const STAFF_REDIS_REALM: &str = "staff";
 
 pub fn compat_refresh_body_enabled(cfg: &Config) -> bool {
     cfg.auth_compat_allow_refresh_body && compat_window_is_open(cfg)
@@ -99,19 +65,6 @@ pub fn read_bearer(headers: &HeaderMap) -> Option<String> {
     Some(token.to_string())
 }
 
-pub fn read_access_token(
-    headers: &HeaderMap,
-    cfg: &Config,
-    audience: AuthAudience,
-) -> Option<String> {
-    read_cookie(headers, audience.access_cookie_name()).or_else(|| {
-        // Cliente móvil no depende de cookies: siempre permitimos Bearer como fallback.
-        // En staff mantenemos la ventana de compatibilidad.
-        let allow_bearer = matches!(audience, AuthAudience::Client) || compat_bearer_enabled(cfg);
-        allow_bearer.then(|| read_bearer(headers)).flatten()
-    })
-}
-
 pub fn read_staff_access_token(headers: &HeaderMap) -> Option<String> {
     read_cookie(headers, STAFF_ACCESS_COOKIE).or_else(|| read_bearer(headers))
 }
@@ -124,34 +77,13 @@ pub struct AuthInputDebug {
     pub has_bearer_token: bool,
 }
 
-pub fn auth_input_debug(headers: &HeaderMap, audience: AuthAudience) -> AuthInputDebug {
+pub fn auth_input_debug(headers: &HeaderMap, access_cookie_name: &str) -> AuthInputDebug {
     AuthInputDebug {
         has_authorization_header: headers.contains_key(axum::http::header::AUTHORIZATION),
         has_cookie_header: headers.contains_key(axum::http::header::COOKIE),
-        has_access_cookie: read_cookie(headers, audience.access_cookie_name()).is_some(),
+        has_access_cookie: read_cookie(headers, access_cookie_name).is_some(),
         has_bearer_token: read_bearer(headers).is_some(),
     }
-}
-
-pub fn read_refresh_token(
-    headers: &HeaderMap,
-    cfg: &Config,
-    audience: AuthAudience,
-    body_fallback: Option<&str>,
-) -> Option<String> {
-    if let Some(token) = read_cookie(headers, audience.refresh_cookie_name()) {
-        return Some(token);
-    }
-
-    let allow_refresh_body =
-        matches!(audience, AuthAudience::Client) || compat_refresh_body_enabled(cfg);
-    if allow_refresh_body {
-        if let Some(token) = body_fallback.map(str::trim).filter(|v| !v.is_empty()) {
-            return Some(token.to_string());
-        }
-    }
-
-    None
 }
 
 pub fn read_staff_refresh_token(

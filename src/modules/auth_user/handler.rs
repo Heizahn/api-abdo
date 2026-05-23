@@ -12,8 +12,8 @@ use time::OffsetDateTime;
 use crate::{
     auth::{
         http_auth::{
-            build_auth_cookie, build_clear_cookie, read_staff_refresh_token, AuthAudience,
-            STAFF_ACCESS_COOKIE, STAFF_REFRESH_COOKIE,
+            build_auth_cookie, build_clear_cookie, read_staff_refresh_token, STAFF_ACCESS_COOKIE,
+            STAFF_REFRESH_COOKIE, STAFF_REDIS_REALM,
         },
         user_jwt::{UserJwtService, UserProfileClaims},
     },
@@ -89,7 +89,7 @@ pub async fn login_handler(
     state
         .redis
         .set_refresh_session(
-            AuthAudience::Staff.redis_realm(),
+            STAFF_REDIS_REALM,
             &family,
             &user.id,
             &jti,
@@ -192,7 +192,7 @@ pub async fn refresh_token_handler(
     let rotate_result = state
         .redis
         .rotate_refresh_session(
-            AuthAudience::Staff.redis_realm(),
+            STAFF_REDIS_REALM,
             &family,
             &user.id,
             &claims.jti,
