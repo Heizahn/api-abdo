@@ -65,6 +65,27 @@ impl MongoDB {
             .build();
         self.db.gridfs_bucket(opts)
     }
+
+    /// Lista de números de negocio activos (E.164 sin '+') según WaSettings.
+    /// Se usa para evitar que badges incluyan conversaciones/tickets de
+    /// workspaces desactivados o eliminados.
+    async fn active_business_phones(&self) -> Result<Vec<String>, String> {
+        let values = self
+            .wa_settings()
+            .distinct("phone", doc! { "active": true })
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let phones = values
+            .into_iter()
+            .filter_map(|v| match v {
+                mongodb::bson::Bson::String(s) if !s.is_empty() => Some(s),
+                _ => None,
+            })
+            .collect();
+
+        Ok(phones)
+    }
 }
 
 #[async_trait]
@@ -2219,9 +2240,15 @@ impl WhatsAppRepository for MongoDB {
     // ── realtime-pending-badges: T09 ─────────────────────────────────────────
 
     async fn count_unread_conversations(&self) -> Result<u64, String> {
+        let active_phones = self.active_business_phones().await?;
+        if active_phones.is_empty() {
+            return Ok(0);
+        }
+
         self.wa_conversations()
             .count_documents(doc! {
                 "$and": [
+                    { "business_phone": { "$in": active_phones } },
                     {
                         "$or": [
                             { "unread_count": { "$gt": 0 } },
@@ -2241,8 +2268,16 @@ impl WhatsAppRepository for MongoDB {
     }
 
     async fn count_open_tickets(&self) -> Result<u64, String> {
+        let active_phones = self.active_business_phones().await?;
+        if active_phones.is_empty() {
+            return Ok(0);
+        }
+
         self.wa_tickets()
-            .count_documents(doc! { "status": "open" })
+            .count_documents(doc! {
+                "status": "open",
+                "business_phone": { "$in": active_phones }
+            })
             .await
             .map_err(|e| e.to_string())
     }

@@ -41,7 +41,7 @@ use super::service::WhatsAppService;
 use super::ws::{
     broadcast_all, broadcast_except, broadcast_to_chat_users, build_template_created_event,
     build_template_deleted_event, build_template_updated_event, emit_to_phone_number_agents,
-    send_to_user, ConversacionNoLeidaData, WsServerEvent,
+    send_to_user, ConversacionNoLeidaData, TicketPendienteData, WsServerEvent,
 };
 
 /// Cooldown que aplica el back cuando Meta rebota con error 131049
@@ -57,6 +57,39 @@ const META_THROTTLE_COOLDOWN_MS: i64 = 6 * 60 * 60 * 1000;
 async fn record_conv_event(state: &AppState, input: WaConversationEventInput<'_>) {
     if let Err(e) = state.db.record_conversation_event(input).await {
         tracing::warn!("record_conversation_event failed: {}", e);
+    }
+}
+
+/// Fuerza un refresh de badges de mensajería (no leídos + tickets abiertos)
+/// para todos los usuarios con acceso al inbox WA.
+///
+/// Se usa en cambios de configuración de números (alta/edición/baja), donde
+/// el universo visible puede cambiar sin que exista un `conversation_id`
+/// concreto para emitir delta (+1/-1).
+async fn emit_chat_badges_refresh(state: &Arc<AppState>, reason: &str) {
+    let unread_total = state.db.count_unread_conversations().await.unwrap_or(0);
+    let unread_event = WsServerEvent::ConversacionNoLeida {
+        data: ConversacionNoLeidaData {
+            pending_total: unread_total,
+            conversation_id: format!("__refresh__:{reason}"),
+            delta: 0,
+        },
+    };
+    if let Ok(payload) = serde_json::to_string(&unread_event) {
+        let _ = broadcast_to_chat_users(state, payload).await;
+    }
+
+    let tickets_total = state.db.count_open_tickets().await.unwrap_or(0);
+    let tickets_event = WsServerEvent::TicketPendiente {
+        data: TicketPendienteData {
+            pending_total: tickets_total,
+            ticket_id: format!("__refresh__:{reason}"),
+            previous_status: None,
+            new_status: "refresh".to_string(),
+        },
+    };
+    if let Ok(payload) = serde_json::to_string(&tickets_event) {
+        let _ = broadcast_to_chat_users(state, payload).await;
     }
 }
 
@@ -3390,6 +3423,7 @@ pub async fn create_settings_handler(
         .create_wa_settings(doc)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
+    emit_chat_badges_refresh(&state, "settings_created").await;
     Ok(Json(SettingsResponse {
         ok: true,
         data: settings_to_item(created),
@@ -3453,6 +3487,7 @@ pub async fn update_settings_handler(
         )
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
+    emit_chat_badges_refresh(&state, "settings_updated").await;
     Ok(Json(UpdateResponse { ok: true }))
 }
 
@@ -3477,6 +3512,7 @@ pub async fn delete_settings_handler(
         .delete_wa_settings(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
+    emit_chat_badges_refresh(&state, "settings_deleted").await;
     Ok(Json(UpdateResponse { ok: true }))
 }
 
