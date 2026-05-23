@@ -22,25 +22,7 @@ use crate::{
 };
 
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let mut cors = CorsLayer::new()
-        .allow_methods([
-            axum::http::Method::GET,
-            axum::http::Method::POST,
-            axum::http::Method::PUT,
-            axum::http::Method::PATCH,
-            axum::http::Method::DELETE,
-            axum::http::Method::OPTIONS,
-        ])
-        .allow_headers([
-            axum::http::header::ACCEPT,
-            axum::http::header::AUTHORIZATION,
-            axum::http::header::CACHE_CONTROL,
-            axum::http::header::CONTENT_TYPE,
-            axum::http::header::ORIGIN,
-            axum::http::header::PRAGMA,
-            axum::http::header::HeaderName::from_static("idempotency-key"),
-            axum::http::header::HeaderName::from_static("x-requested-with"),
-        ]);
+    let mut cors = CorsLayer::new().allow_methods(Any).allow_headers(Any);
     if state.config.frontend_origins.is_empty() {
         cors = cors.allow_origin(Any);
     } else {
