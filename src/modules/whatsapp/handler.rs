@@ -3037,6 +3037,7 @@ pub async fn initiate_conversation_handler(
         }
         user
     };
+    let is_superadmin = caller.role == 0.0;
 
     let business_phone_id = payload.business_phone_id.trim().to_string();
     tracing::info!(
@@ -3093,7 +3094,7 @@ pub async fn initiate_conversation_handler(
         "initiate: workspace resuelto para envio de template"
     );
 
-    if !settings.agents.iter().any(|a| a == &caller.id) {
+    if !is_superadmin && !settings.agents.iter().any(|a| a == &caller.id) {
         tracing::warn!(
             user_id = %caller.id,
             workspace_id = %workspace_oid.to_hex(),
