@@ -3012,11 +3012,35 @@ pub async fn initiate_conversation_handler(
     Extension(claims): Extension<UserProfileClaims>,
     Json(payload): Json<InitiateConversationRequest>,
 ) -> Result<Json<SendMessageResponse>, ApiError> {
-    require_can_chat(&state, &claims.id).await?;
+    // Contrato explícito para frontend: distinguir "sin permiso de chat"
+    // de otros 403 del flujo de workspace.
+    let caller = {
+        use crate::db::UserRepository;
+        let user = state
+            .db
+            .find_user_by_id(&claims.id)
+            .await
+            .map_err(ApiError::DatabaseError)?
+            .ok_or_else(|| {
+                ApiError::domain_simple(
+                    StatusCode::FORBIDDEN,
+                    "whatsapp_chat_permission_required",
+                    "Usuario no autorizado para mensajeria WhatsApp",
+                )
+            })?;
+        if user.role != 0.0 && !user.can_chat {
+            return Err(ApiError::domain_simple(
+                StatusCode::FORBIDDEN,
+                "whatsapp_chat_permission_required",
+                "Este usuario requiere can_chat=true para iniciar conversaciones",
+            ));
+        }
+        user
+    };
 
     let business_phone_id = payload.business_phone_id.trim().to_string();
     tracing::info!(
-        user_id = %claims.id,
+        user_id = %caller.id,
         business_phone_id = %business_phone_id,
         expected_field = "WaSettings._id (ObjectId hex de 24 chars)",
         lookup = "find_wa_settings_by_id({_id: ObjectId(...)})",
@@ -3024,13 +3048,18 @@ pub async fn initiate_conversation_handler(
     );
     let workspace_oid = ObjectId::parse_str(&business_phone_id).map_err(|_| {
         tracing::warn!(
-            user_id = %claims.id,
+            user_id = %caller.id,
             business_phone_id = %business_phone_id,
             expected_field = "WaSettings._id (ObjectId hex de 24 chars)",
             hint = "No enviar WaSettings.phone_number_id (Meta) ni phone E.164",
             "initiate: business_phone_id invalido para parse ObjectId"
         );
-        ApiError::BadRequest("business_phone_id inválido".into())
+        ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            "whatsapp_workspace_id_invalid",
+            "business_phone_id",
+            "business_phone_id debe ser el _id del workspace (ObjectId hex)",
+        )
     })?;
 
     let settings_opt = state
@@ -3042,16 +3071,21 @@ pub async fn initiate_conversation_handler(
         Some(s) => s,
         None => {
             tracing::warn!(
-                user_id = %claims.id,
+                user_id = %caller.id,
                 workspace_id = %workspace_oid.to_hex(),
                 lookup = "find_wa_settings_by_id({_id: ObjectId(...)})",
                 "initiate: workspace no encontrado por _id"
             );
-            return Err(ApiError::NotFound);
+            return Err(ApiError::domain_with_field(
+                StatusCode::NOT_FOUND,
+                "whatsapp_workspace_not_found",
+                "business_phone_id",
+                "No existe workspace para el business_phone_id enviado",
+            ));
         }
     };
     tracing::info!(
-        user_id = %claims.id,
+        user_id = %caller.id,
         workspace_id = %workspace_oid.to_hex(),
         phone_number_id = %settings.phone_number_id,
         active = settings.active,
@@ -3059,34 +3093,44 @@ pub async fn initiate_conversation_handler(
         "initiate: workspace resuelto para envio de template"
     );
 
-    if !settings.agents.iter().any(|a| a == &claims.id) {
+    if !settings.agents.iter().any(|a| a == &caller.id) {
         tracing::warn!(
-            user_id = %claims.id,
+            user_id = %caller.id,
             workspace_id = %workspace_oid.to_hex(),
             "initiate: usuario autenticado no pertenece al workspace.agents"
         );
-        return Err(ApiError::Forbidden);
+        return Err(ApiError::domain_simple(
+            StatusCode::FORBIDDEN,
+            "whatsapp_workspace_membership_required",
+            "No tienes permiso sobre este workspace",
+        ));
     }
 
     if !settings.active {
         tracing::warn!(
-            user_id = %claims.id,
+            user_id = %caller.id,
             workspace_id = %workspace_oid.to_hex(),
             "initiate: workspace inactivo"
         );
-        return Err(ApiError::BadRequest("workspace inactivo".into()));
+        return Err(ApiError::domain_simple(
+            StatusCode::BAD_REQUEST,
+            "whatsapp_workspace_inactive",
+            "El workspace esta inactivo",
+        ));
     }
 
     if settings.phone_number_id.is_empty() || settings.access_token.is_empty() {
         tracing::warn!(
-            user_id = %claims.id,
+            user_id = %caller.id,
             workspace_id = %workspace_oid.to_hex(),
             phone_number_id_empty = settings.phone_number_id.is_empty(),
             access_token_empty = settings.access_token.is_empty(),
             "initiate: workspace sin credenciales WhatsApp completas"
         );
-        return Err(ApiError::BadRequest(
-            "workspace sin phone_number_id o access_token configurados".into(),
+        return Err(ApiError::domain_simple(
+            StatusCode::BAD_REQUEST,
+            "whatsapp_workspace_credentials_missing",
+            "Workspace sin phone_number_id o access_token configurados",
         ));
     }
 
@@ -3101,12 +3145,22 @@ pub async fn initiate_conversation_handler(
 
     let idempotency_key = payload.idempotency_key.trim().to_string();
     if idempotency_key.is_empty() {
-        return Err(ApiError::BadRequest("idempotency_key requerido".into()));
+        return Err(ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            "whatsapp_idempotency_key_required",
+            "idempotency_key",
+            "idempotency_key es requerido",
+        ));
     }
 
     let to = normalize_to_e164(&payload.to);
     if to.is_empty() {
-        return Err(ApiError::BadRequest("to inválido".into()));
+        return Err(ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            "whatsapp_recipient_invalid",
+            "to",
+            "Numero de destino invalido. Usa formato internacional, ej: 58414XXXXXXX",
+        ));
     }
 
     // Linkear con cliente ISP si el teléfono matchea (best-effort — el link
