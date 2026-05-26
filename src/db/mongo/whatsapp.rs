@@ -672,6 +672,26 @@ impl WhatsAppRepository for MongoDB {
         Ok(())
     }
 
+    async fn transfer_conversation(
+        &self,
+        id: &ObjectId,
+        assigned_to: &str,
+    ) -> Result<Option<WaConversation>, String> {
+        use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+        let opts = FindOneAndUpdateOptions::builder()
+            .return_document(ReturnDocument::After)
+            .build();
+
+        self.wa_conversations()
+            .find_one_and_update(
+                doc! { "_id": id },
+                doc! { "$set": { "assigned_to": assigned_to } },
+            )
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn take_conversation(
         &self,
         id: &ObjectId,

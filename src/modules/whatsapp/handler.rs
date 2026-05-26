@@ -37,7 +37,7 @@ use crate::{
 use super::assignment::assign_conversation;
 use crate::cache::MEDIA_CACHE_MAX_BYTES;
 
-use super::service::WhatsAppService;
+use super::service::{MediaInfo, WhatsAppService};
 use super::ws::{
     broadcast_all, broadcast_except, broadcast_to_chat_users, build_template_created_event,
     build_template_deleted_event, build_template_updated_event, emit_to_phone_number_agents,
@@ -50,6 +50,99 @@ use super::ws::{
 /// suficiente para cubrir la ventana típica del rate limit de Meta sin
 /// quedarse pegado en perpetuidad si el inbound del cliente nunca llega.
 const META_THROTTLE_COOLDOWN_MS: i64 = 6 * 60 * 60 * 1000;
+
+/// Reintentos para media download (info+body) cuando Meta/CDN falla de forma
+/// transitoria. Backoff corto para no congelar la UI, pero suficiente para
+/// absorber intermitencias de red o 5xx puntuales.
+const MEDIA_DOWNLOAD_RETRY_DELAYS_MS: &[u64] = &[0, 700, 2_000];
+
+/// Antes de avisar "reenvía la imagen", re-chequeamos si el mensaje apareció
+/// en DB unos segundos después (desfase webhook status vs message).
+/// Si aparece, evitamos fallback prematuro.
+const INBOUND_MEDIA_FAILURE_RECHECK_DELAYS_MS: &[u64] = &[0, 10_000, 30_000];
+
+fn infer_inbound_effective_type(msg: &InboundMessage) -> String {
+    let original = msg.msg_type.trim().to_ascii_lowercase();
+    let inferred = if msg.video.is_some() {
+        Some("video")
+    } else if msg.image.is_some() {
+        Some("image")
+    } else if msg.document.is_some() {
+        Some("document")
+    } else if msg.audio.is_some() {
+        Some("audio")
+    } else if msg.sticker.is_some() {
+        Some("sticker")
+    } else if msg.location.is_some() {
+        Some("location")
+    } else if msg.contacts.is_some() {
+        Some("contacts")
+    } else if msg.interactive.is_some() {
+        Some("interactive")
+    } else if msg.button.is_some() {
+        Some("button")
+    } else if msg.reaction.is_some() {
+        Some("reaction")
+    } else if msg.text.is_some() {
+        Some("text")
+    } else {
+        None
+    };
+
+    let should_override = matches!(original.as_str(), "" | "unsupported" | "unknown")
+        || (original == "text" && msg.text.is_none() && inferred.is_some());
+
+    if should_override {
+        inferred.unwrap_or("unsupported").to_string()
+    } else {
+        original
+    }
+}
+
+fn inbound_payload_markers(msg: &InboundMessage) -> String {
+    let mut markers = Vec::new();
+    if msg.text.is_some() {
+        markers.push("text");
+    }
+    if msg.image.is_some() {
+        markers.push("image");
+    }
+    if msg.document.is_some() {
+        markers.push("document");
+    }
+    if msg.audio.is_some() {
+        markers.push("audio");
+    }
+    if msg.video.is_some() {
+        markers.push("video");
+    }
+    if msg.sticker.is_some() {
+        markers.push("sticker");
+    }
+    if msg.location.is_some() {
+        markers.push("location");
+    }
+    if msg.contacts.is_some() {
+        markers.push("contacts");
+    }
+    if msg.interactive.is_some() {
+        markers.push("interactive");
+    }
+    if msg.button.is_some() {
+        markers.push("button");
+    }
+    if msg.reaction.is_some() {
+        markers.push("reaction");
+    }
+    for key in msg.extra.keys() {
+        markers.push(key.as_str());
+    }
+    if markers.is_empty() {
+        "none".to_string()
+    } else {
+        markers.join(",")
+    }
+}
 
 /// Persiste un evento de ciclo de vida de conversación. Best-effort:
 /// si la inserción falla se loggea pero NO se propaga el error — la
@@ -370,10 +463,12 @@ pub async fn receive_webhook(
                                     s.id, recipient, business_phone, s.errors
                                 );
                                 if !recipient.is_empty() && !business_phone.is_empty() {
+                                    let wa_id = s.id.clone();
                                     let state_cl = state.clone();
                                     tokio::spawn(async move {
-                                        notify_inbound_media_failure(
+                                        schedule_inbound_media_failure_fallback(
                                             &state_cl,
+                                            &wa_id,
                                             &recipient,
                                             &business_phone,
                                         )
@@ -430,8 +525,27 @@ pub async fn receive_webhook(
                 };
 
                 for msg in messages {
+                    let effective_msg_type = infer_inbound_effective_type(&msg);
+                    if effective_msg_type != msg.msg_type {
+                        tracing::warn!(
+                            "[webhook] tipo inbound ajustado wa_id={} from={} original={} effective={} payload_keys={}",
+                            msg.id,
+                            msg.from,
+                            msg.msg_type,
+                            effective_msg_type,
+                            inbound_payload_markers(&msg)
+                        );
+                    } else if msg.msg_type == "unsupported" {
+                        tracing::warn!(
+                            "[webhook] unsupported inbound wa_id={} from={} payload_keys={}",
+                            msg.id,
+                            msg.from,
+                            inbound_payload_markers(&msg)
+                        );
+                    }
+
                     // === REACCIONES — early return, no toca conversación ni persistencia ===
-                    if msg.msg_type == "reaction" {
+                    if effective_msg_type == "reaction" {
                         let reaction = match &msg.reaction {
                             Some(v) => v,
                             None => {
@@ -568,10 +682,8 @@ pub async fn receive_webhook(
                         })
                         .unwrap_or((None, None, None, None))
                     };
-                    let (body, media_id, media_mime_type, media_filename) = match msg
-                        .msg_type
-                        .as_str()
-                    {
+                    let (body, media_id, media_mime_type, media_filename) =
+                        match effective_msg_type.as_str() {
                         "text" => (msg.text.as_ref().map(|t| t.body.clone()), None, None, None),
                         "image" => extract_media(msg.image.as_ref()),
                         "document" => extract_media(msg.document.as_ref()),
@@ -641,16 +753,16 @@ pub async fn receive_webhook(
 
                     // Voice note: sólo relevante en `audio`. Meta envía `voice: true`
                     // para push-to-talk y `false` para archivos de audio subidos.
-                    let voice = msg.msg_type == "audio"
+                    let voice = effective_msg_type == "audio"
                         && msg.audio.as_ref().and_then(|a| a.voice).unwrap_or(false);
 
                     let preview = body
                         .clone()
-                        .unwrap_or_else(|| format!("[{}]", msg.msg_type));
+                        .unwrap_or_else(|| format!("[{}]", effective_msg_type));
 
                     tracing::info!(
                         "[webhook] guardando mensaje de cliente registrado: {} | tipo: {} | preview: {}",
-                        msg.from, msg.msg_type, preview
+                        msg.from, effective_msg_type, preview
                     );
 
                     // Timestamp real desde Meta (Unix seconds en string), fallback a ahora.
@@ -664,14 +776,14 @@ pub async fn receive_webhook(
                     // objeto crudo de Meta (incluye `button_reply`/`list_reply`)
                     // para que el front pueda renderizar la burbuja con el
                     // contexto completo de la selección.
-                    let interactive_payload = match msg.msg_type.as_str() {
+                    let interactive_payload = match effective_msg_type.as_str() {
                         "interactive" => msg.interactive.clone(),
                         "button" => msg.button.clone(),
                         _ => None,
                     };
 
                     // Payload completo de contactos compartidos (vCard).
-                    let contacts_payload = if msg.msg_type == "contacts" {
+                    let contacts_payload = if effective_msg_type == "contacts" {
                         msg.contacts.clone()
                     } else {
                         None
@@ -680,7 +792,7 @@ pub async fn receive_webhook(
                     // Datos estructurados de ubicación para que el front
                     // renderice el mapa (iframe de OSM/Google, img estática,
                     // o link a maps — lo decide el front).
-                    let location_payload = if msg.msg_type == "location" {
+                    let location_payload = if effective_msg_type == "location" {
                         msg.location
                             .as_ref()
                             .and_then(|l| match (l.latitude, l.longitude) {
@@ -703,7 +815,7 @@ pub async fn receive_webhook(
                         conversation_id: conv_id,
                         wa_message_id: msg.id.clone(),
                         direction: "in".to_string(),
-                        msg_type: msg.msg_type.clone(),
+                        msg_type: effective_msg_type.clone(),
                         body,
                         media_id,
                         media_mime_type,
@@ -755,7 +867,7 @@ pub async fn receive_webhook(
 
                     let touch = crate::db::ConversationTouch {
                         preview: &preview,
-                        msg_type: &msg.msg_type,
+                        msg_type: &effective_msg_type,
                         direction: "in",
                         wa_message_id: &msg.id,
                         from_user_id: None,
@@ -2685,11 +2797,12 @@ pub async fn transfer_conversation_handler(
 
     let from_agent = conv.assigned_to.clone();
 
-    state
+    let conv_after = state
         .db
-        .assign_conversation(&oid, Some(&payload.user_id))
+        .transfer_conversation(&oid, &payload.user_id)
         .await
-        .map_err(|e| ApiError::DatabaseError(e))?;
+        .map_err(|e| ApiError::DatabaseError(e))?
+        .ok_or(ApiError::NotFound)?;
 
     if let Some(prev) = from_agent.as_deref() {
         if prev != payload.user_id {
@@ -2709,13 +2822,6 @@ pub async fn transfer_conversation_handler(
             note
         );
     }
-
-    let conv_after = state
-        .db
-        .find_conversation_by_id(&oid)
-        .await
-        .map_err(|e| ApiError::DatabaseError(e))?
-        .ok_or(ApiError::NotFound)?;
 
     let opens = state
         .db
@@ -3918,15 +4024,17 @@ pub async fn get_media_handler(
     );
 
     let t_meta = std::time::Instant::now();
-    let (bytes, mime, remote_filename) = wa.download_media(&media_id).await.map_err(|e| {
-        tracing::error!(
-            "[media] download_media falló para {} tras {}ms: {}",
-            media_id,
-            t_meta.elapsed().as_millis(),
-            e
-        );
-        ApiError::Internal(e.to_string())
-    })?;
+    let (bytes, mime, remote_filename) = download_media_with_retry(&wa, &media_id).await.map_err(
+        |e| {
+            tracing::error!(
+                "[media] download_media falló para {} tras {}ms: {}",
+                media_id,
+                t_meta.elapsed().as_millis(),
+                e
+            );
+            ApiError::Internal(e)
+        },
+    )?;
     tracing::info!(
         "[media] MISS→FETCH {} ({} bytes, {}) meta={}ms",
         media_id,
@@ -4942,6 +5050,47 @@ async fn notify_inbound_media_failure(
     }
 }
 
+/// Evita fallback prematuro en `131052/131056`: algunos eventos de status
+/// pueden adelantarse al guardado del mensaje. Re-chequeamos por `wa_id` y
+/// sólo avisamos al cliente si después de varios intentos sigue sin doc.
+async fn schedule_inbound_media_failure_fallback(
+    state: &Arc<AppState>,
+    wa_id: &str,
+    recipient_phone: &str,
+    business_phone: &str,
+) {
+    for (attempt, delay_ms) in INBOUND_MEDIA_FAILURE_RECHECK_DELAYS_MS.iter().enumerate() {
+        if *delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+        }
+        let probe = vec![wa_id.to_string()];
+        match state.db.find_messages_by_wa_ids(&probe).await {
+            Ok(map) if map.contains_key(wa_id) => {
+                tracing::info!(
+                    "[webhook] inbound_media_failure: wa_id={} apareció en DB en recheck #{}, no se envía fallback",
+                    wa_id,
+                    attempt + 1
+                );
+                return;
+            }
+            Ok(_) => {
+                tracing::debug!(
+                    "[webhook] inbound_media_failure: wa_id={} aún ausente en recheck #{}",
+                    wa_id,
+                    attempt + 1
+                );
+            }
+            Err(e) => tracing::warn!(
+                "[webhook] inbound_media_failure: recheck DB error wa_id={} (#{}) {}",
+                wa_id,
+                attempt + 1,
+                e
+            ),
+        }
+    }
+    notify_inbound_media_failure(state, recipient_phone, business_phone).await;
+}
+
 /// Aplica el relay de Cloudflare al service si ambas env vars están seteadas
 /// en el Config. No-op cuando no hay relay configurado (dev, o red arreglada).
 fn apply_media_relay(state: &Arc<AppState>, svc: WhatsAppService) -> WhatsAppService {
@@ -4965,6 +5114,92 @@ fn should_prefetch_media(msg_type: &str) -> bool {
         msg_type,
         "audio" | "image" | "sticker" | "video" | "document"
     )
+}
+
+/// Descarga completa `info + body` con reintentos y backoff corto.
+/// Devuelve `(bytes, mime, file_name)` o el error del último intento.
+async fn download_media_with_retry(
+    wa: &WhatsAppService,
+    media_id: &str,
+) -> Result<(Vec<u8>, String, Option<String>), String> {
+    let mut last_err: Option<String> = None;
+    for (attempt, delay_ms) in MEDIA_DOWNLOAD_RETRY_DELAYS_MS.iter().enumerate() {
+        if *delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+        }
+        match wa.download_media(media_id).await {
+            Ok(ok) => return Ok(ok),
+            Err(e) => {
+                let err = e.to_string();
+                tracing::warn!(
+                    "[media] retry {}/{} media_id={} falló: {}",
+                    attempt + 1,
+                    MEDIA_DOWNLOAD_RETRY_DELAYS_MS.len(),
+                    media_id,
+                    err
+                );
+                last_err = Some(err);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "media download failed without detail".to_string()))
+}
+
+/// `download_media_info` con retry/backoff.
+async fn download_media_info_with_retry(
+    wa: &WhatsAppService,
+    media_id: &str,
+) -> Result<MediaInfo, String> {
+    let mut last_err: Option<String> = None;
+    for (attempt, delay_ms) in MEDIA_DOWNLOAD_RETRY_DELAYS_MS.iter().enumerate() {
+        if *delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+        }
+        match wa.download_media_info(media_id).await {
+            Ok(info) => return Ok(info),
+            Err(e) => {
+                let err = e.to_string();
+                tracing::warn!(
+                    "prefetch_media({}): info retry {}/{} falló: {}",
+                    media_id,
+                    attempt + 1,
+                    MEDIA_DOWNLOAD_RETRY_DELAYS_MS.len(),
+                    err
+                );
+                last_err = Some(err);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "download_media_info failed without detail".to_string()))
+}
+
+/// `download_media_body` con retry/backoff.
+async fn download_media_body_with_retry(
+    wa: &WhatsAppService,
+    media_id: &str,
+    url: &str,
+) -> Result<Vec<u8>, String> {
+    let mut last_err: Option<String> = None;
+    for (attempt, delay_ms) in MEDIA_DOWNLOAD_RETRY_DELAYS_MS.iter().enumerate() {
+        if *delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+        }
+        match wa.download_media_body(url).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) => {
+                let err = e.to_string();
+                tracing::warn!(
+                    "prefetch_media({}): body retry {}/{} falló: {}",
+                    media_id,
+                    attempt + 1,
+                    MEDIA_DOWNLOAD_RETRY_DELAYS_MS.len(),
+                    err
+                );
+                last_err = Some(err);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "download_media_body failed without detail".to_string()))
 }
 
 /// Guard que libera el lock de prefetch al salir de `prefetch_media`,
@@ -5023,10 +5258,10 @@ pub(crate) async fn prefetch_media(state: Arc<AppState>, business_phone: String,
         }
     };
 
-    let info = match wa.download_media_info(&media_id).await {
+    let info = match download_media_info_with_retry(&wa, &media_id).await {
         Ok(i) => i,
         Err(e) => {
-            tracing::warn!("prefetch_media({}): info falló: {:?}", media_id, e);
+            tracing::warn!("prefetch_media({}): info falló: {}", media_id, e);
             return;
         }
     };
@@ -5045,10 +5280,10 @@ pub(crate) async fn prefetch_media(state: Arc<AppState>, business_phone: String,
         }
     }
 
-    let bytes = match wa.download_media_body(&info.url).await {
+    let bytes = match download_media_body_with_retry(&wa, &media_id, &info.url).await {
         Ok(b) => b,
         Err(e) => {
-            tracing::warn!("prefetch_media({}): body falló: {:?}", media_id, e);
+            tracing::warn!("prefetch_media({}): body falló: {}", media_id, e);
             return;
         }
     };
