@@ -26,6 +26,8 @@ pub struct UserRefreshClaims {
     pub iat: i64,
     pub exp: i64,
     pub jti: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fam: Option<String>,
 }
 
 pub struct UserJwtService {
@@ -82,21 +84,27 @@ impl UserJwtService {
         Ok((token, exp))
     }
 
-    pub fn generate_refresh_token(&self, user_id: &str) -> Result<(String, i64), String> {
+    pub fn generate_refresh_token(
+        &self,
+        user_id: &str,
+        family: &str,
+    ) -> Result<(String, i64, String), String> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let exp = now + self.refresh_expiration_time;
+        let jti = uuid::Uuid::new_v4().to_string();
         let claims = UserRefreshClaims {
             id: user_id.to_string(),
             typ: "refresh".to_string(),
             iat: now,
             exp,
-            jti: uuid::Uuid::new_v4().to_string(),
+            jti: jti.clone(),
+            fam: Some(family.to_string()),
         };
 
         let header = Header::new(Algorithm::HS256);
         let key = EncodingKey::from_secret(self.refresh_secret.as_bytes());
         let token = encode(&header, &claims, &key).map_err(|e| e.to_string())?;
-        Ok((token, exp))
+        Ok((token, exp, jti))
     }
 
     pub fn verify_token(&self, token: &str) -> Result<UserProfileClaims, String> {

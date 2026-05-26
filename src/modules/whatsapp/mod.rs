@@ -23,7 +23,8 @@ pub fn webhook_routes() -> Router<Arc<AppState>> {
         .route("/v1/webhook/whatsapp", post(handler::receive_webhook))
 }
 
-/// Ruta WebSocket: autenticación via query param ?token=<user_jwt>
+/// Ruta WebSocket: autenticación primaria por cookie HttpOnly.
+/// Compat temporal: `?token=` sólo durante migración controlada por env.
 pub fn ws_routes() -> Router<Arc<AppState>> {
     Router::new().route("/v1/ws/chat", get(ws::ws_handler))
 }

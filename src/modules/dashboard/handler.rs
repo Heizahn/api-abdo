@@ -33,18 +33,38 @@ async fn resolve_owner_id(
     claims: &UserProfileClaims,
     owner_param: Option<&str>,
 ) -> Result<Option<String>, ApiError> {
-    let user = state
+    let caller = state
         .db
         .find_user_by_id(&claims.id)
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(|| ApiError::Unauthorized("Usuario no encontrado".to_string()))?;
 
-    if (user.role - 3.0_f32).abs() < 0.01 {
-        Ok(Some(claims.id.clone()))
-    } else {
-        Ok(owner_param.map(|s| s.to_string()))
+    let caller_is_provider = (caller.role - 3.0_f32).abs() < 0.01;
+    if caller_is_provider {
+        if let Some(requested_owner) = owner_param {
+            if requested_owner != claims.id {
+                return Err(ApiError::Forbidden);
+            }
+        }
+        return Ok(Some(claims.id.clone()));
     }
+
+    let Some(requested_owner) = owner_param else {
+        return Ok(None);
+    };
+    let owner_user = state
+        .db
+        .find_user_by_id(requested_owner)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::Forbidden)?;
+
+    if (owner_user.role - 3.0_f32).abs() >= 0.01 {
+        return Err(ApiError::Forbidden);
+    }
+
+    Ok(Some(requested_owner.to_string()))
 }
 
 #[derive(Serialize, ToSchema)]
@@ -66,10 +86,11 @@ pub struct MonthlyClosingData {
     path = "/v1/auth-user/dashboard/latest-payments",
     tag = "Dashboard",
     security(("bearerAuth" = [])),
-    params(("owner" = Option<String>, Query, description = "Filtrar por owner (ignorado si el caller es provider)")),
+    params(("owner" = Option<String>, Query, description = "Filtrar por owner permitido para el caller. Si no tiene permiso, responde 403")),
     responses(
         (status = 200, description = "Últimos 10 pagos activos", body = Vec<LatestPayment>),
         (status = 401, description = "No autorizado"),
+        (status = 403, description = "Owner no permitido para este usuario"),
     )
 )]
 pub async fn latest_payments_handler(
@@ -91,10 +112,11 @@ pub async fn latest_payments_handler(
     path = "/v1/auth-user/dashboard/solvency",
     tag = "Dashboard",
     security(("bearerAuth" = [])),
-    params(("owner" = Option<String>, Query, description = "Filtrar por owner (ignorado si el caller es provider)")),
+    params(("owner" = Option<String>, Query, description = "Filtrar por owner permitido para el caller. Si no tiene permiso, responde 403")),
     responses(
         (status = 200, description = "Conteos de clientes por estado (solventes, morosos, suspendidos)", body = SolvencyCounts),
         (status = 401, description = "No autorizado"),
+        (status = 403, description = "Owner no permitido para este usuario"),
     )
 )]
 pub async fn solvency_handler(
@@ -118,12 +140,13 @@ pub async fn solvency_handler(
     security(("bearerAuth" = [])),
     params(
         ("month" = Option<String>, Query, description = "Mes en formato YYYY-MM (default: mes actual)"),
-        ("owner" = Option<String>, Query, description = "Filtrar por owner (ignorado si el caller es provider)"),
+        ("owner" = Option<String>, Query, description = "Filtrar por owner permitido para el caller. Si no tiene permiso, responde 403"),
     ),
     responses(
         (status = 200, description = "Cierre mensual (cobrado, pendiente, eficiencia) + selector de meses", body = MonthlyClosingResponse),
         (status = 400, description = "Formato de mes inválido o mes futuro"),
         (status = 401, description = "No autorizado"),
+        (status = 403, description = "Owner no permitido para este usuario"),
         (status = 404, description = "Mes pasado sin datos"),
     )
 )]

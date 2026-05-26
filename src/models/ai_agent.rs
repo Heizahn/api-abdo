@@ -1202,7 +1202,6 @@ pub struct TestConnectionResponse {
     pub data: TestConnectionData,
 }
 
-
 // ──────────────────────────────────────────────────────────────────────────────
 // Phase 3a — Metrics response DTOs
 // ──────────────────────────────────────────────────────────────────────────────

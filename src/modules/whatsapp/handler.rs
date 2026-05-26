@@ -25,9 +25,8 @@ use crate::{
     auth::user_jwt::UserProfileClaims,
     crypto::aes::{decrypt_payload, encrypt_payload},
     db::{
-        ProfileRepository,
-        StoreTemplateMediaInput, WaTemplateListFilter, WaTemplateMediaRepository,
-        WaTemplateRepository, WaTemplateUpdatePatch, WhatsAppRepository,
+        ProfileRepository, StoreTemplateMediaInput, WaTemplateListFilter,
+        WaTemplateMediaRepository, WaTemplateRepository, WaTemplateUpdatePatch, WhatsAppRepository,
     },
     error::ApiError,
     models::whatsapp::*,
@@ -35,14 +34,14 @@ use crate::{
     utils::get_bson_amount::get_bson_amount,
 };
 
-use crate::cache::MEDIA_CACHE_MAX_BYTES;
 use super::assignment::assign_conversation;
+use crate::cache::MEDIA_CACHE_MAX_BYTES;
 
 use super::service::WhatsAppService;
 use super::ws::{
     broadcast_all, broadcast_except, broadcast_to_chat_users, build_template_created_event,
     build_template_deleted_event, build_template_updated_event, emit_to_phone_number_agents,
-    send_to_user, ConversacionNoLeidaData, WsServerEvent,
+    send_to_user, ConversacionNoLeidaData, TicketPendienteData, WsServerEvent,
 };
 
 /// Cooldown que aplica el back cuando Meta rebota con error 131049
@@ -58,6 +57,39 @@ const META_THROTTLE_COOLDOWN_MS: i64 = 6 * 60 * 60 * 1000;
 async fn record_conv_event(state: &AppState, input: WaConversationEventInput<'_>) {
     if let Err(e) = state.db.record_conversation_event(input).await {
         tracing::warn!("record_conversation_event failed: {}", e);
+    }
+}
+
+/// Fuerza un refresh de badges de mensajería (no leídos + tickets abiertos)
+/// para todos los usuarios con acceso al inbox WA.
+///
+/// Se usa en cambios de configuración de números (alta/edición/baja), donde
+/// el universo visible puede cambiar sin que exista un `conversation_id`
+/// concreto para emitir delta (+1/-1).
+async fn emit_chat_badges_refresh(state: &Arc<AppState>, reason: &str) {
+    let unread_total = state.db.count_unread_conversations().await.unwrap_or(0);
+    let unread_event = WsServerEvent::ConversacionNoLeida {
+        data: ConversacionNoLeidaData {
+            pending_total: unread_total,
+            conversation_id: format!("__refresh__:{reason}"),
+            delta: 0,
+        },
+    };
+    if let Ok(payload) = serde_json::to_string(&unread_event) {
+        let _ = broadcast_to_chat_users(state, payload).await;
+    }
+
+    let tickets_total = state.db.count_open_tickets().await.unwrap_or(0);
+    let tickets_event = WsServerEvent::TicketPendiente {
+        data: TicketPendienteData {
+            pending_total: tickets_total,
+            ticket_id: format!("__refresh__:{reason}"),
+            previous_status: None,
+            new_status: "refresh".to_string(),
+        },
+    };
+    if let Ok(payload) = serde_json::to_string(&tickets_event) {
+        let _ = broadcast_to_chat_users(state, payload).await;
     }
 }
 
@@ -414,10 +446,7 @@ pub async fn receive_webhook(
                             .get("message_id")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
-                        let emoji = reaction
-                            .get("emoji")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
+                        let emoji = reaction.get("emoji").and_then(|v| v.as_str()).unwrap_or("");
                         if target_wamid.is_empty() {
                             tracing::warn!("[webhook] reaction sin message_id, ignorando");
                             continue;
@@ -446,10 +475,7 @@ pub async fn receive_webhook(
                                 );
                             }
                             Err(e) => {
-                                tracing::error!(
-                                    "[webhook] update_message_reactions error: {}",
-                                    e
-                                );
+                                tracing::error!("[webhook] update_message_reactions error: {}", e);
                             }
                         }
                         continue; // CRÍTICO: no caer en el resto del loop (no upsert, no touch, no insert).
@@ -1170,9 +1196,7 @@ pub async fn get_conversation_client_link_handler(
         }));
     }
 
-    let seed_id = conv
-        .client_id
-        .unwrap_or_else(|| clients[0]._id);
+    let seed_id = conv.client_id.unwrap_or_else(|| clients[0]._id);
     let raw = state
         .db
         .get_clients_by_phone_group(seed_id.to_hex())
@@ -1189,7 +1213,9 @@ pub async fn get_conversation_client_link_handler(
             name: doc.get_str("sName").unwrap_or_default().to_string(),
             phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
             status: doc.get_str("sState").ok().map(|s| s.to_string()),
-            balance: doc.contains_key("nBalance").then(|| get_bson_amount(&doc, "nBalance")),
+            balance: doc
+                .contains_key("nBalance")
+                .then(|| get_bson_amount(&doc, "nBalance")),
         })
         .filter(|item| !item.id.is_empty())
         .collect();
@@ -2986,29 +3012,126 @@ pub async fn initiate_conversation_handler(
     Extension(claims): Extension<UserProfileClaims>,
     Json(payload): Json<InitiateConversationRequest>,
 ) -> Result<Json<SendMessageResponse>, ApiError> {
-    require_can_chat(&state, &claims.id).await?;
+    // Contrato explícito para frontend: distinguir "sin permiso de chat"
+    // de otros 403 del flujo de workspace.
+    let caller = {
+        use crate::db::UserRepository;
+        let user = state
+            .db
+            .find_user_by_id(&claims.id)
+            .await
+            .map_err(ApiError::DatabaseError)?
+            .ok_or_else(|| {
+                ApiError::domain_simple(
+                    StatusCode::FORBIDDEN,
+                    "whatsapp_chat_permission_required",
+                    "Usuario no autorizado para mensajeria WhatsApp",
+                )
+            })?;
+        if user.role != 0.0 && !user.can_chat {
+            return Err(ApiError::domain_simple(
+                StatusCode::FORBIDDEN,
+                "whatsapp_chat_permission_required",
+                "Este usuario requiere can_chat=true para iniciar conversaciones",
+            ));
+        }
+        user
+    };
+    let is_superadmin = caller.role == 0.0;
 
-    let workspace_oid = ObjectId::parse_str(payload.business_phone_id.trim())
-        .map_err(|_| ApiError::BadRequest("business_phone_id inválido".into()))?;
+    let business_phone_id = payload.business_phone_id.trim().to_string();
+    tracing::info!(
+        user_id = %caller.id,
+        business_phone_id = %business_phone_id,
+        expected_field = "WaSettings._id (ObjectId hex de 24 chars)",
+        lookup = "find_wa_settings_by_id({_id: ObjectId(...)})",
+        "initiate: validando workspace emisor para template outbound"
+    );
+    let workspace_oid = ObjectId::parse_str(&business_phone_id).map_err(|_| {
+        tracing::warn!(
+            user_id = %caller.id,
+            business_phone_id = %business_phone_id,
+            expected_field = "WaSettings._id (ObjectId hex de 24 chars)",
+            hint = "No enviar WaSettings.phone_number_id (Meta) ni phone E.164",
+            "initiate: business_phone_id invalido para parse ObjectId"
+        );
+        ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            "whatsapp_workspace_id_invalid",
+            "business_phone_id",
+            "business_phone_id debe ser el _id del workspace (ObjectId hex)",
+        )
+    })?;
 
-    let settings = state
+    let settings_opt = state
         .db
         .find_wa_settings_by_id(&workspace_oid)
         .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or(ApiError::NotFound)?;
+        .map_err(ApiError::DatabaseError)?;
+    let settings = match settings_opt {
+        Some(s) => s,
+        None => {
+            tracing::warn!(
+                user_id = %caller.id,
+                workspace_id = %workspace_oid.to_hex(),
+                lookup = "find_wa_settings_by_id({_id: ObjectId(...)})",
+                "initiate: workspace no encontrado por _id"
+            );
+            return Err(ApiError::domain_with_field(
+                StatusCode::NOT_FOUND,
+                "whatsapp_workspace_not_found",
+                "business_phone_id",
+                "No existe workspace para el business_phone_id enviado",
+            ));
+        }
+    };
+    tracing::info!(
+        user_id = %caller.id,
+        workspace_id = %workspace_oid.to_hex(),
+        phone_number_id = %settings.phone_number_id,
+        active = settings.active,
+        agents_count = settings.agents.len(),
+        "initiate: workspace resuelto para envio de template"
+    );
 
-    if !settings.agents.iter().any(|a| a == &claims.id) {
-        return Err(ApiError::Forbidden);
+    if !is_superadmin && !settings.agents.iter().any(|a| a == &caller.id) {
+        tracing::warn!(
+            user_id = %caller.id,
+            workspace_id = %workspace_oid.to_hex(),
+            "initiate: usuario autenticado no pertenece al workspace.agents"
+        );
+        return Err(ApiError::domain_simple(
+            StatusCode::FORBIDDEN,
+            "whatsapp_workspace_membership_required",
+            "No tienes permiso sobre este workspace",
+        ));
     }
 
     if !settings.active {
-        return Err(ApiError::BadRequest("workspace inactivo".into()));
+        tracing::warn!(
+            user_id = %caller.id,
+            workspace_id = %workspace_oid.to_hex(),
+            "initiate: workspace inactivo"
+        );
+        return Err(ApiError::domain_simple(
+            StatusCode::BAD_REQUEST,
+            "whatsapp_workspace_inactive",
+            "El workspace esta inactivo",
+        ));
     }
 
     if settings.phone_number_id.is_empty() || settings.access_token.is_empty() {
-        return Err(ApiError::BadRequest(
-            "workspace sin phone_number_id o access_token configurados".into(),
+        tracing::warn!(
+            user_id = %caller.id,
+            workspace_id = %workspace_oid.to_hex(),
+            phone_number_id_empty = settings.phone_number_id.is_empty(),
+            access_token_empty = settings.access_token.is_empty(),
+            "initiate: workspace sin credenciales WhatsApp completas"
+        );
+        return Err(ApiError::domain_simple(
+            StatusCode::BAD_REQUEST,
+            "whatsapp_workspace_credentials_missing",
+            "Workspace sin phone_number_id o access_token configurados",
         ));
     }
 
@@ -3023,12 +3146,22 @@ pub async fn initiate_conversation_handler(
 
     let idempotency_key = payload.idempotency_key.trim().to_string();
     if idempotency_key.is_empty() {
-        return Err(ApiError::BadRequest("idempotency_key requerido".into()));
+        return Err(ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            "whatsapp_idempotency_key_required",
+            "idempotency_key",
+            "idempotency_key es requerido",
+        ));
     }
 
     let to = normalize_to_e164(&payload.to);
     if to.is_empty() {
-        return Err(ApiError::BadRequest("to inválido".into()));
+        return Err(ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            "whatsapp_recipient_invalid",
+            "to",
+            "Numero de destino invalido. Usa formato internacional, ej: 58414XXXXXXX",
+        ));
     }
 
     // Linkear con cliente ISP si el teléfono matchea (best-effort — el link
@@ -3397,6 +3530,7 @@ pub async fn create_settings_handler(
         .create_wa_settings(doc)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
+    emit_chat_badges_refresh(&state, "settings_created").await;
     Ok(Json(SettingsResponse {
         ok: true,
         data: settings_to_item(created),
@@ -3460,6 +3594,7 @@ pub async fn update_settings_handler(
         )
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
+    emit_chat_badges_refresh(&state, "settings_updated").await;
     Ok(Json(UpdateResponse { ok: true }))
 }
 
@@ -3484,6 +3619,7 @@ pub async fn delete_settings_handler(
         .delete_wa_settings(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
+    emit_chat_badges_refresh(&state, "settings_deleted").await;
     Ok(Json(UpdateResponse { ok: true }))
 }
 
@@ -7517,7 +7653,11 @@ pub async fn intervene_conversation_handler(
     };
     broadcast_all(&state.ws_registry, &ev_pausada).await;
 
-    tracing::info!("[whatsapp] intervene manual (conv={}, by={})", id, claims.id);
+    tracing::info!(
+        "[whatsapp] intervene manual (conv={}, by={})",
+        id,
+        claims.id
+    );
 
     Ok(Json(InterveneResponse {
         ok: true,
@@ -7568,8 +7708,9 @@ pub async fn react_message_handler(
     use axum::http::StatusCode;
 
     // 1. Parsear ObjectId
-    let oid = ObjectId::parse_str(&id)
-        .map_err(|_| ApiError::domain_simple(StatusCode::BAD_REQUEST, "invalid_id", "id inválido"))?;
+    let oid = ObjectId::parse_str(&id).map_err(|_| {
+        ApiError::domain_simple(StatusCode::BAD_REQUEST, "invalid_id", "id inválido")
+    })?;
 
     // 2. Cargar el WaMessage target
     let message = state
@@ -7578,7 +7719,11 @@ pub async fn react_message_handler(
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(|| {
-            ApiError::domain_simple(StatusCode::NOT_FOUND, "message_not_found", "Mensaje no encontrado")
+            ApiError::domain_simple(
+                StatusCode::NOT_FOUND,
+                "message_not_found",
+                "Mensaje no encontrado",
+            )
         })?;
 
     // 3. Cargar la conversación para obtener customer_phone + business_phone
@@ -7599,12 +7744,18 @@ pub async fn react_message_handler(
     let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
 
     // 5. Llamar a Meta (Meta acepta emoji vacío para remover)
-    wa.send_reaction(&conv.phone, &message.wa_message_id, &body.emoji).await?;
+    wa.send_reaction(&conv.phone, &message.wa_message_id, &body.emoji)
+        .await?;
 
     // 6. Aplicar update en DB (sólo si Meta aceptó)
     let updated = state
         .db
-        .update_message_reactions(&message.wa_message_id, "agent", &body.emoji, Some(&claims.name))
+        .update_message_reactions(
+            &message.wa_message_id,
+            "agent",
+            &body.emoji,
+            Some(&claims.name),
+        )
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(|| {

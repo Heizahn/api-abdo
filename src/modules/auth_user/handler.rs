@@ -1,10 +1,23 @@
-use axum::{extract::State, Extension, Json};
+use axum::{
+    extract::State,
+    http::{header::SET_COOKIE, HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
+    Extension, Json,
+};
 use bcrypt::verify;
 use mongodb::bson::oid::ObjectId;
 use std::sync::Arc;
+use time::OffsetDateTime;
 
 use crate::{
-    auth::user_jwt::{UserJwtService, UserProfileClaims},
+    auth::{
+        http_auth::{
+            build_auth_cookie, build_clear_cookie, read_staff_refresh_token, STAFF_ACCESS_COOKIE,
+            STAFF_REFRESH_COOKIE, STAFF_REDIS_REALM,
+        },
+        user_jwt::{UserJwtService, UserProfileClaims},
+    },
+    cache::RefreshSessionRotateOutcome,
     db::{SalesRepository, UserRepository},
     error::ApiError,
     models::{
@@ -32,7 +45,7 @@ use crate::{
 pub async fn login_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<UserLoginRequest>,
-) -> Result<Json<UserLoginResponse>, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     let user = state
         .db
         .find_user_by_email(&payload.email)
@@ -65,20 +78,42 @@ pub async fn login_handler(
     }
 
     let jwt_service = UserJwtService::new();
+    let family = uuid::Uuid::new_v4().to_string();
     let (access_token, access_exp) = jwt_service
         .generate_access_token(&user.id, &user.name, user.role)
         .map_err(|e| ApiError::Internal(e))?;
-    let (refresh_token, refresh_exp) = jwt_service
-        .generate_refresh_token(&user.id)
+    let (refresh_token, refresh_exp, jti) = jwt_service
+        .generate_refresh_token(&user.id, &family)
         .map_err(|e| ApiError::Internal(e))?;
 
-    Ok(Json(UserLoginResponse {
+    state
+        .redis
+        .set_refresh_session(
+            STAFF_REDIS_REALM,
+            &family,
+            &user.id,
+            &jti,
+            ttl_from_exp(refresh_exp),
+        )
+        .await
+        .map_err(ApiError::from)?;
+
+    let response_body = UserLoginResponse {
         token: access_token.clone(),
-        access_token,
-        refresh_token,
+        access_token: access_token.clone(),
+        refresh_token: refresh_token.clone(),
         access_exp,
         refresh_exp,
-    }))
+    };
+
+    Ok(response_with_staff_auth_cookies(
+        &state,
+        response_body,
+        &access_token,
+        access_exp,
+        &refresh_token,
+        refresh_exp,
+    ))
 }
 
 async fn get_user_by_id(state: &Arc<AppState>, id: &str) -> Result<Option<User>, ApiError> {
@@ -101,18 +136,37 @@ async fn get_user_by_id(state: &Arc<AppState>, id: &str) -> Result<Option<User>,
 )]
 pub async fn refresh_token_handler(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<RefreshTokenRequest>,
-) -> Result<Json<RefreshTokenResponse>, ApiError> {
+    headers: HeaderMap,
+    payload: Option<Json<RefreshTokenRequest>>,
+) -> Result<Response, ApiError> {
     let jwt_service = UserJwtService::new();
 
-    let raw_refresh = payload
-        .refresh_token
-        .or(payload.token)
-        .ok_or(ApiError::Unauthorized("Token inválido".to_string()))?;
+    let body_token = payload
+        .as_ref()
+        .and_then(|p| p.refresh_token.as_deref().or(p.token.as_deref()));
 
-    let claims = jwt_service
-        .verify_refresh_token(&raw_refresh)
-        .map_err(|_| ApiError::Unauthorized("Token inválido".to_string()))?;
+    let raw_refresh =
+        match read_staff_refresh_token(&headers, &state.config, body_token) {
+            Some(v) => v,
+            None => {
+                return Ok(refresh_error_response(
+                    &state,
+                    "invalid_refresh_token",
+                    "No se encontró refresh token",
+                ));
+            }
+        };
+
+    let claims = match jwt_service.verify_refresh_token(&raw_refresh) {
+        Ok(v) => v,
+        Err(_) => {
+            return Ok(refresh_error_response(
+                &state,
+                "invalid_refresh_token",
+                "Refresh token inválido",
+            ));
+        }
+    };
 
     let user = get_user_by_id(&state, &claims.id)
         .await?
@@ -123,20 +177,64 @@ pub async fn refresh_token_handler(
         return Err(ApiError::Unauthorized("Usuario sin acceso".to_string()));
     }
 
+    let family = claims
+        .fam
+        .clone()
+        .unwrap_or_else(|| format!("legacy-{}", claims.id));
+
     let (access_token, access_exp) = jwt_service
         .generate_access_token(&user.id, &user.name, user.role)
         .map_err(|e| ApiError::Internal(e))?;
-    let (refresh_token, refresh_exp) = jwt_service
-        .generate_refresh_token(&user.id)
+    let (refresh_token, refresh_exp, new_jti) = jwt_service
+        .generate_refresh_token(&user.id, &family)
         .map_err(|e| ApiError::Internal(e))?;
 
-    Ok(Json(RefreshTokenResponse {
-        token: access_token.clone(),
-        access_token,
-        refresh_token,
-        access_exp,
-        refresh_exp,
-    }))
+    let rotate_result = state
+        .redis
+        .rotate_refresh_session(
+            STAFF_REDIS_REALM,
+            &family,
+            &user.id,
+            &claims.jti,
+            &new_jti,
+            ttl_from_exp(refresh_exp),
+        )
+        .await
+        .map_err(ApiError::from)?;
+
+    match rotate_result {
+        RefreshSessionRotateOutcome::Rotated => {
+            let response_body = RefreshTokenResponse {
+                token: access_token.clone(),
+                access_token: access_token.clone(),
+                refresh_token: refresh_token.clone(),
+                access_exp,
+                refresh_exp,
+            };
+            Ok(response_with_staff_auth_cookies(
+                &state,
+                response_body,
+                &access_token,
+                access_exp,
+                &refresh_token,
+                refresh_exp,
+            ))
+        }
+        RefreshSessionRotateOutcome::Missing => Ok(refresh_error_response(
+            &state,
+            "session_expired",
+            "La sesión expiró, inicia sesión nuevamente",
+        )),
+        RefreshSessionRotateOutcome::Stale => Ok(refresh_soft_error_response(
+            "refresh_in_progress",
+            "Se detectó una renovación concurrente; reintenta la solicitud",
+        )),
+        RefreshSessionRotateOutcome::ReuseDetected => Ok(refresh_error_response(
+            &state,
+            "refresh_token_reused",
+            "Se detectó reutilización de refresh token; inicia sesión nuevamente",
+        )),
+    }
 }
 
 #[utoipa::path(
@@ -228,4 +326,86 @@ pub async fn me_handler(
         .ok_or(ApiError::Unauthorized("Usuario no encontrado".to_string()))?;
 
     Ok(Json(UserResponse::from(user)))
+}
+
+fn response_with_staff_auth_cookies<T: serde::Serialize>(
+    state: &Arc<AppState>,
+    body: T,
+    access_token: &str,
+    access_exp: i64,
+    refresh_token: &str,
+    refresh_exp: i64,
+) -> Response {
+    let mut response = Json(body).into_response();
+    push_set_cookie(
+        response.headers_mut(),
+        build_auth_cookie(
+            &state.config,
+            STAFF_ACCESS_COOKIE,
+            access_token,
+            ttl_from_exp(access_exp) as i64,
+            "/",
+        ),
+    );
+    push_set_cookie(
+        response.headers_mut(),
+        build_auth_cookie(
+            &state.config,
+            STAFF_REFRESH_COOKIE,
+            refresh_token,
+            ttl_from_exp(refresh_exp) as i64,
+            "/v1/auth-user",
+        ),
+    );
+    response
+}
+
+fn refresh_error_response(state: &Arc<AppState>, code: &str, message: &str) -> Response {
+    let mut response = (
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({
+            "ok": false,
+            "error": code,
+            "code": code,
+            "message": message
+        })),
+    )
+        .into_response();
+
+    push_set_cookie(
+        response.headers_mut(),
+        build_clear_cookie(&state.config, STAFF_ACCESS_COOKIE, "/"),
+    );
+    push_set_cookie(
+        response.headers_mut(),
+        build_clear_cookie(&state.config, STAFF_REFRESH_COOKIE, "/v1/auth-user"),
+    );
+    response
+}
+
+/// Error de refresh sin limpieza de cookies (p.ej. race benigno).
+/// Evita desloguear al usuario cuando hubo dos refresh concurrentes y uno de
+/// ellos ya rotó correctamente la sesión.
+fn refresh_soft_error_response(code: &str, message: &str) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "ok": false,
+            "error": code,
+            "code": code,
+            "message": message
+        })),
+    )
+        .into_response()
+}
+
+fn push_set_cookie(headers: &mut HeaderMap, cookie: String) {
+    if let Ok(value) = HeaderValue::from_str(&cookie) {
+        headers.append(SET_COOKIE, value);
+    }
+}
+
+fn ttl_from_exp(exp: i64) -> u64 {
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    exp.saturating_sub(now).max(1) as u64
 }

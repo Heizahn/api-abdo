@@ -629,8 +629,12 @@ pub async fn run_turn(
         user_blocks.push(m.to_content_block());
     }
 
-    let has_audio = user_blocks.iter().any(|b| matches!(b, ContentBlock::InputAudio { .. }));
-    let has_image = user_blocks.iter().any(|b| matches!(b, ContentBlock::ImageUrl { .. }));
+    let has_audio = user_blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::InputAudio { .. }));
+    let has_image = user_blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::ImageUrl { .. }));
     let effective_model_id = pick_effective_model(has_audio, has_image);
 
     // Mixed burst (audio+image) → vision-first (D1' defensive): strip audio blocks.
@@ -974,9 +978,7 @@ pub async fn run_turn(
         // Mutuamente excluyente con el guardrail de arriba (ese requiere que
         // report_payment SÍ se haya llamado y fallado — acá requiere que NO se
         // haya llamado).
-        let user_media_had_image = user_media
-            .iter()
-            .any(|m| m.mime_type.starts_with("image/"));
+        let user_media_had_image = user_media.iter().any(|m| m.mime_type.starts_with("image/"));
         let report_payment_enabled = agent
             .tools
             .iter()
