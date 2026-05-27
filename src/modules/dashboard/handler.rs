@@ -477,12 +477,6 @@ fn resolve_summary_range_days(
             ));
         }
 
-        if to_day > today {
-            return Err(ApiError::BadRequest(
-                "La fecha final no puede ser mayor al día actual".into(),
-            ));
-        }
-
         return Ok((from_day, to_day));
     }
 

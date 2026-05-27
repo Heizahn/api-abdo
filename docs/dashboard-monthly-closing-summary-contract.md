@@ -50,7 +50,6 @@ Rules:
 
 - `from_date` and `to_date` must be valid `YYYY-MM-DD`.
 - `from_date <= to_date`.
-- `to_date` cannot be in the future (Caracas date).
 - `month` must be valid `YYYY-MM` and cannot be a future month.
 
 ## Notes for Frontend
