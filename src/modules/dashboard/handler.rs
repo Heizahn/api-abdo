@@ -145,12 +145,12 @@ pub async fn solvency_handler(
     tag = "Dashboard",
     security(("bearerAuth" = [])),
     params(
-        ("date" = Option<String>, Query, description = "Fecha centro en formato YYYY-MM-DD. Si no se envía, retorna hoy y 6 días hacia atrás"),
+        ("date" = Option<String>, Query, description = "Fecha final en formato YYYY-MM-DD. Si no se envía, retorna hoy y 6 días hacia atrás"),
         ("owner" = Option<String>, Query, description = "Filtrar por owner permitido para el caller. Si no tiene permiso, responde 403"),
     ),
     responses(
         (status = 200, description = "Serie diaria de recaudación (USD/Bs) para graficar", body = Vec<DailyPaymentChartPoint>),
-        (status = 400, description = "Formato de fecha inválido, fecha futura o sin 3 días posteriores"),
+        (status = 400, description = "Formato de fecha inválido o fecha futura"),
         (status = 401, description = "No autorizado"),
         (status = 403, description = "Owner no permitido para este usuario"),
     )
@@ -164,7 +164,7 @@ pub async fn payments_chart_handler(
     let now_vz = Utc::now().with_timezone(&VENEZUELA_TZ);
     let today = now_vz.date_naive();
 
-    let (start_day, end_day) = match &params.date {
+    let end_day = match &params.date {
         Some(s) => {
             let selected = parse_year_month_day(s).ok_or_else(|| {
                 ApiError::BadRequest("Formato de fecha inválido, use YYYY-MM-DD".into())
@@ -176,18 +176,11 @@ pub async fn payments_chart_handler(
                 ));
             }
 
-            let max_center = today - Duration::days(3);
-            if selected > max_center {
-                return Err(ApiError::BadRequest(format!(
-                    "Para centrar en 7 días deben existir 3 días posteriores. Fecha máxima permitida: {}",
-                    max_center.format("%Y-%m-%d")
-                )));
-            }
-
-            (selected - Duration::days(3), selected + Duration::days(3))
+            selected
         }
-        None => (today - Duration::days(6), today),
+        None => today,
     };
+    let start_day = end_day - Duration::days(6);
 
     let start_utc = VENEZUELA_TZ
         .with_ymd_and_hms(start_day.year(), start_day.month(), start_day.day(), 0, 0, 0)
