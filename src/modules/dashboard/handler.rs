@@ -85,14 +85,7 @@ async fn resolve_owner_id(
 #[derive(Serialize, ToSchema)]
 pub struct MonthlyClosingResponse {
     pub months: Vec<String>,
-    pub current_month: String,
     pub selected_month: String,
-    pub requested_currency: String,
-    pub total: f64,
-    pub total_collected_usd: f64,
-    pub total_paid_usd: f64,
-    pub total_paid_bs: f64,
-    pub total_pending_usd: f64,
     pub data: MonthlyClosingData,
 }
 
@@ -275,6 +268,7 @@ pub async fn payments_chart_handler(
         (status = 400, description = "Formato de mes inválido o mes futuro"),
         (status = 401, description = "No autorizado"),
         (status = 403, description = "Owner no permitido para este usuario"),
+        (status = 404, description = "Mes pasado sin datos"),
     )
 )]
 pub async fn monthly_closing_handler(
@@ -324,7 +318,7 @@ pub async fn monthly_closing_handler(
         .map_err(ApiError::DatabaseError)?;
 
     let client_ids: Vec<_> = active_clients.iter().map(|c| c.id).collect();
-    let collected = if client_ids.is_empty() {
+    let total_collected_usd = if client_ids.is_empty() {
         0.0
     } else {
         state
@@ -339,19 +333,20 @@ pub async fn monthly_closing_handler(
         .get_monthly_closing_summary(start_utc, end_utc, owner_id.as_deref())
         .await
         .map_err(ApiError::DatabaseError)?;
-
-    let total_collected_usd = collected;
-
-    let (requested_currency, total) = match params.currency.as_deref() {
-        Some(raw) if raw.eq_ignore_ascii_case("bs") => ("bs".to_string(), total_paid_bs),
-        Some(raw) if raw.eq_ignore_ascii_case("usd") => ("usd".to_string(), total_paid_usd),
+    let collected = match params.currency.as_deref() {
+        Some(raw) if raw.eq_ignore_ascii_case("bs") => total_paid_bs,
+        Some(raw) if raw.eq_ignore_ascii_case("usd") => total_paid_usd,
         Some(_) => {
             return Err(ApiError::BadRequest(
                 "Moneda inválida. Use currency=bs o currency=usd".into(),
             ))
         }
-        None => ("total_usd".to_string(), total_collected_usd),
+        None => total_collected_usd,
     };
+
+    if !is_current_month && collected == 0.0 {
+        return Err(ApiError::NotFound);
+    }
 
     let pending = if is_current_month {
         active_clients
@@ -375,19 +370,11 @@ pub async fn monthly_closing_handler(
     };
 
     let months = build_month_selector(selected_year, selected_month, current_year, current_month);
-    let current_month_str = format!("{:04}-{:02}", current_year, current_month);
     let selected_month_str = format!("{:04}-{:02}", selected_year, selected_month);
 
     Ok(Json(MonthlyClosingResponse {
         months,
-        current_month: current_month_str,
         selected_month: selected_month_str,
-        requested_currency,
-        total: (total * 100.0).round() / 100.0,
-        total_collected_usd: (total_collected_usd * 100.0).round() / 100.0,
-        total_paid_usd: (total_paid_usd * 100.0).round() / 100.0,
-        total_paid_bs: (total_paid_bs * 100.0).round() / 100.0,
-        total_pending_usd: (pending * 100.0).round() / 100.0,
         data: MonthlyClosingData {
             collected: (collected * 100.0).round() / 100.0,
             pending: (pending * 100.0).round() / 100.0,
@@ -549,30 +536,25 @@ fn build_month_selector(
 ) -> Vec<String> {
     let sel_idx = month_to_index(sel_year, sel_month);
     let cur_idx = month_to_index(cur_year, cur_month);
-    let current_month = format!("{:04}-{:02}", cur_year, cur_month);
 
-    let mut out: Vec<String> = vec![current_month.clone()];
     let mut set: BTreeSet<i32> = BTreeSet::new();
+
     for offset in -3i32..=3 {
-        set.insert(sel_idx + offset);
-    }
-
-    let mut window: Vec<i32> = set.into_iter().collect();
-    window.sort_unstable_by(|a, b| b.cmp(a));
-
-    for idx in window {
-        let (y, m) = index_to_month(idx);
-        let value = format!("{:04}-{:02}", y, m);
-        if value != current_month {
-            out.push(value);
+        let idx = sel_idx + offset;
+        if idx <= cur_idx {
+            set.insert(idx);
         }
     }
 
-    if !out.contains(&current_month) {
-        out.insert(0, format!("{:04}-{:02}", index_to_month(cur_idx).0, index_to_month(cur_idx).1));
-    }
+    set.insert(cur_idx);
 
-    out
+    set.into_iter()
+        .rev()
+        .map(|idx| {
+            let (y, m) = index_to_month(idx);
+            format!("{:04}-{:02}", y, m)
+        })
+        .collect()
 }
 
 fn month_to_index(year: i32, month: u32) -> i32 {
