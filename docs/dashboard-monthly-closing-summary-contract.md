@@ -6,9 +6,14 @@
 
 ## Query Params
 
-- `from_date` (required, `YYYY-MM-DD`)
-- `to_date` (required, `YYYY-MM-DD`)
+- `month` (optional, `YYYY-MM`)
+- `from_date` (optional, `YYYY-MM-DD`)
+- `to_date` (optional, `YYYY-MM-DD`)
 - `owner` (optional, provider id; permission-checked by backend)
+
+Rules:
+- Send `month` OR send `from_date` + `to_date`.
+- Do not send `month` together with `from_date`/`to_date`.
 
 ## Response
 
@@ -17,6 +22,7 @@
   "total_collected_usd": 1234.56,
   "total_paid_usd": 150.00,
   "total_paid_bs": 45000.25,
+  "total_pending_usd": 320.10,
   "currency_meta": {
     "usd_decimals": 2,
     "bs_decimals": 2,
@@ -32,12 +38,18 @@
 - `total_collected_usd`: sum of `Payments.nAmount` in date range.
 - `total_paid_usd`: sum of `Payments.nAmount` where `Payments.bUSD == true`.
 - `total_paid_bs`: sum of `Payments.nBs` in date range.
+- `total_pending_usd`: aligned with current monthly-closing pending logic:
+  - Source: active clients negative balances (`Clients.nBalance < 0`) filtered by owner.
+  - Formula: `SUM(ABS(nBalance))`.
+  - Applies only when the selected range belongs to the current month (`America/Caracas`).
+  - For historical months/ranges, returns `0.0`.
 
 ## Validation Rules
 
 - `from_date` and `to_date` must be valid `YYYY-MM-DD`.
 - `from_date <= to_date`.
 - `to_date` cannot be in the future (Caracas date).
+- `month` must be valid `YYYY-MM` and cannot be a future month.
 
 ## Notes for Frontend
 
@@ -46,3 +58,4 @@
   - `Recaudado total (USD)` -> `total_collected_usd`
   - `Pagos USD` -> `total_paid_usd`
   - `Pagos Bs` -> `total_paid_bs`
+  - `Pendiente (USD)` -> `total_pending_usd`

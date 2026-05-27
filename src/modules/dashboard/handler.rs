@@ -36,8 +36,9 @@ pub struct PaymentsChartQuery {
 
 #[derive(Deserialize)]
 pub struct MonthlyClosingSummaryQuery {
-    pub from_date: String,
-    pub to_date: String,
+    pub month: Option<String>,
+    pub from_date: Option<String>,
+    pub to_date: Option<String>,
     pub owner: Option<String>,
 }
 
@@ -106,6 +107,7 @@ pub struct MonthlyClosingSummaryResponse {
     pub total_collected_usd: f64,
     pub total_paid_usd: f64,
     pub total_paid_bs: f64,
+    pub total_pending_usd: f64,
     pub currency_meta: Option<CurrencyMeta>,
 }
 
@@ -365,13 +367,14 @@ pub async fn monthly_closing_handler(
     tag = "Dashboard",
     security(("bearerAuth" = [])),
     params(
-        ("from_date" = String, Query, description = "Fecha inicial en formato YYYY-MM-DD"),
-        ("to_date" = String, Query, description = "Fecha final en formato YYYY-MM-DD"),
+        ("month" = Option<String>, Query, description = "Mes en formato YYYY-MM. Si viene este campo, no se requiere from_date/to_date."),
+        ("from_date" = Option<String>, Query, description = "Fecha inicial en formato YYYY-MM-DD. Requerido cuando no se envía month."),
+        ("to_date" = Option<String>, Query, description = "Fecha final en formato YYYY-MM-DD. Requerido cuando no se envía month."),
         ("owner" = Option<String>, Query, description = "Filtrar por owner permitido para el caller. Si no tiene permiso, responde 403"),
     ),
     responses(
         (status = 200, description = "Resumen del cierre mensual para el rango de fechas indicado", body = MonthlyClosingSummaryResponse),
-        (status = 400, description = "Formato de fecha inválido, rango inválido o fecha futura"),
+        (status = 400, description = "Formato inválido o combinación inválida de parámetros"),
         (status = 401, description = "No autorizado"),
         (status = 403, description = "Owner no permitido para este usuario"),
     )
@@ -383,26 +386,7 @@ pub async fn monthly_closing_summary_handler(
 ) -> Result<Json<MonthlyClosingSummaryResponse>, ApiError> {
     let owner_id = resolve_owner_id(&state, &claims, params.owner.as_deref()).await?;
     let now_vz = Utc::now().with_timezone(&VENEZUELA_TZ);
-    let today = now_vz.date_naive();
-
-    let from_day = parse_year_month_day(&params.from_date).ok_or_else(|| {
-        ApiError::BadRequest("Formato de fecha inválido en from_date, use YYYY-MM-DD".into())
-    })?;
-    let to_day = parse_year_month_day(&params.to_date).ok_or_else(|| {
-        ApiError::BadRequest("Formato de fecha inválido en to_date, use YYYY-MM-DD".into())
-    })?;
-
-    if from_day > to_day {
-        return Err(ApiError::BadRequest(
-            "El rango de fechas es inválido: from_date no puede ser mayor que to_date".into(),
-        ));
-    }
-
-    if to_day > today {
-        return Err(ApiError::BadRequest(
-            "La fecha final no puede ser mayor al día actual".into(),
-        ));
-    }
+    let (from_day, to_day) = resolve_summary_range_days(&params, now_vz.date_naive())?;
 
     let start_utc = VENEZUELA_TZ
         .with_ymd_and_hms(from_day.year(), from_day.month(), from_day.day(), 0, 0, 0)
@@ -422,16 +406,100 @@ pub async fn monthly_closing_summary_handler(
         .await
         .map_err(ApiError::DatabaseError)?;
 
+    let is_current_month_range =
+        from_day.year() == now_vz.year()
+            && from_day.month() == now_vz.month()
+            && to_day.year() == now_vz.year()
+            && to_day.month() == now_vz.month();
+
+    let total_pending_usd = if is_current_month_range {
+        state
+            .db
+            .find_active_clients_for_closing(owner_id.as_deref())
+            .await
+            .map_err(ApiError::DatabaseError)?
+            .iter()
+            .filter(|c| c.n_balance < 0.0)
+            .map(|c| c.n_balance.abs())
+            .sum::<f64>()
+    } else {
+        0.0
+    };
+
     Ok(Json(MonthlyClosingSummaryResponse {
         total_collected_usd: (total_collected_usd * 100.0).round() / 100.0,
         total_paid_usd: (total_paid_usd * 100.0).round() / 100.0,
         total_paid_bs: (total_paid_bs * 100.0).round() / 100.0,
+        total_pending_usd: (total_pending_usd * 100.0).round() / 100.0,
         currency_meta: Some(CurrencyMeta {
             usd_decimals: 2,
             bs_decimals: 2,
             timezone: "America/Caracas".to_string(),
         }),
     }))
+}
+
+fn resolve_summary_range_days(
+    params: &MonthlyClosingSummaryQuery,
+    today: NaiveDate,
+) -> Result<(NaiveDate, NaiveDate), ApiError> {
+    if let Some(month) = &params.month {
+        if params.from_date.is_some() || params.to_date.is_some() {
+            return Err(ApiError::BadRequest(
+                "Parámetros inválidos: use month o from_date/to_date, no ambos".into(),
+            ));
+        }
+
+        let (year, month) = parse_year_month(month)
+            .ok_or_else(|| ApiError::BadRequest("Formato de month inválido, use YYYY-MM".into()))?;
+
+        let selected_idx = month_to_index(year, month);
+        let current_idx = month_to_index(today.year(), today.month());
+        if selected_idx > current_idx {
+            return Err(ApiError::BadRequest(
+                "El mes seleccionado no puede ser mayor al mes actual".into(),
+            ));
+        }
+
+        let from_day = NaiveDate::from_ymd_opt(year, month, 1).ok_or_else(|| {
+            ApiError::BadRequest("No se pudo construir la fecha inicial del mes".into())
+        })?;
+        let to_day = NaiveDate::from_ymd_opt(year, month, days_in_month(year, month)).ok_or_else(
+            || ApiError::BadRequest("No se pudo construir la fecha final del mes".into()),
+        )?;
+
+        return Ok((from_day, to_day));
+    }
+
+    let (from_str, to_str) = match (&params.from_date, &params.to_date) {
+        (Some(from), Some(to)) => (from, to),
+        _ => {
+            return Err(ApiError::BadRequest(
+                "Debe enviar month o ambos from_date/to_date".into(),
+            ));
+        }
+    };
+
+    let from_day = parse_year_month_day(from_str).ok_or_else(|| {
+        ApiError::BadRequest("Formato de fecha inválido en from_date, use YYYY-MM-DD".into())
+    })?;
+    let to_day = parse_year_month_day(to_str).ok_or_else(|| {
+        ApiError::BadRequest("Formato de fecha inválido en to_date, use YYYY-MM-DD".into())
+    })?;
+
+    if from_day > to_day {
+        return Err(ApiError::BadRequest(
+            "El rango de fechas es inválido: from_date no puede ser mayor que to_date".into(),
+        ));
+    }
+
+    if to_day > today {
+        return Err(ApiError::BadRequest(
+            "La fecha final no puede ser mayor al día actual".into(),
+        ));
+    }
+
+    Ok((from_day, to_day))
 }
 
 fn build_month_selector(
