@@ -40,6 +40,13 @@ pub struct LatestPayment {
     pub creator_name: String,
 }
 
+#[derive(Debug, Serialize, ToSchema, Clone)]
+pub struct DailyPaymentChartPoint {
+    pub date: String,
+    pub amount_usd: f64,
+    pub amount_bs: f64,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SolvencyCounts {
     pub solventes: u32,

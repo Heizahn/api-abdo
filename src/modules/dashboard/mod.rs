@@ -18,4 +18,8 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/v1/auth-user/dashboard/latest-payments",
             get(handler::latest_payments_handler),
         )
+        .route(
+            "/v1/auth-user/dashboard/payments/chart",
+            get(handler::payments_chart_handler),
+        )
 }

@@ -5,7 +5,7 @@ use crate::models::ai_agent::{
 };
 use crate::models::db::{
     ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem,
-    LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate,
+    DailyPaymentChartPoint, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate,
     PartPaymentWithPaymentState, PaymentForMatch, PaymentReportFull, PaymentReportListItem,
     SolvencyCounts, Tax,
 };
@@ -255,6 +255,13 @@ pub trait SalesRepository {
         limit: u32,
         owner_id: Option<&str>,
     ) -> Result<Vec<LatestPayment>, String>;
+
+    async fn get_daily_payments_chart(
+        &self,
+        start: chrono::DateTime<chrono::Utc>,
+        end: chrono::DateTime<chrono::Utc>,
+        owner_id: Option<&str>,
+    ) -> Result<Vec<DailyPaymentChartPoint>, String>;
 
     async fn find_pending_reports_by_debt_ids(
         &self,

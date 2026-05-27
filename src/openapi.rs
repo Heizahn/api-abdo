@@ -26,7 +26,7 @@ use crate::models::auth::{
 use crate::models::db::{
     BcvResponse, ClientDetail, ClientListItem, ClientOnu, ClientStatusHistoryItem,
     CustomerInfoItem, LatestPayment, LatestVersion, LatestVersionResponse, PaymentReportListItem,
-    PingResponse, SolvencyCounts,
+    DailyPaymentChartPoint, PingResponse, SolvencyCounts,
 };
 use crate::models::payment::{
     Bank, BankListResponse, CheckReferenceData, CheckReferenceRequest, CheckReferenceResponse,
@@ -119,6 +119,7 @@ use crate::modules::whatsapp::handler::{InterveneData, InterveneResponse, ResetA
         crate::modules::dashboard::handler::latest_payments_handler,
         crate::modules::dashboard::handler::solvency_handler,
         crate::modules::dashboard::handler::monthly_closing_handler,
+        crate::modules::dashboard::handler::payments_chart_handler,
         // Clients — Staff
         crate::modules::clients::handler::get_all_clients_handler,
         crate::modules::clients::handler::get_client_by_id_handler,
@@ -251,6 +252,7 @@ use crate::modules::whatsapp::handler::{InterveneData, InterveneResponse, ResetA
             CheckReferenceRequest, CheckReferenceResponse, CheckReferenceData, ReferenceDetails,
             // Dashboard
             LatestPayment, SolvencyCounts, MonthlyClosingResponse, MonthlyClosingData,
+            DailyPaymentChartPoint,
             // Clients — Staff
             ClientDetail, ClientOnu, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem,
             // Calculations

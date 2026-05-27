@@ -4,7 +4,7 @@ use axum::{
 };
 use chrono::{Datelike, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use utoipa::ToSchema;
 
@@ -12,7 +12,7 @@ use crate::{
     auth::user_jwt::UserProfileClaims,
     db::{ProfileRepository, SalesRepository, UserRepository},
     error::ApiError,
-    models::db::{LatestPayment, SolvencyCounts},
+    models::db::{DailyPaymentChartPoint, LatestPayment, SolvencyCounts},
     state::AppState,
     utils::timezone::VENEZUELA_TZ,
 };
@@ -131,6 +131,97 @@ pub async fn solvency_handler(
         .await
         .map(Json)
         .map_err(ApiError::DatabaseError)
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/dashboard/payments/chart",
+    tag = "Dashboard",
+    security(("bearerAuth" = [])),
+    params(
+        ("month" = Option<String>, Query, description = "Mes en formato YYYY-MM (default: mes actual)"),
+        ("owner" = Option<String>, Query, description = "Filtrar por owner permitido para el caller. Si no tiene permiso, responde 403"),
+    ),
+    responses(
+        (status = 200, description = "Serie diaria de recaudación (USD/Bs) para graficar", body = Vec<DailyPaymentChartPoint>),
+        (status = 400, description = "Formato de mes inválido o mes futuro"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Owner no permitido para este usuario"),
+    )
+)]
+pub async fn payments_chart_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Query(params): Query<MonthlyClosingQuery>,
+) -> Result<Json<Vec<DailyPaymentChartPoint>>, ApiError> {
+    let owner_id = resolve_owner_id(&state, &claims, params.owner.as_deref()).await?;
+    let now_vz = Utc::now().with_timezone(&VENEZUELA_TZ);
+    let current_year = now_vz.year();
+    let current_month = now_vz.month();
+    let current_idx = month_to_index(current_year, current_month);
+
+    let (selected_year, selected_month) = match &params.month {
+        Some(s) => parse_year_month(s)
+            .ok_or_else(|| ApiError::BadRequest("Formato de mes inválido, use YYYY-MM".into()))?,
+        None => (current_year, current_month),
+    };
+
+    let selected_idx = month_to_index(selected_year, selected_month);
+    if selected_idx > current_idx {
+        return Err(ApiError::BadRequest(
+            "El mes seleccionado no puede ser mayor al mes actual".into(),
+        ));
+    }
+
+    let is_current_month = selected_idx == current_idx;
+    let max_day = if is_current_month {
+        now_vz.day()
+    } else {
+        days_in_month(selected_year, selected_month)
+    };
+
+    let start_utc = VENEZUELA_TZ
+        .with_ymd_and_hms(selected_year, selected_month, 1, 0, 0, 0)
+        .single()
+        .ok_or(ApiError::InternalServerError)?
+        .with_timezone(&Utc);
+
+    let end_utc = VENEZUELA_TZ
+        .with_ymd_and_hms(selected_year, selected_month, max_day, 23, 59, 59)
+        .single()
+        .ok_or(ApiError::InternalServerError)?
+        .with_timezone(&Utc);
+
+    let raw_points = state
+        .db
+        .get_daily_payments_chart(start_utc, end_utc, owner_id.as_deref())
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    let mut by_day: HashMap<String, DailyPaymentChartPoint> = HashMap::new();
+    for p in raw_points {
+        by_day.insert(p.date.clone(), p);
+    }
+
+    let mut points: Vec<DailyPaymentChartPoint> = Vec::new();
+    for day in 1..=max_day {
+        let date = format!("{:04}-{:02}-{:02}", selected_year, selected_month, day);
+        if let Some(p) = by_day.get(&date) {
+            points.push(DailyPaymentChartPoint {
+                date,
+                amount_usd: (p.amount_usd * 100.0).round() / 100.0,
+                amount_bs: (p.amount_bs * 100.0).round() / 100.0,
+            });
+        } else {
+            points.push(DailyPaymentChartPoint {
+                date,
+                amount_usd: 0.0,
+                amount_bs: 0.0,
+            });
+        }
+    }
+
+    Ok(Json(points))
 }
 
 #[utoipa::path(
