@@ -75,9 +75,7 @@ use crate::modules::ai_agent::sandbox::{
 use crate::modules::calculations::handler::{
     CalculationRequest, CalculationRequestV2, CalculationResponse, CalculationResponseV2, Currency,
 };
-use crate::modules::dashboard::handler::{
-    CurrencyMeta, MonthlyClosingData, MonthlyClosingResponse, MonthlyClosingSummaryResponse,
-};
+use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingResponse};
 use crate::modules::payments::handler::RejectReportRequest;
 use crate::modules::whatsapp::handler::{InterveneData, InterveneResponse, ResetAiStateResponse};
 
@@ -121,7 +119,7 @@ use crate::modules::whatsapp::handler::{InterveneData, InterveneResponse, ResetA
         crate::modules::dashboard::handler::latest_payments_handler,
         crate::modules::dashboard::handler::solvency_handler,
         crate::modules::dashboard::handler::monthly_closing_handler,
-        crate::modules::dashboard::handler::monthly_closing_summary_handler,
+
         crate::modules::dashboard::handler::payments_chart_handler,
         // Clients — Staff
         crate::modules::clients::handler::get_all_clients_handler,
@@ -255,7 +253,6 @@ use crate::modules::whatsapp::handler::{InterveneData, InterveneResponse, ResetA
             CheckReferenceRequest, CheckReferenceResponse, CheckReferenceData, ReferenceDetails,
             // Dashboard
             LatestPayment, SolvencyCounts, MonthlyClosingResponse, MonthlyClosingData,
-            MonthlyClosingSummaryResponse, CurrencyMeta,
             DailyPaymentChartPoint,
             // Clients — Staff
             ClientDetail, ClientOnu, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem,
