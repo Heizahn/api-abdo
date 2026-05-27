@@ -443,13 +443,50 @@ fn resolve_summary_range_days(
     params: &MonthlyClosingSummaryQuery,
     today: NaiveDate,
 ) -> Result<(NaiveDate, NaiveDate), ApiError> {
-    if let Some(month) = &params.month {
-        if params.from_date.is_some() || params.to_date.is_some() {
+    // Backward compatible behavior:
+    // 1) If from/to are present, they take priority (even if month is also present).
+    // 2) If only one date is present, interpret it as a single-day range.
+    // 3) If no dates are present, fallback to month.
+    let from_present = params.from_date.as_deref().is_some_and(|v| !v.trim().is_empty());
+    let to_present = params.to_date.as_deref().is_some_and(|v| !v.trim().is_empty());
+
+    if from_present || to_present {
+        let from_str = params
+            .from_date
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+            .or(params.to_date.as_deref().filter(|v| !v.trim().is_empty()))
+            .ok_or_else(|| ApiError::BadRequest("Debe enviar una fecha válida".into()))?;
+        let to_str = params
+            .to_date
+            .as_deref()
+            .filter(|v| !v.trim().is_empty())
+            .or(params.from_date.as_deref().filter(|v| !v.trim().is_empty()))
+            .ok_or_else(|| ApiError::BadRequest("Debe enviar una fecha válida".into()))?;
+
+        let from_day = parse_year_month_day(from_str).ok_or_else(|| {
+            ApiError::BadRequest("Formato de fecha inválido en from_date, use YYYY-MM-DD".into())
+        })?;
+        let to_day = parse_year_month_day(to_str).ok_or_else(|| {
+            ApiError::BadRequest("Formato de fecha inválido en to_date, use YYYY-MM-DD".into())
+        })?;
+
+        if from_day > to_day {
             return Err(ApiError::BadRequest(
-                "Parámetros inválidos: use month o from_date/to_date, no ambos".into(),
+                "El rango de fechas es inválido: from_date no puede ser mayor que to_date".into(),
             ));
         }
 
+        if to_day > today {
+            return Err(ApiError::BadRequest(
+                "La fecha final no puede ser mayor al día actual".into(),
+            ));
+        }
+
+        return Ok((from_day, to_day));
+    }
+
+    if let Some(month) = &params.month {
         let (year, month) = parse_year_month(month)
             .ok_or_else(|| ApiError::BadRequest("Formato de month inválido, use YYYY-MM".into()))?;
 
@@ -470,36 +507,9 @@ fn resolve_summary_range_days(
 
         return Ok((from_day, to_day));
     }
-
-    let (from_str, to_str) = match (&params.from_date, &params.to_date) {
-        (Some(from), Some(to)) => (from, to),
-        _ => {
-            return Err(ApiError::BadRequest(
-                "Debe enviar month o ambos from_date/to_date".into(),
-            ));
-        }
-    };
-
-    let from_day = parse_year_month_day(from_str).ok_or_else(|| {
-        ApiError::BadRequest("Formato de fecha inválido en from_date, use YYYY-MM-DD".into())
-    })?;
-    let to_day = parse_year_month_day(to_str).ok_or_else(|| {
-        ApiError::BadRequest("Formato de fecha inválido en to_date, use YYYY-MM-DD".into())
-    })?;
-
-    if from_day > to_day {
-        return Err(ApiError::BadRequest(
-            "El rango de fechas es inválido: from_date no puede ser mayor que to_date".into(),
-        ));
-    }
-
-    if to_day > today {
-        return Err(ApiError::BadRequest(
-            "La fecha final no puede ser mayor al día actual".into(),
-        ));
-    }
-
-    Ok((from_day, to_day))
+    Err(ApiError::BadRequest(
+        "Debe enviar month o from_date/to_date".into(),
+    ))
 }
 
 fn build_month_selector(

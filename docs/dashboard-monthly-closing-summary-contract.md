@@ -12,8 +12,10 @@
 - `owner` (optional, provider id; permission-checked by backend)
 
 Rules:
-- Send `month` OR send `from_date` + `to_date`.
-- Do not send `month` together with `from_date`/`to_date`.
+- Backward compatibility:
+  - If `from_date`/`to_date` are present, backend uses those dates (they have priority).
+  - If only one date is sent, backend treats it as a one-day range (`from_date == to_date`).
+  - If no dates are sent, backend falls back to `month`.
 
 ## Response
 
