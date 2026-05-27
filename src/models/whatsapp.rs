@@ -472,6 +472,10 @@ pub struct InboundMessage {
     /// Cuando el usuario cita un mensaje, Meta incluye `context.id` con el
     /// `wamid` del mensaje original.
     pub context: Option<InboundContext>,
+    /// Campos desconocidos que Meta pueda agregar o variantes que todavía no
+    /// modelamos. Se usa para logging/forensics sin perder el payload.
+    #[serde(default, flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

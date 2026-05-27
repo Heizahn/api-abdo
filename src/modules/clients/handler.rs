@@ -19,6 +19,45 @@ pub struct ClientsQuery {
     pub owner: Option<String>,
 }
 
+async fn resolve_owner_scope(
+    state: &Arc<AppState>,
+    claims: &UserProfileClaims,
+    owner_param: Option<&str>,
+) -> Result<Option<String>, ApiError> {
+    let caller = state
+        .db
+        .find_user_by_id(&claims.id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| ApiError::Unauthorized("Usuario no encontrado".to_string()))?;
+
+    let caller_is_provider = (caller.role - 3.0_f32).abs() < 0.01;
+    if caller_is_provider {
+        if let Some(requested_owner) = owner_param {
+            if requested_owner != claims.id {
+                return Err(ApiError::Forbidden);
+            }
+        }
+        return Ok(Some(claims.id.clone()));
+    }
+
+    let Some(requested_owner) = owner_param else {
+        return Ok(None);
+    };
+    let owner_user = state
+        .db
+        .find_user_by_id(requested_owner)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::Forbidden)?;
+
+    if (owner_user.role - 3.0_f32).abs() >= 0.01 {
+        return Err(ApiError::Forbidden);
+    }
+
+    Ok(Some(requested_owner.to_string()))
+}
+
 #[utoipa::path(
     get,
     path = "/v1/auth-user/clients/{id}",
@@ -139,10 +178,11 @@ pub async fn get_customers_info_handler(
     path = "/v1/auth-user/clients/all",
     tag = "Clients — Staff",
     security(("bearerAuth" = [])),
-    params(("owner" = Option<String>, Query, description = "Filtrar por owner (ignorado si el caller es provider)")),
+    params(("owner" = Option<String>, Query, description = "Filtrar por owner permitido para el caller. Si no tiene permiso, responde 403")),
     responses(
         (status = 200, description = "Listado de clientes (vista ligera para tablas)", body = Vec<ClientListItem>),
         (status = 401, description = "No autorizado"),
+        (status = 403, description = "Owner no permitido para este usuario"),
     )
 )]
 pub async fn get_all_clients_handler(
@@ -150,18 +190,7 @@ pub async fn get_all_clients_handler(
     Extension(claims): Extension<UserProfileClaims>,
     Query(params): Query<ClientsQuery>,
 ) -> Result<Json<Vec<ClientListItem>>, ApiError> {
-    let user = state
-        .db
-        .find_user_by_id(&claims.id)
-        .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or_else(|| ApiError::Unauthorized("Usuario no encontrado".to_string()))?;
-
-    let owner_id: Option<String> = if (user.role - 3.0_f32).abs() < 0.01 {
-        Some(claims.id.clone())
-    } else {
-        params.owner
-    };
+    let owner_id = resolve_owner_scope(&state, &claims, params.owner.as_deref()).await?;
 
     state
         .db

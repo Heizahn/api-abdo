@@ -25,9 +25,8 @@ use crate::{
     auth::user_jwt::UserProfileClaims,
     crypto::aes::{decrypt_payload, encrypt_payload},
     db::{
-        ProfileRepository,
-        StoreTemplateMediaInput, WaTemplateListFilter, WaTemplateMediaRepository,
-        WaTemplateRepository, WaTemplateUpdatePatch, WhatsAppRepository,
+        ProfileRepository, StoreTemplateMediaInput, WaTemplateListFilter,
+        WaTemplateMediaRepository, WaTemplateRepository, WaTemplateUpdatePatch, WhatsAppRepository,
     },
     error::ApiError,
     models::whatsapp::*,
@@ -35,14 +34,14 @@ use crate::{
     utils::get_bson_amount::get_bson_amount,
 };
 
-use crate::cache::MEDIA_CACHE_MAX_BYTES;
 use super::assignment::assign_conversation;
+use crate::cache::MEDIA_CACHE_MAX_BYTES;
 
-use super::service::WhatsAppService;
+use super::service::{MediaInfo, WhatsAppService};
 use super::ws::{
     broadcast_all, broadcast_except, broadcast_to_chat_users, build_template_created_event,
     build_template_deleted_event, build_template_updated_event, emit_to_phone_number_agents,
-    send_to_user, ConversacionNoLeidaData, WsServerEvent,
+    send_to_user, ConversacionNoLeidaData, TicketPendienteData, WsServerEvent,
 };
 
 /// Cooldown que aplica el back cuando Meta rebota con error 131049
@@ -52,12 +51,138 @@ use super::ws::{
 /// quedarse pegado en perpetuidad si el inbound del cliente nunca llega.
 const META_THROTTLE_COOLDOWN_MS: i64 = 6 * 60 * 60 * 1000;
 
+/// Reintentos para media download (info+body) cuando Meta/CDN falla de forma
+/// transitoria. Backoff corto para no congelar la UI, pero suficiente para
+/// absorber intermitencias de red o 5xx puntuales.
+const MEDIA_DOWNLOAD_RETRY_DELAYS_MS: &[u64] = &[0, 700, 2_000];
+
+/// Antes de avisar "reenvía la imagen", re-chequeamos si el mensaje apareció
+/// en DB unos segundos después (desfase webhook status vs message).
+/// Si aparece, evitamos fallback prematuro.
+const INBOUND_MEDIA_FAILURE_RECHECK_DELAYS_MS: &[u64] = &[0, 10_000, 30_000];
+
+fn infer_inbound_effective_type(msg: &InboundMessage) -> String {
+    let original = msg.msg_type.trim().to_ascii_lowercase();
+    let inferred = if msg.video.is_some() {
+        Some("video")
+    } else if msg.image.is_some() {
+        Some("image")
+    } else if msg.document.is_some() {
+        Some("document")
+    } else if msg.audio.is_some() {
+        Some("audio")
+    } else if msg.sticker.is_some() {
+        Some("sticker")
+    } else if msg.location.is_some() {
+        Some("location")
+    } else if msg.contacts.is_some() {
+        Some("contacts")
+    } else if msg.interactive.is_some() {
+        Some("interactive")
+    } else if msg.button.is_some() {
+        Some("button")
+    } else if msg.reaction.is_some() {
+        Some("reaction")
+    } else if msg.text.is_some() {
+        Some("text")
+    } else {
+        None
+    };
+
+    let should_override = matches!(original.as_str(), "" | "unsupported" | "unknown")
+        || (original == "text" && msg.text.is_none() && inferred.is_some());
+
+    if should_override {
+        inferred.unwrap_or("unsupported").to_string()
+    } else {
+        original
+    }
+}
+
+fn inbound_payload_markers(msg: &InboundMessage) -> String {
+    let mut markers = Vec::new();
+    if msg.text.is_some() {
+        markers.push("text");
+    }
+    if msg.image.is_some() {
+        markers.push("image");
+    }
+    if msg.document.is_some() {
+        markers.push("document");
+    }
+    if msg.audio.is_some() {
+        markers.push("audio");
+    }
+    if msg.video.is_some() {
+        markers.push("video");
+    }
+    if msg.sticker.is_some() {
+        markers.push("sticker");
+    }
+    if msg.location.is_some() {
+        markers.push("location");
+    }
+    if msg.contacts.is_some() {
+        markers.push("contacts");
+    }
+    if msg.interactive.is_some() {
+        markers.push("interactive");
+    }
+    if msg.button.is_some() {
+        markers.push("button");
+    }
+    if msg.reaction.is_some() {
+        markers.push("reaction");
+    }
+    for key in msg.extra.keys() {
+        markers.push(key.as_str());
+    }
+    if markers.is_empty() {
+        "none".to_string()
+    } else {
+        markers.join(",")
+    }
+}
+
 /// Persiste un evento de ciclo de vida de conversación. Best-effort:
 /// si la inserción falla se loggea pero NO se propaga el error — la
 /// auditoría no debe bloquear la respuesta HTTP del agente.
 async fn record_conv_event(state: &AppState, input: WaConversationEventInput<'_>) {
     if let Err(e) = state.db.record_conversation_event(input).await {
         tracing::warn!("record_conversation_event failed: {}", e);
+    }
+}
+
+/// Fuerza un refresh de badges de mensajería (no leídos + tickets abiertos)
+/// para todos los usuarios con acceso al inbox WA.
+///
+/// Se usa en cambios de configuración de números (alta/edición/baja), donde
+/// el universo visible puede cambiar sin que exista un `conversation_id`
+/// concreto para emitir delta (+1/-1).
+async fn emit_chat_badges_refresh(state: &Arc<AppState>, reason: &str) {
+    let unread_total = state.db.count_unread_conversations().await.unwrap_or(0);
+    let unread_event = WsServerEvent::ConversacionNoLeida {
+        data: ConversacionNoLeidaData {
+            pending_total: unread_total,
+            conversation_id: format!("__refresh__:{reason}"),
+            delta: 0,
+        },
+    };
+    if let Ok(payload) = serde_json::to_string(&unread_event) {
+        let _ = broadcast_to_chat_users(state, payload).await;
+    }
+
+    let tickets_total = state.db.count_open_tickets().await.unwrap_or(0);
+    let tickets_event = WsServerEvent::TicketPendiente {
+        data: TicketPendienteData {
+            pending_total: tickets_total,
+            ticket_id: format!("__refresh__:{reason}"),
+            previous_status: None,
+            new_status: "refresh".to_string(),
+        },
+    };
+    if let Ok(payload) = serde_json::to_string(&tickets_event) {
+        let _ = broadcast_to_chat_users(state, payload).await;
     }
 }
 
@@ -338,10 +463,12 @@ pub async fn receive_webhook(
                                     s.id, recipient, business_phone, s.errors
                                 );
                                 if !recipient.is_empty() && !business_phone.is_empty() {
+                                    let wa_id = s.id.clone();
                                     let state_cl = state.clone();
                                     tokio::spawn(async move {
-                                        notify_inbound_media_failure(
+                                        schedule_inbound_media_failure_fallback(
                                             &state_cl,
+                                            &wa_id,
                                             &recipient,
                                             &business_phone,
                                         )
@@ -398,8 +525,27 @@ pub async fn receive_webhook(
                 };
 
                 for msg in messages {
+                    let effective_msg_type = infer_inbound_effective_type(&msg);
+                    if effective_msg_type != msg.msg_type {
+                        tracing::warn!(
+                            "[webhook] tipo inbound ajustado wa_id={} from={} original={} effective={} payload_keys={}",
+                            msg.id,
+                            msg.from,
+                            msg.msg_type,
+                            effective_msg_type,
+                            inbound_payload_markers(&msg)
+                        );
+                    } else if msg.msg_type == "unsupported" {
+                        tracing::warn!(
+                            "[webhook] unsupported inbound wa_id={} from={} payload_keys={}",
+                            msg.id,
+                            msg.from,
+                            inbound_payload_markers(&msg)
+                        );
+                    }
+
                     // === REACCIONES — early return, no toca conversación ni persistencia ===
-                    if msg.msg_type == "reaction" {
+                    if effective_msg_type == "reaction" {
                         let reaction = match &msg.reaction {
                             Some(v) => v,
                             None => {
@@ -414,10 +560,7 @@ pub async fn receive_webhook(
                             .get("message_id")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
-                        let emoji = reaction
-                            .get("emoji")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
+                        let emoji = reaction.get("emoji").and_then(|v| v.as_str()).unwrap_or("");
                         if target_wamid.is_empty() {
                             tracing::warn!("[webhook] reaction sin message_id, ignorando");
                             continue;
@@ -446,10 +589,7 @@ pub async fn receive_webhook(
                                 );
                             }
                             Err(e) => {
-                                tracing::error!(
-                                    "[webhook] update_message_reactions error: {}",
-                                    e
-                                );
+                                tracing::error!("[webhook] update_message_reactions error: {}", e);
                             }
                         }
                         continue; // CRÍTICO: no caer en el resto del loop (no upsert, no touch, no insert).
@@ -542,10 +682,8 @@ pub async fn receive_webhook(
                         })
                         .unwrap_or((None, None, None, None))
                     };
-                    let (body, media_id, media_mime_type, media_filename) = match msg
-                        .msg_type
-                        .as_str()
-                    {
+                    let (body, media_id, media_mime_type, media_filename) =
+                        match effective_msg_type.as_str() {
                         "text" => (msg.text.as_ref().map(|t| t.body.clone()), None, None, None),
                         "image" => extract_media(msg.image.as_ref()),
                         "document" => extract_media(msg.document.as_ref()),
@@ -615,16 +753,16 @@ pub async fn receive_webhook(
 
                     // Voice note: sólo relevante en `audio`. Meta envía `voice: true`
                     // para push-to-talk y `false` para archivos de audio subidos.
-                    let voice = msg.msg_type == "audio"
+                    let voice = effective_msg_type == "audio"
                         && msg.audio.as_ref().and_then(|a| a.voice).unwrap_or(false);
 
                     let preview = body
                         .clone()
-                        .unwrap_or_else(|| format!("[{}]", msg.msg_type));
+                        .unwrap_or_else(|| format!("[{}]", effective_msg_type));
 
                     tracing::info!(
                         "[webhook] guardando mensaje de cliente registrado: {} | tipo: {} | preview: {}",
-                        msg.from, msg.msg_type, preview
+                        msg.from, effective_msg_type, preview
                     );
 
                     // Timestamp real desde Meta (Unix seconds en string), fallback a ahora.
@@ -638,14 +776,14 @@ pub async fn receive_webhook(
                     // objeto crudo de Meta (incluye `button_reply`/`list_reply`)
                     // para que el front pueda renderizar la burbuja con el
                     // contexto completo de la selección.
-                    let interactive_payload = match msg.msg_type.as_str() {
+                    let interactive_payload = match effective_msg_type.as_str() {
                         "interactive" => msg.interactive.clone(),
                         "button" => msg.button.clone(),
                         _ => None,
                     };
 
                     // Payload completo de contactos compartidos (vCard).
-                    let contacts_payload = if msg.msg_type == "contacts" {
+                    let contacts_payload = if effective_msg_type == "contacts" {
                         msg.contacts.clone()
                     } else {
                         None
@@ -654,7 +792,7 @@ pub async fn receive_webhook(
                     // Datos estructurados de ubicación para que el front
                     // renderice el mapa (iframe de OSM/Google, img estática,
                     // o link a maps — lo decide el front).
-                    let location_payload = if msg.msg_type == "location" {
+                    let location_payload = if effective_msg_type == "location" {
                         msg.location
                             .as_ref()
                             .and_then(|l| match (l.latitude, l.longitude) {
@@ -677,7 +815,7 @@ pub async fn receive_webhook(
                         conversation_id: conv_id,
                         wa_message_id: msg.id.clone(),
                         direction: "in".to_string(),
-                        msg_type: msg.msg_type.clone(),
+                        msg_type: effective_msg_type.clone(),
                         body,
                         media_id,
                         media_mime_type,
@@ -729,7 +867,7 @@ pub async fn receive_webhook(
 
                     let touch = crate::db::ConversationTouch {
                         preview: &preview,
-                        msg_type: &msg.msg_type,
+                        msg_type: &effective_msg_type,
                         direction: "in",
                         wa_message_id: &msg.id,
                         from_user_id: None,
@@ -1170,9 +1308,7 @@ pub async fn get_conversation_client_link_handler(
         }));
     }
 
-    let seed_id = conv
-        .client_id
-        .unwrap_or_else(|| clients[0]._id);
+    let seed_id = conv.client_id.unwrap_or_else(|| clients[0]._id);
     let raw = state
         .db
         .get_clients_by_phone_group(seed_id.to_hex())
@@ -1189,7 +1325,9 @@ pub async fn get_conversation_client_link_handler(
             name: doc.get_str("sName").unwrap_or_default().to_string(),
             phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
             status: doc.get_str("sState").ok().map(|s| s.to_string()),
-            balance: doc.contains_key("nBalance").then(|| get_bson_amount(&doc, "nBalance")),
+            balance: doc
+                .contains_key("nBalance")
+                .then(|| get_bson_amount(&doc, "nBalance")),
         })
         .filter(|item| !item.id.is_empty())
         .collect();
@@ -2659,11 +2797,12 @@ pub async fn transfer_conversation_handler(
 
     let from_agent = conv.assigned_to.clone();
 
-    state
+    let conv_after = state
         .db
-        .assign_conversation(&oid, Some(&payload.user_id))
+        .transfer_conversation(&oid, &payload.user_id)
         .await
-        .map_err(|e| ApiError::DatabaseError(e))?;
+        .map_err(|e| ApiError::DatabaseError(e))?
+        .ok_or(ApiError::NotFound)?;
 
     if let Some(prev) = from_agent.as_deref() {
         if prev != payload.user_id {
@@ -2683,13 +2822,6 @@ pub async fn transfer_conversation_handler(
             note
         );
     }
-
-    let conv_after = state
-        .db
-        .find_conversation_by_id(&oid)
-        .await
-        .map_err(|e| ApiError::DatabaseError(e))?
-        .ok_or(ApiError::NotFound)?;
 
     let opens = state
         .db
@@ -2986,29 +3118,126 @@ pub async fn initiate_conversation_handler(
     Extension(claims): Extension<UserProfileClaims>,
     Json(payload): Json<InitiateConversationRequest>,
 ) -> Result<Json<SendMessageResponse>, ApiError> {
-    require_can_chat(&state, &claims.id).await?;
+    // Contrato explícito para frontend: distinguir "sin permiso de chat"
+    // de otros 403 del flujo de workspace.
+    let caller = {
+        use crate::db::UserRepository;
+        let user = state
+            .db
+            .find_user_by_id(&claims.id)
+            .await
+            .map_err(ApiError::DatabaseError)?
+            .ok_or_else(|| {
+                ApiError::domain_simple(
+                    StatusCode::FORBIDDEN,
+                    "whatsapp_chat_permission_required",
+                    "Usuario no autorizado para mensajeria WhatsApp",
+                )
+            })?;
+        if user.role != 0.0 && !user.can_chat {
+            return Err(ApiError::domain_simple(
+                StatusCode::FORBIDDEN,
+                "whatsapp_chat_permission_required",
+                "Este usuario requiere can_chat=true para iniciar conversaciones",
+            ));
+        }
+        user
+    };
+    let is_superadmin = caller.role == 0.0;
 
-    let workspace_oid = ObjectId::parse_str(payload.business_phone_id.trim())
-        .map_err(|_| ApiError::BadRequest("business_phone_id inválido".into()))?;
+    let business_phone_id = payload.business_phone_id.trim().to_string();
+    tracing::info!(
+        user_id = %caller.id,
+        business_phone_id = %business_phone_id,
+        expected_field = "WaSettings._id (ObjectId hex de 24 chars)",
+        lookup = "find_wa_settings_by_id({_id: ObjectId(...)})",
+        "initiate: validando workspace emisor para template outbound"
+    );
+    let workspace_oid = ObjectId::parse_str(&business_phone_id).map_err(|_| {
+        tracing::warn!(
+            user_id = %caller.id,
+            business_phone_id = %business_phone_id,
+            expected_field = "WaSettings._id (ObjectId hex de 24 chars)",
+            hint = "No enviar WaSettings.phone_number_id (Meta) ni phone E.164",
+            "initiate: business_phone_id invalido para parse ObjectId"
+        );
+        ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            "whatsapp_workspace_id_invalid",
+            "business_phone_id",
+            "business_phone_id debe ser el _id del workspace (ObjectId hex)",
+        )
+    })?;
 
-    let settings = state
+    let settings_opt = state
         .db
         .find_wa_settings_by_id(&workspace_oid)
         .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or(ApiError::NotFound)?;
+        .map_err(ApiError::DatabaseError)?;
+    let settings = match settings_opt {
+        Some(s) => s,
+        None => {
+            tracing::warn!(
+                user_id = %caller.id,
+                workspace_id = %workspace_oid.to_hex(),
+                lookup = "find_wa_settings_by_id({_id: ObjectId(...)})",
+                "initiate: workspace no encontrado por _id"
+            );
+            return Err(ApiError::domain_with_field(
+                StatusCode::NOT_FOUND,
+                "whatsapp_workspace_not_found",
+                "business_phone_id",
+                "No existe workspace para el business_phone_id enviado",
+            ));
+        }
+    };
+    tracing::info!(
+        user_id = %caller.id,
+        workspace_id = %workspace_oid.to_hex(),
+        phone_number_id = %settings.phone_number_id,
+        active = settings.active,
+        agents_count = settings.agents.len(),
+        "initiate: workspace resuelto para envio de template"
+    );
 
-    if !settings.agents.iter().any(|a| a == &claims.id) {
-        return Err(ApiError::Forbidden);
+    if !is_superadmin && !settings.agents.iter().any(|a| a == &caller.id) {
+        tracing::warn!(
+            user_id = %caller.id,
+            workspace_id = %workspace_oid.to_hex(),
+            "initiate: usuario autenticado no pertenece al workspace.agents"
+        );
+        return Err(ApiError::domain_simple(
+            StatusCode::FORBIDDEN,
+            "whatsapp_workspace_membership_required",
+            "No tienes permiso sobre este workspace",
+        ));
     }
 
     if !settings.active {
-        return Err(ApiError::BadRequest("workspace inactivo".into()));
+        tracing::warn!(
+            user_id = %caller.id,
+            workspace_id = %workspace_oid.to_hex(),
+            "initiate: workspace inactivo"
+        );
+        return Err(ApiError::domain_simple(
+            StatusCode::BAD_REQUEST,
+            "whatsapp_workspace_inactive",
+            "El workspace esta inactivo",
+        ));
     }
 
     if settings.phone_number_id.is_empty() || settings.access_token.is_empty() {
-        return Err(ApiError::BadRequest(
-            "workspace sin phone_number_id o access_token configurados".into(),
+        tracing::warn!(
+            user_id = %caller.id,
+            workspace_id = %workspace_oid.to_hex(),
+            phone_number_id_empty = settings.phone_number_id.is_empty(),
+            access_token_empty = settings.access_token.is_empty(),
+            "initiate: workspace sin credenciales WhatsApp completas"
+        );
+        return Err(ApiError::domain_simple(
+            StatusCode::BAD_REQUEST,
+            "whatsapp_workspace_credentials_missing",
+            "Workspace sin phone_number_id o access_token configurados",
         ));
     }
 
@@ -3023,12 +3252,22 @@ pub async fn initiate_conversation_handler(
 
     let idempotency_key = payload.idempotency_key.trim().to_string();
     if idempotency_key.is_empty() {
-        return Err(ApiError::BadRequest("idempotency_key requerido".into()));
+        return Err(ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            "whatsapp_idempotency_key_required",
+            "idempotency_key",
+            "idempotency_key es requerido",
+        ));
     }
 
     let to = normalize_to_e164(&payload.to);
     if to.is_empty() {
-        return Err(ApiError::BadRequest("to inválido".into()));
+        return Err(ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            "whatsapp_recipient_invalid",
+            "to",
+            "Numero de destino invalido. Usa formato internacional, ej: 58414XXXXXXX",
+        ));
     }
 
     // Linkear con cliente ISP si el teléfono matchea (best-effort — el link
@@ -3397,6 +3636,7 @@ pub async fn create_settings_handler(
         .create_wa_settings(doc)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
+    emit_chat_badges_refresh(&state, "settings_created").await;
     Ok(Json(SettingsResponse {
         ok: true,
         data: settings_to_item(created),
@@ -3460,6 +3700,7 @@ pub async fn update_settings_handler(
         )
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
+    emit_chat_badges_refresh(&state, "settings_updated").await;
     Ok(Json(UpdateResponse { ok: true }))
 }
 
@@ -3484,6 +3725,7 @@ pub async fn delete_settings_handler(
         .delete_wa_settings(&oid)
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
+    emit_chat_badges_refresh(&state, "settings_deleted").await;
     Ok(Json(UpdateResponse { ok: true }))
 }
 
@@ -3782,15 +4024,17 @@ pub async fn get_media_handler(
     );
 
     let t_meta = std::time::Instant::now();
-    let (bytes, mime, remote_filename) = wa.download_media(&media_id).await.map_err(|e| {
-        tracing::error!(
-            "[media] download_media falló para {} tras {}ms: {}",
-            media_id,
-            t_meta.elapsed().as_millis(),
-            e
-        );
-        ApiError::Internal(e.to_string())
-    })?;
+    let (bytes, mime, remote_filename) = download_media_with_retry(&wa, &media_id).await.map_err(
+        |e| {
+            tracing::error!(
+                "[media] download_media falló para {} tras {}ms: {}",
+                media_id,
+                t_meta.elapsed().as_millis(),
+                e
+            );
+            ApiError::Internal(e)
+        },
+    )?;
     tracing::info!(
         "[media] MISS→FETCH {} ({} bytes, {}) meta={}ms",
         media_id,
@@ -4806,6 +5050,47 @@ async fn notify_inbound_media_failure(
     }
 }
 
+/// Evita fallback prematuro en `131052/131056`: algunos eventos de status
+/// pueden adelantarse al guardado del mensaje. Re-chequeamos por `wa_id` y
+/// sólo avisamos al cliente si después de varios intentos sigue sin doc.
+async fn schedule_inbound_media_failure_fallback(
+    state: &Arc<AppState>,
+    wa_id: &str,
+    recipient_phone: &str,
+    business_phone: &str,
+) {
+    for (attempt, delay_ms) in INBOUND_MEDIA_FAILURE_RECHECK_DELAYS_MS.iter().enumerate() {
+        if *delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+        }
+        let probe = vec![wa_id.to_string()];
+        match state.db.find_messages_by_wa_ids(&probe).await {
+            Ok(map) if map.contains_key(wa_id) => {
+                tracing::info!(
+                    "[webhook] inbound_media_failure: wa_id={} apareció en DB en recheck #{}, no se envía fallback",
+                    wa_id,
+                    attempt + 1
+                );
+                return;
+            }
+            Ok(_) => {
+                tracing::debug!(
+                    "[webhook] inbound_media_failure: wa_id={} aún ausente en recheck #{}",
+                    wa_id,
+                    attempt + 1
+                );
+            }
+            Err(e) => tracing::warn!(
+                "[webhook] inbound_media_failure: recheck DB error wa_id={} (#{}) {}",
+                wa_id,
+                attempt + 1,
+                e
+            ),
+        }
+    }
+    notify_inbound_media_failure(state, recipient_phone, business_phone).await;
+}
+
 /// Aplica el relay de Cloudflare al service si ambas env vars están seteadas
 /// en el Config. No-op cuando no hay relay configurado (dev, o red arreglada).
 fn apply_media_relay(state: &Arc<AppState>, svc: WhatsAppService) -> WhatsAppService {
@@ -4829,6 +5114,92 @@ fn should_prefetch_media(msg_type: &str) -> bool {
         msg_type,
         "audio" | "image" | "sticker" | "video" | "document"
     )
+}
+
+/// Descarga completa `info + body` con reintentos y backoff corto.
+/// Devuelve `(bytes, mime, file_name)` o el error del último intento.
+async fn download_media_with_retry(
+    wa: &WhatsAppService,
+    media_id: &str,
+) -> Result<(Vec<u8>, String, Option<String>), String> {
+    let mut last_err: Option<String> = None;
+    for (attempt, delay_ms) in MEDIA_DOWNLOAD_RETRY_DELAYS_MS.iter().enumerate() {
+        if *delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+        }
+        match wa.download_media(media_id).await {
+            Ok(ok) => return Ok(ok),
+            Err(e) => {
+                let err = e.to_string();
+                tracing::warn!(
+                    "[media] retry {}/{} media_id={} falló: {}",
+                    attempt + 1,
+                    MEDIA_DOWNLOAD_RETRY_DELAYS_MS.len(),
+                    media_id,
+                    err
+                );
+                last_err = Some(err);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "media download failed without detail".to_string()))
+}
+
+/// `download_media_info` con retry/backoff.
+async fn download_media_info_with_retry(
+    wa: &WhatsAppService,
+    media_id: &str,
+) -> Result<MediaInfo, String> {
+    let mut last_err: Option<String> = None;
+    for (attempt, delay_ms) in MEDIA_DOWNLOAD_RETRY_DELAYS_MS.iter().enumerate() {
+        if *delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+        }
+        match wa.download_media_info(media_id).await {
+            Ok(info) => return Ok(info),
+            Err(e) => {
+                let err = e.to_string();
+                tracing::warn!(
+                    "prefetch_media({}): info retry {}/{} falló: {}",
+                    media_id,
+                    attempt + 1,
+                    MEDIA_DOWNLOAD_RETRY_DELAYS_MS.len(),
+                    err
+                );
+                last_err = Some(err);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "download_media_info failed without detail".to_string()))
+}
+
+/// `download_media_body` con retry/backoff.
+async fn download_media_body_with_retry(
+    wa: &WhatsAppService,
+    media_id: &str,
+    url: &str,
+) -> Result<Vec<u8>, String> {
+    let mut last_err: Option<String> = None;
+    for (attempt, delay_ms) in MEDIA_DOWNLOAD_RETRY_DELAYS_MS.iter().enumerate() {
+        if *delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+        }
+        match wa.download_media_body(url).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) => {
+                let err = e.to_string();
+                tracing::warn!(
+                    "prefetch_media({}): body retry {}/{} falló: {}",
+                    media_id,
+                    attempt + 1,
+                    MEDIA_DOWNLOAD_RETRY_DELAYS_MS.len(),
+                    err
+                );
+                last_err = Some(err);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "download_media_body failed without detail".to_string()))
 }
 
 /// Guard que libera el lock de prefetch al salir de `prefetch_media`,
@@ -4887,10 +5258,10 @@ pub(crate) async fn prefetch_media(state: Arc<AppState>, business_phone: String,
         }
     };
 
-    let info = match wa.download_media_info(&media_id).await {
+    let info = match download_media_info_with_retry(&wa, &media_id).await {
         Ok(i) => i,
         Err(e) => {
-            tracing::warn!("prefetch_media({}): info falló: {:?}", media_id, e);
+            tracing::warn!("prefetch_media({}): info falló: {}", media_id, e);
             return;
         }
     };
@@ -4909,10 +5280,10 @@ pub(crate) async fn prefetch_media(state: Arc<AppState>, business_phone: String,
         }
     }
 
-    let bytes = match wa.download_media_body(&info.url).await {
+    let bytes = match download_media_body_with_retry(&wa, &media_id, &info.url).await {
         Ok(b) => b,
         Err(e) => {
-            tracing::warn!("prefetch_media({}): body falló: {:?}", media_id, e);
+            tracing::warn!("prefetch_media({}): body falló: {}", media_id, e);
             return;
         }
     };
@@ -5952,7 +6323,7 @@ pub struct TemplatesListQuery {
         (status = 200, description = "Plantilla creada", body = WaTemplateResponse),
         (status = 400, description = "Datos inválidos (name_required, name_invalid, invalid_component)"),
         (status = 401, description = "No autorizado"),
-        (status = 403, description = "Sólo SUPERADMIN"),
+        (status = 403, description = "Requiere bCanChat"),
         (status = 404, description = "phone_number_not_found"),
         (status = 409, description = "name_already_exists"),
         (status = 502, description = "meta_rejected"),
@@ -5963,8 +6334,8 @@ pub async fn create_template_handler(
     Extension(claims): Extension<UserProfileClaims>,
     Json(body): Json<CreateWaTemplateRequest>,
 ) -> Result<Json<WaTemplateResponse>, ApiError> {
-    // Auth: SUPERADMIN
-    let creator = require_superadmin(&state, &claims.id).await?;
+    // Auth: bCanChat (superadmin bypass implícito en require_can_chat)
+    let creator = require_can_chat(&state, &claims.id).await?;
 
     // 1. Validar name_input no vacío
     if body.name_input.trim().is_empty() {
@@ -7096,7 +7467,7 @@ async fn swap_header_handles_in_components(
         (status = 200, description = "Media persistida en GridFS", body = HeaderMediaUploadResponse),
         (status = 400, description = "invalid_file_type | invalid_format | file_required | file_empty"),
         (status = 401, description = "No autorizado"),
-        (status = 403, description = "Sólo SUPERADMIN"),
+        (status = 403, description = "Requiere bCanChat"),
         (status = 404, description = "phone_number_not_found"),
         (status = 413, description = "file_too_large"),
         (status = 503, description = "app_id_not_configured"),
@@ -7108,7 +7479,7 @@ pub async fn upload_template_header_media_handler(
     mut multipart: Multipart,
 ) -> Result<Json<HeaderMediaUploadResponse>, ApiError> {
     // Auth
-    let uploader = require_superadmin(&state, &claims.id).await?;
+    let uploader = require_can_chat(&state, &claims.id).await?;
 
     let mut file_bytes: Option<Vec<u8>> = None;
     let mut file_mime: Option<String> = None;
@@ -7517,7 +7888,11 @@ pub async fn intervene_conversation_handler(
     };
     broadcast_all(&state.ws_registry, &ev_pausada).await;
 
-    tracing::info!("[whatsapp] intervene manual (conv={}, by={})", id, claims.id);
+    tracing::info!(
+        "[whatsapp] intervene manual (conv={}, by={})",
+        id,
+        claims.id
+    );
 
     Ok(Json(InterveneResponse {
         ok: true,
@@ -7568,8 +7943,9 @@ pub async fn react_message_handler(
     use axum::http::StatusCode;
 
     // 1. Parsear ObjectId
-    let oid = ObjectId::parse_str(&id)
-        .map_err(|_| ApiError::domain_simple(StatusCode::BAD_REQUEST, "invalid_id", "id inválido"))?;
+    let oid = ObjectId::parse_str(&id).map_err(|_| {
+        ApiError::domain_simple(StatusCode::BAD_REQUEST, "invalid_id", "id inválido")
+    })?;
 
     // 2. Cargar el WaMessage target
     let message = state
@@ -7578,7 +7954,11 @@ pub async fn react_message_handler(
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(|| {
-            ApiError::domain_simple(StatusCode::NOT_FOUND, "message_not_found", "Mensaje no encontrado")
+            ApiError::domain_simple(
+                StatusCode::NOT_FOUND,
+                "message_not_found",
+                "Mensaje no encontrado",
+            )
         })?;
 
     // 3. Cargar la conversación para obtener customer_phone + business_phone
@@ -7599,12 +7979,18 @@ pub async fn react_message_handler(
     let wa = resolve_service_for_phone(&state, &conv.business_phone).await?;
 
     // 5. Llamar a Meta (Meta acepta emoji vacío para remover)
-    wa.send_reaction(&conv.phone, &message.wa_message_id, &body.emoji).await?;
+    wa.send_reaction(&conv.phone, &message.wa_message_id, &body.emoji)
+        .await?;
 
     // 6. Aplicar update en DB (sólo si Meta aceptó)
     let updated = state
         .db
-        .update_message_reactions(&message.wa_message_id, "agent", &body.emoji, Some(&claims.name))
+        .update_message_reactions(
+            &message.wa_message_id,
+            "agent",
+            &body.emoji,
+            Some(&claims.name),
+        )
         .await
         .map_err(ApiError::DatabaseError)?
         .ok_or_else(|| {

@@ -392,7 +392,8 @@ pub async fn set_user_password_handler(
     responses(
         (status = 200, description = "Password actualizado. El JWT actual sigue siendo válido — no se requiere relogin.", body = OkResponse),
         (status = 400, description = "`weak_password` (menor al mínimo de 8) | `same_password` (new == old) | `bad_request` (body mal formado)"),
-        (status = 401, description = "`wrong_password` (old_password no coincide) | `unauthorized` (JWT inválido/expirado)"),
+        (status = 401, description = "`unauthorized` (JWT inválido/expirado)"),
+        (status = 403, description = "`wrong_password` (old_password no coincide)"),
     )
 )]
 pub async fn change_my_password_handler(

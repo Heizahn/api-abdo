@@ -3,7 +3,8 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
-    response::IntoResponse,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -11,13 +12,20 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::{
-    auth::user_jwt::UserJwtService,
+    auth::{
+        http_auth::{compat_ws_query_enabled, read_staff_access_token},
+        user_jwt::UserJwtService,
+    },
     db::{SalesRepository, UserRepository, WhatsAppRepository},
     models::whatsapp::{ConversationItem, MessageItem, TicketItem},
     state::{AppState, WsRegistry},
 };
 
 const WS_OUTBOX_CAPACITY: usize = 512;
+const NO_ACCESS_ROLE: f32 = -1.0;
+const SUPERADMIN_ROLE: f32 = 0.0;
+const ACCOUNTING_ROLE: f32 = 1.0;
+const ACCOUNTING_MESSAGING_ROLE: f32 = 1.5;
 
 // ============================================
 // TIPOS DE EVENTOS
@@ -255,7 +263,7 @@ pub enum WsServerEvent {
     ReportePagoPendiente { data: ReportePagoPendienteData },
 
     /// Evento reactivo: cambio en el conteo de conversaciones con mensajes no leídos.
-    /// Audience: bCanChat == true. Fan-out vía `broadcast_to_chat_users`.
+    /// Audience: bCanChat == true OR nRole == 0 (superadmin). Fan-out vía `broadcast_to_chat_users`.
     ///
     /// Emit sites (// EMIT BADGE: CONVERSACION_NO_LEIDA):
     /// - whatsapp/handler.rs (after touch_conversation(increment_unread=true))
@@ -264,7 +272,7 @@ pub enum WsServerEvent {
     ConversacionNoLeida { data: ConversacionNoLeidaData },
 
     /// Evento reactivo: cambio en el conteo de tickets con status "open".
-    /// Audience: bCanChat == true. Fan-out vía `broadcast_to_chat_users`.
+    /// Audience: bCanChat == true OR nRole == 0 (superadmin). Fan-out vía `broadcast_to_chat_users`.
     ///
     /// Emit sites (// EMIT BADGE: TICKET_PENDIENTE):
     /// - whatsapp/tickets.rs::create_ticket_handler (after insert)
@@ -435,7 +443,8 @@ pub async fn broadcast_to_roles(
     Ok(())
 }
 
-/// Broadcast un payload JSON pre-serializado a todos los usuarios con `bCanChat == true`.
+/// Broadcast un payload JSON pre-serializado a todos los usuarios con acceso al inbox WA:
+/// `bCanChat == true` o `nRole == 0` (superadmin).
 ///
 /// Filtros DB: visible == true, bIsBot != true.
 /// Best-effort: fallas de envío por usuario son silenciosas.
@@ -487,34 +496,55 @@ pub async fn broadcast_except(registry: &WsRegistry, skip_agent_id: &str, event:
 
 #[derive(Deserialize)]
 pub struct WsConnectParams {
-    token: String,
+    token: Option<String>,
 }
 
-/// GET /v1/ws/chat?token=<user_jwt>
-/// Upgrade a WebSocket. Valida JWT de staff/admin via query param.
+/// GET /v1/ws/chat
+/// Upgrade a WebSocket. Auth primaria vía cookie HttpOnly.
+/// `?token=` se acepta sólo en ventana de compatibilidad temporal.
 pub async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
-    Query(params): Query<WsConnectParams>,
-) -> impl IntoResponse {
-    // Validar JWT antes del upgrade
+    headers: HeaderMap,
+    query: Option<Query<WsConnectParams>>,
+) -> Response {
+    let cookie_token = read_staff_access_token(&headers);
+    let query_token = if compat_ws_query_enabled(&state.config) {
+        query.and_then(|q| q.0.token)
+    } else {
+        None
+    };
+
+    let Some(token) = cookie_token.or(query_token) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+
+    // Validar JWT antes del upgrade.
     let jwt = UserJwtService::new();
-    match jwt.verify_token(&params.token) {
-        Ok(claims) => {
-            ws.on_upgrade(move |socket| handle_socket(socket, state, claims.id, claims.name))
-        }
-        Err(_) => {
-            // No podemos retornar error HTTP después del upgrade — rechazamos antes
-            ws.on_upgrade(|mut socket| async move {
-                let err = serde_json::to_string(&WsServerEvent::Error {
-                    error: "token_invalido".to_string(),
-                })
-                .unwrap_or_default();
-                let _ = socket.send(Message::Text(err)).await;
-                let _ = socket.close().await;
-            })
-        }
+    let claims = match jwt.verify_token(&token) {
+        Ok(c) => c,
+        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+
+    // Gate explícito de acceso WS (panel interno):
+    // - usuario visible y no bot
+    // - rol válido (nRole != -1)
+    // - acceso por chat (bCanChat) o rol interno elegible para panel (0/1/1.5)
+    let user = match state.db.find_user_by_id(&claims.id).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let role_eligible = user.role == SUPERADMIN_ROLE
+        || user.role == ACCOUNTING_ROLE
+        || user.role == ACCOUNTING_MESSAGING_ROLE;
+    let ws_eligible = user.can_chat || role_eligible;
+    if !user.visible || user.is_bot || user.role == NO_ACCESS_ROLE || !ws_eligible {
+        return StatusCode::FORBIDDEN.into_response();
     }
+
+    ws.on_upgrade(move |socket| handle_socket(socket, state, claims.id, claims.name))
+        .into_response()
 }
 
 async fn handle_socket(
@@ -552,6 +582,7 @@ async fn handle_socket(
 
         let role_eligible =
             matches!(role_opt, Some(r) if r == 0.0_f32 || r == 1.0_f32 || r == 1.5_f32);
+        let wa_eligible = can_chat || matches!(role_opt, Some(r) if r == 0.0_f32);
 
         let (reports, unread, tickets) = tokio::join!(
             async {
@@ -562,14 +593,14 @@ async fn handle_socket(
                 }
             },
             async {
-                if can_chat {
+                if wa_eligible {
                     state.db.count_unread_conversations().await.unwrap_or(0)
                 } else {
                     0
                 }
             },
             async {
-                if can_chat {
+                if wa_eligible {
                     state.db.count_open_tickets().await.unwrap_or(0)
                 } else {
                     0

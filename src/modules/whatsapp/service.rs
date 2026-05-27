@@ -901,7 +901,11 @@ impl WhatsAppService {
             // Intentar parsear el error code de Meta para mapear a 409 si aplica.
             let meta_code: Option<i64> = serde_json::from_str::<serde_json::Value>(&raw)
                 .ok()
-                .and_then(|v| v.get("error").and_then(|e| e.get("code")).and_then(|c| c.as_i64()));
+                .and_then(|v| {
+                    v.get("error")
+                        .and_then(|e| e.get("code"))
+                        .and_then(|c| c.as_i64())
+                });
 
             return match meta_code {
                 // 131047: outside 24h reaction window.

@@ -38,12 +38,12 @@ use crate::{
         ai_agent::{
             AiAgent, AiAgentDeleteResponse, AiAgentFaq, AiAgentFaqItem, AiAgentFaqListResponse,
             AiAgentFaqResponse, AiAgentItem, AiAgentMetricsDailyBucketDto, AiAgentMetricsData,
-            AiAgentMetricsResponse, AiAgentMode,
-            AiAgentPreClassBreakdown, AiAgentResponse, AiAgentsListResponse, AiConfigDto,
-            AiConfigPatchRequest, AiConfigResponse, AiEscalationRules, AiLimits, AiModelConfig,
-            AiPersonality, AiSchedule, AiToolConfig, CreateAiAgentFaqRequest, CreateAiAgentRequest,
-            TestConnectionData, TestConnectionRequest, TestConnectionResponse,
-            TestConnectionSource, UpdateAiAgentFaqRequest, UpdateAiAgentRequest,
+            AiAgentMetricsResponse, AiAgentMode, AiAgentPreClassBreakdown, AiAgentResponse,
+            AiAgentsListResponse, AiConfigDto, AiConfigPatchRequest, AiConfigResponse,
+            AiEscalationRules, AiLimits, AiModelConfig, AiPersonality, AiSchedule, AiToolConfig,
+            CreateAiAgentFaqRequest, CreateAiAgentRequest, TestConnectionData,
+            TestConnectionRequest, TestConnectionResponse, TestConnectionSource,
+            UpdateAiAgentFaqRequest, UpdateAiAgentRequest,
         },
         users::User,
     },
@@ -71,7 +71,6 @@ const FAQ_TAGS_MAX_COUNT: usize = 16;
 
 const TEST_TIMEOUT_MAX: u32 = 30;
 const DEFAULT_TEST_MODEL: &str = "openai/gpt-4o-mini";
-
 
 fn require_superadmin(u: &User) -> Result<(), ApiError> {
     if u.role != SUPERADMIN_ROLE {
@@ -1292,7 +1291,6 @@ pub async fn test_connection_for_agent_handler(
         },
     }))
 }
-
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Phase 3a — Metrics handler

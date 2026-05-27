@@ -35,6 +35,71 @@ fn decode_user_cursor(c: &str) -> Option<(String, String)> {
     Some((name.to_string(), id.to_string()))
 }
 
+fn bson_boolish(v: &Bson) -> Option<bool> {
+    match v {
+        Bson::Boolean(b) => Some(*b),
+        Bson::Int32(i) => Some(*i != 0),
+        Bson::Int64(i) => Some(*i != 0),
+        Bson::Double(f) => Some(*f != 0.0_f64),
+        Bson::String(s) => {
+            let normalized = s.trim().to_ascii_lowercase();
+            match normalized.as_str() {
+                "true" | "1" | "yes" | "on" | "si" => Some(true),
+                "false" | "0" | "no" | "off" | "" => Some(false),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn can_chat_or_filter(can_chat: bool) -> Vec<Document> {
+    let fields = ["bCanChat", "canChat", "can_chat"];
+    let values = if can_chat {
+        vec![
+            Bson::Boolean(true),
+            Bson::Int32(1),
+            Bson::Int64(1),
+            Bson::Double(1.0_f64),
+            Bson::String("1".to_string()),
+            Bson::String("true".to_string()),
+            Bson::String("TRUE".to_string()),
+            Bson::String("True".to_string()),
+        ]
+    } else {
+        vec![
+            Bson::Boolean(false),
+            Bson::Int32(0),
+            Bson::Int64(0),
+            Bson::Double(0.0_f64),
+            Bson::String("0".to_string()),
+            Bson::String("false".to_string()),
+            Bson::String("FALSE".to_string()),
+            Bson::String("False".to_string()),
+            Bson::String("".to_string()),
+        ]
+    };
+
+    fields
+        .into_iter()
+        .map(|field| {
+            let mut in_doc = Document::new();
+            in_doc.insert("$in", Bson::Array(values.clone()));
+            let mut clause = Document::new();
+            clause.insert(field, Bson::Document(in_doc));
+            clause
+        })
+        .collect()
+}
+
+fn superadmin_role_or_filter() -> Vec<Document> {
+    vec![
+        doc! { "nRole": 0.0_f64 },
+        doc! { "nRole": 0_i32 },
+        doc! { "nRole": 0_i64 },
+    ]
+}
+
 pub(crate) fn last_user_cursor(users: &[User]) -> Option<String> {
     users.last().map(|u| encode_user_cursor(&u.name, &u.id))
 }
@@ -125,11 +190,19 @@ impl UserRepository for MongoDB {
         // El bot tiene `bCanChat = false` por construcción; `bIsBot != true`
         // es defensa adicional por si en el futuro alguien crea otro user con
         // can_chat habilitado por error.
-        let filter = doc! {
-            "bCanChat": true,
+        let mut filter = doc! {
             "visible": true,
             "bIsBot": { "$ne": true },
         };
+        filter.insert(
+            "$or",
+            Bson::Array(
+                can_chat_or_filter(true)
+                    .into_iter()
+                    .map(Bson::Document)
+                    .collect(),
+            ),
+        );
 
         collection
             .find(filter)
@@ -307,7 +380,7 @@ impl UserRepository for MongoDB {
             q.insert("visible", v);
         }
         if let Some(cc) = filter.can_chat {
-            q.insert("bCanChat", cc);
+            or_groups.push(can_chat_or_filter(cc));
         }
 
         if let Some(c) = filter.cursor {
@@ -386,20 +459,29 @@ impl UserRepository for MongoDB {
     }
 
     async fn find_chat_user_ids(&self) -> Result<Vec<String>, String> {
-        let collection: Collection<User> = self.db.collection("Users");
-        let filter = doc! {
-            "bCanChat": true,
+        let collection: Collection<Document> = self.db.collection("Users");
+        let mut filter = doc! {
             "visible": true,
             "bIsBot": { "$ne": true },
         };
-        let users: Vec<User> = collection
+        let mut audience = can_chat_or_filter(true);
+        audience.extend(superadmin_role_or_filter());
+        filter.insert(
+            "$or",
+            Bson::Array(audience.into_iter().map(Bson::Document).collect()),
+        );
+        let users: Vec<Document> = collection
             .find(filter)
+            .projection(doc! { "_id": 1 })
             .await
             .map_err(|e| e.to_string())?
             .try_collect::<Vec<_>>()
             .await
             .map_err(|e| e.to_string())?;
-        Ok(users.into_iter().map(|u| u.id).collect())
+        Ok(users
+            .into_iter()
+            .filter_map(|d| d.get_str("_id").ok().map(|s| s.to_string()))
+            .collect())
     }
 
     async fn get_user_role_and_can_chat(
@@ -408,7 +490,7 @@ impl UserRepository for MongoDB {
     ) -> Result<(Option<f32>, bool), String> {
         let collection: Collection<Document> = self.db.collection("Users");
         let opts = FindOptions::builder()
-            .projection(doc! { "_id": 0, "nRole": 1, "bCanChat": 1 })
+            .projection(doc! { "_id": 0, "nRole": 1, "bCanChat": 1, "canChat": 1, "can_chat": 1 })
             .limit(1)
             .build();
         let result = collection
@@ -429,9 +511,9 @@ impl UserRepository for MongoDB {
                     mongodb::bson::Bson::Int64(i) => Some(*i as f32),
                     _ => None,
                 });
-                let can_chat = doc
-                    .get("bCanChat")
-                    .and_then(|v| v.as_bool())
+                let can_chat = ["bCanChat", "canChat", "can_chat"]
+                    .iter()
+                    .find_map(|k| doc.get(*k).and_then(bson_boolish))
                     .unwrap_or(false);
                 Ok((role, can_chat))
             }

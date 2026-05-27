@@ -26,9 +26,8 @@ pub enum ApiError {
     Conflict(String),
 
     /// La password actual provista (`old_password`) no coincide con el hash
-    /// almacenado. Se sirve como 401 `wrong_password` — diferenciable del 401
-    /// genérico (`unauthorized`) para que el front pueda mostrar un mensaje
-    /// específico en el flujo de cambio de contraseña.
+    /// almacenado. Se sirve como 403 `wrong_password` (credencial funcional
+    /// inválida) para evitar refresh innecesario del frontend.
     #[error("Wrong password")]
     WrongPassword,
 
@@ -172,7 +171,7 @@ impl IntoResponse for ApiError {
             ApiError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
             ApiError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             ApiError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
-            ApiError::WrongPassword => (StatusCode::UNAUTHORIZED, "wrong_password"),
+            ApiError::WrongPassword => (StatusCode::FORBIDDEN, "wrong_password"),
             ApiError::SamePassword => (StatusCode::BAD_REQUEST, "same_password"),
             ApiError::WeakPassword => (StatusCode::BAD_REQUEST, "weak_password"),
             ApiError::WindowExpired => (StatusCode::CONFLICT, "window_expired"),

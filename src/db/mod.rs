@@ -751,6 +751,14 @@ pub trait WhatsAppRepository {
         id: &ObjectId,
         assigned_to: Option<&str>,
     ) -> Result<(), String>;
+    /// Reasigna la conversación a otro agente sin alterar el `status` actual.
+    /// Usado por `/transfer`: `pending` debe seguir `pending` y `in_progress`
+    /// debe seguir `in_progress`.
+    async fn transfer_conversation(
+        &self,
+        id: &ObjectId,
+        assigned_to: &str,
+    ) -> Result<Option<WaConversation>, String>;
     /// Intenta tomar una conversación tomable (`pending` o `closed`).
     /// Al tomarla, la asigna al agente y la pasa a `status = "in_progress"`.
     /// Retorna `None` si otro actor la movió fuera de esos estados antes del update.

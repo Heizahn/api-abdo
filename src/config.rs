@@ -27,6 +27,8 @@ pub struct Config {
     // Logging
     pub rust_log: String,
     pub log_format: String,
+    pub frontend_origins: Vec<String>,
+    pub cors_allow_credentials: bool,
 
     //System
     pub id_simcot: String,
@@ -56,6 +58,14 @@ pub struct Config {
     // seteada, el endpoint de upload responde 503 con código `app_id_not_configured`
     // y el resto del módulo WhatsApp sigue funcionando.
     pub whatsapp_app_id: Option<String>,
+
+    // Auth hardening
+    pub auth_cookie_secure: bool,
+    pub auth_cookie_same_site: String,
+    pub auth_cookie_domain: Option<String>,
+    pub auth_compat_allow_refresh_body: bool,
+    pub auth_compat_allow_ws_query: bool,
+    pub auth_compat_until: Option<String>,
 }
 
 impl Config {
@@ -109,6 +119,11 @@ impl Config {
             // Logging
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info,api_abdo=debug".to_string()),
             log_format: env::var("LOG_FORMAT").unwrap_or_else(|_| "json".to_string()),
+            frontend_origins: parse_csv_env(
+                "FRONTEND_ORIGINS",
+                vec!["http://localhost:5173".to_string()],
+            ),
+            cors_allow_credentials: parse_bool_env("CORS_ALLOW_CREDENTIALS", true),
 
             //System
             id_simcot: env::var("ID_SIMCOT").unwrap_or_else(|_| "".to_string()),
@@ -140,10 +155,51 @@ impl Config {
             // Meta App ID — opcional. Si falta, el endpoint de upload de
             // header media responde 503; el resto sigue funcionando.
             whatsapp_app_id: env::var("WHATSAPP_APP_ID").ok().filter(|s| !s.is_empty()),
+
+            // Auth hardening
+            auth_cookie_secure: parse_bool_env("AUTH_COOKIE_SECURE", true),
+            auth_cookie_same_site: env::var("AUTH_COOKIE_SAME_SITE")
+                .unwrap_or_else(|_| "Lax".to_string()),
+            auth_cookie_domain: env::var("AUTH_COOKIE_DOMAIN")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
+            auth_compat_allow_refresh_body: parse_bool_env("AUTH_COMPAT_ALLOW_REFRESH_BODY", true),
+            auth_compat_allow_ws_query: parse_bool_env("AUTH_COMPAT_ALLOW_WS_QUERY", true),
+            auth_compat_until: env::var("AUTH_COMPAT_UNTIL")
+                .ok()
+                .filter(|v| !v.trim().is_empty()),
         }
     }
 
     pub fn address(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+}
+
+fn parse_bool_env(key: &str, default_value: bool) -> bool {
+    match env::var(key) {
+        Ok(raw) => matches!(
+            raw.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => default_value,
+    }
+}
+
+fn parse_csv_env(key: &str, default_value: Vec<String>) -> Vec<String> {
+    match env::var(key) {
+        Ok(raw) => {
+            let values: Vec<String> = raw
+                .split(',')
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .collect();
+            if values.is_empty() {
+                default_value
+            } else {
+                values
+            }
+        }
+        Err(_) => default_value,
     }
 }

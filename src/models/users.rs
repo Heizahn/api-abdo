@@ -21,7 +21,7 @@ pub struct User {
 
     /// Permiso para atender chats de WhatsApp. Cuando es `true`, el usuario aparece
     /// en el dropdown de transferencia de conversaciones.
-    #[serde(rename = "bCanChat", default)]
+    #[serde(rename = "bCanChat", alias = "canChat", alias = "can_chat", default)]
     pub can_chat: bool,
 
     /// `true` cuando el usuario es un bot (Asistente Virtual del módulo

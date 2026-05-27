@@ -3,11 +3,7 @@ use std::time::Duration;
 
 use mongodb::bson::{oid::ObjectId, DateTime};
 
-use crate::{
-    db::WhatsAppRepository,
-    models::whatsapp::WaMessage,
-    state::AppState,
-};
+use crate::{db::WhatsAppRepository, models::whatsapp::WaMessage, state::AppState};
 
 use super::dispatch::dispatch_inbound_async;
 
@@ -51,7 +47,11 @@ pub async fn run_ai_recovery(state: Arc<AppState>) {
             None => continue,
         };
 
-        let settings = match state.db.find_wa_settings_by_phone(&conv.business_phone).await {
+        let settings = match state
+            .db
+            .find_wa_settings_by_phone(&conv.business_phone)
+            .await
+        {
             Ok(Some(s)) => s,
             Ok(None) => {
                 tracing::warn!(
