@@ -34,6 +34,13 @@ pub struct PaymentsChartQuery {
     pub owner: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct MonthlyClosingSummaryQuery {
+    pub from_date: String,
+    pub to_date: String,
+    pub owner: Option<String>,
+}
+
 async fn resolve_owner_id(
     state: &Arc<AppState>,
     claims: &UserProfileClaims,
@@ -85,6 +92,21 @@ pub struct MonthlyClosingData {
     pub collected: f64,
     pub pending: f64,
     pub efficiency: Option<f64>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct CurrencyMeta {
+    pub usd_decimals: u8,
+    pub bs_decimals: u8,
+    pub timezone: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct MonthlyClosingSummaryResponse {
+    pub total_collected_usd: f64,
+    pub total_paid_usd: f64,
+    pub total_paid_bs: f64,
+    pub currency_meta: Option<CurrencyMeta>,
 }
 
 #[utoipa::path(
@@ -334,6 +356,81 @@ pub async fn monthly_closing_handler(
             pending: (pending * 100.0).round() / 100.0,
             efficiency,
         },
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/dashboard/monthly-closing/summary",
+    tag = "Dashboard",
+    security(("bearerAuth" = [])),
+    params(
+        ("from_date" = String, Query, description = "Fecha inicial en formato YYYY-MM-DD"),
+        ("to_date" = String, Query, description = "Fecha final en formato YYYY-MM-DD"),
+        ("owner" = Option<String>, Query, description = "Filtrar por owner permitido para el caller. Si no tiene permiso, responde 403"),
+    ),
+    responses(
+        (status = 200, description = "Resumen del cierre mensual para el rango de fechas indicado", body = MonthlyClosingSummaryResponse),
+        (status = 400, description = "Formato de fecha inválido, rango inválido o fecha futura"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Owner no permitido para este usuario"),
+    )
+)]
+pub async fn monthly_closing_summary_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Query(params): Query<MonthlyClosingSummaryQuery>,
+) -> Result<Json<MonthlyClosingSummaryResponse>, ApiError> {
+    let owner_id = resolve_owner_id(&state, &claims, params.owner.as_deref()).await?;
+    let now_vz = Utc::now().with_timezone(&VENEZUELA_TZ);
+    let today = now_vz.date_naive();
+
+    let from_day = parse_year_month_day(&params.from_date).ok_or_else(|| {
+        ApiError::BadRequest("Formato de fecha inválido en from_date, use YYYY-MM-DD".into())
+    })?;
+    let to_day = parse_year_month_day(&params.to_date).ok_or_else(|| {
+        ApiError::BadRequest("Formato de fecha inválido en to_date, use YYYY-MM-DD".into())
+    })?;
+
+    if from_day > to_day {
+        return Err(ApiError::BadRequest(
+            "El rango de fechas es inválido: from_date no puede ser mayor que to_date".into(),
+        ));
+    }
+
+    if to_day > today {
+        return Err(ApiError::BadRequest(
+            "La fecha final no puede ser mayor al día actual".into(),
+        ));
+    }
+
+    let start_utc = VENEZUELA_TZ
+        .with_ymd_and_hms(from_day.year(), from_day.month(), from_day.day(), 0, 0, 0)
+        .single()
+        .ok_or(ApiError::InternalServerError)?
+        .with_timezone(&Utc);
+
+    let end_utc = VENEZUELA_TZ
+        .with_ymd_and_hms(to_day.year(), to_day.month(), to_day.day(), 23, 59, 59)
+        .single()
+        .ok_or(ApiError::InternalServerError)?
+        .with_timezone(&Utc);
+
+    let (total_collected_usd, total_paid_usd, total_paid_bs) = state
+        .db
+        .get_monthly_closing_summary(start_utc, end_utc, owner_id.as_deref())
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    Ok(Json(MonthlyClosingSummaryResponse {
+        total_collected_usd: (total_collected_usd * 100.0).round() / 100.0,
+        total_paid_usd: (total_paid_usd * 100.0).round() / 100.0,
+        total_paid_bs: (total_paid_bs * 100.0).round() / 100.0,
+        currency_meta: Some(CurrencyMeta {
+            usd_decimals: 2,
+            bs_decimals: 2,
+            timezone: "America/Caracas".to_string(),
+        }),
     }))
 }
 

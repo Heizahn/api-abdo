@@ -263,6 +263,13 @@ pub trait SalesRepository {
         owner_id: Option<&str>,
     ) -> Result<Vec<DailyPaymentChartPoint>, String>;
 
+    async fn get_monthly_closing_summary(
+        &self,
+        start: chrono::DateTime<chrono::Utc>,
+        end: chrono::DateTime<chrono::Utc>,
+        owner_id: Option<&str>,
+    ) -> Result<(f64, f64, f64), String>;
+
     async fn find_pending_reports_by_debt_ids(
         &self,
         debt_ids: &[ObjectId],

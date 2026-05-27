@@ -75,7 +75,9 @@ use crate::modules::ai_agent::sandbox::{
 use crate::modules::calculations::handler::{
     CalculationRequest, CalculationRequestV2, CalculationResponse, CalculationResponseV2, Currency,
 };
-use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingResponse};
+use crate::modules::dashboard::handler::{
+    CurrencyMeta, MonthlyClosingData, MonthlyClosingResponse, MonthlyClosingSummaryResponse,
+};
 use crate::modules::payments::handler::RejectReportRequest;
 use crate::modules::whatsapp::handler::{InterveneData, InterveneResponse, ResetAiStateResponse};
 
@@ -83,7 +85,7 @@ use crate::modules::whatsapp::handler::{InterveneData, InterveneResponse, ResetA
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.7",
+        version = "0.3.9",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
@@ -119,6 +121,7 @@ use crate::modules::whatsapp::handler::{InterveneData, InterveneResponse, ResetA
         crate::modules::dashboard::handler::latest_payments_handler,
         crate::modules::dashboard::handler::solvency_handler,
         crate::modules::dashboard::handler::monthly_closing_handler,
+        crate::modules::dashboard::handler::monthly_closing_summary_handler,
         crate::modules::dashboard::handler::payments_chart_handler,
         // Clients — Staff
         crate::modules::clients::handler::get_all_clients_handler,
@@ -252,6 +255,7 @@ use crate::modules::whatsapp::handler::{InterveneData, InterveneResponse, ResetA
             CheckReferenceRequest, CheckReferenceResponse, CheckReferenceData, ReferenceDetails,
             // Dashboard
             LatestPayment, SolvencyCounts, MonthlyClosingResponse, MonthlyClosingData,
+            MonthlyClosingSummaryResponse, CurrencyMeta,
             DailyPaymentChartPoint,
             // Clients — Staff
             ClientDetail, ClientOnu, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem,
