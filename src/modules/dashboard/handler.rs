@@ -242,7 +242,6 @@ pub async fn payments_chart_handler(
         (status = 400, description = "Formato de mes inválido o mes futuro"),
         (status = 401, description = "No autorizado"),
         (status = 403, description = "Owner no permitido para este usuario"),
-        (status = 404, description = "Mes pasado sin datos"),
     )
 )]
 pub async fn monthly_closing_handler(
@@ -302,10 +301,6 @@ pub async fn monthly_closing_handler(
             .await
             .map_err(ApiError::DatabaseError)?
     };
-
-    if !is_current_month && collected == 0.0 {
-        return Err(ApiError::NotFound);
-    }
 
     let pending = if is_current_month {
         active_clients
