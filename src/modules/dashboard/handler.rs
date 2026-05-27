@@ -2,7 +2,7 @@ use axum::{
     extract::{Extension, Query, State},
     Json,
 };
-use chrono::{Datelike, TimeZone, Utc};
+use chrono::{Datelike, Duration, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -25,6 +25,12 @@ pub struct DashboardQuery {
 #[derive(Deserialize)]
 pub struct MonthlyClosingQuery {
     pub month: Option<String>,
+    pub owner: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct PaymentsChartQuery {
+    pub date: Option<String>,
     pub owner: Option<String>,
 }
 
@@ -139,12 +145,12 @@ pub async fn solvency_handler(
     tag = "Dashboard",
     security(("bearerAuth" = [])),
     params(
-        ("month" = Option<String>, Query, description = "Mes en formato YYYY-MM (default: mes actual)"),
+        ("date" = Option<String>, Query, description = "Fecha centro en formato YYYY-MM-DD. Si no se envía, retorna hoy y 6 días hacia atrás"),
         ("owner" = Option<String>, Query, description = "Filtrar por owner permitido para el caller. Si no tiene permiso, responde 403"),
     ),
     responses(
         (status = 200, description = "Serie diaria de recaudación (USD/Bs) para graficar", body = Vec<DailyPaymentChartPoint>),
-        (status = 400, description = "Formato de mes inválido o mes futuro"),
+        (status = 400, description = "Formato de fecha inválido, fecha futura o sin 3 días posteriores"),
         (status = 401, description = "No autorizado"),
         (status = 403, description = "Owner no permitido para este usuario"),
     )
@@ -152,42 +158,45 @@ pub async fn solvency_handler(
 pub async fn payments_chart_handler(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<UserProfileClaims>,
-    Query(params): Query<MonthlyClosingQuery>,
+    Query(params): Query<PaymentsChartQuery>,
 ) -> Result<Json<Vec<DailyPaymentChartPoint>>, ApiError> {
     let owner_id = resolve_owner_id(&state, &claims, params.owner.as_deref()).await?;
     let now_vz = Utc::now().with_timezone(&VENEZUELA_TZ);
-    let current_year = now_vz.year();
-    let current_month = now_vz.month();
-    let current_idx = month_to_index(current_year, current_month);
+    let today = now_vz.date_naive();
 
-    let (selected_year, selected_month) = match &params.month {
-        Some(s) => parse_year_month(s)
-            .ok_or_else(|| ApiError::BadRequest("Formato de mes inválido, use YYYY-MM".into()))?,
-        None => (current_year, current_month),
-    };
+    let (start_day, end_day) = match &params.date {
+        Some(s) => {
+            let selected = parse_year_month_day(s).ok_or_else(|| {
+                ApiError::BadRequest("Formato de fecha inválido, use YYYY-MM-DD".into())
+            })?;
 
-    let selected_idx = month_to_index(selected_year, selected_month);
-    if selected_idx > current_idx {
-        return Err(ApiError::BadRequest(
-            "El mes seleccionado no puede ser mayor al mes actual".into(),
-        ));
-    }
+            if selected > today {
+                return Err(ApiError::BadRequest(
+                    "La fecha seleccionada no puede ser mayor al día actual".into(),
+                ));
+            }
 
-    let is_current_month = selected_idx == current_idx;
-    let max_day = if is_current_month {
-        now_vz.day()
-    } else {
-        days_in_month(selected_year, selected_month)
+            let max_center = today - Duration::days(3);
+            if selected > max_center {
+                return Err(ApiError::BadRequest(format!(
+                    "Para centrar en 7 días deben existir 3 días posteriores. Fecha máxima permitida: {}",
+                    max_center.format("%Y-%m-%d")
+                )));
+            }
+
+            (selected - Duration::days(3), selected + Duration::days(3))
+        }
+        None => (today - Duration::days(6), today),
     };
 
     let start_utc = VENEZUELA_TZ
-        .with_ymd_and_hms(selected_year, selected_month, 1, 0, 0, 0)
+        .with_ymd_and_hms(start_day.year(), start_day.month(), start_day.day(), 0, 0, 0)
         .single()
         .ok_or(ApiError::InternalServerError)?
         .with_timezone(&Utc);
 
     let end_utc = VENEZUELA_TZ
-        .with_ymd_and_hms(selected_year, selected_month, max_day, 23, 59, 59)
+        .with_ymd_and_hms(end_day.year(), end_day.month(), end_day.day(), 23, 59, 59)
         .single()
         .ok_or(ApiError::InternalServerError)?
         .with_timezone(&Utc);
@@ -204,8 +213,9 @@ pub async fn payments_chart_handler(
     }
 
     let mut points: Vec<DailyPaymentChartPoint> = Vec::new();
-    for day in 1..=max_day {
-        let date = format!("{:04}-{:02}-{:02}", selected_year, selected_month, day);
+    let mut day = start_day;
+    while day <= end_day {
+        let date = day.format("%Y-%m-%d").to_string();
         if let Some(p) = by_day.get(&date) {
             points.push(DailyPaymentChartPoint {
                 date,
@@ -219,6 +229,7 @@ pub async fn payments_chart_handler(
                 amount_bs: 0.0,
             });
         }
+        day += Duration::days(1);
     }
 
     Ok(Json(points))
@@ -385,6 +396,10 @@ fn parse_year_month(s: &str) -> Option<(i32, u32)> {
         return None;
     }
     Some((year, month))
+}
+
+fn parse_year_month_day(s: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {
