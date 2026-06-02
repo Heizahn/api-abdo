@@ -360,7 +360,12 @@ pub async fn receive_webhook(
                             tracing::warn!("[webhook] mensaje {} falló sin detalles", s.id);
                         }
                     }
-                    match state.db.update_message_status(&s.id, &s.status).await {
+                    let first_error = s.errors.as_ref().and_then(|errs| errs.first());
+                    match state
+                        .db
+                        .update_message_status(&s.id, &s.status, first_error)
+                        .await
+                    {
                         Ok(Some(updated)) => {
                             // Si este mensaje era el último de la conversación, propagar el
                             // nuevo status al preview del listado (checkmarks en vivo).
@@ -389,6 +394,11 @@ pub async fn receive_webhook(
                                 conversation_id: updated.conversation_id.to_hex(),
                                 message_id: updated.wa_message_id.clone(),
                                 status: s.status.clone(),
+                                meta_error_code: updated.meta_error_code,
+                                meta_error_title: updated.meta_error_title.clone(),
+                                meta_error_message: updated.meta_error_message.clone(),
+                                meta_error_details: updated.meta_error_details.clone(),
+                                failed_at: updated.failed_at.map(iso8601),
                             };
                             // sent/delivered/read son routine — DEBUG. failed es
                             // accionable y queda en WARN para que no se pierda.
@@ -624,8 +634,6 @@ pub async fn receive_webhook(
                         }
                         continue; // CRÍTICO: no caer en el resto del loop (no upsert, no touch, no insert).
                     }
-
-                    let agents = settings.agents.clone();
 
                     let name = contacts
                         .iter()
@@ -891,6 +899,11 @@ pub async fn receive_webhook(
                         media_mime_type,
                         media_filename,
                         status: None,
+                        meta_error_code: None,
+                        meta_error_title: None,
+                        meta_error_message: None,
+                        meta_error_details: None,
+                        failed_at: None,
                         sent_by: None,
                         read_by_user_id: None,
                         read_at: None,
@@ -1058,7 +1071,7 @@ pub async fn receive_webhook(
                     if conv_now.assigned_to.is_none() {
                         let state_clone = state.clone();
                         tokio::spawn(async move {
-                            assign_conversation(state_clone, conv_id, agents).await;
+                            assign_conversation(state_clone, conv_id).await;
                         });
                     }
 
@@ -1542,7 +1555,7 @@ pub async fn send_message_handler(
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
-    require_workspace_agent(&state, &conv.business_phone, &claims.id).await?;
+    require_workspace_agent_or_assigned(&state, &conv, &claims.id).await?;
 
     // Decidir modo: template (siempre permitido) vs texto (sólo dentro de la
     // ventana de 24h). El discriminador `type: "template"` o la presencia del
@@ -1731,6 +1744,11 @@ pub async fn send_message_handler(
         media_mime_type: sent.media_mime_type,
         media_filename: sent.media_filename,
         status: Some("sent".to_string()),
+        meta_error_code: None,
+        meta_error_title: None,
+        meta_error_message: None,
+        meta_error_details: None,
+        failed_at: None,
         sent_by: Some(claims.id.clone()),
         read_by_user_id: None,
         read_at: None,
@@ -2875,7 +2893,7 @@ pub async fn transfer_conversation_handler(
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
-    let settings = require_workspace_agent(&state, &conv.business_phone, &claims.id).await?;
+    require_workspace_agent_or_assigned(&state, &conv, &claims.id).await?;
 
     // Validar que el usuario destino exista.
     use crate::db::UserRepository;
@@ -2885,7 +2903,7 @@ pub async fn transfer_conversation_handler(
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or_else(|| ApiError::NotFound)?;
-    ensure_transfer_target_allowed(&settings, &target)?;
+    ensure_transfer_target_allowed(&target)?;
 
     let from_agent = conv.assigned_to.clone();
 
@@ -3521,6 +3539,11 @@ pub async fn initiate_conversation_handler(
         media_mime_type: None,
         media_filename: None,
         status: Some("sent".to_string()),
+        meta_error_code: None,
+        meta_error_title: None,
+        meta_error_message: None,
+        meta_error_details: None,
+        failed_at: None,
         sent_by: Some(claims.id.clone()),
         read_by_user_id: None,
         read_at: None,
@@ -5656,6 +5679,11 @@ fn msg_to_item(
         media_mime_type: m.media_mime_type,
         media_filename: m.media_filename,
         status: m.status,
+        meta_error_code: m.meta_error_code,
+        meta_error_title: m.meta_error_title,
+        meta_error_message: m.meta_error_message,
+        meta_error_details: m.meta_error_details,
+        failed_at: m.failed_at.map(iso8601),
         from_user_id: m.sent_by,
         from_user_name,
         idempotency_key: m.idempotency_key,
@@ -5975,27 +6003,26 @@ async fn require_workspace_agent(
     Ok(settings)
 }
 
-fn ensure_transfer_target_allowed(
-    settings: &WaSettings,
-    target: &crate::models::users::User,
+async fn require_workspace_agent_or_assigned(
+    state: &Arc<AppState>,
+    conv: &WaConversation,
+    user_id: &str,
 ) -> Result<(), ApiError> {
+    if conv.assigned_to.as_deref() == Some(user_id) {
+        return Ok(());
+    }
+
+    require_workspace_agent(state, &conv.business_phone, user_id)
+        .await
+        .map(|_| ())
+}
+
+fn ensure_transfer_target_allowed(target: &crate::models::users::User) -> Result<(), ApiError> {
     if !target.visible || target.is_bot || !target.can_chat {
         return Err(ApiError::domain_simple(
             StatusCode::FORBIDDEN,
             "whatsapp_transfer_target_not_allowed",
             "El usuario destino no puede atender chats de WhatsApp",
-        ));
-    }
-
-    if !settings
-        .agents
-        .iter()
-        .any(|agent_id| agent_id == &target.id)
-    {
-        return Err(ApiError::domain_simple(
-            StatusCode::FORBIDDEN,
-            "whatsapp_workspace_membership_required",
-            "El usuario destino no pertenece al workspace de esta conversación",
         ));
     }
 

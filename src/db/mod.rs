@@ -11,7 +11,7 @@ use crate::models::db::{
 };
 use crate::models::whatsapp::{
     ConversationStats, QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyList,
-    UrlPreview, WaConversation, WaConversationAiState, WaConversationEvent,
+    StatusError, UrlPreview, WaConversation, WaConversationAiState, WaConversationEvent,
     WaConversationEventInput, WaMessage, WaQuickReply, WaSettings, WaTemplate, WaTemplateCategory,
     WaTemplateStatus, WaTicket, WaTicketTimelineEntry,
 };
@@ -797,6 +797,7 @@ pub trait WhatsAppRepository {
         &self,
         wa_message_id: &str,
         status: &str,
+        error: Option<&StatusError>,
     ) -> Result<Option<WaMessage>, String>;
     /// Marca todos los inbound de una conversación con status != "read" como "read".
     /// Persiste también `read_by_user_id = agent_id` y `read_at = now` en cada

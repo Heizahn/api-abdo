@@ -104,6 +104,16 @@ pub enum WsServerEvent {
         conversation_id: String,
         message_id: String,
         status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        meta_error_code: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        meta_error_title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        meta_error_message: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        meta_error_details: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        failed_at: Option<String>,
     },
 
     /// Preview de URL listo para un mensaje ya existente. El front debe
