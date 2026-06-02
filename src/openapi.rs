@@ -25,8 +25,8 @@ use crate::models::auth::{
 };
 use crate::models::db::{
     BcvResponse, ClientDetail, ClientListItem, ClientOnu, ClientStatusHistoryItem,
-    CustomerInfoItem, LatestPayment, LatestVersion, LatestVersionResponse, PaymentReportListItem,
-    DailyPaymentChartPoint, PingResponse, SolvencyCounts,
+    CustomerInfoItem, DailyPaymentChartPoint, LatestPayment, LatestVersion, LatestVersionResponse,
+    PaymentReportListItem, PingResponse, SolvencyCounts,
 };
 use crate::models::payment::{
     Bank, BankListResponse, CheckReferenceData, CheckReferenceRequest, CheckReferenceResponse,
@@ -83,7 +83,7 @@ use crate::modules::whatsapp::handler::{InterveneData, InterveneResponse, ResetA
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.13",
+        version = "0.3.14",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."

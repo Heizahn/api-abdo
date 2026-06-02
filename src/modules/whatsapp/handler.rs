@@ -83,6 +83,12 @@ fn infer_inbound_effective_type(msg: &InboundMessage) -> String {
         Some("button")
     } else if msg.reaction.is_some() {
         Some("reaction")
+    } else if msg.extra.contains_key("order") {
+        Some("order")
+    } else if msg.extra.contains_key("system") {
+        Some("system")
+    } else if msg.extra.contains_key("referral") {
+        Some("referral")
     } else if msg.text.is_some() {
         Some("text")
     } else {
@@ -142,6 +148,30 @@ fn inbound_payload_markers(msg: &InboundMessage) -> String {
     } else {
         markers.join(",")
     }
+}
+
+fn should_store_raw_payload(msg_type: &str) -> bool {
+    matches!(
+        msg_type,
+        "order" | "system" | "referral" | "unsupported" | "unknown"
+    )
+}
+
+fn inbound_raw_payload(
+    msg: &InboundMessage,
+    effective_msg_type: &str,
+) -> Option<serde_json::Value> {
+    if should_store_raw_payload(effective_msg_type) {
+        serde_json::to_value(msg).ok()
+    } else {
+        None
+    }
+}
+
+fn first_string_at<'a>(value: &'a serde_json::Value, paths: &[&str]) -> Option<&'a str> {
+    paths
+        .iter()
+        .find_map(|path| value.pointer(path).and_then(|v| v.as_str()))
 }
 
 /// Persiste un evento de ciclo de vida de conversación. Best-effort:
@@ -511,7 +541,7 @@ pub async fn receive_webhook(
                 let settings = match state.db.find_wa_settings_by_phone(&business_phone).await {
                     Ok(Some(s)) => s,
                     Ok(None) => {
-                        tracing::info!(
+                        tracing::debug!(
                             "[webhook] número de negocio no configurado o inactivo: raw={} norm={}",
                             business_phone_raw,
                             business_phone
@@ -583,7 +613,7 @@ pub async fn receive_webhook(
                                 broadcast_all(&state.ws_registry, &event).await;
                             }
                             Ok(None) => {
-                                tracing::info!(
+                                tracing::debug!(
                                     "[webhook] reaction sobre wamid desconocido (ignorada): {}",
                                     target_wamid
                                 );
@@ -682,8 +712,9 @@ pub async fn receive_webhook(
                         })
                         .unwrap_or((None, None, None, None))
                     };
-                    let (body, media_id, media_mime_type, media_filename) =
-                        match effective_msg_type.as_str() {
+                    let (body, media_id, media_mime_type, media_filename) = match effective_msg_type
+                        .as_str()
+                    {
                         "text" => (msg.text.as_ref().map(|t| t.body.clone()), None, None, None),
                         "image" => extract_media(msg.image.as_ref()),
                         "document" => extract_media(msg.document.as_ref()),
@@ -748,6 +779,45 @@ pub async fn receive_webhook(
                                 });
                             (name, None, None, None)
                         }
+                        "order" => {
+                            let label = msg
+                                .extra
+                                .get("order")
+                                .and_then(|v| {
+                                    first_string_at(v, &["/text", "/catalog_id"])
+                                        .map(|s| s.to_string())
+                                })
+                                .unwrap_or_else(|| "Pedido de WhatsApp".to_string());
+                            (Some(label), None, None, None)
+                        }
+                        "system" => {
+                            let label = msg
+                                .extra
+                                .get("system")
+                                .and_then(|v| {
+                                    first_string_at(v, &["/body", "/message", "/type"])
+                                        .map(|s| s.to_string())
+                                })
+                                .unwrap_or_else(|| "Mensaje de sistema".to_string());
+                            (Some(label), None, None, None)
+                        }
+                        "referral" => {
+                            let label = msg
+                                .extra
+                                .get("referral")
+                                .and_then(|v| {
+                                    first_string_at(v, &["/headline", "/body", "/source_type"])
+                                        .map(|s| s.to_string())
+                                })
+                                .unwrap_or_else(|| "Referencia de WhatsApp".to_string());
+                            (Some(label), None, None, None)
+                        }
+                        "unsupported" | "unknown" => (
+                            Some("Mensaje no soportado por WhatsApp".to_string()),
+                            None,
+                            None,
+                            None,
+                        ),
                         _ => (None, None, None, None),
                     };
 
@@ -760,7 +830,7 @@ pub async fn receive_webhook(
                         .clone()
                         .unwrap_or_else(|| format!("[{}]", effective_msg_type));
 
-                    tracing::info!(
+                    tracing::debug!(
                         "[webhook] guardando mensaje de cliente registrado: {} | tipo: {} | preview: {}",
                         msg.from, effective_msg_type, preview
                     );
@@ -835,6 +905,7 @@ pub async fn receive_webhook(
                         contacts_payload,
                         location: location_payload,
                         reactions: vec![],
+                        raw_payload: inbound_raw_payload(&msg, &effective_msg_type),
                         ai_processed_at: None,
                         timestamp: msg_ts,
                     };
@@ -945,7 +1016,7 @@ pub async fn receive_webhook(
                     let saved_for_dispatch = saved.clone();
                     let message_item = msg_to_item(saved, None, reply_to);
                     let agent_count = state.ws_registry.read().await.len();
-                    tracing::info!(
+                    tracing::debug!(
                         "[webhook] broadcast MENSAJE_NUEVO wa_id={} conv={} → {} agente(s) conectados",
                         message_item.wa_message_id, conv_id.to_hex(), agent_count
                     );
@@ -1460,6 +1531,8 @@ pub async fn send_message_handler(
     Path(id): Path<String>,
     Json(payload): Json<SendMessageRequest>,
 ) -> Result<Json<SendMessageResponse>, ApiError> {
+    require_can_chat(&state, &claims.id).await?;
+
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
     let mut conv = state
@@ -1468,6 +1541,8 @@ pub async fn send_message_handler(
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
+
+    require_workspace_agent(&state, &conv.business_phone, &claims.id).await?;
 
     // Decidir modo: template (siempre permitido) vs texto (sólo dentro de la
     // ventana de 24h). El discriminador `type: "template"` o la presencia del
@@ -1670,6 +1745,7 @@ pub async fn send_message_handler(
         contacts_payload: sent.contacts_payload,
         location: sent.location,
         reactions: vec![],
+        raw_payload: None,
         ai_processed_at: None,
         timestamp: DateTime::now(),
     };
@@ -2552,7 +2628,7 @@ pub async fn mark_read_handler(
                             }
                         }
                     }
-                    tracing::info!(
+                    tracing::debug!(
                         "[mark-read] Meta ACK conv={} total={} ok={} err={}",
                         conv_hex,
                         ids_to_ack.len(),
@@ -2613,6 +2689,8 @@ pub async fn take_conversation_handler(
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
+
+    require_workspace_agent(&state, &existing.business_phone, &claims.id).await?;
 
     let previous_status = existing.status.clone();
     let prev_owner = existing.assigned_to.clone();
@@ -2777,6 +2855,8 @@ pub async fn transfer_conversation_handler(
     Path(id): Path<String>,
     Json(payload): Json<TransferConversationRequest>,
 ) -> Result<Json<ConversationDetailResponse>, ApiError> {
+    require_can_chat(&state, &claims.id).await?;
+
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
     let conv = state
@@ -2786,6 +2866,8 @@ pub async fn transfer_conversation_handler(
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
+    let settings = require_workspace_agent(&state, &conv.business_phone, &claims.id).await?;
+
     // Validar que el usuario destino exista.
     use crate::db::UserRepository;
     let target = state
@@ -2794,6 +2876,7 @@ pub async fn transfer_conversation_handler(
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or_else(|| ApiError::NotFound)?;
+    ensure_transfer_target_allowed(&settings, &target)?;
 
     let from_agent = conv.assigned_to.clone();
 
@@ -3143,10 +3226,8 @@ pub async fn initiate_conversation_handler(
         }
         user
     };
-    let is_superadmin = caller.role == 0.0;
-
     let business_phone_id = payload.business_phone_id.trim().to_string();
-    tracing::info!(
+    tracing::debug!(
         user_id = %caller.id,
         business_phone_id = %business_phone_id,
         expected_field = "WaSettings._id (ObjectId hex de 24 chars)",
@@ -3191,7 +3272,7 @@ pub async fn initiate_conversation_handler(
             ));
         }
     };
-    tracing::info!(
+    tracing::debug!(
         user_id = %caller.id,
         workspace_id = %workspace_oid.to_hex(),
         phone_number_id = %settings.phone_number_id,
@@ -3200,7 +3281,11 @@ pub async fn initiate_conversation_handler(
         "initiate: workspace resuelto para envio de template"
     );
 
-    if !is_superadmin && !settings.agents.iter().any(|a| a == &caller.id) {
+    if !settings
+        .agents
+        .iter()
+        .any(|agent_id| agent_id == &caller.id)
+    {
         tracing::warn!(
             user_id = %caller.id,
             workspace_id = %workspace_oid.to_hex(),
@@ -3441,6 +3526,7 @@ pub async fn initiate_conversation_handler(
         contacts_payload: None,
         location: None,
         reactions: vec![],
+        raw_payload: None,
         ai_processed_at: None,
         timestamp: DateTime::now(),
     };
@@ -3520,11 +3606,23 @@ pub async fn initiate_conversation_handler(
 // AGENTES TRANSFERIBLES
 // ============================================
 
+#[derive(serde::Deserialize)]
+pub struct TransferableAgentsQuery {
+    /// ObjectId de `WaSettings` para filtrar agentes del workspace.
+    pub workspace_id: Option<String>,
+    /// Número de negocio (E.164 o formato local) para filtrar agentes del workspace.
+    pub business_phone: Option<String>,
+}
+
 #[utoipa::path(
     get,
     path = "/v1/auth-user/whatsapp/transferable-agents",
     tag = "WhatsApp — Soporte",
     security(("bearerAuth" = [])),
+    params(
+        ("workspace_id" = Option<String>, Query, description = "WaSettings._id para devolver sólo agentes de ese workspace"),
+        ("business_phone" = Option<String>, Query, description = "Número de negocio para devolver sólo agentes de ese workspace"),
+    ),
     responses(
         (status = 200, description = "Usuarios con permiso para atender chats (bCanChat == true)", body = TransferableAgentsResponse),
         (status = 401, description = "No autorizado"),
@@ -3532,6 +3630,7 @@ pub async fn initiate_conversation_handler(
 )]
 pub async fn list_transferable_agents_handler(
     State(state): State<Arc<AppState>>,
+    Query(q): Query<TransferableAgentsQuery>,
 ) -> Result<Json<TransferableAgentsResponse>, ApiError> {
     use crate::db::UserRepository;
     let users = state
@@ -3539,8 +3638,67 @@ pub async fn list_transferable_agents_handler(
         .find_chat_agents()
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
+
+    let allowed_ids: Option<std::collections::HashSet<String>> = if let Some(workspace_id) = q
+        .workspace_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let oid = ObjectId::parse_str(workspace_id).map_err(|_| {
+            ApiError::domain_with_field(
+                StatusCode::BAD_REQUEST,
+                "whatsapp_workspace_id_invalid",
+                "workspace_id",
+                "workspace_id debe ser un ObjectId hex",
+            )
+        })?;
+        let settings = state
+            .db
+            .find_wa_settings_by_id(&oid)
+            .await
+            .map_err(ApiError::DatabaseError)?
+            .ok_or_else(|| {
+                ApiError::domain_with_field(
+                    StatusCode::NOT_FOUND,
+                    "whatsapp_workspace_not_found",
+                    "workspace_id",
+                    "No existe el workspace indicado",
+                )
+            })?;
+        Some(settings.agents.into_iter().collect())
+    } else if let Some(business_phone) = q
+        .business_phone
+        .as_deref()
+        .map(normalize_to_e164)
+        .filter(|s| !s.is_empty())
+    {
+        let settings = state
+            .db
+            .find_wa_settings_by_phone(&business_phone)
+            .await
+            .map_err(ApiError::DatabaseError)?
+            .ok_or_else(|| {
+                ApiError::domain_with_field(
+                    StatusCode::NOT_FOUND,
+                    "whatsapp_workspace_not_found",
+                    "business_phone",
+                    "No existe un workspace activo para el número indicado",
+                )
+            })?;
+        Some(settings.agents.into_iter().collect())
+    } else {
+        None
+    };
+
     let data = users
         .into_iter()
+        .filter(|u| {
+            allowed_ids
+                .as_ref()
+                .map(|ids| ids.contains(&u.id))
+                .unwrap_or(true)
+        })
         .map(|u| TransferableAgentItem {
             id: u.id,
             name: u.name,
@@ -3945,7 +4103,7 @@ pub async fn get_media_handler(
     // primero que haya abierto el media (o el prefetch del webhook) ya lo dejó.
     let t0 = std::time::Instant::now();
     if let Some((bytes, mime, remote_filename)) = state.redis.get_media_cache(&media_id).await {
-        tracing::info!(
+        tracing::debug!(
             "[media] HIT {} ({} bytes, {}) redis={}ms",
             media_id,
             bytes.len(),
@@ -3964,7 +4122,7 @@ pub async fn get_media_handler(
     // hay otra tarea bajándolo. Esperamos ~2s en polls de 100ms a ver si
     // aparece en cache antes de disparar una segunda descarga al Worker.
     if !state.redis.try_lock_media_prefetch(&media_id).await {
-        tracing::info!(
+        tracing::debug!(
             "[media] MISS→WAIT {} — prefetch en vuelo, esperando",
             media_id
         );
@@ -3973,7 +4131,7 @@ pub async fn get_media_handler(
             if let Some((bytes, mime, remote_filename)) =
                 state.redis.get_media_cache(&media_id).await
             {
-                tracing::info!(
+                tracing::debug!(
                     "[media] WAIT→HIT {} ({} bytes, {}) wait={}ms",
                     media_id,
                     bytes.len(),
@@ -4024,18 +4182,19 @@ pub async fn get_media_handler(
     );
 
     let t_meta = std::time::Instant::now();
-    let (bytes, mime, remote_filename) = download_media_with_retry(&wa, &media_id).await.map_err(
-        |e| {
-            tracing::error!(
-                "[media] download_media falló para {} tras {}ms: {}",
-                media_id,
-                t_meta.elapsed().as_millis(),
-                e
-            );
-            ApiError::Internal(e)
-        },
-    )?;
-    tracing::info!(
+    let (bytes, mime, remote_filename) =
+        download_media_with_retry(&wa, &media_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "[media] download_media falló para {} tras {}ms: {}",
+                    media_id,
+                    t_meta.elapsed().as_millis(),
+                    e
+                );
+                ApiError::Internal(e)
+            })?;
+    tracing::debug!(
         "[media] MISS→FETCH {} ({} bytes, {}) meta={}ms",
         media_id,
         bytes.len(),
@@ -5066,7 +5225,7 @@ async fn schedule_inbound_media_failure_fallback(
         let probe = vec![wa_id.to_string()];
         match state.db.find_messages_by_wa_ids(&probe).await {
             Ok(map) if map.contains_key(wa_id) => {
-                tracing::info!(
+                tracing::debug!(
                     "[webhook] inbound_media_failure: wa_id={} apareció en DB en recheck #{}, no se envía fallback",
                     wa_id,
                     attempt + 1
@@ -5298,7 +5457,7 @@ pub(crate) async fn prefetch_media(state: Arc<AppState>, business_phone: String,
         .redis
         .set_media_cache(&media_id, &bytes, &info.mime, info.file_name.as_deref())
         .await;
-    tracing::info!(
+    tracing::debug!(
         "prefetch_media({}): cacheado {} bytes ({})",
         media_id,
         bytes.len(),
@@ -5501,6 +5660,7 @@ fn msg_to_item(
         contacts_payload: m.contacts_payload,
         location: m.location,
         reactions: m.reactions,
+        raw_payload: m.raw_payload,
         ai_processed_at: m.ai_processed_at.map(iso8601),
         created_at: iso8601(m.timestamp),
     }
@@ -5775,6 +5935,62 @@ pub(super) async fn require_can_chat(
         return Err(ApiError::Forbidden);
     }
     Ok(user)
+}
+
+async fn require_workspace_agent(
+    state: &Arc<AppState>,
+    business_phone: &str,
+    user_id: &str,
+) -> Result<WaSettings, ApiError> {
+    let settings = state
+        .db
+        .find_wa_settings_by_phone(business_phone)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| {
+            ApiError::domain_simple(
+                StatusCode::NOT_FOUND,
+                "whatsapp_workspace_not_found",
+                "No hay un workspace activo configurado para esta conversación",
+            )
+        })?;
+
+    if !settings.agents.iter().any(|agent_id| agent_id == user_id) {
+        return Err(ApiError::domain_simple(
+            StatusCode::FORBIDDEN,
+            "whatsapp_workspace_membership_required",
+            "No tienes permiso sobre el workspace de esta conversación",
+        ));
+    }
+
+    Ok(settings)
+}
+
+fn ensure_transfer_target_allowed(
+    settings: &WaSettings,
+    target: &crate::models::users::User,
+) -> Result<(), ApiError> {
+    if !target.visible || target.is_bot || !target.can_chat {
+        return Err(ApiError::domain_simple(
+            StatusCode::FORBIDDEN,
+            "whatsapp_transfer_target_not_allowed",
+            "El usuario destino no puede atender chats de WhatsApp",
+        ));
+    }
+
+    if !settings
+        .agents
+        .iter()
+        .any(|agent_id| agent_id == &target.id)
+    {
+        return Err(ApiError::domain_simple(
+            StatusCode::FORBIDDEN,
+            "whatsapp_workspace_membership_required",
+            "El usuario destino no pertenece al workspace de esta conversación",
+        ));
+    }
+
+    Ok(())
 }
 
 /// Construye un `ConversationItem` completo desde un `WaConversation` resolviendo

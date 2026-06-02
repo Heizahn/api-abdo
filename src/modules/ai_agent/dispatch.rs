@@ -2076,6 +2076,7 @@ async fn send_live_response(
         contacts_payload: None,
         location: None,
         reactions: vec![],
+        raw_payload: None,
         ai_processed_at: None,
         timestamp: now,
     };

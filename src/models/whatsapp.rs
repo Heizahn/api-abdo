@@ -353,6 +353,12 @@ pub struct WaMessage {
     /// Default `Vec::new()` para deserializar documentos pre-rollout sin migración.
     #[serde(default)]
     pub reactions: Vec<MessageReaction>,
+    /// Payload crudo de Meta para tipos no estándar o poco modelados
+    /// (`order`, `system`, `referral`, `unsupported`, etc.). Permite que el
+    /// front renderice/diagnostique mensajes nuevos de WhatsApp Web sin perder
+    /// información mientras se agrega un renderer dedicado.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_payload: Option<serde_json::Value>,
     pub timestamp: DateTime,
 }
 
@@ -701,8 +707,8 @@ pub struct InitiateConversationRequest {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct TransferConversationRequest {
-    /// UUID del agente destino. Acepta cualquier staff/admin
-    /// (aun si no está en `wa_settings.agents` — es override puntual).
+    /// UUID del agente destino. Debe tener permiso de chat y pertenecer al
+    /// mismo `WaSettings.agents` del workspace de la conversación.
     pub user_id: String,
     /// Nota opcional que acompaña la transferencia.
     pub note: Option<String>,
@@ -871,6 +877,10 @@ pub struct MessageItem {
     /// El front renderiza el badge de emoji + tooltip con `sender_name`.
     #[serde(default)]
     pub reactions: Vec<MessageReaction>,
+    /// Payload crudo de Meta para tipos no estándar (`order`, `system`,
+    /// `referral`, `unsupported`, etc.). `null` para tipos ya modelados.
+    #[schema(value_type = Option<Object>)]
+    pub raw_payload: Option<serde_json::Value>,
     /// ISO-8601 (RFC 3339) UTC. Cuando está seteado, indica que la IA procesó
     /// este mensaje inbound (cualquier modo). El front lo renderiza con un
     /// indicador 🤖 sin alterar el `unread_count` del humano.

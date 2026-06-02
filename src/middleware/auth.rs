@@ -69,7 +69,7 @@ pub async fn jwt_auth_middleware(
     req.extensions_mut().insert(claims);
 
     tracing::debug!("✅ Claims insertados en extensions para user: {}", user_id);
-    tracing::info!("✅ Autenticación exitosa para user: {}", user_id);
+    tracing::debug!("✅ Autenticación exitosa para user: {}", user_id);
 
     // Continuar con el siguiente middleware/handler
     Ok(next.run(req).await)

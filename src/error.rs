@@ -124,7 +124,7 @@ impl IntoResponse for ApiError {
             message,
         } = &self
         {
-            tracing::error!("API Error: {:?}", self);
+            tracing::warn!("API Error: {:?}", self);
             let body = Json(json!({
                 "ok": false,
                 "error": "validation_error",
@@ -144,12 +144,21 @@ impl IntoResponse for ApiError {
             details,
         } = self
         {
-            tracing::error!(
-                "API Error: Domain code={} field={:?} message={}",
-                code,
-                field,
-                message
-            );
+            if status.is_server_error() {
+                tracing::error!(
+                    "API Error: Domain code={} field={:?} message={}",
+                    code,
+                    field,
+                    message
+                );
+            } else {
+                tracing::warn!(
+                    "API Error: Domain code={} field={:?} message={}",
+                    code,
+                    field,
+                    message
+                );
+            }
             let mut body = serde_json::json!({
                 "ok": false,
                 "error": code,
@@ -193,8 +202,19 @@ impl IntoResponse for ApiError {
             }
         };
 
-        // Log error details for debugging
-        tracing::error!("API Error: {:?}", self);
+        match &self {
+            ApiError::DatabaseError(_)
+            | ApiError::CacheError(_)
+            | ApiError::SmsError(_)
+            | ApiError::Internal(_)
+            | ApiError::InternalServerError => tracing::error!("API Error: {:?}", self),
+            ApiError::NotFound
+            | ApiError::WindowExpired
+            | ApiError::WindowClosed
+            | ApiError::ConversationNotTakeable
+            | ApiError::ClosedRequiresTemplate => tracing::debug!("API Error: {:?}", self),
+            _ => tracing::warn!("API Error: {:?}", self),
+        }
 
         // ✅ MANTIENE EL FORMATO JSON ACTUAL
         let body = Json(json!({

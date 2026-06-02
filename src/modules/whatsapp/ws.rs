@@ -561,7 +561,7 @@ async fn handle_socket(
         let mut registry = state.ws_registry.write().await;
         registry.insert(user_id.clone(), tx);
     }
-    tracing::info!("[ws] agente conectado: {} ({})", user_name, user_id);
+    tracing::debug!("[ws] agente conectado: {} ({})", user_name, user_id);
 
     // Confirmar conexión
     let connected_msg = serde_json::to_string(&WsServerEvent::Conectado {
@@ -655,7 +655,7 @@ async fn handle_socket(
         registry.remove(&user_id);
     }
     send_task.abort();
-    tracing::info!("[ws] agente desconectado: {} ({})", user_name, user_id);
+    tracing::debug!("[ws] agente desconectado: {} ({})", user_name, user_id);
 }
 
 async fn handle_client_message(user_id: &str, user_name: &str, text: &str) {
@@ -669,7 +669,7 @@ async fn handle_client_message(user_id: &str, user_name: &str, text: &str) {
 
     match event {
         WsClientEvent::Conectar { usuario_id, nombre } => {
-            tracing::info!("[ws] CONECTAR recibido de {} ({})", nombre, usuario_id);
+            tracing::debug!("[ws] CONECTAR recibido de {} ({})", nombre, usuario_id);
             let _ = user_name;
         }
 
