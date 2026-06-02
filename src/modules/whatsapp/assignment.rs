@@ -2,7 +2,10 @@ use mongodb::bson::oid::ObjectId;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::{db::WhatsAppRepository, state::AppState};
+use crate::{
+    db::{UserRepository, WhatsAppRepository},
+    state::AppState,
+};
 
 use super::ws::{broadcast_all, WsServerEvent};
 
@@ -52,6 +55,47 @@ pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents
             return None;
         }
 
+        let mut eligible_agents = Vec::with_capacity(agents.len());
+        for agent_id in agents {
+            match state.db.find_user_by_id(&agent_id).await {
+                Ok(Some(user)) if user.visible && user.can_chat && !user.is_bot => {
+                    eligible_agents.push(agent_id);
+                }
+                Ok(Some(user)) => {
+                    tracing::warn!(
+                        "[assignment] agente no elegible en WaSettings conv={} agent={} visible={} can_chat={} is_bot={}",
+                        conv_id_str,
+                        agent_id,
+                        user.visible,
+                        user.can_chat,
+                        user.is_bot
+                    );
+                }
+                Ok(None) => {
+                    tracing::warn!(
+                        "[assignment] agente configurado no existe conv={} agent={}",
+                        conv_id_str,
+                        agent_id
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[assignment] no se pudo validar agente conv={} agent={}: {}",
+                        conv_id_str,
+                        agent_id,
+                        e
+                    );
+                }
+            }
+        }
+        if eligible_agents.is_empty() {
+            tracing::warn!(
+                "[assignment] sin agentes elegibles para conv {}",
+                conv_id_str
+            );
+            return None;
+        }
+
         // Snapshot de agentes online (presentes en WsRegistry).
         let online: HashSet<String> = {
             let map = state.ws_registry.read().await;
@@ -60,7 +104,7 @@ pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents
 
         // Filtrar candidatos por online primero. Si ninguno está conectado,
         // hacer fallback a la lista completa para que la conv no quede huérfana.
-        let online_candidates: Vec<String> = agents
+        let online_candidates: Vec<String> = eligible_agents
             .iter()
             .filter(|a| online.contains(*a))
             .cloned()
@@ -71,9 +115,9 @@ pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents
         } else {
             tracing::warn!(
                 "[assignment] ningún agente online (configurados={:?}) — fallback a min-load global para conv {}",
-                agents, conv_id_str
+                eligible_agents, conv_id_str
             );
-            &agents
+            &eligible_agents
         };
 
         // Cargar carga de cada candidato desde Redis
@@ -109,7 +153,6 @@ pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents
 
         // Resolver el nombre del agente para que el front pueda patchear la
         // sidebar sin necesitar refetch.
-        use crate::db::UserRepository;
         let taken_by_name = state
             .db
             .find_user_by_id(&chosen_agent)

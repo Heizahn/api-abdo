@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::fs::create_dir("./uploads").await?;
     }
 
-    tracing::info!("🚀 Iniciando API ABDO v0.3.13");
+    tracing::info!("🚀 Iniciando API ABDO v0.3.14");
     tracing::info!("Environment: {}", cfg.rust_log);
 
     // 3. Inicializar estado de aplicación (MongoDB + Redis)

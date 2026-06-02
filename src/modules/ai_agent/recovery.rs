@@ -98,6 +98,7 @@ pub async fn run_ai_recovery(state: Arc<AppState>) {
             contacts_payload: None,
             location: None,
             reactions: vec![],
+            raw_payload: None,
             timestamp: DateTime::now(),
         };
 
