@@ -250,3 +250,8 @@ components(schemas(MiRequest, MiResponse, ...))
 > configuran por cuenta en la colección `WaSettings` (el token se guarda cifrado
 > con AES-GCM usando `JWT_SECRET` como clave). La UI de "WhatsApp Numbers" los
 > administra vía `POST/PUT /v1/auth-user/whatsapp/settings`.
+
+
+## Regla obligatoria de entrega
+- En cada cambio: subir versionado (Cargo.toml + openapi + log de arranque si aplica), hacer commit y push a la rama en que se este trabajando.
+- No terminar una tarea con cambios locales sin push, salvo que el usuario lo prohíba explícitamente.
