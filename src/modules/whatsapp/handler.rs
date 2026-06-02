@@ -2544,6 +2544,15 @@ fn template_preview(tpl: &SendTemplatePayload) -> String {
     format!("[plantilla: {}]", tpl.name)
 }
 
+fn parse_meta_template_category(raw: Option<&str>) -> Option<WaTemplateCategory> {
+    match raw?.trim().to_uppercase().as_str() {
+        "MARKETING" => Some(WaTemplateCategory::Marketing),
+        "UTILITY" | "SERVICE" => Some(WaTemplateCategory::Utility),
+        "AUTHENTICATION" => Some(WaTemplateCategory::Authentication),
+        _ => None,
+    }
+}
+
 #[utoipa::path(
     post,
     path = "/v1/auth-user/whatsapp/conversations/{id}/mark-read",
@@ -7330,10 +7339,10 @@ pub async fn delete_template_handler(
 // POST /v1/auth-user/whatsapp/templates/:id/resync
 // ---------------------------------------------------------------------------
 
-/// Resync manual del estado de un template desde Meta. Útil cuando se perdió
-/// un webhook de status update (subscription apagada, fallo transitorio,
-/// payload mal-deserializado, etc). Hace `GET /{meta_template_id}` a Meta,
-/// lee el `status` real, actualiza la DB y emite `WA_TEMPLATE_UPDATED` por WS.
+/// Resync manual de metadata de un template desde Meta. Útil cuando se perdió
+/// un webhook de status update o cuando Meta reclasificó la categoría
+/// (p.ej. UTILITY/SERVICE → MARKETING). Hace `GET /{meta_template_id}` a Meta,
+/// lee status/categoría reales, actualiza la DB y emite `WA_TEMPLATE_UPDATED`.
 #[utoipa::path(
     post,
     path = "/v1/auth-user/whatsapp/templates/{id}/resync",
@@ -7341,7 +7350,7 @@ pub async fn delete_template_handler(
     security(("bearerAuth" = [])),
     params(("id" = String, Path, description = "ObjectId hex de la plantilla")),
     responses(
-        (status = 200, description = "Estado sincronizado desde Meta", body = WaTemplateResponse),
+        (status = 200, description = "Estado/categoría sincronizados desde Meta", body = WaTemplateResponse),
         (status = 400, description = "draft_cannot_resync (la plantilla está en DRAFT)"),
         (status = 401, description = "No autorizado"),
         (status = 403, description = "Sólo SUPERADMIN"),
@@ -7422,29 +7431,50 @@ pub async fn resync_template_handler(
                 )));
             }
         };
+    let prev_status = doc.status;
+    let prev_category = doc.category;
+    let new_category = parse_meta_template_category(info.category.as_deref());
 
-    // Update DB y capturar prev_status
-    let result = state
+    // Update DB con toda la metadata que el resync conoce. Antes sólo se
+    // persistía status/reason; por eso el front no veía reclasificaciones de
+    // categoría hechas por Meta.
+    let updated_doc = state
         .db
-        .update_template_status(meta_id, new_status, rejection_reason)
+        .update_template(
+            &oid,
+            WaTemplateUpdatePatch {
+                name: None,
+                display_name: None,
+                name_input: None,
+                category: new_category,
+                components: None,
+                body_placeholders: None,
+                status: Some(new_status),
+                rejection_reason: Some(rejection_reason),
+                meta_template_id: None,
+                is_system: None,
+                submit_to_meta: None,
+            },
+        )
         .await
-        .map_err(ApiError::DatabaseError)?;
-
-    let (updated_doc, prev_status) = match result {
-        Some(t) => t,
-        None => {
-            // No debería pasar: existe el doc en DB y tiene meta_template_id
-            return Err(ApiError::Internal(
-                "update_template_status retornó None pese a tener doc en DB".into(),
-            ));
-        }
-    };
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(template_not_found)?;
 
     let item = to_template_item(updated_doc);
+    let category_changed = new_category.is_some_and(|cat| cat != prev_category);
+    let status_changed = item.status != prev_status;
 
-    // Emit WS sólo si el status efectivamente cambió
-    if item.status != prev_status {
-        let payload = build_template_updated_event(&item, Some(prev_status));
+    // Emit WS si cambió status o category. El evento incluye el template
+    // completo; `prev_status` sólo se adjunta cuando aplica para compat front.
+    if status_changed || category_changed {
+        let payload = build_template_updated_event(
+            &item,
+            if status_changed {
+                Some(prev_status)
+            } else {
+                None
+            },
+        );
         emit_to_phone_number_agents(&state, &item.phone_number_id, payload).await;
     }
 
