@@ -9,7 +9,7 @@ use mongodb::{error::Error as MongoError, Collection};
 use super::MongoDB;
 use crate::db::SalesRepository;
 use crate::models::db::{
-    Debt, LatestPayment, PartPayment, PartPaymentWithPaymentState, Payment, PaymentForMatch,
+    DailyPaymentChartPoint, Debt, LatestPayment, PartPayment, PartPaymentWithPaymentState, Payment, PaymentForMatch,
     PaymentReportFull, PaymentReportListItem,
 };
 use crate::models::payment::{
@@ -411,6 +411,151 @@ impl SalesRepository for MongoDB {
         }
 
         Ok(payments)
+    }
+
+    async fn get_daily_payments_chart(
+        &self,
+        start: chrono::DateTime<chrono::Utc>,
+        end: chrono::DateTime<chrono::Utc>,
+        owner_id: Option<&str>,
+    ) -> Result<Vec<DailyPaymentChartPoint>, String> {
+        let mut match_doc = doc! {
+            "sState": "Activo",
+            "dCreation": {
+                "$gte": mongodb::bson::DateTime::from_millis(start.timestamp_millis()),
+                "$lte": mongodb::bson::DateTime::from_millis(end.timestamp_millis())
+            }
+        };
+
+        if let Some(owner) = owner_id {
+            let clients_col = self.db.collection::<Document>("Clients");
+            let mut cursor = clients_col
+                .find(doc! { "idOwner": owner })
+                .projection(doc! { "_id": 1 })
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let mut client_ids: Vec<ObjectId> = Vec::new();
+            while let Some(Ok(doc)) = cursor.next().await {
+                if let Ok(id) = doc.get_object_id("_id") {
+                    client_ids.push(id);
+                }
+            }
+
+            if client_ids.is_empty() {
+                return Ok(vec![]);
+            }
+
+            match_doc.insert("idClient", doc! { "$in": client_ids });
+        }
+
+        let pipeline = vec![
+            doc! { "$match": match_doc },
+            doc! {
+                "$group": {
+                    "_id": {
+                        "$dateToString": {
+                            "format": "%Y-%m-%d",
+                            "date": "$dCreation",
+                            "timezone": "America/Caracas"
+                        }
+                    },
+                    "amount_usd": { "$sum": "$nAmount" },
+                    "amount_bs": { "$sum": "$nBs" },
+                }
+            },
+            doc! { "$sort": { "_id": 1 } },
+        ];
+
+        let collection = self.db.collection::<Document>("Payments");
+        let mut cursor = collection
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut points: Vec<DailyPaymentChartPoint> = Vec::new();
+        while let Some(Ok(doc)) = cursor.next().await {
+            points.push(DailyPaymentChartPoint {
+                date: doc.get_str("_id").unwrap_or_default().to_string(),
+                amount_usd: get_bson_amount(&doc, "amount_usd"),
+                amount_bs: get_bson_amount(&doc, "amount_bs"),
+            });
+        }
+
+        Ok(points)
+    }
+
+    async fn get_monthly_closing_summary(
+        &self,
+        start: chrono::DateTime<chrono::Utc>,
+        end: chrono::DateTime<chrono::Utc>,
+        owner_id: Option<&str>,
+    ) -> Result<(f64, f64, f64), String> {
+        let mut match_doc = doc! {
+            "sState": "Activo",
+            "dCreation": {
+                "$gte": mongodb::bson::DateTime::from_millis(start.timestamp_millis()),
+                "$lte": mongodb::bson::DateTime::from_millis(end.timestamp_millis())
+            }
+        };
+
+        if let Some(owner) = owner_id {
+            let clients_col = self.db.collection::<Document>("Clients");
+            let mut cursor = clients_col
+                .find(doc! { "idOwner": owner })
+                .projection(doc! { "_id": 1 })
+                .await
+                .map_err(|e| e.to_string())?;
+
+            let mut client_ids: Vec<ObjectId> = Vec::new();
+            while let Some(Ok(doc)) = cursor.next().await {
+                if let Ok(id) = doc.get_object_id("_id") {
+                    client_ids.push(id);
+                }
+            }
+
+            if client_ids.is_empty() {
+                return Ok((0.0, 0.0, 0.0));
+            }
+
+            match_doc.insert("idClient", doc! { "$in": client_ids });
+        }
+
+        let pipeline = vec![
+            doc! { "$match": match_doc },
+            doc! {
+                "$group": {
+                    "_id": null,
+                    "total_collected_usd": { "$sum": { "$ifNull": ["$nAmount", 0] } },
+                    "total_paid_bs": { "$sum": { "$ifNull": ["$nBs", 0] } },
+                    "total_paid_usd": {
+                        "$sum": {
+                            "$cond": [
+                                { "$eq": [ { "$ifNull": ["$bUSD", false] }, true ] },
+                                { "$ifNull": ["$nAmount", 0] },
+                                0
+                            ]
+                        }
+                    }
+                }
+            },
+        ];
+
+        let collection = self.db.collection::<Document>("Payments");
+        let mut cursor = collection
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if let Some(Ok(doc)) = cursor.next().await {
+            return Ok((
+                get_bson_amount(&doc, "total_collected_usd"),
+                get_bson_amount(&doc, "total_paid_usd"),
+                get_bson_amount(&doc, "total_paid_bs"),
+            ));
+        }
+
+        Ok((0.0, 0.0, 0.0))
     }
 
     async fn find_bank_list(&self) -> Result<Vec<Bank>, String> {

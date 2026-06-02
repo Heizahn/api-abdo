@@ -2,9 +2,9 @@ use axum::{
     extract::{Extension, Query, State},
     Json,
 };
-use chrono::{Datelike, TimeZone, Utc};
+use chrono::{Datelike, Duration, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use utoipa::ToSchema;
 
@@ -12,7 +12,7 @@ use crate::{
     auth::user_jwt::UserProfileClaims,
     db::{ProfileRepository, SalesRepository, UserRepository},
     error::ApiError,
-    models::db::{LatestPayment, SolvencyCounts},
+    models::db::{DailyPaymentChartPoint, LatestPayment, SolvencyCounts},
     state::AppState,
     utils::timezone::VENEZUELA_TZ,
 };
@@ -26,7 +26,16 @@ pub struct DashboardQuery {
 pub struct MonthlyClosingQuery {
     pub month: Option<String>,
     pub owner: Option<String>,
+    pub currency: Option<String>,
 }
+
+#[derive(Deserialize)]
+pub struct PaymentsChartQuery {
+    pub date: Option<String>,
+    pub owner: Option<String>,
+}
+
+
 
 async fn resolve_owner_id(
     state: &Arc<AppState>,
@@ -80,6 +89,8 @@ pub struct MonthlyClosingData {
     pub pending: f64,
     pub efficiency: Option<f64>,
 }
+
+
 
 #[utoipa::path(
     get,
@@ -135,19 +146,108 @@ pub async fn solvency_handler(
 
 #[utoipa::path(
     get,
+    path = "/v1/auth-user/dashboard/payments/chart",
+    tag = "Dashboard",
+    security(("bearerAuth" = [])),
+    params(
+        ("date" = Option<String>, Query, description = "Fecha final en formato YYYY-MM-DD. Si no se envía, retorna hoy y 6 días hacia atrás"),
+        ("owner" = Option<String>, Query, description = "Filtrar por owner permitido para el caller. Si no tiene permiso, responde 403"),
+    ),
+    responses(
+        (status = 200, description = "Serie diaria de recaudación (USD/Bs) para graficar", body = Vec<DailyPaymentChartPoint>),
+        (status = 400, description = "Formato de fecha inválido o fecha futura"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Owner no permitido para este usuario"),
+    )
+)]
+pub async fn payments_chart_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Query(params): Query<PaymentsChartQuery>,
+) -> Result<Json<Vec<DailyPaymentChartPoint>>, ApiError> {
+    let owner_id = resolve_owner_id(&state, &claims, params.owner.as_deref()).await?;
+    let now_vz = Utc::now().with_timezone(&VENEZUELA_TZ);
+    let today = now_vz.date_naive();
+
+    let end_day = match &params.date {
+        Some(s) => {
+            let selected = parse_year_month_day(s).ok_or_else(|| {
+                ApiError::BadRequest("Formato de fecha inválido, use YYYY-MM-DD".into())
+            })?;
+
+            if selected > today {
+                return Err(ApiError::BadRequest(
+                    "La fecha seleccionada no puede ser mayor al día actual".into(),
+                ));
+            }
+
+            selected
+        }
+        None => today,
+    };
+    let start_day = end_day - Duration::days(6);
+
+    let start_utc = VENEZUELA_TZ
+        .with_ymd_and_hms(start_day.year(), start_day.month(), start_day.day(), 0, 0, 0)
+        .single()
+        .ok_or(ApiError::InternalServerError)?
+        .with_timezone(&Utc);
+
+    let end_utc = VENEZUELA_TZ
+        .with_ymd_and_hms(end_day.year(), end_day.month(), end_day.day(), 23, 59, 59)
+        .single()
+        .ok_or(ApiError::InternalServerError)?
+        .with_timezone(&Utc);
+
+    let raw_points = state
+        .db
+        .get_daily_payments_chart(start_utc, end_utc, owner_id.as_deref())
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    let mut by_day: HashMap<String, DailyPaymentChartPoint> = HashMap::new();
+    for p in raw_points {
+        by_day.insert(p.date.clone(), p);
+    }
+
+    let mut points: Vec<DailyPaymentChartPoint> = Vec::new();
+    let mut day = start_day;
+    while day <= end_day {
+        let date = day.format("%Y-%m-%d").to_string();
+        if let Some(p) = by_day.get(&date) {
+            points.push(DailyPaymentChartPoint {
+                date,
+                amount_usd: (p.amount_usd * 100.0).round() / 100.0,
+                amount_bs: (p.amount_bs * 100.0).round() / 100.0,
+            });
+        } else {
+            points.push(DailyPaymentChartPoint {
+                date,
+                amount_usd: 0.0,
+                amount_bs: 0.0,
+            });
+        }
+        day += Duration::days(1);
+    }
+
+    Ok(Json(points))
+}
+
+#[utoipa::path(
+    get,
     path = "/v1/auth-user/dashboard/monthly-closing",
     tag = "Dashboard",
     security(("bearerAuth" = [])),
     params(
         ("month" = Option<String>, Query, description = "Mes en formato YYYY-MM (default: mes actual)"),
         ("owner" = Option<String>, Query, description = "Filtrar por owner permitido para el caller. Si no tiene permiso, responde 403"),
+        ("currency" = Option<String>, Query, description = "Moneda solicitada para total: bs | usd. Si se omite, se usa total general en USD"),
     ),
     responses(
         (status = 200, description = "Cierre mensual (cobrado, pendiente, eficiencia) + selector de meses", body = MonthlyClosingResponse),
         (status = 400, description = "Formato de mes inválido o mes futuro"),
         (status = 401, description = "No autorizado"),
         (status = 403, description = "Owner no permitido para este usuario"),
-        (status = 404, description = "Mes pasado sin datos"),
     )
 )]
 pub async fn monthly_closing_handler(
@@ -197,8 +297,7 @@ pub async fn monthly_closing_handler(
         .map_err(ApiError::DatabaseError)?;
 
     let client_ids: Vec<_> = active_clients.iter().map(|c| c.id).collect();
-
-    let collected = if client_ids.is_empty() {
+    let total_collected_usd = if client_ids.is_empty() {
         0.0
     } else {
         state
@@ -208,9 +307,23 @@ pub async fn monthly_closing_handler(
             .map_err(ApiError::DatabaseError)?
     };
 
-    if !is_current_month && collected == 0.0 {
-        return Err(ApiError::NotFound);
-    }
+    let (_, total_paid_usd, total_paid_bs) = state
+        .db
+        .get_monthly_closing_summary(start_utc, end_utc, owner_id.as_deref())
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    let collected = match params.currency.as_deref() {
+        Some(raw) if raw.eq_ignore_ascii_case("bs") => total_paid_bs,
+        Some(raw) if raw.eq_ignore_ascii_case("usd") => total_paid_usd,
+        Some(_) => {
+            return Err(ApiError::BadRequest(
+                "Moneda inválida. Use currency=bs o currency=usd".into(),
+            ))
+        }
+        None => total_collected_usd,
+    };
+
+
 
     let pending = if is_current_month {
         active_clients
@@ -246,6 +359,8 @@ pub async fn monthly_closing_handler(
         },
     }))
 }
+
+
 
 fn build_month_selector(
     sel_year: i32,
@@ -294,6 +409,10 @@ fn parse_year_month(s: &str) -> Option<(i32, u32)> {
         return None;
     }
     Some((year, month))
+}
+
+fn parse_year_month_day(s: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {

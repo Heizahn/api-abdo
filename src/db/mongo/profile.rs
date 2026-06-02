@@ -526,7 +526,10 @@ impl ProfileRepository for MongoDB {
 
         let client_projection = doc! {
             "_id": 1, "sName": 1, "sDni": 1, "sRif": 1,
-            "sState": 1, "nBalance": 1, "idSector": 1, "idSubscription": 1
+            "sPhone": 1, "sAddress": 1, "nPayment": 1, "sIp": 1, "sCommentary": 1, "sSn": 1,
+            "bCheck": 1, "idTax": 1, "idOwner": 1,
+            "sState": 1, "nBalance": 1, "idSector": 1, "idSubscription": 1,
+            "dCreation": 1, "dInstallation": 1
         };
 
         // 3 queries en paralelo: clients + sectors + plans
@@ -560,7 +563,7 @@ impl ProfileRepository for MongoDB {
             async move {
                 db.collection::<Document>("Plans")
                     .find(doc! {})
-                    .projection(doc! { "_id": 1, "sName": 1, "nAmount": 1 })
+                    .projection(doc! { "_id": 1, "sName": 1, "nAmount": 1, "nMBPS": 1 })
                     .await
                     .map_err(|e| e.to_string())
             }
@@ -583,13 +586,14 @@ impl ProfileRepository for MongoDB {
             }
         }
 
-        // Plans HashMap: ObjectId hex -> (plan_name, plan_price)
-        let mut plans: HashMap<String, (String, f64)> = HashMap::new();
+        // Plans HashMap: ObjectId hex -> (plan_name, plan_price, plan_mbps)
+        let mut plans: HashMap<String, (String, f64, f64)> = HashMap::new();
         while let Some(Ok(doc)) = plans_cursor.next().await {
             if let Ok(id) = doc.get_object_id("_id") {
                 let name = doc.get_str("sName").unwrap_or_default().to_string();
                 let price = get_bson_amount(&doc, "nAmount");
-                plans.insert(id.to_hex(), (name, price));
+                let mbps = get_bson_amount(&doc, "nMBPS");
+                plans.insert(id.to_hex(), (name, price, mbps));
             }
         }
 
@@ -617,6 +621,11 @@ impl ProfileRepository for MongoDB {
                 .filter(|s| !s.is_empty())
                 .or_else(|| doc.get_str("sRif").ok().filter(|s| !s.is_empty()))
                 .map(|s| s.to_string());
+            let rif = doc
+                .get_str("sRif")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
 
             let sector_name = doc
                 .get_object_id("idSector")
@@ -629,18 +638,84 @@ impl ProfileRepository for MongoDB {
                 .ok()
                 .and_then(|id| plans.get(&id.to_hex()));
 
-            let plan_name = plan_entry.map(|(name, _)| name.clone());
-            let plan_price = plan_entry.map(|(_, price)| *price).filter(|&v| v > 0.0);
+            let plan_name = plan_entry.map(|(name, _, _)| name.clone());
+            let plan_price = plan_entry
+                .map(|(_, price, _)| *price)
+                .filter(|&v| v > 0.0);
+            let plan_mbps = plan_entry
+                .map(|(_, _, mbps)| *mbps)
+                .filter(|&v| v > 0.0);
+            let owner_id = doc
+                .get_str("idOwner")
+                .ok()
+                .map(|s| s.to_string())
+                .or_else(|| doc.get_object_id("idOwner").ok().map(|o| o.to_hex()));
+            let owner = owner_id.clone();
+            let created_at = doc
+                .get_datetime("dCreation")
+                .ok()
+                .map(|dt| VenezuelaDateTime::from(*dt).datetime_string_venezuela())
+                .or_else(|| {
+                    doc.get_str("dCreation")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                });
+            let installed_at = doc
+                .get_datetime("dInstallation")
+                .ok()
+                .map(|dt| VenezuelaDateTime::from(*dt).datetime_string_venezuela())
+                .or_else(|| {
+                    doc.get_str("dInstallation")
+                        .ok()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_string())
+                });
+            let day_payment_limit = Some(get_bson_amount(&doc, "nPayment")).filter(|&v| v != 0.0);
+            let tax_id = doc
+                .get_object_id("idTax")
+                .ok()
+                .map(|o| o.to_hex())
+                .or_else(|| doc.get_str("idTax").ok().map(|s| s.to_string()));
 
             clients.push(ClientListItem {
                 id,
                 name,
                 dni,
+                rif,
+                phone: doc.get_str("sPhone").unwrap_or_default().to_string(),
+                address: doc
+                    .get_str("sAddress")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string()),
+                day_payment_limit,
                 status,
                 balance,
+                ip: doc
+                    .get_str("sIp")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string()),
+                commentary: doc
+                    .get_str("sCommentary")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string()),
+                sn: doc
+                    .get_str("sSn")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string()),
+                check: doc.get_bool("bCheck").ok(),
+                tax_id,
+                owner,
+                created_at,
+                installed_at,
                 sector_name,
                 plan_name,
                 plan_price,
+                plan_mbps,
             });
         }
 

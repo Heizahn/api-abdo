@@ -118,6 +118,13 @@ db.Payments.createIndex(
 );
 print("  ✅ Payments.sState");
 
+// Dashboard summary: rango por fecha + estado (sin owner explícito)
+db.Payments.createIndex(
+  { "sState": 1, "dCreation": -1 },
+  { name: "idx_payments_state_date", background: true }
+);
+print("  ✅ Payments.sState + dCreation");
+
 // approve_payment_report_handler: fuzzy match por cliente + referencia
 db.Payments.createIndex(
   { "idClient": 1, "sReference": 1 },
