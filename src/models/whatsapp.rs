@@ -282,6 +282,21 @@ pub struct WaMessage {
     /// Solo para outbound: "sent" | "delivered" | "read" | "failed"
     #[serde(default)]
     pub status: Option<String>,
+    /// Código de error reportado por Meta para status `failed` (ej. 130472).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta_error_code: Option<i64>,
+    /// Título de error reportado por Meta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta_error_title: Option<String>,
+    /// Mensaje legible de error reportado por Meta.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta_error_message: Option<String>,
+    /// Detalle estructurado de Meta (`error_data`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta_error_details: Option<serde_json::Value>,
+    /// Timestamp en que Meta marcó el mensaje como fallido.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_at: Option<DateTime>,
     /// UUID del agente que envió (solo outbound)
     #[serde(default)]
     pub sent_by: Option<String>,
@@ -526,7 +541,7 @@ pub struct MessageStatus {
     pub errors: Option<Vec<StatusError>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusError {
     pub code: Option<i64>,
     pub title: Option<String>,
@@ -707,8 +722,9 @@ pub struct InitiateConversationRequest {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct TransferConversationRequest {
-    /// UUID del agente destino. Debe tener permiso de chat y pertenecer al
-    /// mismo `WaSettings.agents` del workspace de la conversación.
+    /// UUID del agente destino. Debe ser un usuario humano visible con
+    /// `bCanChat=true`; puede pertenecer a otro workspace cuando la
+    /// transferencia es manual.
     pub user_id: String,
     /// Nota opcional que acompaña la transferencia.
     pub note: Option<String>,
@@ -818,7 +834,10 @@ pub struct MessageItem {
     pub wa_message_id: String,
     /// "in" | "out"
     pub direction: String,
-    /// "text" | "image" | "audio" | "video" | "document" | "sticker" | otros
+    /// "text" | "image" | "audio" | "video" | "document" | "sticker" |
+    /// "location" | "contacts" | "interactive" | "button" | "template" |
+    /// "unsupported" | otros. Los tipos nuevos de Meta se preservan con
+    /// `raw_payload` para render genérico/diagnóstico.
     #[serde(rename = "type")]
     pub msg_type: String,
     pub content: Option<String>,
@@ -834,6 +853,17 @@ pub struct MessageItem {
     /// - En `direction="in"`: `read` indica que un agente ya lo vio en la UI
     ///   (marcado vía `POST /:id/mark-read`). Antes de eso, el campo es `null`.
     pub status: Option<String>,
+    /// Código de error Meta cuando `status == "failed"` (ej. 130472).
+    pub meta_error_code: Option<i64>,
+    /// Título de error Meta cuando `status == "failed"`.
+    pub meta_error_title: Option<String>,
+    /// Mensaje de error Meta cuando `status == "failed"`.
+    pub meta_error_message: Option<String>,
+    /// Detalle estructurado de Meta (`error_data`).
+    #[schema(value_type = Option<Object>)]
+    pub meta_error_details: Option<serde_json::Value>,
+    /// ISO-8601 UTC del momento en que se recibió el failed.
+    pub failed_at: Option<String>,
     /// UUID del agente que envió el mensaje (solo cuando direction="out")
     pub from_user_id: Option<String>,
     /// Nombre del agente que envió el mensaje (best-effort).

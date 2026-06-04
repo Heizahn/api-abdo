@@ -639,12 +639,8 @@ impl ProfileRepository for MongoDB {
                 .and_then(|id| plans.get(&id.to_hex()));
 
             let plan_name = plan_entry.map(|(name, _, _)| name.clone());
-            let plan_price = plan_entry
-                .map(|(_, price, _)| *price)
-                .filter(|&v| v > 0.0);
-            let plan_mbps = plan_entry
-                .map(|(_, _, mbps)| *mbps)
-                .filter(|&v| v > 0.0);
+            let plan_price = plan_entry.map(|(_, price, _)| *price).filter(|&v| v > 0.0);
+            let plan_mbps = plan_entry.map(|(_, _, mbps)| *mbps).filter(|&v| v > 0.0);
             let owner_id = doc
                 .get_str("idOwner")
                 .ok()

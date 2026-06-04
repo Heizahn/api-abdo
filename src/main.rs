@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::fs::create_dir("./uploads").await?;
     }
 
-    tracing::info!("🚀 Iniciando API ABDO v0.3.14");
+    tracing::info!("🚀 Iniciando API ABDO v0.3.15");
     tracing::info!("Environment: {}", cfg.rust_log);
 
     // 3. Inicializar estado de aplicación (MongoDB + Redis)
@@ -98,7 +98,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5. Crear listener TCP
     let addr = cfg.address();
-    tracing::info!("Servidor escuchando en: http://{}", addr);
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        "Servidor escuchando en: http://{}",
+        addr
+    );
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 

@@ -17,9 +17,9 @@ use crate::db::{
     WhatsAppRepository,
 };
 use crate::models::whatsapp::{
-    ConversationStats, UrlPreview, WaConversation, WaConversationAiState, WaConversationEvent,
-    WaConversationEventInput, WaConversationOpen, WaMessage, WaPurposeUsage, WaPurposesPatch,
-    WaQuickReply, WaSettings, WaTemplate, WaTemplateStatus, WaTicket,
+    ConversationStats, StatusError, UrlPreview, WaConversation, WaConversationAiState,
+    WaConversationEvent, WaConversationEventInput, WaConversationOpen, WaMessage, WaPurposeUsage,
+    WaPurposesPatch, WaQuickReply, WaSettings, WaTemplate, WaTemplateStatus, WaTicket,
 };
 
 impl MongoDB {
@@ -869,6 +869,13 @@ impl WhatsAppRepository for MongoDB {
                         "status": status,
                         "timestamp": DateTime::now(),
                     },
+                    "$unset": {
+                        "meta_error_code": "",
+                        "meta_error_title": "",
+                        "meta_error_message": "",
+                        "meta_error_details": "",
+                        "failed_at": "",
+                    },
                 },
             )
             .with_options(opts)
@@ -989,16 +996,49 @@ impl WhatsAppRepository for MongoDB {
         &self,
         wa_message_id: &str,
         status: &str,
+        error: Option<&StatusError>,
     ) -> Result<Option<WaMessage>, String> {
         use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
         let opts = FindOneAndUpdateOptions::builder()
             .return_document(ReturnDocument::After)
             .build();
+        let update = if status == "failed" {
+            let mut set_doc = doc! {
+                "status": status,
+                "failed_at": DateTime::now(),
+            };
+            if let Some(error) = error {
+                if let Some(code) = error.code {
+                    set_doc.insert("meta_error_code", code);
+                }
+                if let Some(title) = error.title.as_ref() {
+                    set_doc.insert("meta_error_title", title);
+                }
+                if let Some(message) = error.message.as_ref() {
+                    set_doc.insert("meta_error_message", message);
+                }
+                if let Some(details) = error.error_data.as_ref() {
+                    set_doc.insert(
+                        "meta_error_details",
+                        mongodb::bson::to_bson(details).map_err(|e| e.to_string())?,
+                    );
+                }
+            }
+            doc! { "$set": set_doc }
+        } else {
+            doc! {
+                "$set": { "status": status },
+                "$unset": {
+                    "meta_error_code": "",
+                    "meta_error_title": "",
+                    "meta_error_message": "",
+                    "meta_error_details": "",
+                    "failed_at": "",
+                }
+            }
+        };
         self.wa_messages()
-            .find_one_and_update(
-                doc! { "wa_message_id": wa_message_id },
-                doc! { "$set": { "status": status } },
-            )
+            .find_one_and_update(doc! { "wa_message_id": wa_message_id }, update)
             .with_options(opts)
             .await
             .map_err(|e| e.to_string())

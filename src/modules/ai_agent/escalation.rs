@@ -146,12 +146,10 @@ pub async fn auto_escalate(
                     "[ai_agent.tools] request_human → triggering human assignment for conv {}",
                     conv_hex
                 );
-                let agents = settings.agents.clone();
                 let state_clone = Arc::clone(state);
                 let conv_id_for_assignment = *conversation_id;
                 tokio::spawn(async move {
-                    assignment::assign_conversation(state_clone, conv_id_for_assignment, agents)
-                        .await;
+                    assignment::assign_conversation(state_clone, conv_id_for_assignment).await;
                     tracing::info!(
                         "[ai_agent.tools] human assigned for conv {}",
                         conv_id_for_assignment.to_hex()
@@ -239,6 +237,11 @@ async fn send_farewell_message(
         media_mime_type: None,
         media_filename: None,
         status: Some("sent".into()),
+        meta_error_code: None,
+        meta_error_title: None,
+        meta_error_message: None,
+        meta_error_details: None,
+        failed_at: None,
         sent_by: Some(agent.ai_user_id.clone()),
         read_by_user_id: None,
         read_at: None,

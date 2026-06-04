@@ -10,7 +10,9 @@ use crate::{
 use super::ws::{broadcast_all, WsServerEvent};
 
 /// Selecciona el agente con menor carga y le asigna la conversación.
-/// `agents` viene de la configuración `wa_settings` del número que originó el mensaje.
+/// La lista de candidatos se re-resuelve desde `WaSettings` usando el
+/// `business_phone` persistido en la conversación: la auto-asignación nunca
+/// confía en una lista de agentes pasada por el caller.
 ///
 /// Estrategia: prefiere agentes **online** (presentes en `WsRegistry`) sobre
 /// los que están desconectados, incluso si tienen más carga. Si nadie está
@@ -20,7 +22,7 @@ use super::ws::{broadcast_all, WsServerEvent};
 /// Importante: esta auto-asignación NO implica que un humano haya "tomado" la
 /// conversación. La conv permanece en `pending` para que la IA pueda atender
 /// primero y el front no la marque prematuramente como `in_progress`.
-pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents: Vec<String>) {
+pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId) {
     let conv_id_str = conv_id.to_hex();
 
     // Lock de asignación para evitar duplicados
@@ -30,12 +32,13 @@ pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents
     }
 
     let event = async {
-        // Re-leer conversación dentro del lock — otro webhook pudo haberla asignado ya
-        match state.db.find_conversation_by_id(&conv_id).await {
+        // Re-leer conversación dentro del lock — otro webhook pudo haberla asignado ya.
+        let conv = match state.db.find_conversation_by_id(&conv_id).await {
             Ok(Some(c)) if c.assigned_to.is_some() => {
                 tracing::debug!("[assignment] conv {} ya asignada, skip", conv_id_str);
                 return None;
             }
+            Ok(Some(c)) => c,
             Ok(None) => {
                 tracing::warn!("[assignment] conv {} no existe, skip", conv_id_str);
                 return None;
@@ -44,19 +47,40 @@ pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents
                 tracing::error!("[assignment] error releyendo conv {}: {}", conv_id_str, e);
                 return None;
             }
-            _ => {}
-        }
+        };
 
-        if agents.is_empty() {
+        let settings = match state.db.find_wa_settings_by_phone(&conv.business_phone).await {
+            Ok(Some(settings)) => settings,
+            Ok(None) => {
+                tracing::warn!(
+                    "[assignment] workspace no encontrado conv={} business_phone={}",
+                    conv_id_str,
+                    conv.business_phone
+                );
+                return None;
+            }
+            Err(e) => {
+                tracing::error!(
+                    "[assignment] error cargando workspace conv={} business_phone={}: {}",
+                    conv_id_str,
+                    conv.business_phone,
+                    e
+                );
+                return None;
+            }
+        };
+        let configured_agents = settings.agents;
+        if configured_agents.is_empty() {
             tracing::warn!(
-                "[assignment] lista de agentes vacía para conv {}",
-                conv_id_str
+                "[assignment] workspace sin agentes configurados conv={} business_phone={}",
+                conv_id_str,
+                conv.business_phone
             );
             return None;
         }
 
-        let mut eligible_agents = Vec::with_capacity(agents.len());
-        for agent_id in agents {
+        let mut eligible_agents = Vec::with_capacity(configured_agents.len());
+        for agent_id in configured_agents {
             match state.db.find_user_by_id(&agent_id).await {
                 Ok(Some(user)) if user.visible && user.can_chat && !user.is_bot => {
                     eligible_agents.push(agent_id);
@@ -137,6 +161,36 @@ pub async fn assign_conversation(state: Arc<AppState>, conv_id: ObjectId, agents
             used_online_filter,
             loads
         );
+
+        match state.db.find_wa_settings_by_phone(&conv.business_phone).await {
+            Ok(Some(settings)) if settings.agents.iter().any(|agent_id| agent_id == &chosen_agent) => {}
+            Ok(Some(_)) => {
+                tracing::warn!(
+                    "[assignment] agente elegido ya no pertenece al workspace conv={} agent={} business_phone={} — skip",
+                    conv_id_str,
+                    chosen_agent,
+                    conv.business_phone
+                );
+                return None;
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    "[assignment] workspace desapareció antes de asignar conv={} business_phone={} — skip",
+                    conv_id_str,
+                    conv.business_phone
+                );
+                return None;
+            }
+            Err(e) => {
+                tracing::error!(
+                    "[assignment] error revalidando workspace conv={} business_phone={}: {}",
+                    conv_id_str,
+                    conv.business_phone,
+                    e
+                );
+                return None;
+            }
+        }
 
         // Actualizar MongoDB
         if let Err(e) = state

@@ -9,8 +9,8 @@ use mongodb::{error::Error as MongoError, Collection};
 use super::MongoDB;
 use crate::db::SalesRepository;
 use crate::models::db::{
-    DailyPaymentChartPoint, Debt, LatestPayment, PartPayment, PartPaymentWithPaymentState, Payment, PaymentForMatch,
-    PaymentReportFull, PaymentReportListItem,
+    DailyPaymentChartPoint, Debt, LatestPayment, PartPayment, PartPaymentWithPaymentState, Payment,
+    PaymentForMatch, PaymentReportFull, PaymentReportListItem,
 };
 use crate::models::payment::{
     Bank, ClientOwner, PaymentMethod, PaymentReport, ReferenceMatchInfo, UserPaymentInfo,
