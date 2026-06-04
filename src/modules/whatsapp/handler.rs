@@ -61,6 +61,25 @@ const MEDIA_DOWNLOAD_RETRY_DELAYS_MS: &[u64] = &[0, 700, 2_000];
 /// Si aparece, evitamos fallback prematuro.
 const INBOUND_MEDIA_FAILURE_RECHECK_DELAYS_MS: &[u64] = &[0, 10_000, 30_000];
 
+#[derive(Debug, Clone)]
+struct InboundMediaFailureDetails {
+    code: Option<i64>,
+    title: Option<String>,
+    message: Option<String>,
+    error_data: Option<serde_json::Value>,
+}
+
+impl InboundMediaFailureDetails {
+    fn from_status_error(err: &StatusError) -> Self {
+        Self {
+            code: err.code,
+            title: err.title.clone(),
+            message: err.message.clone(),
+            error_data: err.error_data.clone(),
+        }
+    }
+}
+
 fn infer_inbound_effective_type(msg: &InboundMessage) -> String {
     let original = msg.msg_type.trim().to_ascii_lowercase();
     let inferred = if msg.video.is_some() {
@@ -151,9 +170,28 @@ fn inbound_payload_markers(msg: &InboundMessage) -> String {
 }
 
 fn should_store_raw_payload(msg_type: &str) -> bool {
+    matches!(msg_type, "order" | "system" | "referral") || !is_known_inbound_type(msg_type)
+}
+
+fn is_known_inbound_type(msg_type: &str) -> bool {
     matches!(
         msg_type,
-        "order" | "system" | "referral" | "unsupported" | "unknown"
+        "text"
+            | "image"
+            | "document"
+            | "audio"
+            | "video"
+            | "sticker"
+            | "location"
+            | "contacts"
+            | "interactive"
+            | "button"
+            | "reaction"
+            | "order"
+            | "system"
+            | "referral"
+            | "unsupported"
+            | "unknown"
     )
 }
 
@@ -505,12 +543,15 @@ pub async fn receive_webhook(
                                 if !recipient.is_empty() && !business_phone.is_empty() {
                                     let wa_id = s.id.clone();
                                     let state_cl = state.clone();
+                                    let failure_details = first_error
+                                        .map(InboundMediaFailureDetails::from_status_error);
                                     tokio::spawn(async move {
                                         schedule_inbound_media_failure_fallback(
                                             &state_cl,
                                             &wa_id,
                                             &recipient,
                                             &business_phone,
+                                            failure_details,
                                         )
                                         .await;
                                     });
@@ -826,7 +867,22 @@ pub async fn receive_webhook(
                             None,
                             None,
                         ),
-                        _ => (None, None, None, None),
+                        _ => {
+                            // Meta puede introducir tipos nuevos sin aviso. NO los
+                            // descartamos: persistimos un cuerpo genérico y el raw
+                            // payload (ver `should_store_raw_payload`) para que el
+                            // front pueda renderizar/diagnosticar sin perder el chat.
+                            if is_known_inbound_type(&effective_msg_type) {
+                                (None, None, None, None)
+                            } else {
+                                (
+                                    Some(format!("Mensaje de WhatsApp ({})", effective_msg_type)),
+                                    None,
+                                    None,
+                                    None,
+                                )
+                            }
+                        }
                     };
 
                     // Voice note: sólo relevante en `audio`. Meta envía `voice: true`
@@ -5195,8 +5251,10 @@ async fn resolve_service_for_phone(
 /// no justifica complejidad de retry.
 async fn notify_inbound_media_failure(
     state: &Arc<AppState>,
+    wa_id: &str,
     recipient_phone: &str,
     business_phone: &str,
+    failure: Option<InboundMediaFailureDetails>,
 ) {
     let settings = match state.db.find_wa_settings_by_phone(business_phone).await {
         Ok(Some(s)) => s,
@@ -5208,6 +5266,17 @@ async fn notify_inbound_media_failure(
             return;
         }
     };
+
+    persist_inbound_media_failure_placeholder(
+        state,
+        wa_id,
+        recipient_phone,
+        business_phone,
+        Some(settings.workspace_name.as_str()).filter(|w| !w.is_empty()),
+        failure.as_ref(),
+    )
+    .await;
+
     let token = match decrypt_payload(&settings_secret(), &settings.access_token) {
         Some(t) => t,
         None => {
@@ -5241,6 +5310,212 @@ async fn notify_inbound_media_failure(
     }
 }
 
+/// Hace visible en el inbox un media inbound que Meta reportó como fallido
+/// antes de que existiera un `WaMessage` persistido. Esto evita el peor caso
+/// operativo: el cliente sí envió la imagen/documento en WhatsApp, pero el
+/// panel queda vacío y el agente cree que nunca llegó nada.
+async fn persist_inbound_media_failure_placeholder(
+    state: &Arc<AppState>,
+    wa_id: &str,
+    recipient_phone: &str,
+    business_phone: &str,
+    workspace_name: Option<&str>,
+    failure: Option<&InboundMediaFailureDetails>,
+) {
+    let (conv, conv_created) = match state
+        .db
+        .upsert_conversation(recipient_phone, business_phone, None)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                "[webhook] inbound_media_failure: no se pudo crear/ubicar conv customer='{}' business='{}': {}",
+                recipient_phone,
+                business_phone,
+                e
+            );
+            return;
+        }
+    };
+    let conv_id = match conv.id {
+        Some(id) => id,
+        None => return,
+    };
+
+    if conv_created {
+        record_conv_event(
+            state,
+            WaConversationEventInput {
+                conversation_id: &conv_id,
+                business_phone: &conv.business_phone,
+                event_type: "created",
+                actor_id: None,
+                actor_name: None,
+                target_id: None,
+                target_name: None,
+                note: Some("inbound_media_failure"),
+            },
+        )
+        .await;
+    }
+
+    let was_reopened = if conv.status == "closed" {
+        match state.db.reopen_conversation(&conv_id).await {
+            Ok(changed) => changed,
+            Err(e) => {
+                tracing::warn!("[webhook] inbound_media_failure reopen error: {}", e);
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    if was_reopened {
+        record_conv_event(
+            state,
+            WaConversationEventInput {
+                conversation_id: &conv_id,
+                business_phone: &conv.business_phone,
+                event_type: "reopened",
+                actor_id: None,
+                actor_name: None,
+                target_id: None,
+                target_name: None,
+                note: Some("inbound_media_failure"),
+            },
+        )
+        .await;
+    }
+
+    let now = DateTime::now();
+    let body = "⚠️ WhatsApp informó que el archivo enviado por el cliente no pudo ser procesado por Meta. Pedí que lo reenvíe como foto/documento o que escriba los datos manualmente.".to_string();
+    let raw_payload = Some(serde_json::json!({
+        "source": "meta_status_media_failure",
+        "wa_message_id": wa_id,
+        "customer_phone": recipient_phone,
+        "business_phone": business_phone,
+        "error": failure.map(|f| serde_json::json!({
+            "code": f.code,
+            "title": f.title,
+            "message": f.message,
+            "error_data": f.error_data,
+        })),
+    }));
+
+    let msg = WaMessage {
+        id: None,
+        conversation_id: conv_id,
+        wa_message_id: wa_id.to_string(),
+        direction: "in".to_string(),
+        msg_type: "unsupported".to_string(),
+        body: Some(body.clone()),
+        media_id: None,
+        media_mime_type: None,
+        media_filename: None,
+        status: Some("failed".to_string()),
+        meta_error_code: failure.and_then(|f| f.code),
+        meta_error_title: failure.and_then(|f| f.title.clone()),
+        meta_error_message: failure.and_then(|f| f.message.clone()),
+        meta_error_details: failure.and_then(|f| f.error_data.clone()),
+        failed_at: Some(now),
+        sent_by: None,
+        read_by_user_id: None,
+        read_at: None,
+        idempotency_key: None,
+        reply_to_wa_message_id: None,
+        url_preview: None,
+        voice: false,
+        template_name: None,
+        template_language: None,
+        template_components: None,
+        interactive_payload: None,
+        contacts_payload: None,
+        location: None,
+        reactions: vec![],
+        raw_payload,
+        ai_processed_at: None,
+        timestamp: now,
+    };
+
+    let saved = match state.db.save_message(msg).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                "[webhook] inbound_media_failure: no se pudo persistir placeholder wa_id={}: {}",
+                wa_id,
+                e
+            );
+            return;
+        }
+    };
+
+    let touch = crate::db::ConversationTouch {
+        preview: &body,
+        msg_type: "unsupported",
+        direction: "in",
+        wa_message_id: wa_id,
+        from_user_id: None,
+        media_filename: None,
+        status: Some("failed"),
+        increment_unread: true,
+        last_message_at: Some(now),
+    };
+    if let Err(e) = state.db.touch_conversation(&conv_id, touch).await {
+        tracing::warn!("[webhook] inbound_media_failure touch error: {}", e);
+    }
+
+    let conv_now = state
+        .db
+        .find_conversation_by_id(&conv_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(conv);
+
+    if conv_created {
+        let resolved = resolve_customer_name(state, &conv_now).await;
+        let new_ev = WsServerEvent::ConversacionNueva {
+            conversation: conv_to_item(
+                conv_now.clone(),
+                false,
+                None,
+                workspace_name.map(str::to_string),
+                resolved,
+                None,
+                None,
+            ),
+        };
+        broadcast_all(&state.ws_registry, &new_ev).await;
+    } else if was_reopened {
+        let reopened_ev = WsServerEvent::ChatEstadoCambio {
+            conversation_id: conv_id.to_hex(),
+            new_status: "pending".to_string(),
+        };
+        broadcast_all(&state.ws_registry, &reopened_ev).await;
+    }
+
+    let unread_pending = state.db.count_unread_conversations().await.unwrap_or(0);
+    let unread_ev = WsServerEvent::ConversacionNoLeida {
+        data: ConversacionNoLeidaData {
+            pending_total: unread_pending,
+            conversation_id: conv_id.to_hex(),
+            delta: 1,
+        },
+    };
+    if let Ok(badge_payload) = serde_json::to_string(&unread_ev) {
+        let _ = broadcast_to_chat_users(state, badge_payload).await;
+    }
+
+    let item = msg_to_item(saved, None, None);
+    let msg_ev = WsServerEvent::MensajeNuevo {
+        conversation_id: conv_id.to_hex(),
+        message: item,
+    };
+    broadcast_all(&state.ws_registry, &msg_ev).await;
+}
+
 /// Evita fallback prematuro en `131052/131056`: algunos eventos de status
 /// pueden adelantarse al guardado del mensaje. Re-chequeamos por `wa_id` y
 /// sólo avisamos al cliente si después de varios intentos sigue sin doc.
@@ -5249,6 +5524,7 @@ async fn schedule_inbound_media_failure_fallback(
     wa_id: &str,
     recipient_phone: &str,
     business_phone: &str,
+    failure: Option<InboundMediaFailureDetails>,
 ) {
     for (attempt, delay_ms) in INBOUND_MEDIA_FAILURE_RECHECK_DELAYS_MS.iter().enumerate() {
         if *delay_ms > 0 {
@@ -5279,7 +5555,7 @@ async fn schedule_inbound_media_failure_fallback(
             ),
         }
     }
-    notify_inbound_media_failure(state, recipient_phone, business_phone).await;
+    notify_inbound_media_failure(state, wa_id, recipient_phone, business_phone, failure).await;
 }
 
 /// Aplica el relay de Cloudflare al service si ambas env vars están seteadas

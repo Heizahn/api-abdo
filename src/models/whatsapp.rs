@@ -541,7 +541,7 @@ pub struct MessageStatus {
     pub errors: Option<Vec<StatusError>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusError {
     pub code: Option<i64>,
     pub title: Option<String>,
@@ -834,7 +834,10 @@ pub struct MessageItem {
     pub wa_message_id: String,
     /// "in" | "out"
     pub direction: String,
-    /// "text" | "image" | "audio" | "video" | "document" | "sticker" | otros
+    /// "text" | "image" | "audio" | "video" | "document" | "sticker" |
+    /// "location" | "contacts" | "interactive" | "button" | "template" |
+    /// "unsupported" | otros. Los tipos nuevos de Meta se preservan con
+    /// `raw_payload` para render genérico/diagnóstico.
     #[serde(rename = "type")]
     pub msg_type: String,
     pub content: Option<String>,

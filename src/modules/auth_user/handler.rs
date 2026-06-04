@@ -13,7 +13,7 @@ use crate::{
     auth::{
         http_auth::{
             build_auth_cookie, build_clear_cookie, read_staff_refresh_token, STAFF_ACCESS_COOKIE,
-            STAFF_REFRESH_COOKIE, STAFF_REDIS_REALM,
+            STAFF_REDIS_REALM, STAFF_REFRESH_COOKIE,
         },
         user_jwt::{UserJwtService, UserProfileClaims},
     },
@@ -145,17 +145,16 @@ pub async fn refresh_token_handler(
         .as_ref()
         .and_then(|p| p.refresh_token.as_deref().or(p.token.as_deref()));
 
-    let raw_refresh =
-        match read_staff_refresh_token(&headers, &state.config, body_token) {
-            Some(v) => v,
-            None => {
-                return Ok(refresh_error_response(
-                    &state,
-                    "invalid_refresh_token",
-                    "No se encontró refresh token",
-                ));
-            }
-        };
+    let raw_refresh = match read_staff_refresh_token(&headers, &state.config, body_token) {
+        Some(v) => v,
+        None => {
+            return Ok(refresh_error_response(
+                &state,
+                "invalid_refresh_token",
+                "No se encontró refresh token",
+            ));
+        }
+    };
 
     let claims = match jwt_service.verify_refresh_token(&raw_refresh) {
         Ok(v) => v,

@@ -176,6 +176,10 @@ Traits en `db/mod.rs`, implementaciones en `db/mongo/`. Los módulos acceden via
 
 **WebSocket** (`ws.rs`): `GET /v1/ws/chat?token=<user_jwt>`. JWT validado antes del upgrade. Eventos JSON con discriminante `tipo`: `CONECTAR`, `SUSCRIBIR_CONVERSACION` (cliente→servidor) y `MENSAJE_NUEVO`, `CONVERSACION_NUEVA`, `CHAT_TOMADO`, `CHAT_TRANSFERIDO`, `CHAT_CERRADO`, `MENSAJE_ACTUALIZADO`, `ERROR`, `CONECTADO` (servidor→cliente).
 
+**Tipos de mensajes WA soportados**: El webhook persiste `text`, `image`, `document`, `audio`, `video`, `sticker`, `location`, `contacts`, `interactive`, `button`, `order`, `system`, `referral`, `unsupported` y cualquier tipo nuevo/desconocido como mensaje genérico con `raw_payload`. Las reacciones (`reaction`) no crean mensaje nuevo: actualizan `WaMessage.reactions` del mensaje objetivo.
+
+**Media inbound**: Si Meta entrega `media_id`, el mensaje se guarda primero y la descarga del binario se intenta después por prefetch/cache Redis (`prefetch_media`) o bajo demanda vía `GET /v1/auth-user/whatsapp/media/:media_id`. Si Meta reporta fallo de media inbound (`131052`, `131053`, `131056`) antes de que exista mensaje en DB, el backend re-chequea con delay y, si sigue ausente, crea un placeholder visible en el chat + avisa al cliente que reenvíe el archivo. NO asumir que “no llegó nada”: puede ser un fallo de procesamiento de Meta.
+
 ---
 
 ## Documentación OpenAPI

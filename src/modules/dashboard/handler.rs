@@ -35,8 +35,6 @@ pub struct PaymentsChartQuery {
     pub owner: Option<String>,
 }
 
-
-
 async fn resolve_owner_id(
     state: &Arc<AppState>,
     claims: &UserProfileClaims,
@@ -89,8 +87,6 @@ pub struct MonthlyClosingData {
     pub pending: f64,
     pub efficiency: Option<f64>,
 }
-
-
 
 #[utoipa::path(
     get,
@@ -188,7 +184,14 @@ pub async fn payments_chart_handler(
     let start_day = end_day - Duration::days(6);
 
     let start_utc = VENEZUELA_TZ
-        .with_ymd_and_hms(start_day.year(), start_day.month(), start_day.day(), 0, 0, 0)
+        .with_ymd_and_hms(
+            start_day.year(),
+            start_day.month(),
+            start_day.day(),
+            0,
+            0,
+            0,
+        )
         .single()
         .ok_or(ApiError::InternalServerError)?
         .with_timezone(&Utc);
@@ -323,8 +326,6 @@ pub async fn monthly_closing_handler(
         None => total_collected_usd,
     };
 
-
-
     let pending = if is_current_month {
         active_clients
             .iter()
@@ -359,8 +360,6 @@ pub async fn monthly_closing_handler(
         },
     }))
 }
-
-
 
 fn build_month_selector(
     sel_year: i32,

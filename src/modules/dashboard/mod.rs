@@ -10,7 +10,6 @@ pub fn routes() -> Router<Arc<AppState>> {
             "/v1/auth-user/dashboard/monthly-closing",
             get(handler::monthly_closing_handler),
         )
-
         .route(
             "/v1/auth-user/dashboard/solvency",
             get(handler::solvency_handler),
