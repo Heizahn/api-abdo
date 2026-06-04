@@ -42,6 +42,7 @@ pub enum ApiError {
     WeakPassword,
 
     /// Ventana de 24h expirada: no se puede enviar freeform, usar template.
+    #[allow(dead_code)]
     #[error("Window expired: use template")]
     WindowExpired,
 
@@ -51,6 +52,7 @@ pub enum ApiError {
 
     /// La ventana de 24h del chat ya expiró (alias de sentido para casos donde
     /// el mensaje sería freeform). Se sirve como 409 `window_closed`.
+    #[allow(dead_code)]
     #[error("Window closed: use template")]
     WindowClosed,
 
@@ -146,17 +148,19 @@ impl IntoResponse for ApiError {
         {
             if status.is_server_error() {
                 tracing::error!(
-                    "API Error: Domain code={} field={:?} message={}",
+                    "API Error: Domain code={} field={:?} message={} details={:?}",
                     code,
                     field,
-                    message
+                    message,
+                    details
                 );
             } else {
                 tracing::warn!(
-                    "API Error: Domain code={} field={:?} message={}",
+                    "API Error: Domain code={} field={:?} message={} details={:?}",
                     code,
                     field,
-                    message
+                    message,
+                    details
                 );
             }
             let mut body = serde_json::json!({

@@ -1999,7 +1999,7 @@ fn resolve_send_mode(
         })?;
 
         if !is_within_24h(conv.last_inbound_at) {
-            return Err(ApiError::WindowClosed);
+            return Err(freeform_window_expired_error(payload, conv, "interactive"));
         }
         return Ok(SendMode::Interactive {
             payload: inter.clone(),
@@ -2018,7 +2018,7 @@ fn resolve_send_mode(
             .ok_or_else(|| ApiError::BadRequest("image requerido cuando type=image".into()))?;
         validate_media_id(&m.media_id)?;
         if !is_within_24h(conv.last_inbound_at) {
-            return Err(ApiError::WindowExpired);
+            return Err(freeform_window_expired_error(payload, conv, "image"));
         }
         return Ok(SendMode::Image {
             media_id: m.media_id.clone(),
@@ -2032,7 +2032,7 @@ fn resolve_send_mode(
             .ok_or_else(|| ApiError::BadRequest("video requerido cuando type=video".into()))?;
         validate_media_id(&m.media_id)?;
         if !is_within_24h(conv.last_inbound_at) {
-            return Err(ApiError::WindowExpired);
+            return Err(freeform_window_expired_error(payload, conv, "video"));
         }
         return Ok(SendMode::Video {
             media_id: m.media_id.clone(),
@@ -2045,7 +2045,7 @@ fn resolve_send_mode(
         })?;
         validate_media_id(&m.media_id)?;
         if !is_within_24h(conv.last_inbound_at) {
-            return Err(ApiError::WindowExpired);
+            return Err(freeform_window_expired_error(payload, conv, "document"));
         }
         return Ok(SendMode::Document {
             media_id: m.media_id.clone(),
@@ -2060,7 +2060,7 @@ fn resolve_send_mode(
             .ok_or_else(|| ApiError::BadRequest("audio requerido cuando type=audio".into()))?;
         validate_media_id(&m.media_id)?;
         if !is_within_24h(conv.last_inbound_at) {
-            return Err(ApiError::WindowExpired);
+            return Err(freeform_window_expired_error(payload, conv, "audio"));
         }
         return Ok(SendMode::Audio {
             media_id: m.media_id.clone(),
@@ -2073,7 +2073,7 @@ fn resolve_send_mode(
             .ok_or_else(|| ApiError::BadRequest("sticker requerido cuando type=sticker".into()))?;
         validate_media_id(&m.media_id)?;
         if !is_within_24h(conv.last_inbound_at) {
-            return Err(ApiError::WindowExpired);
+            return Err(freeform_window_expired_error(payload, conv, "sticker"));
         }
         return Ok(SendMode::Sticker {
             media_id: m.media_id.clone(),
@@ -2096,7 +2096,7 @@ fn resolve_send_mode(
             });
         }
         if !is_within_24h(conv.last_inbound_at) {
-            return Err(ApiError::WindowExpired);
+            return Err(freeform_window_expired_error(payload, conv, "location"));
         }
         return Ok(SendMode::Location { loc: loc.clone() });
     }
@@ -2127,7 +2127,7 @@ fn resolve_send_mode(
             }
         }
         if !is_within_24h(conv.last_inbound_at) {
-            return Err(ApiError::WindowExpired);
+            return Err(freeform_window_expired_error(payload, conv, "contacts"));
         }
         return Ok(SendMode::Contacts { list: list.clone() });
     }
@@ -2140,12 +2140,57 @@ fn resolve_send_mode(
     }
 
     if !is_within_24h(conv.last_inbound_at) {
-        return Err(ApiError::WindowExpired);
+        return Err(freeform_window_expired_error(payload, conv, "text"));
     }
 
     Ok(SendMode::Text {
         content: content.to_string(),
     })
+}
+
+fn freeform_window_expired_error(
+    payload: &SendMessageRequest,
+    conv: &WaConversation,
+    attempted_type: &str,
+) -> ApiError {
+    let declared_type = payload.msg_type.as_deref().unwrap_or("text");
+    let has_template = payload.template.is_some();
+    let (can_send_freeform, freeform_expires_at) = compute_freeform_state(conv.last_inbound_at);
+    let last_inbound_at = conv.last_inbound_at.map(iso8601);
+    let conversation_id = conv.id.as_ref().map(|id| id.to_hex());
+
+    tracing::warn!(
+        conversation_id = conversation_id.as_deref().unwrap_or("unknown"),
+        status = %conv.status,
+        attempted_type,
+        declared_type,
+        has_template,
+        has_content = payload.content.as_deref().is_some_and(|s| !s.trim().is_empty()),
+        last_inbound_at = last_inbound_at.as_deref().unwrap_or("none"),
+        freeform_expires_at = freeform_expires_at.as_deref().unwrap_or("none"),
+        "whatsapp freeform blocked by expired 24h window; payload did not activate template mode"
+    );
+
+    ApiError::Domain {
+        status: StatusCode::CONFLICT,
+        code: "window_expired".into(),
+        field: Some("type".into()),
+        message: "La ventana de 24h esta cerrada. Este payload llego como mensaje libre, no como plantilla. Para enviar una plantilla usa type=\"template\" y el objeto template.".into(),
+        details: Some(serde_json::json!({
+            "reason": "payload_not_template",
+            "attempted_type": attempted_type,
+            "received_type": declared_type,
+            "has_template": has_template,
+            "can_send_freeform": can_send_freeform,
+            "last_inbound_at": last_inbound_at,
+            "freeform_expires_at": freeform_expires_at,
+            "retry_with": {
+                "type": "template",
+                "required_field": "template",
+                "note": "No envies el texto renderizado como content cuando la ventana esta cerrada."
+            }
+        })),
+    }
 }
 
 fn nonempty(opt: &Option<String>) -> Option<String> {
@@ -2365,7 +2410,7 @@ async fn dispatch_send(
             let wa_id = wa
                 .send_template(to, &tpl.name, &tpl.language, components_value.as_ref())
                 .await
-                .map_err(internal)?;
+                .map_err(|e| map_template_send_error(&e))?;
             let prev = template_preview(tpl);
             let body = tpl.rendered_text.clone().or_else(|| Some(prev.clone()));
             let fields = TemplateFields {
@@ -3574,7 +3619,7 @@ pub async fn initiate_conversation_handler(
     let wa_id = wa
         .send_template(&to, &tpl_name, &tpl_lang, components_value.as_ref())
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| map_template_send_error(&e))?;
 
     let preview = tpl
         .rendered_text
@@ -6795,6 +6840,45 @@ fn map_meta_error(err: &anyhow::Error, default_msg: &str) -> ApiError {
             "meta_error_code": "0",
             "meta_error_message": err.to_string(),
             "rejection_reason": null,
+        }),
+    )
+}
+
+fn map_template_send_error(err: &anyhow::Error) -> ApiError {
+    use super::service::MetaApiError;
+
+    if let Some(me) = err.downcast_ref::<MetaApiError>() {
+        let details = serde_json::json!({
+            "meta_error_code": me.code.to_string(),
+            "meta_error_message": me.message,
+            "meta_error_subcode": me.error_subcode,
+            "meta_error_user_msg": me.error_user_msg,
+        });
+
+        if me.code == 131049 {
+            return ApiError::domain_with_details(
+                StatusCode::CONFLICT,
+                "template_throttled_by_meta",
+                "Meta bloqueo temporalmente los envios a este contacto por demasiados mensajes sin respuesta. Espera a que responda o intenta mas tarde.",
+                details,
+            );
+        }
+
+        return ApiError::domain_with_details(
+            StatusCode::BAD_GATEWAY,
+            "meta_rejected",
+            "Meta rechazo el envio de la plantilla. Revisa que este aprobada, el idioma, los parametros y el numero destino.",
+            details,
+        );
+    }
+
+    ApiError::domain_with_details(
+        StatusCode::BAD_GATEWAY,
+        "meta_rejected",
+        "Meta rechazo el envio de la plantilla o no devolvio una respuesta valida.",
+        serde_json::json!({
+            "meta_error_code": "0",
+            "meta_error_message": err.to_string(),
         }),
     )
 }
