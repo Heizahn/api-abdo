@@ -4,6 +4,7 @@ pub mod backfill;
 pub mod handler;
 pub mod quick_reply_validation;
 pub mod service;
+pub mod shared;
 pub mod tickets;
 pub mod url_preview;
 pub mod ws;

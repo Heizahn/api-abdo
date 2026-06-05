@@ -32,7 +32,7 @@ use crate::{
     state::AppState,
 };
 
-use super::handler::require_superadmin;
+use super::shared::require_superadmin;
 
 // ============================================
 // CONSTANTES

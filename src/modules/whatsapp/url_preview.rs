@@ -24,6 +24,7 @@ use scraper::{Html, Selector};
 
 use crate::db::WhatsAppRepository;
 use crate::models::whatsapp::UrlPreview;
+use crate::modules::whatsapp::shared::build_message_item;
 use crate::state::AppState;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(3);
@@ -59,7 +60,7 @@ pub fn spawn_preview_job(
 
         match state.db.set_message_url_preview(&msg_oid, &preview).await {
             Ok(Some(updated)) => {
-                let item = super::handler::build_message_item(&state, updated).await;
+                let item = build_message_item(&state, updated).await;
                 let ev = super::ws::WsServerEvent::UrlPreviewReady {
                     conversation_id: conv_oid.to_hex(),
                     message: item,

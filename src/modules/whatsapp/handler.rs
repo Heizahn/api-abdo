@@ -35,6 +35,7 @@ use crate::{
 };
 
 use super::assignment::assign_conversation;
+use super::shared;
 use crate::cache::MEDIA_CACHE_MAX_BYTES;
 
 use super::service::{MediaInfo, WhatsAppService};
@@ -6382,6 +6383,7 @@ fn normalize_to_e164(phone: &str) -> String {
 // HELPERS DE MAPEO
 // ============================================
 
+#[allow(dead_code)]
 fn iso8601(dt: DateTime) -> String {
     dt.try_to_rfc3339_string().unwrap_or_default()
 }
@@ -6395,141 +6397,51 @@ fn conv_to_item(
     last_message_from_user_name: Option<String>,
     assigned_to_name: Option<String>,
 ) -> ConversationItem {
-    let (can_send_freeform, expires_iso) = compute_freeform_state(c.last_inbound_at);
-    let (meta_throttled, meta_throttle_until_iso) =
-        compute_meta_throttle_state(c.meta_throttle_until);
-    // Prioridad: DB (Clients.sName) → WhatsApp profile (c.name) → null
-    let customer_name = resolved_name.filter(|s| !s.trim().is_empty()).or(c.name);
-    ConversationItem {
-        id: c.id.map(|o| o.to_hex()).unwrap_or_default(),
-        customer_phone: c.phone,
-        customer_name,
-        business_phone: c.business_phone,
+    shared::response::conv_to_item(
+        c,
+        include_client_id,
+        last_opened_at,
         workspace_name,
-        status: c.status,
-        assigned_to: c.assigned_to,
-        assigned_to_name,
-        last_message_at: iso8601(c.last_message_at),
-        last_message_preview: c.last_message_preview,
-        last_message_type: c.last_message_type,
-        last_message_direction: c.last_message_direction,
-        last_message_status: c.last_message_status,
-        last_message_media_filename: c.last_message_media_filename,
-        last_message_from_user_id: c.last_message_from_user_id,
+        resolved_name,
         last_message_from_user_name,
-        unread_count: c.unread_count,
-        created_at: iso8601(c.created_at),
-        client_id: if include_client_id {
-            c.client_id.map(|o| o.to_hex())
-        } else {
-            None
-        },
-        last_opened_at: last_opened_at.map(iso8601),
-        last_inbound_at: c.last_inbound_at.map(iso8601),
-        can_send_freeform,
-        freeform_expires_at: expires_iso,
-        meta_throttled,
-        meta_throttle_until: meta_throttle_until_iso,
-        ai_active_agent_id: c.ai_active_agent_id.map(|o| o.to_hex()),
-        ai_disabled: c.ai_disabled,
-        ai_last_processed_at: c.ai_last_processed_at.map(iso8601),
-        ai_conv_state: c.ai_conv_state,
-    }
+        assigned_to_name,
+    )
 }
 
 /// Devuelve `(meta_throttled, meta_throttle_until_iso)`. Si el cooldown ya
 /// expiró, devuelve `(false, None)` — un campo seteado en el pasado no debe
 /// confundir al front.
+#[allow(dead_code)]
 fn compute_meta_throttle_state(until: Option<DateTime>) -> (bool, Option<String>) {
-    match until {
-        Some(t) => {
-            let now_ms = DateTime::now().timestamp_millis();
-            if t.timestamp_millis() > now_ms {
-                (true, Some(iso8601(t)))
-            } else {
-                (false, None)
-            }
-        }
-        None => (false, None),
-    }
+    shared::response::compute_meta_throttle_state(until)
 }
 
 /// Resuelve el nombre del contacto para una conversación contra `Clients`:
 /// si tiene `client_id` linkeado lo usa; si no, intenta por teléfono. Devuelve
 /// `None` cuando no matchea en DB — el caller cae a `WaConversation.name`.
 async fn resolve_customer_name(state: &Arc<AppState>, conv: &WaConversation) -> Option<String> {
-    use crate::db::ProfileRepository;
-    if let Some(cid) = conv.client_id {
-        let map = state.db.get_client_names_by_ids(&[cid]).await.ok()?;
-        if let Some(n) = map.get(&cid).cloned() {
-            return Some(n);
-        }
-    }
-    let map = state
-        .db
-        .get_client_names_by_phones(&[conv.phone.clone()])
-        .await
-        .ok()?;
-    map.get(&conv.phone).cloned()
+    shared::mappers::resolve_customer_name(state, conv).await
 }
 
 /// Ventana de 24h desde `last_inbound_at`. Usado por el gate de envío freeform,
 /// por `conv_to_item` y por el WS event `CONVERSACION_ESTADO`.
 pub(super) fn is_within_24h(last_inbound_at: Option<DateTime>) -> bool {
-    match last_inbound_at {
-        Some(t) => {
-            let now = DateTime::now().timestamp_millis();
-            let then = t.timestamp_millis();
-            (now - then) <= 24 * 60 * 60 * 1000
-        }
-        None => false,
-    }
+    shared::time::is_within_24h(last_inbound_at)
 }
 
 /// Devuelve `(can_send_freeform, freeform_expires_at_iso)`.
 fn compute_freeform_state(last_inbound_at: Option<DateTime>) -> (bool, Option<String>) {
-    match last_inbound_at {
-        Some(t) => {
-            let expires = DateTime::from_millis(t.timestamp_millis() + 24 * 60 * 60 * 1000);
-            (is_within_24h(Some(t)), Some(iso8601(expires)))
-        }
-        None => (false, None),
-    }
+    shared::time::compute_freeform_state(last_inbound_at)
 }
 
 /// Atajo para handlers que tocan una sola conversación: resuelve `workspace_name`
 /// por su `business_phone` vía `WaSettings`.
 async fn resolve_workspace_name(state: &Arc<AppState>, business_phone: &str) -> Option<String> {
-    if business_phone.is_empty() {
-        return None;
-    }
-    state
-        .db
-        .get_workspace_names(&[business_phone.to_string()])
-        .await
-        .ok()
-        .and_then(|m| m.get(business_phone).cloned())
+    shared::workspace::resolve_workspace_name(state, business_phone).await
 }
 
 fn settings_to_item(s: WaSettings) -> SettingsItem {
-    SettingsItem {
-        id: s.id.map(|o| o.to_hex()).unwrap_or_default(),
-        phone: s.phone,
-        workspace_name: s.workspace_name,
-        phone_number_id: s.phone_number_id,
-        whatsapp_business_account_id: s.whatsapp_business_account_id,
-        has_access_token: !s.access_token.is_empty(),
-        agents: s.agents,
-        active: s.active,
-        purposes: s.purposes,
-        enable_guardrails: s.enable_guardrails,
-        enable_conversation_state: s.enable_conversation_state,
-        pre_classifier_enabled: s.pre_classifier_enabled,
-        trivial_responses: s.trivial_responses,
-        templates_synced_at: s.templates_synced_at.map(iso8601),
-        created_at: iso8601(s.created_at),
-        updated_at: iso8601(s.updated_at),
-    }
+    shared::response::settings_to_item(s)
 }
 
 fn msg_to_item(
@@ -6537,39 +6449,7 @@ fn msg_to_item(
     from_user_name: Option<String>,
     reply_to: Option<ReplyToItem>,
 ) -> MessageItem {
-    MessageItem {
-        id: m.id.map(|o| o.to_hex()).unwrap_or_default(),
-        conversation_id: m.conversation_id.to_hex(),
-        wa_message_id: m.wa_message_id,
-        direction: m.direction,
-        msg_type: m.msg_type,
-        content: m.body,
-        media_id: m.media_id,
-        media_mime_type: m.media_mime_type,
-        media_filename: m.media_filename,
-        status: m.status,
-        meta_error_code: m.meta_error_code,
-        meta_error_title: m.meta_error_title,
-        meta_error_message: m.meta_error_message,
-        meta_error_details: m.meta_error_details,
-        failed_at: m.failed_at.map(iso8601),
-        from_user_id: m.sent_by,
-        from_user_name,
-        idempotency_key: m.idempotency_key,
-        reply_to,
-        url_preview: m.url_preview,
-        voice: m.voice,
-        template_name: m.template_name,
-        template_language: m.template_language,
-        template_components: m.template_components,
-        interactive_payload: m.interactive_payload,
-        contacts_payload: m.contacts_payload,
-        location: m.location,
-        reactions: m.reactions,
-        raw_payload: m.raw_payload,
-        ai_processed_at: m.ai_processed_at.map(iso8601),
-        created_at: iso8601(m.timestamp),
-    }
+    shared::mappers::msg_to_item(m, from_user_name, reply_to)
 }
 
 /// Atajo usado por jobs async (`url_preview`, `ai_agent::dispatch`) para armar
@@ -6577,24 +6457,13 @@ fn msg_to_item(
 /// resuelve `sent_by_name` y `reply_to` en un solo call. Costo: 1-2 queries
 /// a `Users` / `WaMessages`.
 pub async fn build_message_item(state: &Arc<AppState>, m: WaMessage) -> MessageItem {
-    use crate::db::UserRepository;
-    let name = match m.sent_by.as_deref() {
-        Some(id) => state
-            .db
-            .find_user_by_id(id)
-            .await
-            .ok()
-            .flatten()
-            .map(|u| u.name),
-        None => None,
-    };
-    let reply_to = resolve_reply_to_for_one(state, &m).await;
-    msg_to_item(m, name, reply_to)
+    shared::mappers::build_message_item(state, m).await
 }
 
 /// Trunca el cuerpo del mensaje citado a ~80 chars (seguro en UTF-8).
 /// Se usa sólo para preview en la UI; el mensaje original completo sigue
 /// disponible por su `wa_message_id`.
+#[allow(dead_code)]
 fn preview_truncate(s: &str, max_chars: usize) -> String {
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
@@ -6610,9 +6479,7 @@ fn preview_truncate(s: &str, max_chars: usize) -> String {
 /// Atajo para un solo mensaje: reusa el helper batch y devuelve el `ReplyToItem`
 /// correspondiente si existe.
 async fn resolve_reply_to_for_one(state: &Arc<AppState>, m: &WaMessage) -> Option<ReplyToItem> {
-    let wid = m.reply_to_wa_message_id.as_ref()?;
-    let items = resolve_reply_to_items(state, std::slice::from_ref(m)).await;
-    items.get(wid).cloned()
+    shared::mappers::resolve_reply_to_for_one(state, m).await
 }
 
 /// Batch-resuelve los `reply_to` de un conjunto de mensajes en un solo query a
@@ -6626,65 +6493,7 @@ async fn resolve_reply_to_items(
     state: &Arc<AppState>,
     messages: &[WaMessage],
 ) -> std::collections::HashMap<String, ReplyToItem> {
-    use crate::db::UserRepository;
-
-    // Recolecto los wamid citados, dedup.
-    let mut wa_ids: Vec<String> = messages
-        .iter()
-        .filter_map(|m| m.reply_to_wa_message_id.clone())
-        .collect();
-    wa_ids.sort();
-    wa_ids.dedup();
-    if wa_ids.is_empty() {
-        return std::collections::HashMap::new();
-    }
-
-    // Batch lookup del mensaje original.
-    let originals = match state.db.find_messages_by_wa_ids(&wa_ids).await {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(
-                "resolve_reply_to_items find_messages_by_wa_ids error: {}",
-                e
-            );
-            return std::collections::HashMap::new();
-        }
-    };
-
-    // Nombres de agentes para los originales outbound — un batch sobre Users.
-    let mut sender_ids: Vec<String> = originals
-        .values()
-        .filter_map(|m| m.sent_by.clone())
-        .collect();
-    sender_ids.sort();
-    sender_ids.dedup();
-    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for id in sender_ids {
-        if let Ok(Some(u)) = state.db.find_user_by_id(&id).await {
-            names.insert(id, u.name);
-        }
-    }
-
-    // Ensamblar ReplyToItems.
-    originals
-        .into_iter()
-        .map(|(wa_id, m)| {
-            let preview_content = m
-                .body
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .map(|s| preview_truncate(s, 80));
-            let from_user_name = m.sent_by.as_deref().and_then(|id| names.get(id).cloned());
-            let item = ReplyToItem {
-                wa_message_id: wa_id.clone(),
-                preview_content,
-                preview_type: m.msg_type,
-                direction: m.direction,
-                from_user_name,
-            };
-            (wa_id, item)
-        })
-        .collect()
+    shared::mappers::resolve_reply_to_items(state, messages).await
 }
 
 /// Convierte un timestamp de Meta (Unix seconds en string) a `bson::DateTime`.
@@ -6744,15 +6553,7 @@ async fn resolve_last_message_agent_name_one(
     state: &Arc<AppState>,
     conv: &WaConversation,
 ) -> Option<String> {
-    use crate::db::UserRepository;
-    let id = conv.last_message_from_user_id.as_deref()?;
-    state
-        .db
-        .find_user_by_id(id)
-        .await
-        .ok()
-        .flatten()
-        .map(|u| u.name)
+    shared::mappers::resolve_last_message_agent_name_one(state, conv).await
 }
 
 /// Batch-resolución de nombres de agentes asignados (`assigned_to`) para
@@ -6782,31 +6583,13 @@ async fn resolve_assigned_agent_name_one(
     state: &Arc<AppState>,
     conv: &WaConversation,
 ) -> Option<String> {
-    use crate::db::UserRepository;
-    let id = conv.assigned_to.as_deref()?;
-    state
-        .db
-        .find_user_by_id(id)
-        .await
-        .ok()
-        .flatten()
-        .map(|u| u.name)
+    shared::mappers::resolve_assigned_agent_name_one(state, conv).await
 }
 
 /// Resuelve el nombre de un único user_id (UUID). Útil para los eventos WS
 /// que necesitan inyectar el nombre del actor (CHAT_TOMADO -> taken_by_name).
 async fn resolve_user_name_by_id(state: &Arc<AppState>, user_id: &str) -> Option<String> {
-    use crate::db::UserRepository;
-    if user_id.trim().is_empty() {
-        return None;
-    }
-    state
-        .db
-        .find_user_by_id(user_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|u| u.name)
+    shared::mappers::resolve_user_name_by_id(state, user_id).await
 }
 
 // ============================================
@@ -6830,32 +6613,18 @@ pub(super) async fn require_can_chat(
     state: &Arc<AppState>,
     user_id: &str,
 ) -> Result<crate::models::users::User, ApiError> {
-    use crate::db::UserRepository;
-    let user = state
-        .db
-        .find_user_by_id(user_id)
-        .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or(ApiError::Forbidden)?;
-    if user.role != 0.0 && !user.can_chat {
-        return Err(ApiError::Forbidden);
-    }
-    Ok(user)
+    shared::authz::require_can_chat(state, user_id).await
 }
 
 fn is_superadmin(user: &crate::models::users::User) -> bool {
-    user.role == 0.0
+    shared::authz::is_superadmin(user)
 }
 
 fn is_chat_workspace_match(
     user_workspace_ids: &[ObjectId],
     conversation_workspace_id: &ObjectId,
 ) -> bool {
-    // Global users (sin workspaces explícitos) pueden operar en cualquier workspace.
-    user_workspace_ids.is_empty()
-        || user_workspace_ids
-            .iter()
-            .any(|id| id == conversation_workspace_id)
+    shared::authz::is_chat_workspace_match(user_workspace_ids, conversation_workspace_id)
 }
 
 async fn require_workspace_actor_for_conversation(
@@ -6863,42 +6632,7 @@ async fn require_workspace_actor_for_conversation(
     actor: &crate::models::users::User,
     business_phone: &str,
 ) -> Result<WaSettings, ApiError> {
-    let settings = state
-        .db
-        .find_wa_settings_by_phone(business_phone)
-        .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or_else(|| {
-            ApiError::domain_simple(
-                StatusCode::NOT_FOUND,
-                "whatsapp_workspace_not_found",
-                "No hay un workspace activo configurado para esta conversación",
-            )
-        })?;
-
-    if is_superadmin(actor) {
-        return Ok(settings);
-    }
-
-    let actor_workspaces = state
-        .db
-        .get_user_workspaces(&actor.id)
-        .await
-        .map_err(ApiError::DatabaseError)?;
-
-    let Some(conversation_workspace_id) = settings.id.as_ref() else {
-        return Err(ApiError::DatabaseError("workspace id no disponible".into()));
-    };
-
-    if !is_chat_workspace_match(&actor_workspaces, conversation_workspace_id) {
-        return Err(ApiError::domain_simple(
-            StatusCode::FORBIDDEN,
-            "whatsapp_workspace_membership_required",
-            "No tienes permiso sobre el workspace de esta conversación",
-        ));
-    }
-
-    Ok(settings)
+    shared::authz::require_workspace_actor_for_conversation(state, actor, business_phone).await
 }
 
 async fn ensure_transfer_target_allowed_for_workspace(
@@ -6906,15 +6640,7 @@ async fn ensure_transfer_target_allowed_for_workspace(
     target: &crate::models::users::User,
     workspace_id: Option<&ObjectId>,
 ) -> Result<(), ApiError> {
-    if is_transfer_target_allowed_for_workspace(state, target, workspace_id).await? {
-        return Ok(());
-    }
-
-    Err(ApiError::domain_simple(
-        StatusCode::FORBIDDEN,
-        "whatsapp_transfer_target_not_allowed",
-        "El usuario destino no puede atender chats de WhatsApp",
-    ))
+    shared::authz::ensure_transfer_target_allowed_for_workspace(state, target, workspace_id).await
 }
 
 async fn is_transfer_target_allowed_for_workspace(
@@ -6922,31 +6648,7 @@ async fn is_transfer_target_allowed_for_workspace(
     target: &crate::models::users::User,
     workspace_id: Option<&ObjectId>,
 ) -> Result<bool, ApiError> {
-    // Regla base del target: debe estar visible, no ser bot y poder atender chats.
-    if !target.visible || target.is_bot || !target.can_chat {
-        return Ok(false);
-    }
-
-    // Superadmin sigue respetando bCanChat=true como gate de recepción.
-    if is_superadmin(target) {
-        return Ok(true);
-    }
-
-    let Some(workspace_id) = workspace_id else {
-        return Ok(true);
-    };
-
-    let target_workspaces = state
-        .db
-        .get_user_workspaces(&target.id)
-        .await
-        .map_err(ApiError::DatabaseError)?;
-
-    if !is_chat_workspace_match(&target_workspaces, workspace_id) {
-        return Ok(false);
-    }
-
-    Ok(true)
+    shared::authz::is_transfer_target_allowed_for_workspace(state, target, workspace_id).await
 }
 
 async fn is_transfer_target_allowed_for_actor_workspaces(
@@ -6954,29 +6656,12 @@ async fn is_transfer_target_allowed_for_actor_workspaces(
     target: &crate::models::users::User,
     actor_workspace_ids: &[ObjectId],
 ) -> Result<bool, ApiError> {
-    if !target.visible || target.is_bot || !target.can_chat {
-        return Ok(false);
-    }
-
-    if is_superadmin(target) || actor_workspace_ids.is_empty() {
-        return Ok(true);
-    }
-
-    let target_workspaces = state
-        .db
-        .get_user_workspaces(&target.id)
-        .await
-        .map_err(ApiError::DatabaseError)?;
-
-    if target_workspaces.is_empty() {
-        return Ok(true);
-    }
-
-    Ok(target_workspaces.iter().any(|target_workspace_id| {
-        actor_workspace_ids
-            .iter()
-            .any(|id| id == target_workspace_id)
-    }))
+    shared::authz::is_transfer_target_allowed_for_actor_workspaces(
+        state,
+        target,
+        actor_workspace_ids,
+    )
+    .await
 }
 
 async fn require_workspace_agent_or_assigned(
@@ -6996,6 +6681,7 @@ async fn require_workspace_agent_or_assigned(
 /// Construye un `ConversationItem` completo desde un `WaConversation` resolviendo
 /// workspace_name + nombres en una sola pasada. Reusable desde otros módulos
 /// del feature (tickets) sin tener que reexportar todos los helpers internos.
+#[allow(dead_code)]
 pub(super) async fn build_conversation_item(
     state: &Arc<AppState>,
     conv: WaConversation,
@@ -7021,33 +6707,6 @@ pub(super) async fn build_conversation_item(
         agent_name,
         assigned_name,
     ))
-}
-
-pub(super) fn iso8601_pub(dt: DateTime) -> String {
-    iso8601(dt)
-}
-
-/// Regla de `can_edit` (controla el botón de **eliminar** una quick reply):
-///
-/// - `true` si el caller es superadmin (`nRole == 0`).
-/// - `true` si el caller es agente de **al menos uno** de los workspaces del
-///   item (`overlap`).
-/// - `false` en cualquier otro caso.
-///
-/// Cualquier `can_chat=true` puede ver/usar/editar/toggle — las únicas
-/// operaciones con gate de workspace son crear y eliminar. Este helper cubre
-/// la regla de eliminar; para crear se usa `require_create_permission`.
-fn compute_can_edit(
-    caller_role: f32,
-    caller_workspaces: &[ObjectId],
-    qr_workspace_ids: &[ObjectId],
-) -> bool {
-    if caller_role == 0.0 {
-        return true;
-    }
-    qr_workspace_ids
-        .iter()
-        .any(|w| caller_workspaces.contains(w))
 }
 
 /// Gate para crear (y duplicate). El caller debe ser superadmin, o agente en
@@ -7105,26 +6764,21 @@ fn quick_reply_to_item(
     caller: &crate::models::users::User,
     caller_workspaces: &[ObjectId],
 ) -> QuickReplyItem {
-    let can_edit = compute_can_edit(caller.role, caller_workspaces, &q.workspace_ids);
-    QuickReplyItem {
-        id: q.id.map(|o| o.to_hex()).unwrap_or_default(),
-        title: q.title,
-        content: q.content,
-        workspace_ids: q.workspace_ids.into_iter().map(|o| o.to_hex()).collect(),
-        created_by: q.created_by,
-        created_by_name: q.created_by_name,
-        created_at: iso8601(q.created_at),
-        updated_at: iso8601(q.updated_at),
-        active: q.active,
-        can_edit,
-        header: q.header,
-        footer: q.footer,
-        buttons: q.buttons,
-        list: q.list,
-        cta_url: q.cta_url,
-        use_count: q.use_count,
-        last_used_at: q.last_used_at.map(iso8601),
+    shared::response::quick_reply_to_item(q, caller, caller_workspaces)
+}
+
+fn compute_can_edit(
+    caller_role: f32,
+    caller_workspaces: &[ObjectId],
+    qr_workspace_ids: &[ObjectId],
+) -> bool {
+    if caller_role == 0.0 {
+        return true;
     }
+
+    qr_workspace_ids
+        .iter()
+        .any(|workspace_id| caller_workspaces.contains(workspace_id))
 }
 
 // ============================================
@@ -7531,17 +7185,7 @@ pub(super) async fn require_superadmin(
     state: &Arc<AppState>,
     user_id: &str,
 ) -> Result<crate::models::users::User, ApiError> {
-    use crate::db::UserRepository;
-    let user = state
-        .db
-        .find_user_by_id(user_id)
-        .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or(ApiError::Forbidden)?;
-    if user.role != 0.0 {
-        return Err(ApiError::Forbidden);
-    }
-    Ok(user)
+    shared::authz::require_superadmin(state, user_id).await
 }
 
 /// Error canónico para plantilla no encontrada (404).
