@@ -1600,7 +1600,7 @@ pub async fn send_message_handler(
     Path(id): Path<String>,
     Json(payload): Json<SendMessageRequest>,
 ) -> Result<Json<SendMessageResponse>, ApiError> {
-    require_can_chat(&state, &claims.id).await?;
+    let actor = require_can_chat(&state, &claims.id).await?;
 
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
@@ -1611,7 +1611,7 @@ pub async fn send_message_handler(
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
-    require_workspace_agent_or_assigned(&state, &conv, &claims.id).await?;
+    require_workspace_agent_or_assigned(&state, &conv, &actor).await?;
 
     // Decidir modo: template (siempre permitido) vs texto (sólo dentro de la
     // ventana de 24h). El discriminador `type: "template"` o la presencia del
@@ -2807,7 +2807,7 @@ pub async fn take_conversation_handler(
     Extension(claims): Extension<UserProfileClaims>,
     Path(id): Path<String>,
 ) -> Result<Json<TakeConversationResponse>, ApiError> {
-    require_can_chat(&state, &claims.id).await?;
+    let actor = require_can_chat(&state, &claims.id).await?;
 
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
@@ -2818,7 +2818,7 @@ pub async fn take_conversation_handler(
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
-    require_workspace_agent(&state, &existing.business_phone, &claims.id).await?;
+    require_workspace_actor_for_conversation(&state, &actor, &existing.business_phone).await?;
 
     let previous_status = existing.status.clone();
     let prev_owner = existing.assigned_to.clone();
@@ -2983,7 +2983,7 @@ pub async fn transfer_conversation_handler(
     Path(id): Path<String>,
     Json(payload): Json<TransferConversationRequest>,
 ) -> Result<Json<ConversationDetailResponse>, ApiError> {
-    require_can_chat(&state, &claims.id).await?;
+    let actor = require_can_chat(&state, &claims.id).await?;
 
     let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
 
@@ -2994,7 +2994,8 @@ pub async fn transfer_conversation_handler(
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or(ApiError::NotFound)?;
 
-    require_workspace_agent_or_assigned(&state, &conv, &claims.id).await?;
+    let current_workspace =
+        require_workspace_actor_for_conversation(&state, &actor, &conv.business_phone).await?;
 
     // Validar que el usuario destino exista.
     use crate::db::UserRepository;
@@ -3004,7 +3005,8 @@ pub async fn transfer_conversation_handler(
         .await
         .map_err(|e| ApiError::DatabaseError(e))?
         .ok_or_else(|| ApiError::NotFound)?;
-    ensure_transfer_target_allowed(&target)?;
+    ensure_transfer_target_allowed_for_workspace(&state, &target, current_workspace.id.as_ref())
+        .await?;
 
     let from_agent = conv.assigned_to.clone();
 
@@ -3763,16 +3765,21 @@ pub struct TransferableAgentsQuery {
 )]
 pub async fn list_transferable_agents_handler(
     State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
     Query(q): Query<TransferableAgentsQuery>,
 ) -> Result<Json<TransferableAgentsResponse>, ApiError> {
     use crate::db::UserRepository;
+    use mongodb::bson::oid::ObjectId;
+
+    let actor = require_can_chat(&state, &claims.id).await?;
+
     let users = state
         .db
         .find_chat_agents()
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;
 
-    let allowed_ids: Option<std::collections::HashSet<String>> = if let Some(workspace_id) = q
+    let workspace_id: Option<ObjectId> = if let Some(workspace_id) = q
         .workspace_id
         .as_deref()
         .map(str::trim)
@@ -3799,7 +3806,7 @@ pub async fn list_transferable_agents_handler(
                     "No existe el workspace indicado",
                 )
             })?;
-        Some(settings.agents.into_iter().collect())
+        settings.id
     } else if let Some(business_phone) = q
         .business_phone
         .as_deref()
@@ -3819,27 +3826,56 @@ pub async fn list_transferable_agents_handler(
                     "No existe un workspace activo para el número indicado",
                 )
             })?;
-        Some(settings.agents.into_iter().collect())
+        settings.id
     } else {
         None
     };
 
-    let data = users
-        .into_iter()
-        .filter(|u| {
-            allowed_ids
-                .as_ref()
-                .map(|ids| ids.contains(&u.id))
-                .unwrap_or(true)
-        })
-        .map(|u| TransferableAgentItem {
-            id: u.id,
-            name: u.name,
-            email: u.email,
-            role: u.role,
-            is_bot: u.is_bot,
-        })
-        .collect();
+    let actor_workspaces = if is_superadmin(&actor) {
+        None
+    } else {
+        let workspaces = state
+            .db
+            .get_user_workspaces(&actor.id)
+            .await
+            .map_err(ApiError::DatabaseError)?;
+
+        if let Some(workspace_id) = workspace_id.as_ref() {
+            if !is_chat_workspace_match(&workspaces, workspace_id) {
+                return Err(ApiError::domain_simple(
+                    StatusCode::FORBIDDEN,
+                    "whatsapp_workspace_membership_required",
+                    "No tienes permiso sobre el workspace indicado",
+                ));
+            }
+        }
+
+        Some(workspaces)
+    };
+
+    let mut data = Vec::with_capacity(users.len());
+    for user in users {
+        let allowed = if let Some(workspace_id) = workspace_id.as_ref() {
+            is_transfer_target_allowed_for_workspace(&state, &user, Some(workspace_id)).await?
+        } else if let Some(actor_workspaces) = actor_workspaces.as_deref() {
+            is_transfer_target_allowed_for_actor_workspaces(&state, &user, actor_workspaces).await?
+        } else {
+            is_transfer_target_allowed_for_workspace(&state, &user, None).await?
+        };
+
+        if !allowed {
+            continue;
+        }
+
+        data.push(TransferableAgentItem {
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            role: user.role,
+            is_bot: user.is_bot,
+        });
+    }
+
     Ok(Json(TransferableAgentsResponse { ok: true, data }))
 }
 
@@ -6295,10 +6331,25 @@ pub(super) async fn require_can_chat(
     Ok(user)
 }
 
-async fn require_workspace_agent(
+fn is_superadmin(user: &crate::models::users::User) -> bool {
+    user.role == 0.0
+}
+
+fn is_chat_workspace_match(
+    user_workspace_ids: &[ObjectId],
+    conversation_workspace_id: &ObjectId,
+) -> bool {
+    // Global users (sin workspaces explícitos) pueden operar en cualquier workspace.
+    user_workspace_ids.is_empty()
+        || user_workspace_ids
+            .iter()
+            .any(|id| id == conversation_workspace_id)
+}
+
+async fn require_workspace_actor_for_conversation(
     state: &Arc<AppState>,
+    actor: &crate::models::users::User,
     business_phone: &str,
-    user_id: &str,
 ) -> Result<WaSettings, ApiError> {
     let settings = state
         .db
@@ -6313,7 +6364,21 @@ async fn require_workspace_agent(
             )
         })?;
 
-    if !settings.agents.iter().any(|agent_id| agent_id == user_id) {
+    if is_superadmin(actor) {
+        return Ok(settings);
+    }
+
+    let actor_workspaces = state
+        .db
+        .get_user_workspaces(&actor.id)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    let Some(conversation_workspace_id) = settings.id.as_ref() else {
+        return Err(ApiError::DatabaseError("workspace id no disponible".into()));
+    };
+
+    if !is_chat_workspace_match(&actor_workspaces, conversation_workspace_id) {
         return Err(ApiError::domain_simple(
             StatusCode::FORBIDDEN,
             "whatsapp_workspace_membership_required",
@@ -6324,30 +6389,96 @@ async fn require_workspace_agent(
     Ok(settings)
 }
 
-async fn require_workspace_agent_or_assigned(
+async fn ensure_transfer_target_allowed_for_workspace(
     state: &Arc<AppState>,
-    conv: &WaConversation,
-    user_id: &str,
+    target: &crate::models::users::User,
+    workspace_id: Option<&ObjectId>,
 ) -> Result<(), ApiError> {
-    if conv.assigned_to.as_deref() == Some(user_id) {
+    if is_transfer_target_allowed_for_workspace(state, target, workspace_id).await? {
         return Ok(());
     }
 
-    require_workspace_agent(state, &conv.business_phone, user_id)
-        .await
-        .map(|_| ())
+    Err(ApiError::domain_simple(
+        StatusCode::FORBIDDEN,
+        "whatsapp_transfer_target_not_allowed",
+        "El usuario destino no puede atender chats de WhatsApp",
+    ))
 }
 
-fn ensure_transfer_target_allowed(target: &crate::models::users::User) -> Result<(), ApiError> {
+async fn is_transfer_target_allowed_for_workspace(
+    state: &Arc<AppState>,
+    target: &crate::models::users::User,
+    workspace_id: Option<&ObjectId>,
+) -> Result<bool, ApiError> {
+    // Regla base del target: debe estar visible, no ser bot y poder atender chats.
     if !target.visible || target.is_bot || !target.can_chat {
-        return Err(ApiError::domain_simple(
-            StatusCode::FORBIDDEN,
-            "whatsapp_transfer_target_not_allowed",
-            "El usuario destino no puede atender chats de WhatsApp",
-        ));
+        return Ok(false);
     }
 
-    Ok(())
+    // Superadmin sigue respetando bCanChat=true como gate de recepción.
+    if is_superadmin(target) {
+        return Ok(true);
+    }
+
+    let Some(workspace_id) = workspace_id else {
+        return Ok(true);
+    };
+
+    let target_workspaces = state
+        .db
+        .get_user_workspaces(&target.id)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    if !is_chat_workspace_match(&target_workspaces, workspace_id) {
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+async fn is_transfer_target_allowed_for_actor_workspaces(
+    state: &Arc<AppState>,
+    target: &crate::models::users::User,
+    actor_workspace_ids: &[ObjectId],
+) -> Result<bool, ApiError> {
+    if !target.visible || target.is_bot || !target.can_chat {
+        return Ok(false);
+    }
+
+    if is_superadmin(target) || actor_workspace_ids.is_empty() {
+        return Ok(true);
+    }
+
+    let target_workspaces = state
+        .db
+        .get_user_workspaces(&target.id)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    if target_workspaces.is_empty() {
+        return Ok(true);
+    }
+
+    Ok(target_workspaces.iter().any(|target_workspace_id| {
+        actor_workspace_ids
+            .iter()
+            .any(|id| id == target_workspace_id)
+    }))
+}
+
+async fn require_workspace_agent_or_assigned(
+    state: &Arc<AppState>,
+    conv: &WaConversation,
+    actor: &crate::models::users::User,
+) -> Result<(), ApiError> {
+    if conv.assigned_to.as_deref() == Some(&actor.id) {
+        return Ok(());
+    }
+
+    require_workspace_actor_for_conversation(state, actor, &conv.business_phone)
+        .await
+        .map(|_| ())
 }
 
 /// Construye un `ConversationItem` completo desde un `WaConversation` resolviendo

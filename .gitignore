@@ -1,18 +1,13 @@
 /target
 .env
-<<<<<<< HEAD
-.claude/*
-!.claude/skills/
+.claude/
+.agents/
 .idea
 /uploads
 /olt_reports
 /mk_reports
+.atl/
 
 
 # Example HTTP
 example.http
-=======
-.claude/
-.idea
-/uploads
->>>>>>> 630956f82c62e1ca3653085a006940b4665c5fab
