@@ -27,9 +27,9 @@ Chain strategy: feature-branch-chain
 
 ## Phase 1: Foundation
 
-- [ ] 1.1 Create `src/modules/whatsapp/shared/{mod.rs,authz.rs,mappers.rs,response.rs,time.rs,workspace.rs}` and move pure helpers/builders from `handler.rs`.
-- [ ] 1.2 Update `src/modules/ai_agent/{dispatch.rs,escalation.rs}` to import `whatsapp::shared::mappers` instead of `handler`.
-- [ ] 1.3 Keep `handler.rs` as a compatibility facade with re-exports only; do not change external routes.
+- [x] 1.1 Create `src/modules/whatsapp/shared/{mod.rs,authz.rs,mappers.rs,response.rs,time.rs,workspace.rs}` and move pure helpers/builders from `handler.rs`.
+- [x] 1.2 Update `src/modules/ai_agent/{dispatch.rs,escalation.rs}` to import `whatsapp::shared::mappers` instead of `handler`.
+- [ ] 1.3 Keep `handler.rs` as a compatibility facade with re-exports only; do not change external routes. _(Partially advanced in PR1 by adding compatibility wrappers; full facade cleanup remains for later domain extraction slices.)_
 
 ## Phase 2: Domain Extraction
 
