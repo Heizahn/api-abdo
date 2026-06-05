@@ -33,15 +33,15 @@ Chain strategy: feature-branch-chain
 
 ## Phase 2: Domain Extraction
 
-- [ ] 2.1 Move webhook handlers into `webhook/{mod.rs,handler.rs,normalize.rs,media_failures.rs,status.rs}` and preserve `verify_webhook`, `receive_webhook`, `debug_last_webhook_handler`.
-- [ ] 2.2 Move conversation REST flows into `conversations/{mod.rs,handlers.rs,lifecycle.rs,queries.rs}`; keep route paths/order unchanged.
+- [ ] 2.1 Move webhook handlers into `webhook/{mod.rs,handler.rs,normalize.rs,media_failures.rs,status.rs}` and preserve `verify_webhook`, `receive_webhook`, `debug_last_webhook_handler`. _(PR2 created the module boundary and route re-exports; implementation body extraction remains.)_
+- [ ] 2.2 Move conversation REST flows into `conversations/{mod.rs,handlers.rs,lifecycle.rs,queries.rs}`; keep route paths/order unchanged. _(PR2 created the module boundary and OpenAPI re-exports; implementation body extraction remains.)_
 - [ ] 2.3 Move messaging/media/reaction code into `messaging/{mod.rs,send.rs,reactions.rs,media.rs,preview.rs}`.
 - [ ] 2.4 Move settings + WhatsApp Numbers + test-connection into `settings/{mod.rs,handlers.rs,validation.rs}`.
 
 ## Phase 3: Wiring / Verification
 
-- [ ] 3.1 Update `src/modules/whatsapp/mod.rs` to wire the new modules without changing the route inventory from `user_routes`, `webhook_routes`, or `ws_routes`.
-- [ ] 3.2 Update `src/openapi.rs` path/component registrations per slice; verify semantic parity for every moved WhatsApp endpoint.
+- [x] 3.1 Update `src/modules/whatsapp/mod.rs` to wire the new modules without changing the route inventory from `user_routes`, `webhook_routes`, or `ws_routes`.
+- [x] 3.2 Update `src/openapi.rs` path/component registrations per slice; verify semantic parity for every rewired WhatsApp endpoint.
 - [ ] 3.3 Add route inventory checks from `mod.rs` and OpenAPI diff checks from `/docs/openapi.json` for each PR slice.
 
 ## Phase 4: Cleanup / Final Parity

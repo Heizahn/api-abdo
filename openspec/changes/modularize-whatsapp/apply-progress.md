@@ -44,3 +44,54 @@ Revert the PR1 commit to restore the pre-extraction helper layout. No route path
 ## Known Follow-up
 
 `handler.rs` is not yet a re-export-only facade. It still contains substantial handler implementation and compatibility wrappers. Full facade cleanup should happen only after domain extraction slices move webhook, conversation, messaging, settings, quick replies, and template handlers safely.
+
+## PR2: Webhook + Conversations Domain Wiring
+
+Status: in progress
+
+Branch: `feature/modularize-whatsapp-pr2-webhook-conversations`
+
+## Completed
+
+- Added webhook domain module boundary: `src/modules/whatsapp/webhook/`
+  - `mod.rs`
+  - `handler.rs` (compatibility forwarding for `verify_webhook`, `receive_webhook`, `debug_last_webhook_handler`)
+  - `normalize.rs`
+  - `media_failures.rs`
+  - `status.rs`
+- Added conversations domain module boundary: `src/modules/whatsapp/conversations/`
+  - `mod.rs`
+  - `handlers.rs` (compatibility forwarding for conversation REST endpoints)
+  - `queries.rs`
+  - `lifecycle.rs`
+- Rewired WhatsApp routing in `src/modules/whatsapp/mod.rs` to use:
+  - `webhook::handler::*` for webhook routes
+  - `conversations::handlers::*` for conversation routes
+  - kept route paths/order unchanged
+- Updated `src/openapi.rs` WhatsApp registration to point moved conversation handlers to
+  `crate::modules::whatsapp::conversations::handlers`.
+- Updated `openspec/changes/modularize-whatsapp/tasks.md`:
+  - 3.1 and 3.2 marked `[x]`
+  - 2.1 and 2.2 left unchecked with notes because PR2 created module boundaries/re-exports, but did not move implementation bodies yet
+
+## Verification
+
+- Route inventory parity maintained in `src/modules/whatsapp/mod.rs` during this slice.
+- OpenAPI path registrations updated for moved conversation handlers.
+- `cargo check` passed after structural rewiring.
+
+## Task Status
+
+- Completed: 1.1, 1.2, 3.1, 3.2
+- Partially advanced: 1.3, 2.1, 2.2
+- Remaining: 1.3 full facade cleanup, 2.1/2.2 implementation body extraction, 2.3, 2.4, 3.3
+
+## Rollback Boundary (PR2)
+
+- Added modules under `src/modules/whatsapp/webhook/` and
+  `src/modules/whatsapp/conversations/`
+- Route wiring in `src/modules/whatsapp/mod.rs`
+- OpenAPI endpoint references in `src/openapi.rs`
+
+This PR2 rollback is self-contained to structural wiring and does not alter
+business logic behavior, route contracts, or response shapes.
