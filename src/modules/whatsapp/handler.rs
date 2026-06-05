@@ -3914,21 +3914,30 @@ pub async fn initiate_conversation_handler(
         "initiate: workspace resuelto para envio de template"
     );
 
-    if !settings
-        .agents
-        .iter()
-        .any(|agent_id| agent_id == &caller.id)
-    {
-        tracing::warn!(
-            user_id = %caller.id,
-            workspace_id = %workspace_oid.to_hex(),
-            "initiate: usuario autenticado no pertenece al workspace.agents"
-        );
-        return Err(ApiError::domain_simple(
-            StatusCode::FORBIDDEN,
-            "whatsapp_workspace_membership_required",
-            "No tienes permiso sobre este workspace",
-        ));
+    if !is_superadmin(&caller) {
+        let caller_workspaces = state
+            .db
+            .get_user_workspaces(&caller.id)
+            .await
+            .map_err(ApiError::DatabaseError)?;
+
+        if caller_workspaces.is_empty()
+            || !caller_workspaces
+                .iter()
+                .any(|workspace_id| workspace_id == &workspace_oid)
+        {
+            tracing::warn!(
+                user_id = %caller.id,
+                workspace_id = %workspace_oid.to_hex(),
+                assigned_workspaces_count = caller_workspaces.len(),
+                "initiate: usuario autenticado no pertenece al workspace requerido"
+            );
+            return Err(ApiError::domain_simple(
+                StatusCode::FORBIDDEN,
+                "whatsapp_workspace_membership_required",
+                "No tienes permiso sobre este workspace",
+            ));
+        }
     }
 
     if !settings.active {
