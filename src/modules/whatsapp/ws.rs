@@ -116,6 +116,16 @@ pub enum WsServerEvent {
         failed_at: Option<String>,
     },
 
+    /// Mensaje existente mutado (edición o revocación).
+    /// Se emite cuando el webhook trae `edit`/`revoke` con `context.id` válido.
+    #[serde(rename = "MENSAJE_MODIFICADO")]
+    MensajeModificado {
+        conversation_id: String,
+        message: MessageItem,
+        /// Tipo de delta aplicado: "edit" o "revoke".
+        change_type: String,
+    },
+
     /// Preview de URL listo para un mensaje ya existente. El front debe
     /// mergear `message.url_preview` en la burbuja que ya tiene, sin crear
     /// duplicado (el `id` coincide con el `MessageItem` ya entregado vía
@@ -818,5 +828,66 @@ mod tests {
 
         // Sender is closed — should return normally without panic
         send_to_user(&registry, "u2", "payload".to_string()).await;
+    }
+
+    fn sample_message_item() -> MessageItem {
+        MessageItem {
+            id: "507f191e810c19729de860ea".to_string(),
+            conversation_id: "507f191e810c19729de860eb".to_string(),
+            wa_message_id: "wamid.message".to_string(),
+            direction: "in".to_string(),
+            msg_type: "text".to_string(),
+            content: Some("hello".to_string()),
+            media_id: None,
+            media_mime_type: None,
+            media_filename: None,
+            status: Some("read".to_string()),
+            meta_error_code: None,
+            meta_error_title: None,
+            meta_error_message: None,
+            meta_error_details: None,
+            failed_at: None,
+            from_user_id: None,
+            from_user_name: None,
+            idempotency_key: None,
+            reply_to: None,
+            url_preview: None,
+            voice: false,
+            template_name: None,
+            template_language: None,
+            template_components: None,
+            interactive_payload: None,
+            contacts_payload: None,
+            location: None,
+            reactions: vec![],
+            raw_payload: None,
+            ai_processed_at: None,
+            created_at: "2026-06-05T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn mensaje_modificado_event_serialize_roundtrip() {
+        let event = WsServerEvent::MensajeModificado {
+            conversation_id: "507f191e810c19729de860ec".to_string(),
+            message: sample_message_item(),
+            change_type: "edit".to_string(),
+        };
+
+        let payload = serde_json::to_string(&event).expect("serialize event");
+        let event_json: serde_json::Value =
+            serde_json::from_str(&payload).expect("deserialize payload json");
+
+        assert_eq!(event_json["tipo"], "MENSAJE_MODIFICADO");
+        assert_eq!(event_json["datos"]["change_type"], "edit");
+        assert_eq!(
+            event_json["datos"]["conversation_id"],
+            "507f191e810c19729de860ec"
+        );
+
+        assert_eq!(
+            event_json["datos"]["message"]["wa_message_id"],
+            "wamid.message"
+        );
     }
 }

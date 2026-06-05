@@ -102,6 +102,12 @@ fn infer_inbound_effective_type(msg: &InboundMessage) -> String {
         Some("button")
     } else if msg.reaction.is_some() {
         Some("reaction")
+    } else if msg.edit.is_some() {
+        Some("edit")
+    } else if msg.revoke.is_some() {
+        Some("revoke")
+    } else if msg.group.is_some() {
+        Some("group")
     } else if msg.extra.contains_key("order") {
         Some("order")
     } else if msg.extra.contains_key("system") {
@@ -115,6 +121,9 @@ fn infer_inbound_effective_type(msg: &InboundMessage) -> String {
     };
 
     let should_override = matches!(original.as_str(), "" | "unsupported" | "unknown")
+        || msg.edit.is_some()
+        || msg.revoke.is_some()
+        || msg.group.is_some()
         || (original == "text" && msg.text.is_none() && inferred.is_some());
 
     if should_override {
@@ -156,6 +165,15 @@ fn inbound_payload_markers(msg: &InboundMessage) -> String {
     if msg.button.is_some() {
         markers.push("button");
     }
+    if msg.edit.is_some() {
+        markers.push("edit");
+    }
+    if msg.revoke.is_some() {
+        markers.push("revoke");
+    }
+    if msg.group.is_some() {
+        markers.push("group");
+    }
     if msg.reaction.is_some() {
         markers.push("reaction");
     }
@@ -170,7 +188,10 @@ fn inbound_payload_markers(msg: &InboundMessage) -> String {
 }
 
 fn should_store_raw_payload(msg_type: &str) -> bool {
-    matches!(msg_type, "order" | "system" | "referral") || !is_known_inbound_type(msg_type)
+    matches!(
+        msg_type,
+        "order" | "system" | "referral" | "edit" | "revoke" | "group"
+    ) || !is_known_inbound_type(msg_type)
 }
 
 fn is_known_inbound_type(msg_type: &str) -> bool {
@@ -187,6 +208,9 @@ fn is_known_inbound_type(msg_type: &str) -> bool {
             | "interactive"
             | "button"
             | "reaction"
+            | "edit"
+            | "revoke"
+            | "group"
             | "order"
             | "system"
             | "referral"
@@ -206,10 +230,584 @@ fn inbound_raw_payload(
     }
 }
 
+fn build_top_level_delta_message(
+    value: &WebhookValue,
+    effective_msg_type: &str,
+) -> Option<InboundMessage> {
+    let payload = match effective_msg_type {
+        "edit" => value.edit.as_ref()?,
+        "revoke" => value.revoke.as_ref()?,
+        _ => return None,
+    };
+
+    let id = payload
+        .pointer("/id")
+        .and_then(|v| v.as_str())
+        .or_else(|| payload.pointer("/message/id").and_then(|v| v.as_str()))
+        .or_else(|| payload.pointer("/message/wa_id").and_then(|v| v.as_str()))
+        .or_else(|| payload.pointer("/wa_id").and_then(|v| v.as_str()))
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or("webhook.top.level");
+
+    let from = value
+        .contacts
+        .as_ref()
+        .and_then(|contacts| contacts.first())
+        .and_then(|c| c.wa_id.as_deref())
+        .unwrap_or("webhook")
+        .to_string();
+
+    let timestamp = payload
+        .pointer("/timestamp")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            payload
+                .pointer("/message/timestamp")
+                .and_then(|v| v.as_str())
+        })
+        .map(ToString::to_string);
+
+    let target_context_id = extract_inbound_payload_target_wa_id(payload).and_then(|id| {
+        let id = id.trim();
+        if id.is_empty() {
+            None
+        } else {
+            Some(id)
+        }
+    });
+
+    let context = target_context_id.map(|id| InboundContext {
+        id: id.to_string(),
+        from: None,
+    });
+
+    Some(InboundMessage {
+        from,
+        id: id.to_string(),
+        timestamp,
+        msg_type: "text".to_string(),
+        text: None,
+        image: None,
+        document: None,
+        audio: None,
+        video: None,
+        sticker: None,
+        location: None,
+        contacts: None,
+        interactive: None,
+        button: None,
+        reaction: None,
+        edit: if effective_msg_type == "edit" {
+            Some(payload.clone())
+        } else {
+            None
+        },
+        revoke: if effective_msg_type == "revoke" {
+            Some(payload.clone())
+        } else {
+            None
+        },
+        group: None,
+        context,
+        extra: Default::default(),
+    })
+}
+
+#[derive(Debug)]
+struct InboundNormalizedContent {
+    body: Option<String>,
+    media_id: Option<String>,
+    media_mime_type: Option<String>,
+    media_filename: Option<String>,
+    interactive_payload: Option<serde_json::Value>,
+    contacts_payload: Option<serde_json::Value>,
+    location_payload: Option<LocationPayload>,
+    voice: bool,
+}
+
+fn extract_media_fields(
+    media: Option<&InboundMedia>,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    media
+        .map(|m| {
+            (
+                m.caption.clone(),
+                m.id.clone(),
+                m.mime_type.clone(),
+                m.filename.clone(),
+            )
+        })
+        .unwrap_or((None, None, None, None))
+}
+
+fn extract_inbound_content(
+    msg: &InboundMessage,
+    effective_msg_type: &str,
+) -> InboundNormalizedContent {
+    let extract_media = |media: Option<&InboundMedia>| extract_media_fields(media);
+
+    let (
+        body,
+        media_id,
+        media_mime_type,
+        media_filename,
+        interactive_payload,
+        contacts_payload,
+        location_payload,
+        voice,
+    ) = match effective_msg_type {
+        "text" => (
+            msg.text.as_ref().map(|t| t.body.clone()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        ),
+        "image" => {
+            let (body, id, mime, filename) = extract_media(msg.image.as_ref());
+            (body, id, mime, filename, None, None, None, false)
+        }
+        "document" => {
+            let (body, id, mime, filename) = extract_media(msg.document.as_ref());
+            (body, id, mime, filename, None, None, None, false)
+        }
+        "audio" => {
+            let (body, id, mime, filename) = extract_media(msg.audio.as_ref());
+            let voice = msg.audio.as_ref().and_then(|a| a.voice).unwrap_or(false);
+            (body, id, mime, filename, None, None, None, voice)
+        }
+        "video" => {
+            let (body, id, mime, filename) = extract_media(msg.video.as_ref());
+            (body, id, mime, filename, None, None, None, false)
+        }
+        "sticker" => {
+            let body = msg
+                .sticker
+                .as_ref()
+                .and_then(|m| m.caption.clone())
+                .or_else(|| Some("[Sticker]".to_string()));
+
+            (
+                body.or_else(|| msg.text.as_ref().map(|text| text.body.clone())),
+                msg.sticker.as_ref().and_then(|m| m.id.clone()),
+                msg.sticker.as_ref().and_then(|m| m.mime_type.clone()),
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+        }
+        "edit" => {
+            let label = normalize_delta_body(
+                extract_text_from_payload(msg.edit.as_ref(), &["/text", "/caption", "/message"])
+                    .or_else(|| msg.text.as_ref().map(|text| text.body.clone())),
+                "Mensaje editado",
+            );
+            (Some(label), None, None, None, None, None, None, false)
+        }
+        "revoke" => {
+            let label = normalize_delta_body(
+                extract_text_from_payload(msg.revoke.as_ref(), &["/text", "/message", "/reason"])
+                    .or_else(|| msg.text.as_ref().map(|text| text.body.clone())),
+                "Mensaje revocado",
+            );
+            (Some(label), None, None, None, None, None, None, false)
+        }
+        "group" => {
+            let label = extract_text_from_payload(msg.group.as_ref(), &["/text", "/body", "/name"])
+                .or_else(|| msg.text.as_ref().map(|text| text.body.clone()));
+            (
+                label.or_else(|| Some("Evento de grupo de WhatsApp".to_string())),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+        }
+        "location" => (
+            msg.location
+                .as_ref()
+                .and_then(|l| l.name.clone().or_else(|| l.address.clone()))
+                .or_else(|| Some("Ubicación".to_string())),
+            None,
+            None,
+            None,
+            None,
+            None,
+            msg.location
+                .as_ref()
+                .and_then(|l| match (l.latitude, l.longitude) {
+                    (Some(lat), Some(lng)) => Some(LocationPayload {
+                        latitude: lat,
+                        longitude: lng,
+                        name: l.name.clone(),
+                        address: l.address.clone(),
+                    }),
+                    _ => None,
+                }),
+            false,
+        ),
+        "interactive" => (
+            msg.interactive.as_ref().and_then(|v| {
+                v.get("button_reply")
+                    .and_then(|b| b.get("title"))
+                    .or_else(|| v.get("list_reply").and_then(|l| l.get("title")))
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string())
+            }),
+            None,
+            None,
+            None,
+            msg.interactive.clone(),
+            None,
+            None,
+            false,
+        ),
+        "button" => (
+            msg.button.as_ref().and_then(|v| {
+                v.get("text")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string())
+            }),
+            None,
+            None,
+            None,
+            msg.button.clone(),
+            None,
+            None,
+            false,
+        ),
+        "contacts" => (
+            msg.contacts
+                .as_ref()
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|c| c.get("name"))
+                .and_then(|n| {
+                    n.get("formatted_name")
+                        .or_else(|| n.get("first_name"))
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string())
+                }),
+            None,
+            None,
+            None,
+            None,
+            msg.contacts.clone(),
+            None,
+            false,
+        ),
+        "order" => {
+            let label = msg
+                .extra
+                .get("order")
+                .and_then(|v| first_string_at(v, &["/text", "/catalog_id"]).map(|s| s.to_string()))
+                .unwrap_or_else(|| "Pedido de WhatsApp".to_string());
+            (Some(label), None, None, None, None, None, None, false)
+        }
+        "system" => {
+            let label = msg
+                .extra
+                .get("system")
+                .and_then(|v| {
+                    first_string_at(v, &["/body", "/message", "/type"]).map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| "Mensaje de sistema".to_string());
+            (Some(label), None, None, None, None, None, None, false)
+        }
+        "referral" => {
+            let label = msg
+                .extra
+                .get("referral")
+                .and_then(|v| {
+                    first_string_at(v, &["/headline", "/body", "/source_type"])
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| "Referencia de WhatsApp".to_string());
+            (Some(label), None, None, None, None, None, None, false)
+        }
+        "unsupported" | "unknown" => (
+            Some("Mensaje no soportado por WhatsApp".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        ),
+        _ => {
+            if is_known_inbound_type(effective_msg_type) {
+                (None, None, None, None, None, None, None, false)
+            } else {
+                (
+                    Some(format!("Mensaje de WhatsApp ({})", effective_msg_type)),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                )
+            }
+        }
+    };
+
+    InboundNormalizedContent {
+        body,
+        media_id,
+        media_mime_type,
+        media_filename,
+        interactive_payload,
+        contacts_payload,
+        location_payload,
+        voice,
+    }
+}
+
+fn log_webhook_top_level_errors(value: &WebhookValue) -> usize {
+    match &value.errors {
+        Some(errors) => {
+            if errors.is_empty() {
+                tracing::warn!("[webhook] payload errors recibido sin detalles en change.value");
+                0
+            } else {
+                for err in errors {
+                    tracing::warn!(
+                        "[webhook] top-level error: code={:?} title={:?} message={:?}",
+                        err.code,
+                        err.title,
+                        err.message
+                    );
+                }
+                errors.len()
+            }
+        }
+        None => {
+            tracing::warn!("[webhook] payload errors recibido sin detalles en change.value");
+            0
+        }
+    }
+}
+
 fn first_string_at<'a>(value: &'a serde_json::Value, paths: &[&str]) -> Option<&'a str> {
     paths
         .iter()
         .find_map(|path| value.pointer(path).and_then(|v| v.as_str()))
+}
+
+fn extract_text_from_payload(
+    payload: Option<&serde_json::Value>,
+    paths: &[&str],
+) -> Option<String> {
+    payload.and_then(|payload| first_string_at(payload, paths).map(ToString::to_string))
+}
+
+fn normalize_delta_body(content: Option<String>, fallback: &str) -> String {
+    match content {
+        Some(text) if !text.trim().is_empty() => text,
+        _ => fallback.to_string(),
+    }
+}
+
+fn describe_top_level_group(value: &WebhookValue) -> Option<String> {
+    let group = value.group.as_ref()?;
+
+    let id = first_string_at(group, &["/id", "/group_id", "/wa_id"]).unwrap_or("");
+    let name = first_string_at(group, &["/name", "/subject", "/title", "/text"]).unwrap_or("");
+    let reason = first_string_at(group, &["/reason"]).unwrap_or("");
+    let key_count = group.as_object().map(|o| o.len()).unwrap_or(0);
+
+    Some(format!(
+        "top-level group id='{id}' name='{name}' reason='{reason}' keys={key_count}"
+    ))
+}
+
+fn extract_inbound_payload_target_wa_id(payload: &serde_json::Value) -> Option<&str> {
+    const TARGET_PATHS: [&str; 6] = [
+        "/context/id",
+        "/message/context/id",
+        "/message/id",
+        "/message/wa_id",
+        "/id",
+        "/wa_id",
+    ];
+
+    TARGET_PATHS
+        .iter()
+        .find_map(|path| first_string_at(payload, std::slice::from_ref(path)))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
+fn extract_inbound_delta_target_wa_id(msg: &InboundMessage) -> Option<&str> {
+    msg.context
+        .as_ref()
+        .and_then(|ctx| {
+            let id = ctx.id.trim();
+            if id.is_empty() {
+                None
+            } else {
+                Some(id)
+            }
+        })
+        .or_else(|| {
+            msg.edit
+                .as_ref()
+                .and_then(extract_inbound_payload_target_wa_id)
+                .or_else(|| {
+                    msg.revoke
+                        .as_ref()
+                        .and_then(extract_inbound_payload_target_wa_id)
+                })
+        })
+}
+
+fn should_apply_message_delta_update(effective_msg_type: &str) -> bool {
+    matches!(effective_msg_type, "edit" | "revoke")
+}
+
+async fn apply_inbound_message_delta_update(
+    state: &Arc<AppState>,
+    msg: &InboundMessage,
+    effective_msg_type: &str,
+) -> bool {
+    if !should_apply_message_delta_update(effective_msg_type) {
+        return false;
+    }
+
+    let target_wa_id = match extract_inbound_delta_target_wa_id(msg) {
+        Some(id) => id,
+        None => {
+            tracing::warn!(
+                "[webhook] {} sin context.id target; se tratará como inbound normal",
+                effective_msg_type
+            );
+            return false;
+        }
+    };
+
+    let target_ids = vec![target_wa_id.to_string()];
+    let messages = match state.db.find_messages_by_wa_ids(&target_ids).await {
+        Ok(messages) => messages,
+        Err(e) => {
+            tracing::error!(
+                "[webhook] error consultando mensaje objetivo {}: {}",
+                target_wa_id,
+                e
+            );
+            return false;
+        }
+    };
+
+    if !messages.contains_key(target_wa_id) {
+        tracing::debug!(
+            "[webhook] {} apuntando a mensaje no encontrado: {}. Se procesará como nuevo inbound",
+            effective_msg_type,
+            target_wa_id
+        );
+        return false;
+    }
+
+    let normalized = extract_inbound_content(msg, effective_msg_type);
+    let new_body = normalized.body.unwrap_or_else(|| {
+        if effective_msg_type == "revoke" {
+            "Mensaje revocado".to_string()
+        } else {
+            "Mensaje editado".to_string()
+        }
+    });
+
+    let raw_payload = inbound_raw_payload(msg, effective_msg_type);
+
+    match state
+        .db
+        .update_message_body_by_wa_id(
+            target_wa_id,
+            &new_body,
+            raw_payload.as_ref(),
+            effective_msg_type,
+        )
+        .await
+    {
+        Ok(Some(updated)) => {
+            match state
+                .db
+                .update_conversation_preview_if_last(
+                    &updated.conversation_id,
+                    &updated.wa_message_id,
+                    new_body.as_str(),
+                    &updated.msg_type,
+                    &updated.direction,
+                    updated.sent_by.as_deref(),
+                    updated.media_filename.as_deref(),
+                    updated.status.as_deref(),
+                    updated.timestamp,
+                )
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::debug!(
+                        "[webhook] ignorando refresco de preview para delta de mensaje {}: ya no es último mensaje",
+                        target_wa_id
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[webhook] error refrescando preview para mensaje mutado {}: {}",
+                        updated.wa_message_id,
+                        e
+                    );
+                }
+            }
+
+            let updated_message_item = build_message_item(state, updated).await;
+
+            let ev = WsServerEvent::MensajeModificado {
+                conversation_id: updated_message_item.conversation_id.clone(),
+                message: updated_message_item,
+                change_type: effective_msg_type.to_string(),
+            };
+            broadcast_all(&state.ws_registry, &ev).await;
+
+            tracing::info!(
+                "[webhook] mensaje objetivo actualizado por {}: wa_id={}",
+                effective_msg_type,
+                target_wa_id
+            );
+            true
+        }
+        Ok(None) => {
+            tracing::warn!(
+                "[webhook] {} para objetivo inexistente tras requery: {}",
+                effective_msg_type,
+                target_wa_id
+            );
+            false
+        }
+        Err(e) => {
+            tracing::error!(
+                "[webhook] error actualizando mensaje objetivo {}: {}",
+                target_wa_id,
+                e
+            );
+            false
+        }
+    }
 }
 
 /// Persiste un evento de ciclo de vida de conversación. Best-effort:
@@ -370,6 +968,15 @@ pub async fn receive_webhook(
                     }
                     continue;
                 }
+                Some("errors") => {
+                    if let Some(value) = &change.value {
+                        let count = log_webhook_top_level_errors(value);
+                        if count > 0 {
+                            tracing::debug!("[webhook] procesadas {} top-level error(s)", count);
+                        }
+                    }
+                    continue;
+                }
                 _ => {
                     tracing::debug!("[webhook] campo desconocido ignorado: {:?}", change.field);
                     continue;
@@ -381,7 +988,7 @@ pub async fn receive_webhook(
             };
 
             // Procesar actualizaciones de estado (delivered / read / failed)
-            if let Some(statuses) = value.statuses {
+            if let Some(statuses) = value.statuses.as_ref() {
                 for s in statuses {
                     if s.status == "failed" {
                         if let Some(errs) = s.errors.as_ref() {
@@ -576,6 +1183,57 @@ pub async fn receive_webhook(
                 }
             }
 
+            // Metadatos top-level de edición/revocación de mensajes (sin `messages`).
+            // Se mantienen en modo tolerante: si no podemos resolver target, se loggea
+            // y se procesa como inbound normal (que aquí no existe).
+            if value.messages.is_none() {
+                if let Some(summary) = describe_top_level_group(&value) {
+                    tracing::warn!(
+                        "[webhook] evento top-level de grupo omitido sin soporte directo: {}",
+                        summary
+                    );
+                }
+
+                let has_top_level_edit_or_revoke = value.edit.is_some() || value.revoke.is_some();
+                if has_top_level_edit_or_revoke {
+                    let business_phone_raw = value
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.display_phone_number.as_deref())
+                        .unwrap_or("")
+                        .to_string();
+                    let business_phone = normalize_to_e164(&business_phone_raw);
+
+                    match state.db.find_wa_settings_by_phone(&business_phone).await {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            tracing::debug!(
+                                "[webhook] número de negocio no configurado o inactivo: raw={} norm={}",
+                                business_phone_raw,
+                                business_phone
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::error!("[webhook] error buscando wa_settings: {}", e);
+                            continue;
+                        }
+                    }
+                }
+
+                for delta_kind in ["edit", "revoke"] {
+                    if let Some(msg) = build_top_level_delta_message(&value, delta_kind) {
+                        let effective_msg_type = infer_inbound_effective_type(&msg);
+                        if should_apply_message_delta_update(&effective_msg_type)
+                            && apply_inbound_message_delta_update(&state, &msg, &effective_msg_type)
+                                .await
+                        {
+                            continue;
+                        }
+                    }
+                }
+            }
+
             // Procesar mensajes entrantes
             if let Some(messages) = value.messages {
                 let contacts = value.contacts.unwrap_or_default();
@@ -676,6 +1334,15 @@ pub async fn receive_webhook(
                         continue; // CRÍTICO: no caer en el resto del loop (no upsert, no touch, no insert).
                     }
 
+                    // Edits/revoke: intentan mutar mensaje previo con mismo `context.id`.
+                    if should_apply_message_delta_update(&effective_msg_type)
+                        && apply_inbound_message_delta_update(&state, &msg, &effective_msg_type)
+                            .await
+                    {
+                        // Si el objetivo existe y se actualizó, no crear mensaje nuevo.
+                        continue;
+                    }
+
                     let name = contacts
                         .iter()
                         .find(|c| c.wa_id.as_deref() == Some(&msg.from))
@@ -749,146 +1416,16 @@ pub async fn receive_webhook(
                         .await;
                     }
 
-                    // Extraer contenido según tipo (body, media_id, mime, filename)
-                    let extract_media = |m: Option<&InboundMedia>| {
-                        m.map(|x| {
-                            (
-                                x.caption.clone(),
-                                x.id.clone(),
-                                x.mime_type.clone(),
-                                x.filename.clone(),
-                            )
-                        })
-                        .unwrap_or((None, None, None, None))
-                    };
-                    let (body, media_id, media_mime_type, media_filename) = match effective_msg_type
-                        .as_str()
-                    {
-                        "text" => (msg.text.as_ref().map(|t| t.body.clone()), None, None, None),
-                        "image" => extract_media(msg.image.as_ref()),
-                        "document" => extract_media(msg.document.as_ref()),
-                        "audio" => extract_media(msg.audio.as_ref()),
-                        "video" => extract_media(msg.video.as_ref()),
-                        "sticker" => msg
-                            .sticker
-                            .as_ref()
-                            .map(|m| (None, m.id.clone(), m.mime_type.clone(), None))
-                            .unwrap_or((None, None, None, None)),
-                        "location" => {
-                            // Preview: nombre del lugar → dirección → "Ubicación" genérico.
-                            // Las coordenadas ya van en el campo `location`
-                            // estructurado; no las ponemos en el preview.
-                            let label = msg
-                                .location
-                                .as_ref()
-                                .and_then(|l| l.name.clone().or_else(|| l.address.clone()))
-                                .unwrap_or_else(|| "Ubicación".to_string());
-                            (Some(label), None, None, None)
-                        }
-                        // Respuesta a botón/lista interactivo: Meta envía
-                        // `interactive.button_reply.{id,title}` o
-                        // `interactive.list_reply.{id,title,description}`.
-                        // Guardamos el `title` elegido como body (para preview) y
-                        // el objeto crudo en `interactive_payload` para que el
-                        // front pueda renderizar el contexto completo.
-                        "interactive" => {
-                            let txt = msg.interactive.as_ref().and_then(|v| {
-                                v.get("button_reply")
-                                    .and_then(|b| b.get("title"))
-                                    .or_else(|| v.get("list_reply").and_then(|l| l.get("title")))
-                                    .and_then(|t| t.as_str())
-                                    .map(|s| s.to_string())
-                            });
-                            (txt, None, None, None)
-                        }
-                        // Legacy: botón de template (quick-reply de template).
-                        // Meta envía `button.text` con el label tapped.
-                        "button" => {
-                            let txt = msg.button.as_ref().and_then(|v| {
-                                v.get("text")
-                                    .and_then(|t| t.as_str())
-                                    .map(|s| s.to_string())
-                            });
-                            (txt, None, None, None)
-                        }
-                        // Tarjeta de contacto: Meta manda un array; usamos el
-                        // nombre del primero para el preview del listado.
-                        "contacts" => {
-                            let name = msg
-                                .contacts
-                                .as_ref()
-                                .and_then(|v| v.as_array())
-                                .and_then(|arr| arr.first())
-                                .and_then(|c| c.get("name"))
-                                .and_then(|n| {
-                                    n.get("formatted_name")
-                                        .or_else(|| n.get("first_name"))
-                                        .and_then(|x| x.as_str())
-                                        .map(|s| s.to_string())
-                                });
-                            (name, None, None, None)
-                        }
-                        "order" => {
-                            let label = msg
-                                .extra
-                                .get("order")
-                                .and_then(|v| {
-                                    first_string_at(v, &["/text", "/catalog_id"])
-                                        .map(|s| s.to_string())
-                                })
-                                .unwrap_or_else(|| "Pedido de WhatsApp".to_string());
-                            (Some(label), None, None, None)
-                        }
-                        "system" => {
-                            let label = msg
-                                .extra
-                                .get("system")
-                                .and_then(|v| {
-                                    first_string_at(v, &["/body", "/message", "/type"])
-                                        .map(|s| s.to_string())
-                                })
-                                .unwrap_or_else(|| "Mensaje de sistema".to_string());
-                            (Some(label), None, None, None)
-                        }
-                        "referral" => {
-                            let label = msg
-                                .extra
-                                .get("referral")
-                                .and_then(|v| {
-                                    first_string_at(v, &["/headline", "/body", "/source_type"])
-                                        .map(|s| s.to_string())
-                                })
-                                .unwrap_or_else(|| "Referencia de WhatsApp".to_string());
-                            (Some(label), None, None, None)
-                        }
-                        "unsupported" | "unknown" => (
-                            Some("Mensaje no soportado por WhatsApp".to_string()),
-                            None,
-                            None,
-                            None,
-                        ),
-                        _ => {
-                            // Meta puede introducir tipos nuevos sin aviso. NO los
-                            // descartamos: persistimos un cuerpo genérico y el raw
-                            // payload (ver `should_store_raw_payload`) para que el
-                            // front pueda renderizar/diagnosticar sin perder el chat.
-                            if is_known_inbound_type(&effective_msg_type) {
-                                (None, None, None, None)
-                            } else {
-                                (
-                                    Some(format!("Mensaje de WhatsApp ({})", effective_msg_type)),
-                                    None,
-                                    None,
-                                    None,
-                                )
-                            }
-                        }
-                    };
-
-                    // Voice note: sólo relevante en `audio`. Meta envía `voice: true`
-                    // para push-to-talk y `false` para archivos de audio subidos.
-                    let voice = effective_msg_type == "audio"
-                        && msg.audio.as_ref().and_then(|a| a.voice).unwrap_or(false);
+                    let InboundNormalizedContent {
+                        body,
+                        media_id,
+                        media_mime_type,
+                        media_filename,
+                        interactive_payload,
+                        contacts_payload,
+                        location_payload,
+                        voice,
+                    } = extract_inbound_content(&msg, effective_msg_type.as_str());
 
                     let preview = body
                         .clone()
@@ -905,44 +1442,6 @@ pub async fn receive_webhook(
                         .as_deref()
                         .and_then(parse_unix_seconds_to_bson)
                         .unwrap_or_else(DateTime::now);
-
-                    // Para inbound de tipo `interactive`/`button`, preservamos el
-                    // objeto crudo de Meta (incluye `button_reply`/`list_reply`)
-                    // para que el front pueda renderizar la burbuja con el
-                    // contexto completo de la selección.
-                    let interactive_payload = match effective_msg_type.as_str() {
-                        "interactive" => msg.interactive.clone(),
-                        "button" => msg.button.clone(),
-                        _ => None,
-                    };
-
-                    // Payload completo de contactos compartidos (vCard).
-                    let contacts_payload = if effective_msg_type == "contacts" {
-                        msg.contacts.clone()
-                    } else {
-                        None
-                    };
-
-                    // Datos estructurados de ubicación para que el front
-                    // renderice el mapa (iframe de OSM/Google, img estática,
-                    // o link a maps — lo decide el front).
-                    let location_payload = if effective_msg_type == "location" {
-                        msg.location
-                            .as_ref()
-                            .and_then(|l| match (l.latitude, l.longitude) {
-                                (Some(lat), Some(lng)) => {
-                                    Some(crate::models::whatsapp::LocationPayload {
-                                        latitude: lat,
-                                        longitude: lng,
-                                        name: l.name.clone(),
-                                        address: l.address.clone(),
-                                    })
-                                }
-                                _ => None,
-                            })
-                    } else {
-                        None
-                    };
 
                     let wa_msg = WaMessage {
                         id: None,
@@ -1136,12 +1635,16 @@ pub async fn receive_webhook(
                     // persiste `AiInteraction`. En shadow loguea qué habría
                     // contestado; en live envía la respuesta vía Meta y
                     // emite `MENSAJE_NUEVO` para los agentes humanos.
-                    if let Some(ws_id) = settings.id {
-                        crate::modules::ai_agent::dispatch::dispatch_inbound_async(
-                            state.clone(),
-                            saved_for_dispatch,
-                            ws_id,
-                        );
+                    let should_dispatch_ai =
+                        !matches!(effective_msg_type.as_str(), "edit" | "revoke" | "group");
+                    if should_dispatch_ai {
+                        if let Some(ws_id) = settings.id {
+                            crate::modules::ai_agent::dispatch::dispatch_inbound_async(
+                                state.clone(),
+                                saved_for_dispatch,
+                                ws_id,
+                            );
+                        }
                     }
                 }
             }
@@ -8777,4 +9280,354 @@ pub async fn react_message_handler(
     broadcast_all(&state.ws_registry, &event).await;
 
     Ok(Json(ReactMessageResponse { ok: true }))
+}
+
+#[cfg(test)]
+mod webhook_normalization_tests {
+    use super::*;
+    use std::fs;
+
+    fn load_fixture(filename: &str) -> String {
+        let path = format!(
+            "{}/src/modules/whatsapp/fixtures/{filename}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture missing: {} ({})", path, e))
+    }
+
+    fn first_message(payload: &WebhookPayload) -> &InboundMessage {
+        payload
+            .entry
+            .as_ref()
+            .and_then(|entries| entries.first())
+            .and_then(|entry| entry.changes.as_ref())
+            .and_then(|changes| changes.first())
+            .and_then(|change| change.value.as_ref())
+            .and_then(|value| value.messages.as_ref())
+            .and_then(|messages| messages.first())
+            .unwrap_or_else(|| panic!("fixture no trae mensajes entrantes"))
+    }
+
+    #[test]
+    fn inbound_edit_inference_and_markers() {
+        let payload: WebhookPayload =
+            serde_json::from_str(&load_fixture("webhook_edit.json")).unwrap();
+        let msg = first_message(&payload);
+
+        assert_eq!(infer_inbound_effective_type(msg), "edit");
+        assert!(inbound_payload_markers(msg).contains("edit"));
+        assert!(is_known_inbound_type("edit"));
+    }
+
+    #[test]
+    fn inbound_revoke_inference_and_markers() {
+        let payload: WebhookPayload =
+            serde_json::from_str(&load_fixture("webhook_revoke.json")).unwrap();
+        let msg = first_message(&payload);
+
+        assert_eq!(infer_inbound_effective_type(msg), "revoke");
+        assert!(inbound_payload_markers(msg).contains("revoke"));
+        assert!(is_known_inbound_type("revoke"));
+        assert_eq!(
+            extract_inbound_delta_target_wa_id(msg),
+            Some("wamid.orig.002")
+        );
+    }
+
+    #[test]
+    fn inbound_group_inference_and_markers() {
+        let payload: WebhookPayload =
+            serde_json::from_str(&load_fixture("webhook_group.json")).unwrap();
+        let msg = first_message(&payload);
+
+        assert_eq!(infer_inbound_effective_type(msg), "group");
+        assert!(inbound_payload_markers(msg).contains("group"));
+        assert!(is_known_inbound_type("group"));
+    }
+
+    #[test]
+    fn inbound_edit_revoke_extract_target_id() {
+        let edit_payload: WebhookPayload =
+            serde_json::from_str(&load_fixture("webhook_edit.json")).unwrap();
+
+        let edit_msg = first_message(&edit_payload);
+
+        assert_eq!(
+            extract_inbound_delta_target_wa_id(edit_msg),
+            Some("wamid.orig.001")
+        );
+        assert_eq!(should_apply_message_delta_update("edit"), true);
+        assert_eq!(should_apply_message_delta_update("revoke"), true);
+        assert_eq!(should_apply_message_delta_update("text"), false);
+
+        let make_message_base = || InboundMessage {
+            from: "1".into(),
+            id: "2".into(),
+            timestamp: None,
+            msg_type: "text".into(),
+            text: None,
+            image: None,
+            document: None,
+            audio: None,
+            video: None,
+            sticker: None,
+            location: None,
+            contacts: None,
+            interactive: None,
+            button: None,
+            reaction: None,
+            edit: None,
+            revoke: None,
+            group: None,
+            context: None,
+            extra: Default::default(),
+        };
+
+        let msg_without_target = make_message_base();
+
+        assert_eq!(
+            extract_inbound_delta_target_wa_id(&msg_without_target),
+            None
+        );
+
+        let msg_with_blank_target = InboundMessage {
+            context: Some(InboundContext {
+                id: "   ".to_string(),
+                from: None,
+            }),
+            ..make_message_base()
+        };
+        assert_eq!(
+            extract_inbound_delta_target_wa_id(&msg_with_blank_target),
+            None
+        );
+
+        let msg_with_edit_context_in_payload = InboundMessage {
+            context: Some(InboundContext {
+                id: "   ".to_string(),
+                from: None,
+            }),
+            edit: Some(serde_json::json!({
+                "context": { "id": "wamid.payload.ctx.001" },
+                "text": "Actualizado"
+            })),
+            ..make_message_base()
+        };
+
+        assert_eq!(
+            extract_inbound_delta_target_wa_id(&msg_with_edit_context_in_payload),
+            Some("wamid.payload.ctx.001")
+        );
+
+        let msg_with_message_id_in_revoke_payload = InboundMessage {
+            context: None,
+            edit: None,
+            revoke: Some(
+                serde_json::json!({ "id": "wamid.payload.revoke.001", "reason": "policy" }),
+            ),
+            ..make_message_base()
+        };
+
+        assert_eq!(
+            extract_inbound_delta_target_wa_id(&msg_with_message_id_in_revoke_payload),
+            Some("wamid.payload.revoke.001")
+        );
+    }
+
+    #[test]
+    fn top_level_delta_payload_builds_synthetic_message() {
+        let value: WebhookValue = serde_json::from_str(
+            r#"{
+                "metadata": {"display_phone_number":"+15551234567"},
+                "contacts": [{"wa_id":"5841400000000","profile":{"name":"Ana"}}],
+                "revoke": {
+                    "context": {"id": "wamid.orig.010"},
+                    "id": "wamid.revoke.top.001",
+                    "reason": "message_revoked_by_sender"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let msg = build_top_level_delta_message(&value, "revoke").unwrap();
+        assert_eq!(msg.id, "wamid.revoke.top.001");
+        assert_eq!(infer_inbound_effective_type(&msg), "revoke");
+        assert_eq!(msg.context.as_ref().unwrap().id, "wamid.orig.010");
+
+        assert_eq!(
+            extract_inbound_delta_target_wa_id(&msg),
+            Some("wamid.orig.010")
+        );
+    }
+
+    #[test]
+    fn inbound_edit_revoke_fallback_content() {
+        let edit_payload = InboundMessage {
+            from: "573001234567".to_string(),
+            id: "wamid.payload.009".to_string(),
+            timestamp: None,
+            msg_type: "text".to_string(),
+            text: None,
+            image: None,
+            document: None,
+            audio: None,
+            video: None,
+            sticker: None,
+            location: None,
+            contacts: None,
+            interactive: None,
+            button: None,
+            reaction: None,
+            edit: Some(serde_json::json!({})),
+            revoke: None,
+            group: None,
+            context: Some(InboundContext {
+                id: "wamid.orig.001".to_string(),
+                from: None,
+            }),
+            extra: Default::default(),
+        };
+
+        let revoke_payload = InboundMessage {
+            from: "573001234567".to_string(),
+            id: "wamid.payload.010".to_string(),
+            timestamp: None,
+            msg_type: "text".to_string(),
+            text: None,
+            image: None,
+            document: None,
+            audio: None,
+            video: None,
+            sticker: None,
+            location: None,
+            contacts: None,
+            interactive: None,
+            button: None,
+            reaction: None,
+            edit: None,
+            revoke: Some(serde_json::json!({ "text": "" })),
+            group: None,
+            context: Some(InboundContext {
+                id: "wamid.orig.002".to_string(),
+                from: None,
+            }),
+            extra: Default::default(),
+        };
+
+        let inferred_edit = infer_inbound_effective_type(&edit_payload);
+        let inferred_revoke = infer_inbound_effective_type(&revoke_payload);
+
+        assert_eq!(inferred_edit, "edit");
+        assert_eq!(inferred_revoke, "revoke");
+
+        let edit_content = extract_inbound_content(&edit_payload, &inferred_edit);
+        let revoke_content = extract_inbound_content(&revoke_payload, &inferred_revoke);
+
+        assert_eq!(edit_content.body, Some("Mensaje editado".to_string()));
+        assert_eq!(revoke_content.body, Some("Mensaje revocado".to_string()));
+    }
+
+    #[test]
+    fn inbound_raw_payload_is_stored_for_delta_types() {
+        let edit_payload = InboundMessage {
+            from: "573001234567".to_string(),
+            id: "wamid.payload.011".to_string(),
+            timestamp: None,
+            msg_type: "text".to_string(),
+            text: None,
+            image: None,
+            document: None,
+            audio: None,
+            video: None,
+            sticker: None,
+            location: None,
+            contacts: None,
+            interactive: None,
+            button: None,
+            reaction: None,
+            edit: Some(serde_json::json!({ "text": "hola" })),
+            revoke: None,
+            group: None,
+            context: None,
+            extra: Default::default(),
+        };
+
+        let revoke_payload = InboundMessage {
+            from: "573001234567".to_string(),
+            id: "wamid.payload.012".to_string(),
+            timestamp: None,
+            msg_type: "text".to_string(),
+            text: None,
+            image: None,
+            document: None,
+            audio: None,
+            video: None,
+            sticker: None,
+            location: None,
+            contacts: None,
+            interactive: None,
+            button: None,
+            reaction: None,
+            edit: None,
+            revoke: Some(serde_json::json!({ "reason": "policy" })),
+            group: None,
+            context: None,
+            extra: Default::default(),
+        };
+
+        let plain_payload = InboundMessage {
+            from: "573001234567".to_string(),
+            id: "wamid.payload.013".to_string(),
+            timestamp: None,
+            msg_type: "text".to_string(),
+            text: Some(InboundText {
+                body: "hola".to_string(),
+            }),
+            image: None,
+            document: None,
+            audio: None,
+            video: None,
+            sticker: None,
+            location: None,
+            contacts: None,
+            interactive: None,
+            button: None,
+            reaction: None,
+            edit: None,
+            revoke: None,
+            group: None,
+            context: None,
+            extra: Default::default(),
+        };
+
+        assert!(inbound_raw_payload(&edit_payload, "edit").is_some());
+        assert!(inbound_raw_payload(&revoke_payload, "revoke").is_some());
+        assert!(inbound_raw_payload(&plain_payload, "text").is_none());
+    }
+
+    #[test]
+    fn top_level_errors_are_parsed() {
+        let payload: WebhookPayload =
+            serde_json::from_str(&load_fixture("webhook_errors.json")).unwrap();
+        let change = payload
+            .entry
+            .as_ref()
+            .and_then(|entries| entries.first())
+            .and_then(|entry| entry.changes.as_ref())
+            .and_then(|changes| changes.first())
+            .unwrap_or_else(|| panic!("payload sin cambios"));
+
+        assert_eq!(change.field.as_deref(), Some("errors"));
+        let value = change
+            .value
+            .as_ref()
+            .unwrap_or_else(|| panic!("top-level errors sin value"));
+        let errors = value
+            .errors
+            .as_ref()
+            .unwrap_or_else(|| panic!("top-level errors sin lista"));
+
+        assert!(!errors.is_empty());
+        assert_eq!(errors[0].code, Some(130429));
+    }
 }

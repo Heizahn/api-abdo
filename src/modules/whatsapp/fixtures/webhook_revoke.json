@@ -1,0 +1,41 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "metadata": {
+              "display_phone_number": "+15551234567"
+            },
+            "contacts": [
+              {
+                "wa_id": "5841400000000",
+                "profile": {
+                  "name": "Ana"
+                }
+              }
+            ],
+            "messages": [
+              {
+                "from": "5841400000000",
+               "id": "wamid.revoke.001",
+               "type": "text",
+               "text": {
+                 "body": "No quiero este mensaje"
+               },
+               "context": {
+                 "id": "wamid.orig.002"
+               },
+               "revoke": {
+                 "reason": "message_revoked_by_sender"
+               }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

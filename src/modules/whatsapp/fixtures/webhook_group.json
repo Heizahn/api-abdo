@@ -1,0 +1,36 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "metadata": {
+              "display_phone_number": "+15551234567"
+            },
+            "contacts": [
+              {
+                "wa_id": "1203630012345678",
+                "profile": {
+                  "name": "Soporte General"
+                }
+              }
+            ],
+            "messages": [
+              {
+                "from": "1203630012345678",
+                "id": "wamid.group.001",
+                "type": "text",
+                "group": {
+                  "name": "Grupo Soporte ISP",
+                  "body": "Añadiste a soporte@isp"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -458,6 +458,15 @@ pub struct WebhookValue {
     pub message_template_name: Option<String>,
     pub message_template_language: Option<String>,
     pub reason: Option<String>,
+    /// Eventos de edición/revocación de mensaje que no mutan el `field`
+    /// de forma tradicional (`messages`). Meta puede incluir estas cajas en el
+    /// payload para representar cambios sobre mensajes previos.
+    pub edit: Option<serde_json::Value>,
+    pub revoke: Option<serde_json::Value>,
+    /// Cambios de metadatos/grupo (ej. metadata de un grupo de WhatsApp).
+    pub group: Option<serde_json::Value>,
+    /// Errores top-level (fuera de `statuses`) para escenarios de notificación.
+    pub errors: Option<Vec<StatusError>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -490,6 +499,12 @@ pub struct InboundMessage {
     pub interactive: Option<serde_json::Value>,
     pub button: Option<serde_json::Value>,
     pub reaction: Option<serde_json::Value>,
+    /// Meta webhook adicional: actualización (texto original actualizado).
+    pub edit: Option<serde_json::Value>,
+    /// Meta webhook adicional: mensaje revocado/eliminado.
+    pub revoke: Option<serde_json::Value>,
+    /// Meta webhook adicional: evento asociado a chats de grupo.
+    pub group: Option<serde_json::Value>,
     /// Cuando el usuario cita un mensaje, Meta incluye `context.id` con el
     /// `wamid` del mensaje original.
     pub context: Option<InboundContext>,

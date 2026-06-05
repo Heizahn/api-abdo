@@ -268,6 +268,72 @@ impl WhatsAppRepository for MongoDB {
         Ok(res.modified_count > 0)
     }
 
+    async fn update_conversation_preview_if_last(
+        &self,
+        id: &ObjectId,
+        wa_message_id: &str,
+        preview: &str,
+        msg_type: &str,
+        direction: &str,
+        from_user_id: Option<&str>,
+        media_filename: Option<&str>,
+        status: Option<&str>,
+        last_message_at: DateTime,
+    ) -> Result<bool, String> {
+        let mut set_doc = doc! {
+            "last_message_at": last_message_at,
+            "last_message_preview": preview,
+            "last_message_type": msg_type,
+            "last_message_direction": direction,
+            "last_message_wa_id": wa_message_id,
+        };
+        let mut unset_doc = Document::new();
+
+        match status {
+            Some(value) => {
+                set_doc.insert("last_message_status", value);
+            }
+            None => {
+                unset_doc.insert("last_message_status", "");
+            }
+        }
+        match from_user_id {
+            Some(value) => {
+                set_doc.insert("last_message_from_user_id", value);
+            }
+            None => {
+                unset_doc.insert("last_message_from_user_id", "");
+            }
+        }
+        match media_filename {
+            Some(value) => {
+                set_doc.insert("last_message_media_filename", value);
+            }
+            None => {
+                unset_doc.insert("last_message_media_filename", "");
+            }
+        }
+
+        let mut update_doc = doc! { "$set": set_doc };
+        if !unset_doc.is_empty() {
+            update_doc.insert("$unset", unset_doc);
+        }
+
+        let res = self
+            .wa_conversations()
+            .update_one(
+                doc! {
+                    "_id": id,
+                    "last_message_wa_id": wa_message_id,
+                },
+                update_doc,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        Ok(res.modified_count > 0)
+    }
+
     async fn update_last_inbound_at(&self, id: &ObjectId, when: DateTime) -> Result<(), String> {
         // El inbound libera cualquier engagement throttle (131049) activo:
         // el cliente acaba de responder, así que Meta deja de rate-limitar.
@@ -1039,6 +1105,51 @@ impl WhatsAppRepository for MongoDB {
         };
         self.wa_messages()
             .find_one_and_update(doc! { "wa_message_id": wa_message_id }, update)
+            .with_options(opts)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn update_message_body_by_wa_id(
+        &self,
+        wa_message_id: &str,
+        body: &str,
+        raw_payload: Option<&serde_json::Value>,
+        message_type: &str,
+    ) -> Result<Option<WaMessage>, String> {
+        use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+
+        let mut set_doc = doc! { "body": body };
+        if let Some(payload) = raw_payload {
+            let bson_payload = mongodb::bson::to_bson(payload).map_err(|e| e.to_string())?;
+            set_doc.insert("raw_payload", bson_payload);
+        } else {
+            set_doc.insert("raw_payload", mongodb::bson::Bson::Null);
+        }
+
+        if message_type == "revoke" {
+            set_doc.insert("media_id", mongodb::bson::Bson::Null);
+            set_doc.insert("media_mime_type", mongodb::bson::Bson::Null);
+            set_doc.insert("media_filename", mongodb::bson::Bson::Null);
+            set_doc.insert("url_preview", mongodb::bson::Bson::Null);
+            set_doc.insert("interactive_payload", mongodb::bson::Bson::Null);
+            set_doc.insert("contacts_payload", mongodb::bson::Bson::Null);
+            set_doc.insert("location", mongodb::bson::Bson::Null);
+            set_doc.insert("template_name", mongodb::bson::Bson::Null);
+            set_doc.insert("template_language", mongodb::bson::Bson::Null);
+            set_doc.insert("template_components", mongodb::bson::Bson::Null);
+            set_doc.insert("voice", mongodb::bson::Bson::Boolean(false));
+        }
+
+        let opts = FindOneAndUpdateOptions::builder()
+            .return_document(ReturnDocument::After)
+            .build();
+
+        self.wa_messages()
+            .find_one_and_update(
+                doc! { "wa_message_id": wa_message_id },
+                doc! { "$set": set_doc },
+            )
             .with_options(opts)
             .await
             .map_err(|e| e.to_string())
