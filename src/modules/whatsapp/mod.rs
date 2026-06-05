@@ -1,12 +1,14 @@
 pub mod assignment;
 pub mod audit;
 pub mod backfill;
+pub mod conversations;
 pub mod handler;
 pub mod quick_reply_validation;
 pub mod service;
 pub mod shared;
 pub mod tickets;
 pub mod url_preview;
+pub mod webhook;
 pub mod ws;
 
 use crate::state::AppState;
@@ -20,8 +22,14 @@ use std::sync::Arc;
 /// Rutas públicas: webhook de Meta (sin JWT ni rate limit)
 pub fn webhook_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/v1/webhook/whatsapp", get(handler::verify_webhook))
-        .route("/v1/webhook/whatsapp", post(handler::receive_webhook))
+        .route(
+            "/v1/webhook/whatsapp",
+            get(webhook::handler::verify_webhook),
+        )
+        .route(
+            "/v1/webhook/whatsapp",
+            post(webhook::handler::receive_webhook),
+        )
 }
 
 /// Ruta WebSocket: autenticación primaria por cookie HttpOnly.
@@ -36,65 +44,65 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         // Conversaciones
         .route(
             "/v1/auth-user/whatsapp/conversations",
-            get(handler::list_conversations_handler),
+            get(conversations::handlers::list_conversations_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/conversations/stats",
-            get(handler::conversations_stats_handler),
+            get(conversations::handlers::conversations_stats_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/conversations/:id",
-            get(handler::get_conversation_handler),
+            get(conversations::handlers::get_conversation_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/conversations/:id/client-link",
-            get(handler::get_conversation_client_link_handler),
+            get(conversations::handlers::get_conversation_client_link_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/conversations/:id/messages",
-            get(handler::get_conversation_messages_handler),
+            get(conversations::handlers::get_conversation_messages_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/conversations/:id/messages",
-            post(handler::send_message_handler),
+            post(conversations::handlers::send_message_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/conversations/:id/mark-read",
-            post(handler::mark_read_handler),
+            post(conversations::handlers::mark_read_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/conversations/:id/take",
-            post(handler::take_conversation_handler),
+            post(conversations::handlers::take_conversation_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/conversations/:id/transfer",
-            post(handler::transfer_conversation_handler),
+            post(conversations::handlers::transfer_conversation_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/conversations/:id/close",
-            post(handler::close_conversation_handler),
+            post(conversations::handlers::close_conversation_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/conversations/:id/reopen",
-            post(handler::reopen_conversation_handler),
+            post(conversations::handlers::reopen_conversation_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/conversations/:id/agent-state/reset",
-            post(handler::reset_ai_conv_state_handler),
+            post(conversations::handlers::reset_ai_conv_state_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/conversations/:id/intervene",
-            post(handler::intervene_conversation_handler),
+            post(conversations::handlers::intervene_conversation_handler),
         )
         // Iniciar una conversación (agente outbound first) — siempre template
         .route(
             "/v1/auth-user/whatsapp/conversations/initiate",
-            post(handler::initiate_conversation_handler),
+            post(conversations::handlers::initiate_conversation_handler),
         )
         // Agentes con permiso de chat (para dropdown de transferencia)
         .route(
             "/v1/auth-user/whatsapp/transferable-agents",
-            get(handler::list_transferable_agents_handler),
+            get(conversations::handlers::list_transferable_agents_handler),
         )
         // Media: proxy de descarga (el binario vive en la CDN de Meta)
         .route(
@@ -224,7 +232,7 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         // Debug
         .route(
             "/v1/auth-user/whatsapp/debug/last-webhook",
-            get(handler::debug_last_webhook_handler),
+            get(webhook::handler::debug_last_webhook_handler),
         )
         // Auditoría / trazabilidad (SUPERADMIN only)
         .route(
