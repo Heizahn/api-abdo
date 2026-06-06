@@ -972,3 +972,42 @@ Status: partial
 
 - `2.3`: partially advanced (download/proxy/cache extracted; template-header upload and inbound media-failure fallback still pending)
 - `3.3`: unchanged
+
+## PR3h: Template header media extraction
+
+Branch: `feature/modularize-whatsapp-pr3h-media-remaining`
+
+Status: partial
+
+## Completed
+
+- Moved template-header media ownership from `src/modules/whatsapp/handler.rs` to `src/modules/whatsapp/messaging/media.rs`:
+  - `upload_template_header_media_handler`
+  - `swap_header_handles_in_components`
+  - `header_media_limits`
+  - `sha256_hex`
+- Kept template create/update handlers in `handler.rs` and imported `swap_header_handles_in_components` from `messaging::media`.
+- Rewired the existing template header upload route in `src/modules/whatsapp/mod.rs` to use:
+  `messaging::media::upload_template_header_media_handler`.
+- Updated OpenAPI registration to use:
+  `crate::modules::whatsapp::messaging::media::upload_template_header_media_handler`.
+- Preserved endpoint path, multipart fields, validation messages, SHA-256 dedup, DB persistence, and Resumable Upload swap behavior.
+- Applied project version bump to `0.3.44` in:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/main.rs`
+  - `src/openapi.rs`
+- Kept inbound media-failure fallback in `handler.rs` for a later slice.
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.3`: partially advanced (template-header upload extracted; inbound media-failure fallback still pending)
+- `3.3`: unchanged
