@@ -95,3 +95,47 @@ Branch: `feature/modularize-whatsapp-pr2-webhook-conversations`
 
 This PR2 rollback is self-contained to structural wiring and does not alter
 business logic behavior, route contracts, or response shapes.
+
+## PR2b: Webhook Verify/Debug Ownership Slice
+
+Status: in progress
+
+Branch: `feature/modularize-whatsapp-pr2b-webhook-impl`
+
+## Completed
+
+- Moved webhook ownership scaffolding items from `src/modules/whatsapp/handler.rs` to
+  `src/modules/whatsapp/webhook/handler.rs`:
+  - `WebhookVerifyParams`
+  - `verify_webhook`
+  - `debug_last_webhook_handler`
+  - `LAST_WEBHOOK_PAYLOAD`
+  - `last_payload_store`
+  - `verify_meta_signature`
+  - `hex_decode`
+  - `hex_nibble`
+- Kept `receive_webhook` implementation body in `src/modules/whatsapp/handler.rs` and
+  re-exported it from `src/modules/whatsapp/webhook/handler.rs`.
+
+## Notes
+
+- This is intentionally a minimal contract-safe slice: only endpoint ownership for
+  webhook verify/debug moved. `receive_webhook` remains legacy and still executes in
+  place.
+- OpenAPI route registrations and documented semantics were not intentionally changed
+  in this slice.
+
+## Task Status Impact
+
+- 2.1: partially advanced (simple endpoint ownership only)
+- 2.2: still pending
+
+## Verification
+
+- Route wiring remains unchanged because `src/modules/whatsapp/mod.rs` already points
+  webhook routes to `webhook::handler::*`.
+
+## Rollback Boundary (PR2b)
+
+- Revert this PR2b commit to restore `WebhookVerifyParams` / verify/debug helpers to
+  `handler.rs` and `receive_webhook` remains untouched.
