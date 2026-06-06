@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::{
     auth::user_jwt::UserProfileClaims,
-    crypto::aes::{decrypt_payload, encrypt_payload},
+    crypto::aes::decrypt_payload,
     db::{WaTemplateListFilter, WaTemplateRepository, WaTemplateUpdatePatch, WhatsAppRepository},
     error::ApiError,
     models::whatsapp::*,
@@ -20,9 +20,9 @@ use super::assignment::assign_conversation;
 use super::messaging::download::{prefetch_media, should_prefetch_media};
 use super::messaging::media::swap_header_handles_in_components;
 use super::service::WhatsAppService;
-use super::settings::validation::{normalize_to_e164, validate_access_token};
+use super::settings::validation::normalize_to_e164;
 use super::shared;
-use super::shared::{apply_media_relay, settings_secret};
+use super::shared::settings_secret;
 use super::webhook::handler::{last_payload_store, verify_meta_signature};
 use super::webhook::media_failures::schedule_inbound_media_failure_fallback;
 use super::webhook::status::{
@@ -32,7 +32,7 @@ use super::webhook::status::{
 use super::ws::{
     broadcast_all, broadcast_to_chat_users, build_template_created_event,
     build_template_deleted_event, build_template_updated_event, emit_to_phone_number_agents,
-    ConversacionNoLeidaData, TicketPendienteData, WsServerEvent,
+    ConversacionNoLeidaData, WsServerEvent,
 };
 
 use super::webhook::normalize::{
@@ -184,39 +184,6 @@ async fn apply_inbound_message_delta_update(
 async fn record_conv_event(state: &AppState, input: WaConversationEventInput<'_>) {
     if let Err(e) = state.db.record_conversation_event(input).await {
         tracing::warn!("record_conversation_event failed: {}", e);
-    }
-}
-
-/// Fuerza un refresh de badges de mensajería (no leídos + tickets abiertos)
-/// para todos los usuarios con acceso al inbox WA.
-///
-/// Se usa en cambios de configuración de números (alta/edición/baja), donde
-/// el universo visible puede cambiar sin que exista un `conversation_id`
-/// concreto para emitir delta (+1/-1).
-async fn emit_chat_badges_refresh(state: &Arc<AppState>, reason: &str) {
-    let unread_total = state.db.count_unread_conversations().await.unwrap_or(0);
-    let unread_event = WsServerEvent::ConversacionNoLeida {
-        data: ConversacionNoLeidaData {
-            pending_total: unread_total,
-            conversation_id: format!("__refresh__:{reason}"),
-            delta: 0,
-        },
-    };
-    if let Ok(payload) = serde_json::to_string(&unread_event) {
-        let _ = broadcast_to_chat_users(state, payload).await;
-    }
-
-    let tickets_total = state.db.count_open_tickets().await.unwrap_or(0);
-    let tickets_event = WsServerEvent::TicketPendiente {
-        data: TicketPendienteData {
-            pending_total: tickets_total,
-            ticket_id: format!("__refresh__:{reason}"),
-            previous_status: None,
-            new_status: "refresh".to_string(),
-        },
-    };
-    if let Ok(payload) = serde_json::to_string(&tickets_event) {
-        let _ = broadcast_to_chat_users(state, payload).await;
     }
 }
 
@@ -957,331 +924,6 @@ fn parse_meta_template_category(raw: Option<&str>) -> Option<WaTemplateCategory>
 }
 
 // ============================================
-// SETTINGS — Configuración de números y agentes
-// ============================================
-
-#[utoipa::path(
-    get,
-    path = "/v1/auth-user/whatsapp/settings",
-    tag = "WhatsApp — Soporte",
-    security(("bearerAuth" = [])),
-    responses(
-        (status = 200, description = "Lista de configuraciones", body = SettingsListResponse),
-        (status = 401, description = "No autorizado"),
-    )
-)]
-pub async fn list_settings_handler(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<SettingsListResponse>, ApiError> {
-    let items = state
-        .db
-        .get_all_wa_settings()
-        .await
-        .map_err(|e| ApiError::DatabaseError(e))?;
-    Ok(Json(SettingsListResponse {
-        ok: true,
-        data: items.into_iter().map(settings_to_item).collect(),
-    }))
-}
-
-#[utoipa::path(
-    post,
-    path = "/v1/auth-user/whatsapp/settings",
-    tag = "WhatsApp — Soporte",
-    security(("bearerAuth" = [])),
-    request_body = CreateSettingsRequest,
-    responses(
-        (status = 200, description = "Configuración creada", body = SettingsResponse),
-        (status = 401, description = "No autorizado"),
-    )
-)]
-pub async fn create_settings_handler(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<CreateSettingsRequest>,
-) -> Result<Json<SettingsResponse>, ApiError> {
-    // Normalizar el número a E.164 venezolano sin "+"
-    let phone = normalize_to_e164(&payload.phone);
-    let now = mongodb::bson::DateTime::now();
-
-    let access_token = validate_access_token(&payload.access_token)?;
-    if payload.phone_number_id.trim().is_empty() {
-        return Err(ApiError::BadRequest("phone_number_id requerido".into()));
-    }
-    let waba_id = payload.whatsapp_business_account_id.trim().to_string();
-    if waba_id.is_empty() {
-        return Err(ApiError::BadRequest(
-            "whatsapp_business_account_id requerido".into(),
-        ));
-    }
-
-    let encrypted = encrypt_payload(&settings_secret(), access_token);
-
-    let doc = WaSettings {
-        id: None,
-        phone,
-        workspace_name: payload.workspace_name,
-        phone_number_id: payload.phone_number_id,
-        whatsapp_business_account_id: waba_id,
-        access_token: encrypted,
-        agents: payload.agents,
-        active: true,
-        purposes: payload.purposes.unwrap_or_default(),
-        templates_synced_at: None,
-        enable_guardrails: true,
-        enable_conversation_state: true,
-        pre_classifier_enabled: false,
-        trivial_responses: Vec::new(),
-        created_at: now,
-        updated_at: now,
-    };
-
-    let created = state
-        .db
-        .create_wa_settings(doc)
-        .await
-        .map_err(|e| ApiError::DatabaseError(e))?;
-    emit_chat_badges_refresh(&state, "settings_created").await;
-    Ok(Json(SettingsResponse {
-        ok: true,
-        data: settings_to_item(created),
-    }))
-}
-
-#[utoipa::path(
-    put,
-    path = "/v1/auth-user/whatsapp/settings/{id}",
-    tag = "WhatsApp — Soporte",
-    security(("bearerAuth" = [])),
-    params(("id" = String, Path, description = "ID de la configuración")),
-    request_body = UpdateSettingsRequest,
-    responses(
-        (status = 200, description = "Configuración actualizada", body = UpdateResponse),
-        (status = 404, description = "No encontrada"),
-        (status = 401, description = "No autorizado"),
-    )
-)]
-pub async fn update_settings_handler(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Json(payload): Json<UpdateSettingsRequest>,
-) -> Result<Json<UpdateResponse>, ApiError> {
-    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
-
-    // Cifrar access_token si vino con valor. `None` o vacío ⇒ no tocar el guardado.
-    let encrypted_token = match payload.access_token.as_deref() {
-        Some(raw) if !raw.trim().is_empty() => {
-            let clean = validate_access_token(raw)?;
-            Some(encrypt_payload(&settings_secret(), clean))
-        }
-        _ => None,
-    };
-
-    // WABA id: `Some("")` se ignora (permitir payloads sin borrar el campo).
-    let waba = payload.whatsapp_business_account_id.and_then(|v| {
-        let t = v.trim().to_string();
-        if t.is_empty() {
-            None
-        } else {
-            Some(t)
-        }
-    });
-
-    state
-        .db
-        .update_wa_settings(
-            &oid,
-            payload.workspace_name,
-            payload.phone_number_id,
-            waba,
-            encrypted_token,
-            payload.agents,
-            payload.active,
-            payload.purposes,
-            payload.enable_guardrails,
-            payload.enable_conversation_state,
-            payload.pre_classifier_enabled,
-            payload.trivial_responses,
-        )
-        .await
-        .map_err(|e| ApiError::DatabaseError(e))?;
-    emit_chat_badges_refresh(&state, "settings_updated").await;
-    Ok(Json(UpdateResponse { ok: true }))
-}
-
-#[utoipa::path(
-    delete,
-    path = "/v1/auth-user/whatsapp/settings/{id}",
-    tag = "WhatsApp — Soporte",
-    security(("bearerAuth" = [])),
-    params(("id" = String, Path, description = "ID de la configuración")),
-    responses(
-        (status = 200, description = "Configuración eliminada", body = UpdateResponse),
-        (status = 401, description = "No autorizado"),
-    )
-)]
-pub async fn delete_settings_handler(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<UpdateResponse>, ApiError> {
-    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
-    state
-        .db
-        .delete_wa_settings(&oid)
-        .await
-        .map_err(|e| ApiError::DatabaseError(e))?;
-    emit_chat_badges_refresh(&state, "settings_deleted").await;
-    Ok(Json(UpdateResponse { ok: true }))
-}
-
-// ============================================
-// TEST CONNECTION (verificación contra Meta)
-// ============================================
-
-#[utoipa::path(
-    post,
-    path = "/v1/auth-user/whatsapp/settings/test-connection",
-    tag = "WhatsApp — Soporte",
-    security(("bearerAuth" = [])),
-    request_body = WaTestConnectionRequest,
-    responses(
-        (status = 200, description = "Credenciales válidas", body = WaTestConnectionResponse),
-        (status = 400, description = "phone_number_id o access_token faltante / inválido"),
-        (status = 401, description = "No autorizado"),
-        (status = 502, description = "Meta rechazó las credenciales"),
-    )
-)]
-pub async fn test_settings_connection_raw_handler(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<WaTestConnectionRequest>,
-) -> Result<Json<WaTestConnectionResponse>, ApiError> {
-    let phone_number_id = payload
-        .phone_number_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| ApiError::BadRequest("phone_number_id requerido".into()))?
-        .to_string();
-    let token_raw = payload
-        .access_token
-        .as_deref()
-        .ok_or_else(|| ApiError::BadRequest("access_token requerido".into()))?;
-    let token = validate_access_token(token_raw)?.to_string();
-
-    let svc = apply_media_relay(
-        &state,
-        WhatsAppService::new(state.reqwest_client.clone(), phone_number_id.clone(), token),
-    );
-
-    let info = svc
-        .test_phone_number()
-        .await
-        .map_err(|e| map_meta_error(&e, "no se pudo validar las credenciales contra Meta"))?;
-
-    Ok(Json(WaTestConnectionResponse {
-        ok: true,
-        data: WaTestConnectionData {
-            reachable: true,
-            phone_number_id: info.id,
-            verified_name: info.verified_name,
-            display_phone_number: info.display_phone_number,
-            source: WaTestConnectionSource::Body,
-        },
-    }))
-}
-
-#[utoipa::path(
-    post,
-    path = "/v1/auth-user/whatsapp/settings/{id}/test-connection",
-    tag = "WhatsApp — Soporte",
-    security(("bearerAuth" = [])),
-    params(("id" = String, Path, description = "ID del WaSettings a re-validar")),
-    request_body = WaTestConnectionRequest,
-    responses(
-        (status = 200, description = "Credenciales válidas", body = WaTestConnectionResponse),
-        (status = 400, description = "id inválido o access_token de override mal formado"),
-        (status = 401, description = "No autorizado"),
-        (status = 404, description = "WaSettings no encontrado"),
-        (status = 502, description = "Meta rechazó las credenciales"),
-    )
-)]
-pub async fn test_settings_connection_stored_handler(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Json(payload): Json<WaTestConnectionRequest>,
-) -> Result<Json<WaTestConnectionResponse>, ApiError> {
-    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
-    let settings = state
-        .db
-        .find_wa_settings_by_id(&oid)
-        .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or(ApiError::NotFound)?;
-
-    // Resolver phone_number_id: override del body si vino con valor, si no el guardado.
-    let phone_override = payload
-        .phone_number_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
-    let phone_number_id = phone_override
-        .clone()
-        .unwrap_or_else(|| settings.phone_number_id.clone());
-    if phone_number_id.is_empty() {
-        return Err(ApiError::BadRequest(
-            "phone_number_id no configurado y no se envió override".into(),
-        ));
-    }
-
-    // Resolver token: override del body (validado) o el guardado descifrado.
-    let token_override = match payload.access_token.as_deref() {
-        Some(raw) if !raw.trim().is_empty() => Some(validate_access_token(raw)?.to_string()),
-        _ => None,
-    };
-    let token = match token_override.as_ref() {
-        Some(t) => t.clone(),
-        None => {
-            if settings.access_token.is_empty() {
-                return Err(ApiError::BadRequest(
-                    "access_token no guardado y no se envió override".into(),
-                ));
-            }
-            decrypt_payload(&settings_secret(), &settings.access_token)
-                .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?
-        }
-    };
-
-    // `source = body` cuando CUALQUIER credencial vino en el body — refleja que
-    // lo validado no es 100% lo guardado.
-    let source = if phone_override.is_some() || token_override.is_some() {
-        WaTestConnectionSource::Body
-    } else {
-        WaTestConnectionSource::Stored
-    };
-
-    let svc = apply_media_relay(
-        &state,
-        WhatsAppService::new(state.reqwest_client.clone(), phone_number_id.clone(), token),
-    );
-
-    let info = svc
-        .test_phone_number()
-        .await
-        .map_err(|e| map_meta_error(&e, "no se pudo validar las credenciales contra Meta"))?;
-
-    Ok(Json(WaTestConnectionResponse {
-        ok: true,
-        data: WaTestConnectionData {
-            reachable: true,
-            phone_number_id: info.id,
-            verified_name: info.verified_name,
-            display_phone_number: info.display_phone_number,
-            source,
-        },
-    }))
-}
-
-// ============================================
 // MEDIA (descarga proxy)
 // ============================================
 
@@ -1811,10 +1453,6 @@ fn compute_freeform_state(last_inbound_at: Option<DateTime>) -> (bool, Option<St
 /// por su `business_phone` vía `WaSettings`.
 async fn resolve_workspace_name(state: &Arc<AppState>, business_phone: &str) -> Option<String> {
     shared::workspace::resolve_workspace_name(state, business_phone).await
-}
-
-fn settings_to_item(s: WaSettings) -> SettingsItem {
-    shared::response::settings_to_item(s)
 }
 
 fn msg_to_item(

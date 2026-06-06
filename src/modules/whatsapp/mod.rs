@@ -127,55 +127,55 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         // Configuración de números y agentes
         .route(
             "/v1/auth-user/whatsapp/settings",
-            get(handler::list_settings_handler),
+            get(settings::handlers::list_settings_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/settings",
-            post(handler::create_settings_handler),
+            post(settings::handlers::create_settings_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/settings/:id",
-            put(handler::update_settings_handler),
+            put(settings::handlers::update_settings_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/settings/:id",
-            delete(handler::delete_settings_handler),
+            delete(settings::handlers::delete_settings_handler),
         )
         // Test connection: pre-creación (raw) y re-test sobre setting guardado.
         // La ruta sin `:id` debe declararse ANTES de las que matchean `:id`
         // para que axum no interprete `test-connection` como un id literal.
         .route(
             "/v1/auth-user/whatsapp/settings/test-connection",
-            post(handler::test_settings_connection_raw_handler),
+            post(settings::handlers::test_settings_connection_raw_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/settings/:id/test-connection",
-            post(handler::test_settings_connection_stored_handler),
+            post(settings::handlers::test_settings_connection_stored_handler),
         )
         // Alias: el frontend se refiere a estas configs como "WhatsApp Numbers"
         .route(
             "/v1/auth-user/whatsapp/whatsapp-numbers",
-            get(handler::list_settings_handler),
+            get(settings::handlers::list_settings_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/whatsapp-numbers",
-            post(handler::create_settings_handler),
+            post(settings::handlers::create_settings_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/whatsapp-numbers/:id",
-            put(handler::update_settings_handler),
+            put(settings::handlers::update_settings_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/whatsapp-numbers/:id",
-            delete(handler::delete_settings_handler),
+            delete(settings::handlers::delete_settings_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/whatsapp-numbers/test-connection",
-            post(handler::test_settings_connection_raw_handler),
+            post(settings::handlers::test_settings_connection_raw_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/whatsapp-numbers/:id/test-connection",
-            post(handler::test_settings_connection_stored_handler),
+            post(settings::handlers::test_settings_connection_stored_handler),
         )
         // Quick replies (snippets de texto)
         .route(
