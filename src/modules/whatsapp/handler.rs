@@ -30,6 +30,7 @@ use super::webhook::status::{
 };
 use crate::cache::MEDIA_CACHE_MAX_BYTES;
 
+use super::messaging::preview::{interactive_preview, template_preview};
 use super::service::{MediaInfo, WhatsAppService};
 use super::ws::{
     broadcast_all, broadcast_to_chat_users, build_template_created_event,
@@ -2041,44 +2042,6 @@ async fn dispatch_send(
         }
     };
     Ok(res)
-}
-
-/// Resumen legible de un payload `interactive` para persistir como preview
-/// y poblar el feed de "último mensaje" de la conversación. No hace
-/// validación — si el payload viene mal armado, devuelve un fallback genérico.
-fn interactive_preview(payload: &serde_json::Value) -> String {
-    // Preferimos el texto del body, luego del header, luego un fallback.
-    if let Some(b) = payload
-        .get("body")
-        .and_then(|b| b.get("text"))
-        .and_then(|t| t.as_str())
-    {
-        let t = b.trim();
-        if !t.is_empty() {
-            return t.to_string();
-        }
-    }
-    if let Some(h) = payload
-        .get("header")
-        .and_then(|h| h.get("text"))
-        .and_then(|t| t.as_str())
-    {
-        let t = h.trim();
-        if !t.is_empty() {
-            return t.to_string();
-        }
-    }
-    "[mensaje interactivo]".to_string()
-}
-
-fn template_preview(tpl: &SendTemplatePayload) -> String {
-    if let Some(rendered) = tpl.rendered_text.as_deref() {
-        let t = rendered.trim();
-        if !t.is_empty() {
-            return t.to_string();
-        }
-    }
-    format!("[plantilla: {}]", tpl.name)
 }
 
 fn parse_meta_template_category(raw: Option<&str>) -> Option<WaTemplateCategory> {
