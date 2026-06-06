@@ -573,3 +573,50 @@ Branch: `feature/modularize-whatsapp-pr2l-conversation-ai-controls`
 
 - `2.2`: remains **unchecked/partial** (conversation AI controls moved; conversation flow extraction continues)
 - `3.3`: unchanged
+
+## PR2m: Transferable agents query extraction slice
+
+Branch: `feature/modularize-whatsapp-pr2m-transferable-agents`
+
+## Completed
+
+- Moved `TransferableAgentsQuery` and `list_transferable_agents_handler` from
+  `src/modules/whatsapp/handler.rs` into
+  `src/modules/whatsapp/conversations/queries.rs`.
+- In the moved handler, switched authz resolution to direct `shared::authz` helpers:
+  - `require_can_chat`
+  - `is_superadmin`
+  - `is_chat_workspace_match`
+  - `is_transfer_target_allowed_for_workspace`
+  - `is_transfer_target_allowed_for_actor_workspaces`
+- Reused the existing `normalize_to_e164` in `conversations/queries` for
+  `business_phone` filtering.
+- Updated `src/modules/whatsapp/conversations/handlers.rs` to re-export:
+  - `list_transferable_agents_handler`
+  - `__path_list_transferable_agents_handler`
+  from `conversations::queries`.
+- Kept route path, OpenAPI registration path references, response shape, DB traits,
+  route registration, settings/media/webhook/send/initiate/quick replies/templates behavior
+  unchanged.
+- Applied version bump for this PR2m slice:
+  - `Cargo.toml`
+  - `src/openapi.rs`
+  - `src/main.rs`
+
+## Notes
+
+- Task `2.2` remains intentionally **unchecked/partial** by scope (transferable
+  agents query extraction only).
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.2`: remains **unchecked/partial** (transferable-agent query extracted; full task remains partial by design)
+- `3.3`: unchanged

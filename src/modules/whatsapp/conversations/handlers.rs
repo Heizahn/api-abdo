@@ -5,9 +5,8 @@
 //! semantics via re-exports.
 
 pub use crate::modules::whatsapp::handler::{
-    __path_initiate_conversation_handler, __path_list_transferable_agents_handler,
-    __path_send_message_handler, initiate_conversation_handler, list_transferable_agents_handler,
-    send_message_handler,
+    __path_initiate_conversation_handler, __path_send_message_handler,
+    initiate_conversation_handler, send_message_handler,
 };
 
 pub use crate::modules::whatsapp::conversations::lifecycle::{
@@ -22,7 +21,8 @@ pub use crate::modules::whatsapp::conversations::lifecycle::{
 pub use crate::modules::whatsapp::conversations::queries::{
     __path_conversations_stats_handler, __path_get_conversation_client_link_handler,
     __path_get_conversation_handler, __path_get_conversation_messages_handler,
-    __path_list_conversations_handler, conversations_stats_handler,
-    get_conversation_client_link_handler, get_conversation_handler,
+    __path_list_conversations_handler, __path_list_transferable_agents_handler,
+    conversations_stats_handler, get_conversation_client_link_handler, get_conversation_handler,
     get_conversation_messages_handler, list_conversations_handler,
+    list_transferable_agents_handler,
 };
