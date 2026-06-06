@@ -219,5 +219,38 @@ Branch: `feature/modularize-whatsapp-pr2d-webhook-status`
 ## Rollback Boundary (PR2d)
 
 - Revert this PR2d commit to move the three status helpers back into
-  `src/modules/whatsapp/handler.rs` and restore the previous call site usage.
+`src/modules/whatsapp/handler.rs` and restore the previous call site usage.
   Route wiring, webhook semantics, and payload mutation behavior remain unchanged.
+
+## PR2e: Conversation read/query handler extraction
+
+Status: in progress
+
+Branch: `feature/modularize-whatsapp-pr2e-conversation-read`
+
+## Completed
+
+- Split conversation query/read handlers into `src/modules/whatsapp/conversations/queries.rs`:
+  - `ConversationStatsQuery`
+  - `conversations_stats_handler`
+  - `get_conversation_handler`
+  - `get_conversation_client_link_handler`
+- Updated `src/modules/whatsapp/conversations/handlers.rs` to re-export moved handlers and `__path_*` symbols from the new module while keeping other conversation handlers in `handler.rs`.
+- Preserved `list_conversations_handler` in `src/modules/whatsapp/handler.rs` as required by scope for this slice.
+- Version bump applied in manifest and startup/OpenAPI metadata.
+
+## Notes
+
+- Task `2.2` remains **unchecked/partial** because the full conversation modularization path still requires follow-up extraction for remaining query/messaging handlers and module cleanup.
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.2`: now partially advanced (query/read extraction only; no messaging/aux list body migration)
+- `3.3`: unchanged
