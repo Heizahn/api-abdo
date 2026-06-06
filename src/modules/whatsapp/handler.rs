@@ -24,6 +24,10 @@ use crate::{
 use super::assignment::assign_conversation;
 use super::shared;
 use super::webhook::handler::{last_payload_store, verify_meta_signature};
+use super::webhook::status::{
+    has_meta_throttle_131049, is_inbound_media_failure_status, log_webhook_top_level_errors,
+    InboundMediaFailureDetails,
+};
 use crate::cache::MEDIA_CACHE_MAX_BYTES;
 
 use super::service::{MediaInfo, WhatsAppService};
@@ -55,50 +59,6 @@ const MEDIA_DOWNLOAD_RETRY_DELAYS_MS: &[u64] = &[0, 700, 2_000];
 /// en DB unos segundos después (desfase webhook status vs message).
 /// Si aparece, evitamos fallback prematuro.
 const INBOUND_MEDIA_FAILURE_RECHECK_DELAYS_MS: &[u64] = &[0, 10_000, 30_000];
-
-#[derive(Debug, Clone)]
-struct InboundMediaFailureDetails {
-    code: Option<i64>,
-    title: Option<String>,
-    message: Option<String>,
-    error_data: Option<serde_json::Value>,
-}
-
-impl InboundMediaFailureDetails {
-    fn from_status_error(err: &StatusError) -> Self {
-        Self {
-            code: err.code,
-            title: err.title.clone(),
-            message: err.message.clone(),
-            error_data: err.error_data.clone(),
-        }
-    }
-}
-
-fn log_webhook_top_level_errors(value: &WebhookValue) -> usize {
-    match &value.errors {
-        Some(errors) => {
-            if errors.is_empty() {
-                tracing::warn!("[webhook] payload errors recibido sin detalles en change.value");
-                0
-            } else {
-                for err in errors {
-                    tracing::warn!(
-                        "[webhook] top-level error: code={:?} title={:?} message={:?}",
-                        err.code,
-                        err.title,
-                        err.message
-                    );
-                }
-                errors.len()
-            }
-        }
-        None => {
-            tracing::warn!("[webhook] payload errors recibido sin detalles en change.value");
-            0
-        }
-    }
-}
 
 async fn apply_inbound_message_delta_update(
     state: &Arc<AppState>,
@@ -454,10 +414,7 @@ pub async fn receive_webhook(
                             // bloqueado en el back y el front pueda mostrarlo.
                             // El cooldown se libera al recibir un inbound (ver
                             // `update_last_inbound_at`) o al expirar `until`.
-                            let has_131049 = s
-                                .errors
-                                .as_ref()
-                                .is_some_and(|errs| errs.iter().any(|e| e.code == Some(131049)));
+                            let has_131049 = has_meta_throttle_131049(s.errors.as_deref());
                             if s.status == "failed" && has_131049 {
                                 let until = DateTime::from_millis(
                                     DateTime::now().timestamp_millis() + META_THROTTLE_COOLDOWN_MS,
@@ -511,12 +468,10 @@ pub async fn receive_webhook(
                             // marcar nada, pero PODEMOS avisarle al cliente que
                             // reenvíe — sino queda esperando respuesta de un archivo
                             // que nunca llegó al sistema.
-                            let is_media_failure = s.status == "failed"
-                                && s.errors.as_ref().is_some_and(|errs| {
-                                    errs.iter().any(|e| {
-                                        matches!(e.code, Some(131052) | Some(131053) | Some(131056))
-                                    })
-                                });
+                            let is_media_failure = is_inbound_media_failure_status(
+                                s.status.as_str(),
+                                s.errors.as_deref(),
+                            );
                             if is_media_failure {
                                 let recipient = s
                                     .recipient_id
