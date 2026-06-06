@@ -85,7 +85,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.38",
+        version = "0.3.39",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
