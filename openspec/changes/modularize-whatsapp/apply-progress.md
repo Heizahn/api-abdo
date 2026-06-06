@@ -1011,3 +1011,39 @@ Status: partial
 
 - `2.3`: partially advanced (template-header upload extracted; inbound media-failure fallback still pending)
 - `3.3`: unchanged
+
+## PR3i: Inbound media-failure fallback extraction
+
+Branch: `feature/modularize-whatsapp-pr3i-media-fallback`
+
+Status: complete
+
+## Completed
+
+- Replaced the placeholder `src/modules/whatsapp/webhook/media_failures.rs` with the inbound media-failure fallback implementation:
+  - `schedule_inbound_media_failure_fallback`
+  - `notify_inbound_media_failure`
+  - `persist_inbound_media_failure_placeholder`
+  - `record_conv_event`
+  - `INBOUND_MEDIA_FAILURE_RECHECK_DELAYS_MS`
+- Updated `receive_webhook` in `handler.rs` to call `webhook::media_failures::schedule_inbound_media_failure_fallback`.
+- Preserved delayed DB recheck behavior, placeholder message creation, conversation reopen/touch behavior, unread badge broadcast, `MensajeNuevo` event shape, customer fallback text, and Meta service/relay behavior.
+- Applied project version bump to `0.3.45` in:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/main.rs`
+  - `src/openapi.rs`
+- Marked task `2.3` complete: messaging/media/reaction ownership is now out of `handler.rs`; remaining webhook/conversation/settings work is tracked by tasks `2.1`, `2.2`, and `2.4`.
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.3`: complete
+- `3.3`: unchanged
