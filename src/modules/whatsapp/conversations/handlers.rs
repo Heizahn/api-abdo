@@ -8,15 +8,15 @@ pub use crate::modules::whatsapp::handler::{
     __path_close_conversation_handler, __path_initiate_conversation_handler,
     __path_intervene_conversation_handler, __path_list_transferable_agents_handler,
     __path_reopen_conversation_handler, __path_reset_ai_conv_state_handler,
-    __path_send_message_handler, __path_transfer_conversation_handler, close_conversation_handler,
-    initiate_conversation_handler, intervene_conversation_handler,
-    list_transferable_agents_handler, reopen_conversation_handler, reset_ai_conv_state_handler,
-    send_message_handler, transfer_conversation_handler,
+    __path_send_message_handler, close_conversation_handler, initiate_conversation_handler,
+    intervene_conversation_handler, list_transferable_agents_handler, reopen_conversation_handler,
+    reset_ai_conv_state_handler, send_message_handler,
 };
 
 pub use crate::modules::whatsapp::conversations::lifecycle::{
-    __path_mark_read_handler, __path_take_conversation_handler, mark_read_handler,
-    take_conversation_handler,
+    __path_mark_read_handler, __path_take_conversation_handler,
+    __path_transfer_conversation_handler, mark_read_handler, take_conversation_handler,
+    transfer_conversation_handler,
 };
 
 pub use crate::modules::whatsapp::conversations::queries::{

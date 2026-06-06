@@ -7,8 +7,13 @@ use axum::{
 use mongodb::bson::oid::ObjectId;
 
 use crate::modules::whatsapp::shared::{
-    authz::{require_can_chat, require_workspace_actor_for_conversation},
-    mappers::{resolve_customer_name, resolve_last_message_agent_name_one},
+    authz::{
+        ensure_transfer_target_allowed_for_workspace, require_can_chat,
+        require_workspace_actor_for_conversation,
+    },
+    mappers::{
+        resolve_assigned_agent_name_one, resolve_customer_name, resolve_last_message_agent_name_one,
+    },
     response::conv_to_item,
     service::resolve_service_for_phone,
     workspace::resolve_workspace_name,
@@ -22,7 +27,8 @@ use crate::{
     db::WhatsAppRepository,
     error::ApiError,
     models::whatsapp::{
-        MarkReadData, MarkReadResponse, TakeConversationResponse, WaConversationEventInput,
+        ConversationDetailResponse, MarkReadData, MarkReadResponse, TakeConversationResponse,
+        TransferConversationRequest, WaConversationEventInput,
     },
     state::AppState,
 };
@@ -320,5 +326,131 @@ pub async fn take_conversation_handler(
             agent_name,
             assigned_name,
         ),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/conversations/{id}/transfer",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ID de la conversación")),
+    request_body = TransferConversationRequest,
+    responses(
+        (status = 200, description = "Conversación transferida", body = ConversationDetailResponse),
+        (status = 404, description = "Conversación o usuario destino no encontrado"),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn transfer_conversation_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+    Json(payload): Json<TransferConversationRequest>,
+) -> Result<Json<ConversationDetailResponse>, ApiError> {
+    let actor = require_can_chat(&state, &claims.id).await?;
+
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+
+    let conv = state
+        .db
+        .find_conversation_by_id(&oid)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?
+        .ok_or(ApiError::NotFound)?;
+
+    let current_workspace =
+        require_workspace_actor_for_conversation(&state, &actor, &conv.business_phone).await?;
+
+    use crate::db::UserRepository;
+    let target = state
+        .db
+        .find_user_by_id(&payload.user_id)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?
+        .ok_or_else(|| ApiError::NotFound)?;
+    ensure_transfer_target_allowed_for_workspace(&state, &target, current_workspace.id.as_ref())
+        .await?;
+
+    let from_agent = conv.assigned_to.clone();
+
+    let conv_after = state
+        .db
+        .transfer_conversation(&oid, &payload.user_id)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?
+        .ok_or(ApiError::NotFound)?;
+
+    if let Some(prev) = from_agent.as_deref() {
+        if prev != payload.user_id {
+            state.redis.decr_agent_load(prev).await;
+        }
+    }
+    state.redis.incr_agent_load(&payload.user_id).await;
+
+    if let Some(note) = payload.note.as_deref() {
+        tracing::info!(
+            "[transfer] conv={} de {:?} → {} por {} ({}): {}",
+            id,
+            from_agent,
+            payload.user_id,
+            claims.id,
+            claims.name,
+            note
+        );
+    }
+
+    let opens = state
+        .db
+        .get_conversation_opens(&claims.id, &[oid])
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
+    let last_opened = opens.get(&oid).copied();
+    let workspace_name = resolve_workspace_name(&state, &conv_after.business_phone).await;
+    let resolved = resolve_customer_name(&state, &conv_after).await;
+    let agent_name = resolve_last_message_agent_name_one(&state, &conv_after).await;
+    let assigned_name = resolve_assigned_agent_name_one(&state, &conv_after).await;
+    let conv_item = conv_to_item(
+        conv_after,
+        true,
+        last_opened,
+        workspace_name,
+        resolved,
+        agent_name,
+        assigned_name,
+    );
+
+    // Emitir tras tener el item listo — incluye el estado actualizado con workspace_name y assigned_to nuevo.
+    let ev = WsServerEvent::ChatTransferido {
+        conversation_id: id.clone(),
+        from_user_id: from_agent.clone(),
+        to_user_id: payload.user_id.clone(),
+        conversation: conv_item.clone(),
+    };
+    broadcast_all(&state.ws_registry, &ev).await;
+    let json = serde_json::to_string(&ev).unwrap_or_default();
+    send_to_user(&state.ws_registry, &payload.user_id, json).await;
+    tracing::debug!("[transfer] targeted push sent to {}", payload.user_id);
+
+    if let Err(e) = state
+        .db
+        .record_conversation_event(WaConversationEventInput {
+            conversation_id: &oid,
+            business_phone: &conv.business_phone,
+            event_type: "transferred",
+            actor_id: Some(claims.id.as_str()),
+            actor_name: Some(claims.name.as_str()),
+            target_id: Some(payload.user_id.as_str()),
+            target_name: Some(target.name.as_str()),
+            note: payload.note.as_deref(),
+        })
+        .await
+    {
+        tracing::warn!("record_conversation_event failed: {}", e);
+    }
+
+    Ok(Json(ConversationDetailResponse {
+        ok: true,
+        data: conv_item,
     }))
 }

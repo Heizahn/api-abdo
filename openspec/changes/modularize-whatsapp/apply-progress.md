@@ -437,3 +437,49 @@ Branch: `feature/modularize-whatsapp-pr2i-conversation-take`
 
 - `2.2`: remains unchecked/partial (take handler extracted; task remains scoped)
 - `3.3`: unchanged
+
+## PR2j: Conversation transfer extraction slice
+
+Branch: `feature/modularize-whatsapp-pr2j-conversation-transfer`
+
+## Completed
+
+- Moved `transfer_conversation_handler` from `src/modules/whatsapp/handler.rs` to
+  `src/modules/whatsapp/conversations/lifecycle.rs`, preserving behavior.
+- In the moved handler, switched to shared helpers directly:
+  - `shared::authz::{require_can_chat, require_workspace_actor_for_conversation,
+    ensure_transfer_target_allowed_for_workspace}`
+  - `shared::workspace::resolve_workspace_name`
+  - `shared::mappers::{resolve_customer_name, resolve_last_message_agent_name_one,
+    resolve_assigned_agent_name_one}`
+  - `shared::response::conv_to_item`
+- Updated `conversations/handlers.rs` to re-export `transfer_conversation_handler`
+  and `__path_transfer_conversation_handler` from `conversations::lifecycle`.
+- Kept `record_conv_event` in `handler.rs` unchanged and used
+  `state.db.record_conversation_event(...)` directly in the moved transfer
+  implementation (best-effort warning on persistence failure).
+- Kept all legacy conversation handlers and other WhatsApp flows untouched:
+  `close/reopen/send/initiate/intervene/reset/list-transferable/webhook/media/settings/templates/quick replies`.
+- Bumped version metadata:
+  - `Cargo.toml`
+  - `src/main.rs`
+  - `src/openapi.rs`
+
+## Notes
+
+- Task `2.2` remains **unchecked/partial** for PR2j by scope (single transfer
+  extraction only).
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.2`: remains unchecked/partial (transfer ownership moved; implementation body
+  extraction continues)
+- `3.3`: unchanged
