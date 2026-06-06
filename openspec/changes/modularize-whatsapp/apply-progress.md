@@ -181,3 +181,43 @@ Status: complete
   `src/modules/whatsapp/handler.rs` if needed. No route paths, OpenAPI entries,
   DB queries, webhook status handling, or assignment/media pipelines were changed
   in this slice.
+
+## PR2d: Webhook status helpers micro-extraction
+
+Status: complete
+
+Branch: `feature/modularize-whatsapp-pr2d-webhook-status`
+
+## Completed
+
+- Moved webhook status-only helpers from `src/modules/whatsapp/handler.rs` to
+  `src/modules/whatsapp/webhook/status.rs`:
+  - `InboundMediaFailureDetails`
+  - `impl InboundMediaFailureDetails::from_status_error`
+  - `log_webhook_top_level_errors`
+  - `is_inbound_media_failure_status` (tiny pure predicate)
+  - `has_meta_throttle_131049` (tiny pure predicate)
+- Updated `src/modules/whatsapp/handler.rs` call sites to use status helpers via
+  `super::webhook::status`.
+- Updated release version metadata to keep repo versioning in sync:
+  - `Cargo.toml`
+  - `src/openapi.rs`
+  - `src/main.rs`
+
+## Verification
+
+- `cargo fmt --check` passed.
+- `cargo check` passed.
+- `cargo check --tests` passed.
+- `git diff --check` passed.
+
+## Task Status Impact
+
+- `2.1` remains intentionally partial/unchecked by task definition (webhook
+  body extraction in prior PRs; this PR extracts only status helper ownership).
+
+## Rollback Boundary (PR2d)
+
+- Revert this PR2d commit to move the three status helpers back into
+  `src/modules/whatsapp/handler.rs` and restore the previous call site usage.
+  Route wiring, webhook semantics, and payload mutation behavior remain unchanged.
