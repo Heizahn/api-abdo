@@ -748,3 +748,47 @@ Branch: `feature/modularize-whatsapp-pr3b-send-helpers`
 
 - `2.3`: unchanged/partial (send-mode extraction only, full task 2.3 still pending)
 - `3.3`: unchanged
+
+## PR3c: Messaging dispatch/send data extraction
+
+Branch: `feature/modularize-whatsapp-pr3c-dispatch-send`
+
+## Completed
+
+- Added `src/modules/whatsapp/messaging/send.rs` and moved dispatch ownership types +
+  function from `handler.rs`:
+  - `TemplateFields`
+  - `SentData`
+  - `dispatch_send`
+- Updated `src/modules/whatsapp/messaging/mod.rs` with `pub mod send;`.
+- Updated `src/modules/whatsapp/handler.rs` imports and callsites:
+  - `dispatch_send` now imported from `super::messaging::send::dispatch_send`.
+  - `auto_fill_template_header_media` callsites switched to the existing helper in
+    `conversations::outbound`.
+- Removed private `handler.rs` duplicates that were already safely owned in other
+  modules:
+  - `auto_fill_template_header_media`
+  - `map_template_send_error`
+  (logic preserved by delegating to `crate::modules::whatsapp::conversations::outbound`).
+- Kept `send_message_handler` and all behavior-sensitive WhatsApp flows in `handler.rs`
+  unchanged per bounded slice.
+- Kept task `2.3` intentionally **unchecked/partial** (send handler remains in
+  `handler.rs` for this slice).
+- Applied version bump for this PR:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/main.rs`
+  - `src/openapi.rs`
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.3`: still unchanged/partial (dispatch/send helper ownership advanced, handler remains).
+- `3.3`: unchanged

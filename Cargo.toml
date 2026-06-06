@@ -1,6 +1,6 @@
 [package]
 name = "api-abdo"
-version = "0.3.38"
+version = "0.3.39"
 edition = "2021"
 
 [dependencies]
