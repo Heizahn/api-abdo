@@ -1048,6 +1048,51 @@ Status: complete
 - `2.3`: complete
 - `3.3`: unchanged
 
+## PR4b: Settings handlers implementation extraction
+
+Branch: `feature/modularize-whatsapp-pr4b-settings-handlers`
+
+Status: complete
+
+## Completed
+
+- Extracted settings endpoint implementations out of `src/modules/whatsapp/handler.rs` into `src/modules/whatsapp/settings/handlers.rs`:
+  - `list_settings_handler`
+  - `create_settings_handler`
+  - `update_settings_handler`
+  - `delete_settings_handler`
+  - `test_settings_connection_raw_handler`
+  - `test_settings_connection_stored_handler`
+- Rewired settings routes (including legacy `whatsapp-numbers` alias routes) in `src/modules/whatsapp/mod.rs` to use `settings::handlers::*`.
+- Rewired OpenAPI symbols in `src/openapi.rs` to point to `crate::modules::whatsapp::settings::handlers`.
+- Removed stale settings handler implementations and local compatibility wrappers from `src/modules/whatsapp/handler.rs`.
+- Applied version bump to `0.3.47` across:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/main.rs`
+  - `src/openapi.rs`
+- Confirmed no leftover `settings` implementation references remain in `handler.rs`.
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.4`: complete
+- `3.3`: unchanged
+
+## Rollback Boundary (PR4b)
+
+- Revert this PR4b commit to restore settings CRUD/test-connection handler implementations to
+  `src/modules/whatsapp/handler.rs`.
+- Routing, OpenAPI symbols, and versioned release metadata changes are safe to drop by reverting
+  the same commit set; no data schema or DB behavior changes were introduced in this slice.
+
 ## PR4a: Settings validation helper extraction
 
 Branch: `feature/modularize-whatsapp-pr4a-settings-validation`

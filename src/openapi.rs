@@ -85,7 +85,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.46",
+        version = "0.3.47",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
@@ -160,12 +160,12 @@ use crate::modules::whatsapp::conversations::lifecycle::{
         crate::modules::whatsapp::conversations::handlers::intervene_conversation_handler,
         crate::modules::whatsapp::conversations::handlers::initiate_conversation_handler,
         crate::modules::whatsapp::conversations::handlers::list_transferable_agents_handler,
-        crate::modules::whatsapp::handler::list_settings_handler,
-        crate::modules::whatsapp::handler::create_settings_handler,
-        crate::modules::whatsapp::handler::update_settings_handler,
-        crate::modules::whatsapp::handler::delete_settings_handler,
-        crate::modules::whatsapp::handler::test_settings_connection_raw_handler,
-        crate::modules::whatsapp::handler::test_settings_connection_stored_handler,
+        crate::modules::whatsapp::settings::handlers::list_settings_handler,
+        crate::modules::whatsapp::settings::handlers::create_settings_handler,
+        crate::modules::whatsapp::settings::handlers::update_settings_handler,
+        crate::modules::whatsapp::settings::handlers::delete_settings_handler,
+        crate::modules::whatsapp::settings::handlers::test_settings_connection_raw_handler,
+        crate::modules::whatsapp::settings::handlers::test_settings_connection_stored_handler,
         crate::modules::whatsapp::messaging::download::get_media_handler,
         crate::modules::whatsapp::messaging::media::upload_media_handler,
         crate::modules::whatsapp::messaging::media::get_media_limits_handler,
