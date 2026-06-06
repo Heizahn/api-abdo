@@ -878,3 +878,52 @@ Status: complete
 
 - `2.3`: partially advanced (reactions extracted; `media.rs` still pending).
 - `3.3`: unchanged
+
+## PR3f: Messaging media extraction
+
+Branch: `feature/modularize-whatsapp-pr3f-media`
+
+Status: partial
+
+## Completed
+
+- Added `src/modules/whatsapp/messaging/media.rs` and moved upload/media-limits ownership out of `src/modules/whatsapp/handler.rs`:
+  - `upload_media_handler`
+  - `get_media_limits_handler`
+  - media constants/constants helpers used by upload validation:
+    - `MIME_*`
+    - `MAX_*`
+    - `human_bytes`
+    - `media_type_label`
+    - `media_type_limits`
+    - `infer_type_from_mime`
+- Exported `media` module in `src/modules/whatsapp/messaging/mod.rs` with `pub mod media;`.
+- Rewired WhatsApp routes in `src/modules/whatsapp/mod.rs` to use moved handlers:
+  - `GET /v1/auth-user/whatsapp/media/limits`
+  - `POST /v1/auth-user/whatsapp/media`
+- Updated OpenAPI registration path references to moved symbols in `src/openapi.rs`:
+  - `crate::modules::whatsapp::messaging::media::upload_media_handler`
+  - `crate::modules::whatsapp::messaging::media::get_media_limits_handler`
+- Kept endpoint contracts unchanged:
+  - multipart parsing, validation messages, max-size checks, MIME allowlist behavior,
+  - SHA-256 computation, conversation lookup flow, and Meta upload flow.
+- Kept route order and `DefaultBodyLimit::disable()` behavior on upload endpoint.
+- Applied project version bump to `0.3.42` in:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/main.rs`
+  - `src/openapi.rs`
+- Kept media download/proxy/cache/template-header upload in `handler.rs` for a later slice.
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.3`: partially advanced (upload + limits extracted; download/proxy/cache/template-header upload still pending)
+- `3.3`: unchanged

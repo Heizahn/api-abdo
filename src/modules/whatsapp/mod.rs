@@ -113,7 +113,7 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         // Media: límites por tipo — el front los lee para validar client-side.
         .route(
             "/v1/auth-user/whatsapp/media/limits",
-            get(handler::get_media_limits_handler),
+            get(messaging::media::get_media_limits_handler),
         )
         // Media: upload multipart hacia Meta (paso 1 del envío outbound).
         // El body limit por defecto de axum es 2 MiB — lo desactivamos por
@@ -121,7 +121,7 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         // config (`wa_media_max_*_bytes`, hasta 100 MiB para documentos).
         .route(
             "/v1/auth-user/whatsapp/media",
-            post(handler::upload_media_handler).layer(DefaultBodyLimit::disable()),
+            post(messaging::media::upload_media_handler).layer(DefaultBodyLimit::disable()),
         )
         // Configuración de números y agentes
         .route(

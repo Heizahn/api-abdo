@@ -1,3 +1,4 @@
+pub mod media;
 pub mod mode;
 pub mod preview;
 pub mod reactions;

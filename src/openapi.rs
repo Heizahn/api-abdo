@@ -85,7 +85,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.41",
+        version = "0.3.42",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
@@ -167,8 +167,8 @@ use crate::modules::whatsapp::conversations::lifecycle::{
         crate::modules::whatsapp::handler::test_settings_connection_raw_handler,
         crate::modules::whatsapp::handler::test_settings_connection_stored_handler,
         crate::modules::whatsapp::handler::get_media_handler,
-        crate::modules::whatsapp::handler::upload_media_handler,
-        crate::modules::whatsapp::handler::get_media_limits_handler,
+        crate::modules::whatsapp::messaging::media::upload_media_handler,
+        crate::modules::whatsapp::messaging::media::get_media_limits_handler,
         crate::modules::whatsapp::handler::list_quick_replies_handler,
         crate::modules::whatsapp::handler::create_quick_reply_handler,
         crate::modules::whatsapp::handler::update_quick_reply_handler,
