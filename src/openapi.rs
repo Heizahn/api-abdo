@@ -85,7 +85,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.40",
+        version = "0.3.41",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
@@ -182,7 +182,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
         crate::modules::whatsapp::handler::delete_template_handler,
         crate::modules::whatsapp::handler::resync_template_handler,
         crate::modules::whatsapp::handler::upload_template_header_media_handler,
-        crate::modules::whatsapp::handler::react_message_handler,
+        crate::modules::whatsapp::messaging::reactions::react_message_handler,
         // WhatsApp — Tickets
         crate::modules::whatsapp::tickets::list_ticket_categories_handler,
         crate::modules::whatsapp::tickets::list_tickets_handler,
@@ -304,8 +304,8 @@ use crate::modules::whatsapp::conversations::lifecycle::{
             ChangeMyPasswordRequest,
             // WhatsApp — Reactions
             crate::models::whatsapp::MessageReaction,
-            crate::modules::whatsapp::handler::ReactMessageRequest,
-            crate::modules::whatsapp::handler::ReactMessageResponse,
+            crate::modules::whatsapp::messaging::reactions::ReactMessageRequest,
+            crate::modules::whatsapp::messaging::reactions::ReactMessageResponse,
             // WhatsApp — Items
             ConversationItem, MessageItem, SettingsItem,
             TransferableAgentItem, ReplyToItem, UrlPreview, LocationPayload, QuickReplyItem,

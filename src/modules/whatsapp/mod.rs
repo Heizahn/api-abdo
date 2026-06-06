@@ -287,6 +287,6 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         // Reacciones sobre mensajes individuales
         .route(
             "/v1/auth-user/whatsapp/messages/:id/react",
-            post(handler::react_message_handler),
+            post(messaging::reactions::react_message_handler),
         )
 }
