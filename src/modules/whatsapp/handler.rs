@@ -999,147 +999,9 @@ pub async fn receive_webhook(
 // ============================================
 
 #[derive(serde::Deserialize)]
-pub struct ConversationsQuery {
-    pub status: Option<String>,
-    pub assigned_to: Option<String>,
-    pub business_phone: Option<String>,
-    pub cursor: Option<String>,
-    pub limit: Option<i64>,
-}
-
-#[derive(serde::Deserialize)]
 pub struct MessagesQuery {
     pub cursor: Option<String>,
     pub limit: Option<i64>,
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/auth-user/whatsapp/conversations",
-    tag = "WhatsApp — Soporte",
-    security(("bearerAuth" = [])),
-    params(
-        ("status" = Option<String>, Query, description = "Filtrar por estado: pending | in_progress | closed"),
-        ("assigned_to" = Option<String>, Query, description = "Filtrar por UUID de agente"),
-        ("business_phone" = Option<String>, Query, description = "Filtrar por número de negocio (E.164 sin '+')"),
-        ("cursor" = Option<String>, Query, description = "Cursor opaco para paginación (copiar de next_cursor)"),
-        ("limit" = Option<i64>, Query, description = "Resultados por página (default: 20, max: 100)"),
-    ),
-    responses(
-        (status = 200, description = "Lista de conversaciones", body = ConversationsListResponse),
-        (status = 401, description = "No autorizado"),
-    )
-)]
-pub async fn list_conversations_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<UserProfileClaims>,
-    Query(q): Query<ConversationsQuery>,
-) -> Result<Json<ConversationsListResponse>, ApiError> {
-    let limit = q.limit.unwrap_or(20).clamp(1, 100);
-    let business_phone_norm = q.business_phone.as_deref().map(normalize_to_e164);
-
-    let convs = state
-        .db
-        .get_conversations(
-            q.status.as_deref(),
-            q.assigned_to.as_deref(),
-            business_phone_norm.as_deref(),
-            q.cursor.as_deref(),
-            limit,
-        )
-        .await
-        .map_err(|e| ApiError::DatabaseError(e))?;
-
-    let next_cursor = if (convs.len() as i64) < limit {
-        None
-    } else {
-        convs.last().and_then(|c| {
-            Some(format!(
-                "{}_{}",
-                c.last_message_at.timestamp_millis(),
-                c.id?.to_hex()
-            ))
-        })
-    };
-
-    // Batch-fetch last_opened_at del agente actual para todas las conversaciones.
-    let ids: Vec<ObjectId> = convs.iter().filter_map(|c| c.id).collect();
-    let opens = state
-        .db
-        .get_conversation_opens(&claims.id, &ids)
-        .await
-        .map_err(|e| ApiError::DatabaseError(e))?;
-
-    // Batch-fetch workspace_name por business_phone único.
-    let mut unique_phones: Vec<String> = convs.iter().map(|c| c.business_phone.clone()).collect();
-    unique_phones.sort();
-    unique_phones.dedup();
-    let workspaces = state
-        .db
-        .get_workspace_names(&unique_phones)
-        .await
-        .map_err(|e| ApiError::DatabaseError(e))?;
-
-    // Batch-resolve nombre del contacto contra Clients: primero por client_id,
-    // luego por teléfono para los que no tienen link. Evita N+1 en listados.
-    let (names_by_id, names_by_phone) = {
-        use crate::db::ProfileRepository;
-        let client_ids: Vec<ObjectId> = convs.iter().filter_map(|c| c.client_id).collect();
-        let mut customer_phones: Vec<String> = convs
-            .iter()
-            .filter(|c| c.client_id.is_none())
-            .map(|c| c.phone.clone())
-            .collect();
-        customer_phones.sort();
-        customer_phones.dedup();
-        let (ids_res, phones_res) = tokio::join!(
-            state.db.get_client_names_by_ids(&client_ids),
-            state.db.get_client_names_by_phones(&customer_phones),
-        );
-        (
-            ids_res.map_err(ApiError::DatabaseError)?,
-            phones_res.map_err(ApiError::DatabaseError)?,
-        )
-    };
-
-    // Batch-resolve nombres de agentes (autor del último mensaje outbound + asignado).
-    let agent_names = resolve_last_message_agent_names(&state, &convs).await;
-    let assigned_names = resolve_assigned_agent_names(&state, &convs).await;
-
-    let data = convs
-        .into_iter()
-        .map(|c| {
-            let last_opened = c.id.and_then(|id| opens.get(&id).copied());
-            let ws = workspaces.get(&c.business_phone).cloned();
-            let resolved = c
-                .client_id
-                .and_then(|id| names_by_id.get(&id).cloned())
-                .or_else(|| names_by_phone.get(&c.phone).cloned());
-            let agent_name = c
-                .last_message_from_user_id
-                .as_ref()
-                .and_then(|id| agent_names.get(id).cloned());
-            let assigned_name = c
-                .assigned_to
-                .as_ref()
-                .and_then(|id| assigned_names.get(id).cloned());
-            conv_to_item(
-                c,
-                false,
-                last_opened,
-                ws,
-                resolved,
-                agent_name,
-                assigned_name,
-            )
-        })
-        .collect();
-
-    Ok(Json(ConversationsListResponse {
-        ok: true,
-        data,
-        next_cursor,
-    }))
 }
 
 #[utoipa::path(
@@ -5527,6 +5389,22 @@ async fn resolve_customer_name(state: &Arc<AppState>, conv: &WaConversation) -> 
     shared::mappers::resolve_customer_name(state, conv).await
 }
 
+/// Resuelve el nombre del agente que envió el último mensaje.
+async fn resolve_last_message_agent_name_one(
+    state: &Arc<AppState>,
+    conv: &WaConversation,
+) -> Option<String> {
+    shared::mappers::resolve_last_message_agent_name_one(state, conv).await
+}
+
+/// Resuelve el nombre del agente actualmente asignado.
+async fn resolve_assigned_agent_name_one(
+    state: &Arc<AppState>,
+    conv: &WaConversation,
+) -> Option<String> {
+    shared::mappers::resolve_assigned_agent_name_one(state, conv).await
+}
+
 /// Ventana de 24h desde `last_inbound_at`. Usado por el gate de envío freeform,
 /// por `conv_to_item` y por el WS event `CONVERSACION_ESTADO`.
 pub(super) fn is_within_24h(last_inbound_at: Option<DateTime>) -> bool {
@@ -5625,69 +5503,6 @@ async fn resolve_sent_by_names(
         }
     }
     out
-}
-
-/// Batch-resolución de nombres de agentes para listados de conversaciones,
-/// a partir de `last_message_from_user_id`. Dedup + 1 lookup por UUID único.
-async fn resolve_last_message_agent_names(
-    state: &Arc<AppState>,
-    convs: &[WaConversation],
-) -> std::collections::HashMap<String, String> {
-    use crate::db::UserRepository;
-
-    let mut ids: Vec<String> = convs
-        .iter()
-        .filter_map(|c| c.last_message_from_user_id.clone())
-        .collect();
-    ids.sort();
-    ids.dedup();
-
-    let mut out = std::collections::HashMap::new();
-    for id in ids {
-        if let Ok(Some(u)) = state.db.find_user_by_id(&id).await {
-            out.insert(id, u.name);
-        }
-    }
-    out
-}
-
-/// Resuelve el nombre del agente del último mensaje de una conversación
-/// puntual (detalle). Devuelve `None` si no hay autor o no se encuentra.
-async fn resolve_last_message_agent_name_one(
-    state: &Arc<AppState>,
-    conv: &WaConversation,
-) -> Option<String> {
-    shared::mappers::resolve_last_message_agent_name_one(state, conv).await
-}
-
-/// Batch-resolución de nombres de agentes asignados (`assigned_to`) para
-/// listados. Mismo patrón que `resolve_last_message_agent_names`.
-async fn resolve_assigned_agent_names(
-    state: &Arc<AppState>,
-    convs: &[WaConversation],
-) -> std::collections::HashMap<String, String> {
-    use crate::db::UserRepository;
-
-    let mut ids: Vec<String> = convs.iter().filter_map(|c| c.assigned_to.clone()).collect();
-    ids.sort();
-    ids.dedup();
-
-    let mut out = std::collections::HashMap::new();
-    for id in ids {
-        if let Ok(Some(u)) = state.db.find_user_by_id(&id).await {
-            out.insert(id, u.name);
-        }
-    }
-    out
-}
-
-/// Resuelve el nombre del agente asignado de una conversación puntual.
-/// Devuelve `None` si no hay asignado o el usuario no existe.
-async fn resolve_assigned_agent_name_one(
-    state: &Arc<AppState>,
-    conv: &WaConversation,
-) -> Option<String> {
-    shared::mappers::resolve_assigned_agent_name_one(state, conv).await
 }
 
 /// Resuelve el nombre de un único user_id (UUID). Útil para los eventos WS
