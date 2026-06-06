@@ -138,4 +138,46 @@ Branch: `feature/modularize-whatsapp-pr2b-webhook-impl`
 ## Rollback Boundary (PR2b)
 
 - Revert this PR2b commit to restore `WebhookVerifyParams` / verify/debug helpers to
-  `handler.rs` and `receive_webhook` remains untouched.
+`handler.rs` and `receive_webhook` remains untouched.
+
+## PR2c: Webhook normalization helper extraction
+
+Status: complete
+
+## Completed
+
+- Refactored inbound webhook normalization and metadata helpers out of
+  `src/modules/whatsapp/handler.rs` into
+  `src/modules/whatsapp/webhook/normalize.rs`:
+  - `infer_inbound_effective_type`
+  - `inbound_payload_markers`
+  - `should_store_raw_payload`
+  - `is_known_inbound_type`
+  - `inbound_raw_payload`
+  - `build_top_level_delta_message`
+  - `extract_media_fields`
+  - `extract_inbound_content`
+  - `first_string_at`
+  - `extract_text_from_payload`
+  - `normalize_delta_body`
+  - `describe_top_level_group`
+  - `extract_inbound_payload_target_wa_id`
+  - `extract_inbound_delta_target_wa_id`
+  - `should_apply_message_delta_update`
+- Updated `src/modules/whatsapp/handler.rs` to consume these helpers from
+  `super::webhook::normalize`, reducing in-file logic duplication.
+- Fixed an extraction-side syntax issue in `group` branch normalization and
+  re-ran formatter + typecheck.
+
+## Verification
+
+- `cargo fmt --check` passes after formatting.
+- `git diff --check` passes.
+- `cargo check` passes with no warnings.
+
+## Rollback Boundary (PR2c)
+
+- Revert this PR2c commit to restore normalization helpers and related logic to
+  `src/modules/whatsapp/handler.rs` if needed. No route paths, OpenAPI entries,
+  DB queries, webhook status handling, or assignment/media pipelines were changed
+  in this slice.
