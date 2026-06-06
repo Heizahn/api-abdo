@@ -6,6 +6,7 @@ pub mod handler;
 pub mod messaging;
 pub mod quick_reply_validation;
 pub mod service;
+pub mod settings;
 pub mod shared;
 pub mod tickets;
 pub mod url_preview;
