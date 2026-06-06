@@ -22,6 +22,7 @@ use crate::{
 
 use super::assignment::assign_conversation;
 use super::shared;
+use super::shared::{apply_media_relay, resolve_service_for_phone, settings_secret};
 use super::webhook::handler::{last_payload_store, verify_meta_signature};
 use super::webhook::status::{
     has_meta_throttle_131049, is_inbound_media_failure_status, log_webhook_top_level_errors,
@@ -2087,123 +2088,6 @@ fn parse_meta_template_category(raw: Option<&str>) -> Option<WaTemplateCategory>
         "AUTHENTICATION" => Some(WaTemplateCategory::Authentication),
         _ => None,
     }
-}
-
-#[utoipa::path(
-    post,
-    path = "/v1/auth-user/whatsapp/conversations/{id}/mark-read",
-    tag = "WhatsApp — Soporte",
-    security(("bearerAuth" = [])),
-    params(("id" = String, Path, description = "ID de la conversación")),
-    responses(
-        (status = 200, description = "Mensajes marcados como leídos", body = MarkReadResponse),
-        (status = 404, description = "Conversación no encontrada"),
-        (status = 401, description = "No autorizado"),
-    )
-)]
-pub async fn mark_read_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<UserProfileClaims>,
-    Path(id): Path<String>,
-) -> Result<Json<MarkReadResponse>, ApiError> {
-    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
-
-    let conv = state
-        .db
-        .find_conversation_by_id(&oid)
-        .await
-        .map_err(|e| ApiError::DatabaseError(e))?
-        .ok_or(ApiError::NotFound)?;
-
-    // Actualizar status de inbound en DB y obtener los que cambiaron.
-    // El `agent_id` queda persistido en `read_by_user_id` (first-read-wins)
-    // para que la auditoría pueda atribuir el inbound a quien lo atendió.
-    let changed_ids = state
-        .db
-        .mark_inbound_as_read(&oid, &claims.id)
-        .await
-        .map_err(|e| ApiError::DatabaseError(e))?;
-
-    // Capture old unread_count BEFORE reset (conv was fetched above).
-    let old_unread = conv.unread_count;
-
-    // Resetear contador local en la conversación.
-    let _ = state.db.reset_unread(&oid).await;
-
-    // EMIT BADGE: CONVERSACION_NO_LEIDA — only if there was something to clear.
-    if old_unread > 0 {
-        let pending_total = state.db.count_unread_conversations().await.unwrap_or(0);
-        let unread_ev = WsServerEvent::ConversacionNoLeida {
-            data: ConversacionNoLeidaData {
-                pending_total,
-                conversation_id: id.clone(),
-                delta: -1,
-            },
-        };
-        if let Ok(badge_payload) = serde_json::to_string(&unread_ev) {
-            let _ = broadcast_to_chat_users(&state, badge_payload).await;
-        }
-    }
-
-    // Notificar a Meta (ticks azules + mic azul en voice notes) para cada
-    // inbound del batch. Meta NO propaga `read` a mensajes anteriores — en
-    // particular, los audios sólo muestran el mic azul en el teléfono del
-    // cliente si se llama `status: "read"` sobre ese `wa_message_id` puntual.
-    // Best-effort: si falta credencial o Meta responde error, logueamos y
-    // seguimos (no bloquea el endpoint, va en spawn).
-    if !changed_ids.is_empty() {
-        match resolve_service_for_phone(&state, &conv.business_phone).await {
-            Ok(wa) => {
-                let ids_to_ack = changed_ids.clone();
-                let conv_hex = oid.to_hex();
-                tokio::spawn(async move {
-                    let mut ok = 0usize;
-                    let mut err = 0usize;
-                    for wamid in &ids_to_ack {
-                        match wa.mark_as_read(wamid).await {
-                            Ok(()) => ok += 1,
-                            Err(e) => {
-                                err += 1;
-                                tracing::warn!(
-                                    "[mark-read] Meta mark_as_read falló conv={} wamid={}: {}",
-                                    conv_hex,
-                                    wamid,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                    tracing::debug!(
-                        "[mark-read] Meta ACK conv={} total={} ok={} err={}",
-                        conv_hex,
-                        ids_to_ack.len(),
-                        ok,
-                        err
-                    );
-                });
-            }
-            Err(e) => {
-                tracing::warn!("[mark-read] no se pudo resolver WhatsAppService: {:?}", e);
-            }
-        }
-    }
-
-    // Broadcast del batch. El front propaga `status: "read"` en la UI local.
-    if !changed_ids.is_empty() {
-        let ev = WsServerEvent::MensajesVistos {
-            conversation_id: id.clone(),
-            message_ids: changed_ids.clone(),
-            status: "read".to_string(),
-        };
-        broadcast_all(&state.ws_registry, &ev).await;
-    }
-
-    Ok(Json(MarkReadResponse {
-        ok: true,
-        data: MarkReadData {
-            message_ids: changed_ids,
-        },
-    }))
 }
 
 #[utoipa::path(
@@ -4647,13 +4531,6 @@ pub async fn duplicate_quick_reply_handler(
 // ============================================
 // HELPERS INTERNOS
 // ============================================
-
-/// Secreto AES para cifrar `WaSettings.access_token` en reposo.
-/// Reutilizamos `JWT_SECRET` — alta entropía y estrictamente privado del backend.
-fn settings_secret() -> String {
-    std::env::var("JWT_SECRET").unwrap_or_default()
-}
-
 /// Valida un access_token de Meta. Un token legítimo es un string continuo
 /// base64url-ish sin espacios ni comillas. Cualquier carácter extraño suele
 /// indicar copy-paste con varias variables (ej: pegar una línea de `.env`).
@@ -4670,41 +4547,6 @@ fn validate_access_token(raw: &str) -> Result<&str, ApiError> {
         ));
     }
     Ok(t)
-}
-
-/// Resuelve el `WhatsAppService` para el `business_phone` de una conversación:
-/// busca `WaSettings`, descifra el `access_token` y construye el cliente.
-async fn resolve_service_for_phone(
-    state: &Arc<AppState>,
-    business_phone: &str,
-) -> Result<WhatsAppService, ApiError> {
-    let settings = state
-        .db
-        .find_wa_settings_by_phone(business_phone)
-        .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or_else(|| {
-            ApiError::Internal(format!(
-                "wa_settings inactivo o no encontrado para {}",
-                business_phone
-            ))
-        })?;
-
-    if settings.phone_number_id.is_empty() || settings.access_token.is_empty() {
-        return Err(ApiError::Internal(
-            "wa_settings sin phone_number_id o access_token configurados".into(),
-        ));
-    }
-
-    let token = decrypt_payload(&settings_secret(), &settings.access_token)
-        .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
-
-    let svc = WhatsAppService::new(
-        state.reqwest_client.clone(),
-        settings.phone_number_id,
-        token,
-    );
-    Ok(apply_media_relay(&state, svc))
 }
 
 /// Avisa al cliente que su archivo no llegó cuando Meta reporta un fallo de
@@ -5022,21 +4864,6 @@ async fn schedule_inbound_media_failure_fallback(
         }
     }
     notify_inbound_media_failure(state, wa_id, recipient_phone, business_phone, failure).await;
-}
-
-/// Aplica el relay de Cloudflare al service si ambas env vars están seteadas
-/// en el Config. No-op cuando no hay relay configurado (dev, o red arreglada).
-fn apply_media_relay(state: &Arc<AppState>, svc: WhatsAppService) -> WhatsAppService {
-    match (
-        state.config.relay_url.as_ref(),
-        state.config.relay_secret.as_ref(),
-    ) {
-        (Some(url), Some(secret)) => svc.with_media_relay(super::service::MediaRelay {
-            url: url.clone(),
-            secret: secret.clone(),
-        }),
-        _ => svc,
-    }
 }
 
 /// Tipos de mensaje que se prefetchean al llegar por webhook.

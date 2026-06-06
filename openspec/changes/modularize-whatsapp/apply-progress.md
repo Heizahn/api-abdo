@@ -346,3 +346,44 @@ Branch: `feature/modularize-whatsapp-pr2g-conversation-messages`
 - `2.2`: remains unchecked/partial (query/list/messaging read extraction only in
   this slice)
 - `3.3`: unchanged
+
+## PR2h: Conversation mark-read extraction
+
+Branch: `feature/modularize-whatsapp-pr2h-conversation-mark-read`
+
+## Completed
+
+- Moved `mark_read_handler` from `src/modules/whatsapp/handler.rs` to
+  `src/modules/whatsapp/conversations/lifecycle.rs` and preserved behavior.
+- Updated `src/modules/whatsapp/conversations/handlers.rs` to re-export
+  `mark_read_handler` and `__path_mark_read_handler` from
+  `conversations::lifecycle`.
+- Extracted WhatsApp service helpers into `src/modules/whatsapp/shared/service.rs`:
+  - `resolve_service_for_phone`
+  - `settings_secret`
+  - `apply_media_relay`
+- Updated `src/modules/whatsapp/handler.rs` callsites for those helpers to use the
+  shared implementation.
+- Bumped version metadata for this PR slice:
+  - `Cargo.toml`
+  - `src/openapi.rs`
+  - `src/main.rs`
+
+## Notes
+
+- Task `2.2` remains **unchecked/partial** because this PR intentionally extracts
+  only `mark_read` lifecycle ownership; other conversation handlers, messaging,
+  settings, quick reply, and template flows remain in legacy `handler.rs`.
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.2`: remains unchecked/partial (mark-read slice only)
+- `3.3`: unchanged
