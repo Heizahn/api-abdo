@@ -833,3 +833,48 @@ Branch: `feature/modularize-whatsapp-pr3c-dispatch-send`
 
 - `2.3`: still unchanged/partial (dispatch/send helper ownership advanced, handler remains).
 - `3.3`: unchanged
+
+## PR3e: Messaging reactions extraction
+
+Branch: `feature/modularize-whatsapp-pr3e-reactions`
+
+Status: complete
+
+## Completed
+
+- Added `src/modules/whatsapp/messaging/reactions.rs` and moved reaction ownership out of
+  `src/modules/whatsapp/handler.rs`:
+  - `ReactMessageRequest`
+  - `ReactMessageResponse`
+  - `react_message_handler`
+  - `handle_inbound_reaction`
+- Updated inbound webhook processing in `handler.rs` to delegate reaction handling:
+  `super::messaging::reactions::handle_inbound_reaction`.
+- Added `pub mod reactions;` to `src/modules/whatsapp/messaging/mod.rs`.
+- Rewired the existing WhatsApp reaction route in `src/modules/whatsapp/mod.rs` to use:
+  `messaging::reactions::react_message_handler`.
+- Updated OpenAPI registrations to moved symbols:
+  - `crate::modules::whatsapp::messaging::reactions::react_message_handler`
+  - `crate::modules::whatsapp::messaging::reactions::ReactMessageRequest`
+  - `crate::modules::whatsapp::messaging::reactions::ReactMessageResponse`
+- Kept request/response contract, WS event shape, DB update semantics, and reaction
+  behaviors unchanged.
+- Applied project version bump to `0.3.41` in:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/main.rs`
+  - `src/openapi.rs`
+- Kept task `2.3` as partial because `messaging/media.rs` still remains in `handler.rs`.
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.3`: partially advanced (reactions extracted; `media.rs` still pending).
+- `3.3`: unchanged
