@@ -4576,40 +4576,12 @@ fn is_superadmin(user: &crate::models::users::User) -> bool {
     shared::authz::is_superadmin(user)
 }
 
-fn is_chat_workspace_match(
-    user_workspace_ids: &[ObjectId],
-    conversation_workspace_id: &ObjectId,
-) -> bool {
-    shared::authz::is_chat_workspace_match(user_workspace_ids, conversation_workspace_id)
-}
-
 async fn require_workspace_actor_for_conversation(
     state: &Arc<AppState>,
     actor: &crate::models::users::User,
     business_phone: &str,
 ) -> Result<WaSettings, ApiError> {
     shared::authz::require_workspace_actor_for_conversation(state, actor, business_phone).await
-}
-
-async fn is_transfer_target_allowed_for_workspace(
-    state: &Arc<AppState>,
-    target: &crate::models::users::User,
-    workspace_id: Option<&ObjectId>,
-) -> Result<bool, ApiError> {
-    shared::authz::is_transfer_target_allowed_for_workspace(state, target, workspace_id).await
-}
-
-async fn is_transfer_target_allowed_for_actor_workspaces(
-    state: &Arc<AppState>,
-    target: &crate::models::users::User,
-    actor_workspace_ids: &[ObjectId],
-) -> Result<bool, ApiError> {
-    shared::authz::is_transfer_target_allowed_for_actor_workspaces(
-        state,
-        target,
-        actor_workspace_ids,
-    )
-    .await
 }
 
 async fn require_workspace_agent_or_assigned(
