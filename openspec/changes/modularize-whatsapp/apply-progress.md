@@ -574,6 +574,47 @@ Branch: `feature/modularize-whatsapp-pr2l-conversation-ai-controls`
 - `2.2`: remains **unchecked/partial** (conversation AI controls moved; conversation flow extraction continues)
 - `3.3`: unchanged
 
+## PR3d: Messaging send handler extraction
+
+Branch: `feature/modularize-whatsapp-pr3d-send-handler`
+
+Status: complete
+
+## Completed
+
+- Moved full ownership of `send_message_handler` from `src/modules/whatsapp/handler.rs` to
+  `src/modules/whatsapp/messaging/send.rs`:
+  - `send_message_handler` implementation and OpenAPI annotation
+  - `require_workspace_agent_or_assigned` helper (private helper needed only by this handler)
+- Updated `src/modules/whatsapp/conversations/handlers.rs` to re-export send symbols from
+  `crate::modules::whatsapp::messaging::send` so route and OpenAPI entry points remain stable:
+  - `send_message_handler`
+  - `__path_send_message_handler`
+- Removed now-orphaned send-only helpers from `src/modules/whatsapp/handler.rs`:
+  - `send_message_handler`
+  - `require_workspace_agent_or_assigned`
+- Preserved behavior-sensitive logic paths (DB write flow, idempotency, WS events, quick-reply increment,
+  `require_can_chat`/workspace checks, template media header auto-fill, reaction handling context).
+- Applied patch-version metadata bump to:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/main.rs`
+  - `src/openapi.rs`
+- Kept task `2.3` status as partial because `media.rs` / `reactions.rs` still remain in `handler.rs` by scope.
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.3`: still **partial/unchecked** (`send_message_handler` moved, but media/reaction modules still pending)
+- `3.3`: unchanged
+
 ## PR2m: Transferable agents query extraction slice
 
 Branch: `feature/modularize-whatsapp-pr2m-transferable-agents`
