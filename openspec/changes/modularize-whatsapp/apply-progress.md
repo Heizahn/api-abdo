@@ -620,3 +620,45 @@ Branch: `feature/modularize-whatsapp-pr2m-transferable-agents`
 
 - `2.2`: remains **unchecked/partial** (transferable-agent query extracted; full task remains partial by design)
 - `3.3`: unchanged
+
+## PR2n: Conversation initiation ownership extraction slice
+
+Branch: `feature/modularize-whatsapp-pr2n-initiate-conversation`
+
+Status: complete
+
+## Completed
+
+- Added `src/modules/whatsapp/conversations/outbound.rs` with implementation ownership for `initiate_conversation_handler` and its local helpers:
+  - `initiate_conversation_handler`
+  - `auto_fill_template_header_media`
+  - `map_template_send_error`
+  - `normalize_to_e164`
+- Wired the new module in `src/modules/whatsapp/conversations/mod.rs`.
+- Updated `src/modules/whatsapp/conversations/handlers.rs` to re-export:
+  - `initiate_conversation_handler`
+  - `__path_initiate_conversation_handler`
+  from `conversations::outbound`.
+- Removed the legacy `initiate_conversation_handler` implementation from `src/modules/whatsapp/handler.rs`; route and OpenAPI callsites continue through the `conversations::handlers` facade, which now re-exports the canonical implementation from `conversations::outbound`.
+- Kept route and OpenAPI registration unchanged (`src/modules/whatsapp/mod.rs`, `src/openapi.rs` still target `conversations::handlers`).
+- Applied project metadata version bump for this PR2n slice:
+  - `Cargo.toml`
+  - `src/openapi.rs`
+  - `src/main.rs`
+
+## Notes
+
+- Task `2.2` remains **unchecked/partial** by scope: messaging (`send_message_handler`), webhook/WS, templates/media/settings/quick replies still remain in `handler.rs`; this slice only migrates the conversation initiation ownership.
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.2`: remains **partial/unchecked** (initiation ownership moved; conversation implementation migration still ongoing)
+- `3.3`: unchanged
