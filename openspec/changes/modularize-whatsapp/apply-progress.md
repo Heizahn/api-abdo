@@ -483,3 +483,49 @@ Branch: `feature/modularize-whatsapp-pr2j-conversation-transfer`
 - `2.2`: remains unchecked/partial (transfer ownership moved; implementation body
   extraction continues)
 - `3.3`: unchanged
+
+## PR2k: Conversation close/reopen lifecycle extraction
+
+Branch: `feature/modularize-whatsapp-pr2k-conversation-close-reopen`
+
+## Completed
+
+- Moved `close_conversation_handler` and `reopen_conversation_handler` from
+  `src/modules/whatsapp/handler.rs` to
+  `src/modules/whatsapp/conversations/lifecycle.rs`, preserving behavior.
+- In moved handlers, switched to direct `state.db.record_conversation_event(...)`
+  calls with best-effort warning logs on failure (no caller-facing impact).
+- Updated moved handlers to call shared helpers directly:
+  - `shared::workspace::resolve_workspace_name`
+  - `shared::mappers::{resolve_customer_name, resolve_last_message_agent_name_one,
+    resolve_assigned_agent_name_one}`
+  - `shared::response::conv_to_item`
+- Updated `src/modules/whatsapp/conversations/handlers.rs` to re-export:
+  `close_conversation_handler`, `reopen_conversation_handler`,
+  `__path_close_conversation_handler`, `__path_reopen_conversation_handler`
+  from `conversations::lifecycle`.
+- Preserved all non-requested scope handlers in `src/modules/whatsapp/handler.rs`:
+  send/initiate/intervene/reset/list-transferable/webhook/media/settings/templates/
+  quick replies, routes, payload contracts, DB traits, WS event schemas.
+- Bumped version metadata for PR2k:
+  - `Cargo.toml`
+  - `src/openapi.rs`
+  - `src/main.rs`
+
+## Notes
+
+- Task `2.2` remains **unchecked/partial** as requested: close/reopen ownership
+  moved only.
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.2`: remains **unchecked/partial** (close/reopen lifecycle extraction only)
+- `3.3`: unchanged

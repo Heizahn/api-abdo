@@ -35,6 +35,229 @@ use crate::{
 
 #[utoipa::path(
     post,
+    path = "/v1/auth-user/whatsapp/conversations/{id}/close",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ID de la conversación")),
+    responses(
+        (status = 200, description = "Conversación cerrada", body = ConversationDetailResponse),
+        (status = 404, description = "Conversación no encontrada"),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn close_conversation_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+) -> Result<Json<ConversationDetailResponse>, ApiError> {
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+
+    let conv = state
+        .db
+        .find_conversation_by_id(&oid)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?
+        .ok_or(ApiError::NotFound)?;
+
+    // Capturar al agente ANTES de cerrar — `close_conversation` desasigna.
+    let prev_agent = conv.assigned_to.clone();
+
+    state
+        .db
+        .close_conversation(&oid)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
+
+    if let Some(agent) = prev_agent.as_deref() {
+        state.redis.decr_agent_load(agent).await;
+    }
+
+    // Limpieza de counters AI por conversación al cerrar.
+    state.redis.clear_ai_conv_counters(&id).await;
+
+    let ev = WsServerEvent::ChatCerrado {
+        conversation_id: id.clone(),
+    };
+    broadcast_all(&state.ws_registry, &ev).await;
+
+    // EMIT BADGE: CONVERSACION_NO_LEIDA — cerrar puede bajar el conteo si había mensajes sin leer.
+    if conv.unread_count > 0 {
+        let pending_total = state.db.count_unread_conversations().await.unwrap_or(0);
+        let unread_ev = WsServerEvent::ConversacionNoLeida {
+            data: ConversacionNoLeidaData {
+                pending_total,
+                conversation_id: id.clone(),
+                delta: -1,
+            },
+        };
+        if let Ok(badge_payload) = serde_json::to_string(&unread_ev) {
+            let _ = broadcast_to_chat_users(&state, badge_payload).await;
+        }
+    }
+
+    if let Err(e) = state
+        .db
+        .record_conversation_event(WaConversationEventInput {
+            conversation_id: &oid,
+            business_phone: &conv.business_phone,
+            event_type: "closed",
+            actor_id: Some(claims.id.as_str()),
+            actor_name: Some(claims.name.as_str()),
+            target_id: None,
+            target_name: None,
+            note: None,
+        })
+        .await
+    {
+        tracing::warn!("record_conversation_event failed: {}", e);
+    }
+
+    let conv_after = state
+        .db
+        .find_conversation_by_id(&oid)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?
+        .ok_or(ApiError::NotFound)?;
+
+    let opens = state
+        .db
+        .get_conversation_opens(&claims.id, &[oid])
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
+    let last_opened = opens.get(&oid).copied();
+    let workspace_name = resolve_workspace_name(&state, &conv_after.business_phone).await;
+    let resolved = resolve_customer_name(&state, &conv_after).await;
+    let agent_name = resolve_last_message_agent_name_one(&state, &conv_after).await;
+    let assigned_name = resolve_assigned_agent_name_one(&state, &conv_after).await;
+
+    Ok(Json(ConversationDetailResponse {
+        ok: true,
+        data: conv_to_item(
+            conv_after,
+            true,
+            last_opened,
+            workspace_name,
+            resolved,
+            agent_name,
+            assigned_name,
+        ),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/conversations/{id}/reopen",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ID de la conversación cerrada")),
+    responses(
+        (status = 200, description = "Conversación reabierta (status: pending, assigned_to: null) o detalle actual si ya estaba abierta (idempotente).", body = ConversationDetailResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "El usuario no tiene `bCanChat=true`"),
+        (status = 404, description = "Conversación no encontrada"),
+    )
+)]
+pub async fn reopen_conversation_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+) -> Result<Json<ConversationDetailResponse>, ApiError> {
+    require_can_chat(&state, &claims.id).await?;
+
+    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
+
+    // Pre-check de existencia: `reopen_conversation` sólo actúa si status==closed.
+    // Distinguir "no existe" (404) de "ya abierta" (idempotente) requiere este paso.
+    if state
+        .db
+        .find_conversation_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .is_none()
+    {
+        return Err(ApiError::NotFound);
+    }
+
+    let reopened = state
+        .db
+        .reopen_conversation(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    let conv_after = state
+        .db
+        .find_conversation_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::NotFound)?;
+
+    let opens = state
+        .db
+        .get_conversation_opens(&claims.id, &[oid])
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    let last_opened = opens.get(&oid).copied();
+    let workspace_name = resolve_workspace_name(&state, &conv_after.business_phone).await;
+    let resolved = resolve_customer_name(&state, &conv_after).await;
+    let agent_name = resolve_last_message_agent_name_one(&state, &conv_after).await;
+    let assigned_name = resolve_assigned_agent_name_one(&state, &conv_after).await;
+    let business_phone_for_audit = conv_after.business_phone.clone();
+    let conversation_item = conv_to_item(
+        conv_after,
+        true,
+        last_opened,
+        workspace_name,
+        resolved,
+        agent_name,
+        assigned_name,
+    );
+
+    // Sólo emitimos el evento si realmente se reabrió (transición real).
+    // Si era una llamada idempotente sobre una conv ya abierta, no disparamos
+    // nada para no confundir a los otros clientes conectados.
+    if reopened {
+        // Reopen = arranque limpio: limpiamos counters AI por conv.
+        state.redis.clear_ai_conv_counters(&id).await;
+
+        let ev = WsServerEvent::ChatReabierto {
+            conversation_id: id.clone(),
+            conversation: conversation_item.clone(),
+        };
+        broadcast_all(&state.ws_registry, &ev).await;
+
+        // Notificar al front que ai_conv_state fue limpiado (null = borrado).
+        let ev_ia = WsServerEvent::ConversacionEstadoIa {
+            conversation_id: id.clone(),
+            ai_conv_state: None,
+        };
+        broadcast_all(&state.ws_registry, &ev_ia).await;
+
+        if let Err(e) = state
+            .db
+            .record_conversation_event(WaConversationEventInput {
+                conversation_id: &oid,
+                business_phone: &business_phone_for_audit,
+                event_type: "reopened",
+                actor_id: Some(claims.id.as_str()),
+                actor_name: Some(claims.name.as_str()),
+                target_id: None,
+                target_name: None,
+                note: None,
+            })
+            .await
+        {
+            tracing::warn!("record_conversation_event failed: {}", e);
+        }
+    }
+
+    Ok(Json(ConversationDetailResponse {
+        ok: true,
+        data: conversation_item,
+    }))
+}
+
+#[utoipa::path(
+    post,
     path = "/v1/auth-user/whatsapp/conversations/{id}/mark-read",
     tag = "WhatsApp — Soporte",
     security(("bearerAuth" = [])),
