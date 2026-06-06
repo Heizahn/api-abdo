@@ -296,3 +296,53 @@ Branch: `feature/modularize-whatsapp-pr2f-conversation-list`
 
 - `2.2`: still partially advanced (query/list extraction now includes list handler; implementation body migration continues)
 - `3.3`: unchanged
+
+## PR2g: Conversation messages query extraction slice
+
+Branch: `feature/modularize-whatsapp-pr2g-conversation-messages`
+
+## Completed
+
+- Moved `get_conversation_messages_handler` and `MessagesQuery` from
+  `src/modules/whatsapp/handler.rs` into
+  `src/modules/whatsapp/conversations/queries.rs`.
+- Moved/ported `resolve_sent_by_names` to `conversations/queries.rs` and wired
+  it into the moved query handler flow.
+- Updated query mapping to use shared mapper helpers directly:
+  - `crate::modules::whatsapp::shared::mappers::msg_to_item`
+  - `crate::modules::whatsapp::shared::mappers::resolve_reply_to_items`
+- Preserved `record_conversation_open` call/semantics exactly as before for GET
+  `/v1/auth-user/whatsapp/conversations/{id}/messages`:
+  - executed on every successful read path,
+  - warning-only handling on DB failure,
+  - unchanged comments/behavioral meaning.
+- Updated `src/modules/whatsapp/conversations/handlers.rs` to re-export:
+  - `get_conversation_messages_handler`
+  - `__path_get_conversation_messages_handler`
+  from `conversations::queries`.
+- Kept legacy handlers (send/mark/lifecycle/settings/media/webhook/template/quick-replies/WS/contracts/DB traits/OpenAPI semantics) in
+  `src/modules/whatsapp/handler.rs`.
+- Bumped project version metadata in all standard artifacts:
+  - `Cargo.toml`
+  - `src/main.rs`
+  - `src/openapi.rs`
+
+## Notes
+
+- Task `2.2` remains intentionally **unchecked/partial** after this bounded
+  PR slice, as required. Remaining message/lifecycle logic is still in
+  `handler.rs`.
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.2`: remains unchecked/partial (query/list/messaging read extraction only in
+  this slice)
+- `3.3`: unchanged

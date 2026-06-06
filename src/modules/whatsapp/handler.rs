@@ -998,100 +998,6 @@ pub async fn receive_webhook(
 // ENDPOINTS DE STAFF/ADMIN (user JWT)
 // ============================================
 
-#[derive(serde::Deserialize)]
-pub struct MessagesQuery {
-    pub cursor: Option<String>,
-    pub limit: Option<i64>,
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/auth-user/whatsapp/conversations/{id}/messages",
-    tag = "WhatsApp — Soporte",
-    security(("bearerAuth" = [])),
-    params(
-        ("id" = String, Path, description = "ID de la conversación"),
-        ("cursor" = Option<String>, Query, description = "Cursor opaco (copiar de next_cursor)"),
-        ("limit" = Option<i64>, Query, description = "Mensajes por página (default: 50, max: 200)"),
-    ),
-    responses(
-        (status = 200, description = "Detalle de conversación + mensajes (más recientes primero)", body = ConversationMessagesResponse),
-        (status = 404, description = "Conversación no encontrada"),
-        (status = 401, description = "No autorizado"),
-    )
-)]
-pub async fn get_conversation_messages_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<UserProfileClaims>,
-    Path(id): Path<String>,
-    Query(q): Query<MessagesQuery>,
-) -> Result<Json<ConversationMessagesResponse>, ApiError> {
-    let oid = ObjectId::parse_str(&id).map_err(|_| ApiError::BadRequest("id inválido".into()))?;
-
-    // Verificar existencia (404 si no existe). No bindeamos: leer mensajes ya
-    // no depende del estado de la conv (sin transición pending → in_progress).
-    state
-        .db
-        .find_conversation_by_id(&oid)
-        .await
-        .map_err(|e| ApiError::DatabaseError(e))?
-        .ok_or(ApiError::NotFound)?;
-
-    let limit = q.limit.unwrap_or(50).clamp(1, 200);
-
-    let messages = state
-        .db
-        .get_messages(&oid, q.cursor.as_deref(), limit)
-        .await
-        .map_err(|e| ApiError::DatabaseError(e))?;
-
-    let agent_names = resolve_sent_by_names(&state, &messages).await;
-    let reply_items = resolve_reply_to_items(&state, &messages).await;
-
-    let next_cursor = if (messages.len() as i64) < limit {
-        None
-    } else {
-        messages.last().and_then(|m| {
-            Some(format!(
-                "{}_{}",
-                m.timestamp.timestamp_millis(),
-                m.id?.to_hex()
-            ))
-        })
-    };
-
-    // Registrar "chat abierto" por este agente (siempre, incluso en paginaciones).
-    // Esto es tracking de lectura — NO toca ownership ni status.
-    if let Err(e) = state.db.record_conversation_open(&claims.id, &oid).await {
-        tracing::warn!("record_conversation_open error: {}", e);
-    }
-
-    // NOTA: leer una conversación NO la toma ni cambia su status. La transición
-    // pending → in_progress ocurre SOLO vía acciones explícitas: POST /take,
-    // POST /intervene (y el reopen+take de envío sobre conv cerrada). Antes el
-    // GET transicionaba si el lector era el asignado, lo que "tomaba" la conv
-    // (y pausaba la IA) con solo abrirla. Removido a propósito.
-
-    Ok(Json(ConversationMessagesResponse {
-        ok: true,
-        data: messages
-            .into_iter()
-            .map(|m| {
-                let name = m
-                    .sent_by
-                    .as_deref()
-                    .and_then(|id| agent_names.get(id).cloned());
-                let rto = m
-                    .reply_to_wa_message_id
-                    .as_deref()
-                    .and_then(|wid| reply_items.get(wid).cloned());
-                msg_to_item(m, name, rto)
-            })
-            .collect(),
-        next_cursor,
-    }))
-}
-
 #[utoipa::path(
     post,
     path = "/v1/auth-user/whatsapp/conversations/{id}/messages",
@@ -5464,45 +5370,10 @@ async fn resolve_reply_to_for_one(state: &Arc<AppState>, m: &WaMessage) -> Optio
     shared::mappers::resolve_reply_to_for_one(state, m).await
 }
 
-/// Batch-resuelve los `reply_to` de un conjunto de mensajes en un solo query a
-/// `WaMessages` (+ uno a `Users` para los nombres de agentes).
-///
-/// Devuelve un mapa `wa_message_id citado → ReplyToItem` listo para armar el
-/// `MessageItem`. Mensajes cuyo `reply_to_wa_message_id` no existe en DB
-/// (ej. mensajes anteriores al deploy del feature) quedan fuera del mapa y
-/// el front recibirá `reply_to: null`.
-async fn resolve_reply_to_items(
-    state: &Arc<AppState>,
-    messages: &[WaMessage],
-) -> std::collections::HashMap<String, ReplyToItem> {
-    shared::mappers::resolve_reply_to_items(state, messages).await
-}
-
 /// Convierte un timestamp de Meta (Unix seconds en string) a `bson::DateTime`.
 fn parse_unix_seconds_to_bson(s: &str) -> Option<DateTime> {
     let secs: i64 = s.parse().ok()?;
     Some(DateTime::from_millis(secs.checked_mul(1000)?))
-}
-
-/// Resuelve nombres de agentes para un batch de mensajes, deduplicando UUIDs
-/// y leyendo de `Users` en paralelo.
-async fn resolve_sent_by_names(
-    state: &Arc<AppState>,
-    messages: &[WaMessage],
-) -> std::collections::HashMap<String, String> {
-    use crate::db::UserRepository;
-
-    let mut ids: Vec<String> = messages.iter().filter_map(|m| m.sent_by.clone()).collect();
-    ids.sort();
-    ids.dedup();
-
-    let mut out = std::collections::HashMap::new();
-    for id in ids {
-        if let Ok(Some(u)) = state.db.find_user_by_id(&id).await {
-            out.insert(id, u.name);
-        }
-    }
-    out
 }
 
 /// Resuelve el nombre de un único user_id (UUID). Útil para los eventos WS
