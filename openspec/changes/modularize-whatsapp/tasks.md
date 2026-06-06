@@ -35,7 +35,7 @@ Chain strategy: feature-branch-chain
 
 - [ ] 2.1 Move webhook handlers into `webhook/{mod.rs,handler.rs,normalize.rs,media_failures.rs,status.rs}` and preserve `verify_webhook`, `receive_webhook`, `debug_last_webhook_handler`. _(PR2 created the module boundary and route re-exports. PR2b moved simple verify/debug endpoint ownership to `webhook::handler`; `receive_webhook` remains legacy in `handler.rs` and is re-exported from `webhook::handler` for now.)_
 - [ ] 2.2 Move conversation REST flows into `conversations/{mod.rs,handlers.rs,lifecycle.rs,queries.rs}`; keep route paths/order unchanged. _(PR2 + PR2e + PR2f moved query/list/read pieces into `conversations::queries` while request/response flow remains in legacy `handler.rs` for now; task remains partial.)_
-- [ ] 2.3 Move messaging/media/reaction code into `messaging/{mod.rs,send.rs,reactions.rs,media.rs,preview.rs}`. _(PR3e extracted reactions; `media.rs` remains pending.)_
+- [ ] 2.3 Move messaging/media/reaction code into `messaging/{mod.rs,send.rs,reactions.rs,media.rs,preview.rs}`. _(PR3f extracted outbound upload + limits; media download/proxy/cache/template-header upload still remain in `handler.rs`.)_
 - [ ] 2.4 Move settings + WhatsApp Numbers + test-connection into `settings/{mod.rs,handlers.rs,validation.rs}`.
 
 ## Phase 3: Wiring / Verification
