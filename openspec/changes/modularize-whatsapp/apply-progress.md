@@ -706,3 +706,45 @@ Branch: `feature/modularize-whatsapp-pr3a-send-message`
 
 - `2.3`: unchanged/partial (preview helper extraction only)
 - `3.3`: unchanged
+
+## PR3b: Messaging send-mode extraction
+
+Branch: `feature/modularize-whatsapp-pr3b-send-helpers`
+
+## Completed
+
+- Added `src/modules/whatsapp/messaging/mode.rs` and moved send-mode resolution logic from `src/modules/whatsapp/handler.rs`:
+  - `SendMode`
+  - `resolve_send_mode`
+  - private helper functions:
+    - `freeform_window_expired_error`
+    - `nonempty`
+    - `validate_media_id`
+- Exported messaging submodule in `src/modules/whatsapp/messaging/mod.rs` with `pub mod mode;`.
+- Updated `src/modules/whatsapp/handler.rs` imports to consume:
+  - `super::messaging::mode::{resolve_send_mode, SendMode}`
+- Removed legacy `resolve_send_mode_local` from `handler.rs` so the callsite now resolves the helper from `messaging::mode`.
+- Kept task `2.3` in `tasks.md` as unchecked (partial), with explicit scope note that this PR only moves send-mode plumbing.
+- Applied version bump for this slice:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/openapi.rs`
+  - `src/main.rs`
+
+## Notes
+
+- This batch still does **not** extract `dispatch_send`, `SentData`, or other messaging ownership slices.
+- OpenAPI/path registrations and send handler behavior remain unchanged.
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.3`: unchanged/partial (send-mode extraction only, full task 2.3 still pending)
+- `3.3`: unchanged
