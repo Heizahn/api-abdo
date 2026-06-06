@@ -639,7 +639,7 @@ Status: complete
   - `initiate_conversation_handler`
   - `__path_initiate_conversation_handler`
   from `conversations::outbound`.
-- Added a compatibility shim in `src/modules/whatsapp/handler.rs` so external callsites remain intact while the canonical implementation lives in `conversations::outbound`.
+- Removed the legacy `initiate_conversation_handler` implementation from `src/modules/whatsapp/handler.rs`; route and OpenAPI callsites continue through the `conversations::handlers` facade, which now re-exports the canonical implementation from `conversations::outbound`.
 - Kept route and OpenAPI registration unchanged (`src/modules/whatsapp/mod.rs`, `src/openapi.rs` still target `conversations::handlers`).
 - Applied project metadata version bump for this PR2n slice:
   - `Cargo.toml`
