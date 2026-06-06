@@ -2,13 +2,14 @@ use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     Extension, Json,
 };
 use mongodb::bson::oid::ObjectId;
 
 use crate::{
     auth::user_jwt::UserProfileClaims,
-    db::{ProfileRepository, WhatsAppRepository},
+    db::{ProfileRepository, UserRepository, WhatsAppRepository},
     error::ApiError,
     models::whatsapp::*,
     modules::whatsapp::shared::{authz, mappers, response},
@@ -30,6 +31,14 @@ pub struct ConversationsQuery {
     pub business_phone: Option<String>,
     pub cursor: Option<String>,
     pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct TransferableAgentsQuery {
+    /// ObjectId de `WaSettings` para filtrar agentes del workspace.
+    pub workspace_id: Option<String>,
+    /// Número de negocio (E.164 o formato local) para filtrar agentes del workspace.
+    pub business_phone: Option<String>,
 }
 
 fn normalize_to_e164(input: &str) -> String {
@@ -436,6 +445,135 @@ pub async fn get_conversation_messages_handler(
             .collect(),
         next_cursor,
     }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/transferable-agents",
+    tag = "WhatsApp — Soporte",
+    security(("bearerAuth" = [])),
+    params(
+        ("workspace_id" = Option<String>, Query, description = "WaSettings._id para devolver sólo agentes de ese workspace"),
+        ("business_phone" = Option<String>, Query, description = "Número de negocio para devolver sólo agentes de ese workspace"),
+    ),
+    responses(
+        (status = 200, description = "Usuarios con permiso para atender chats (bCanChat == true)", body = TransferableAgentsResponse),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn list_transferable_agents_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Query(q): Query<TransferableAgentsQuery>,
+) -> Result<Json<TransferableAgentsResponse>, ApiError> {
+    let actor = authz::require_can_chat(&state, &claims.id).await?;
+
+    let users = state
+        .db
+        .find_chat_agents()
+        .await
+        .map_err(|e| ApiError::DatabaseError(e))?;
+
+    let workspace_id: Option<ObjectId> = if let Some(workspace_id) = q
+        .workspace_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let oid = ObjectId::parse_str(workspace_id).map_err(|_| {
+            ApiError::domain_with_field(
+                StatusCode::BAD_REQUEST,
+                "whatsapp_workspace_id_invalid",
+                "workspace_id",
+                "workspace_id debe ser un ObjectId hex",
+            )
+        })?;
+        let settings = state
+            .db
+            .find_wa_settings_by_id(&oid)
+            .await
+            .map_err(ApiError::DatabaseError)?
+            .ok_or_else(|| {
+                ApiError::domain_with_field(
+                    StatusCode::NOT_FOUND,
+                    "whatsapp_workspace_not_found",
+                    "workspace_id",
+                    "No existe el workspace indicado",
+                )
+            })?;
+        settings.id
+    } else if let Some(business_phone) = q
+        .business_phone
+        .as_deref()
+        .map(normalize_to_e164)
+        .filter(|s| !s.is_empty())
+    {
+        let settings = state
+            .db
+            .find_wa_settings_by_phone(&business_phone)
+            .await
+            .map_err(ApiError::DatabaseError)?
+            .ok_or_else(|| {
+                ApiError::domain_with_field(
+                    StatusCode::NOT_FOUND,
+                    "whatsapp_workspace_not_found",
+                    "business_phone",
+                    "No existe un workspace activo para el número indicado",
+                )
+            })?;
+        settings.id
+    } else {
+        None
+    };
+
+    let actor_workspaces = if authz::is_superadmin(&actor) {
+        None
+    } else {
+        let workspaces = state
+            .db
+            .get_user_workspaces(&actor.id)
+            .await
+            .map_err(ApiError::DatabaseError)?;
+
+        if let Some(workspace_id) = workspace_id.as_ref() {
+            if !authz::is_chat_workspace_match(&workspaces, workspace_id) {
+                return Err(ApiError::domain_simple(
+                    StatusCode::FORBIDDEN,
+                    "whatsapp_workspace_membership_required",
+                    "No tienes permiso sobre el workspace indicado",
+                ));
+            }
+        }
+
+        Some(workspaces)
+    };
+
+    let mut data = Vec::with_capacity(users.len());
+    for user in users {
+        let allowed = if let Some(workspace_id) = workspace_id.as_ref() {
+            authz::is_transfer_target_allowed_for_workspace(&state, &user, Some(workspace_id))
+                .await?
+        } else if let Some(actor_workspaces) = actor_workspaces.as_deref() {
+            authz::is_transfer_target_allowed_for_actor_workspaces(&state, &user, actor_workspaces)
+                .await?
+        } else {
+            authz::is_transfer_target_allowed_for_workspace(&state, &user, None).await?
+        };
+
+        if !allowed {
+            continue;
+        }
+
+        data.push(TransferableAgentItem {
+            id: user.id,
+            name: user.name,
+            email: user.email,
+            role: user.role,
+            is_bot: user.is_bot,
+        });
+    }
+
+    Ok(Json(TransferableAgentsResponse { ok: true, data }))
 }
 
 /// Batch-resolución de nombres de agentes para listados de conversaciones,
