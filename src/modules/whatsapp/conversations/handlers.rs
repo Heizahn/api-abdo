@@ -4,7 +4,9 @@
 //! `conversations::queries` (query/read handlers) while preserving route
 //! semantics via re-exports.
 
-pub use crate::modules::whatsapp::handler::{__path_send_message_handler, send_message_handler};
+pub use crate::modules::whatsapp::messaging::send::{
+    __path_send_message_handler, send_message_handler,
+};
 
 pub use crate::modules::whatsapp::conversations::outbound::{
     __path_initiate_conversation_handler, initiate_conversation_handler,
