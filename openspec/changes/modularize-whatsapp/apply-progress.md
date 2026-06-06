@@ -254,3 +254,45 @@ Branch: `feature/modularize-whatsapp-pr2e-conversation-read`
 
 - `2.2`: now partially advanced (query/read extraction only; no messaging/aux list body migration)
 - `3.3`: unchanged
+
+## PR2f: Conversation list query extraction
+
+Status: in progress
+
+Branch: `feature/modularize-whatsapp-pr2f-conversation-list`
+
+## Completed
+
+- Moved `list_conversations_handler` query/list logic from `handler.rs` to `conversations/queries.rs`:
+  - `ConversationsQuery`
+  - `list_conversations_handler`
+  - `resolve_last_message_agent_names`
+  - `resolve_assigned_agent_names`
+- In `conversations/queries.rs`, updated list handler mapping to use
+  `crate::modules::whatsapp::shared::response::conv_to_item` directly.
+- Updated `src/modules/whatsapp/conversations/handlers.rs` to re-export:
+  - `list_conversations_handler`
+  - `__path_list_conversations_handler`
+  from `conversations::queries`.
+- Preserved all non-assigned handlers in `handler.rs` (messages lifecycle, messaging,
+  lifecycle, webhook, settings/media/WS/template/quick-reply code, routes, payload contracts, DB traits, and OpenAPI semantics).
+- Applied version bump in versioned artifacts:
+  - `Cargo.toml`
+  - `src/openapi.rs`
+  - `src/main.rs`
+
+## Notes
+
+- Task `2.2` remains intentionally **unchecked/partial** after this PR slice; further conversation flow handlers remain in `handler.rs` by design for this bounded change.
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.2`: still partially advanced (query/list extraction now includes list handler; implementation body migration continues)
+- `3.3`: unchanged
