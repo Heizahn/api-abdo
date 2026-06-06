@@ -662,3 +662,47 @@ Status: complete
 
 - `2.2`: remains **partial/unchecked** (initiation ownership moved; conversation implementation migration still ongoing)
 - `3.3`: unchanged
+
+## PR3a: Messaging preview helper extraction
+
+Branch: `feature/modularize-whatsapp-pr3a-send-message`
+
+## Completed
+
+- Added `src/modules/whatsapp/messaging/` module boundary:
+  - `mod.rs`
+  - `preview.rs`
+- Moved preview helpers only (low coupling) from `src/modules/whatsapp/handler.rs` to `src/modules/whatsapp/messaging/preview.rs`:
+  - `interactive_preview`
+  - `template_preview`
+- Updated `src/modules/whatsapp/handler.rs` callsites to use
+  `crate::modules::whatsapp::messaging::preview::{interactive_preview, template_preview}`.
+- Added `pub mod messaging;` in `src/modules/whatsapp/mod.rs`.
+- Preserved behavior and output strings of moved helpers.
+- Explicitly kept `send_message_handler`, `SendMode`, `SentData`, `resolve_send_mode`,
+  `dispatch_send`, media/template header helpers, reactions, webhook, conversations,
+  settings, quick replies, templates, routes, OpenAPI path symbols, DB traits, and WS
+  schemas unchanged.
+- Kept task `2.3` in `tasks.md` unchecked and marked as partial for this bounded safe
+  pre-step.
+- Bumped version metadata for this PR:
+  - `Cargo.toml`
+  - `src/openapi.rs`
+  - `src/main.rs`
+
+## Notes
+
+- This batch is a partial extraction only (`PR3a` safe pre-step).
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.3`: unchanged/partial (preview helper extraction only)
+- `3.3`: unchanged

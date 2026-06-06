@@ -3,6 +3,7 @@ pub mod audit;
 pub mod backfill;
 pub mod conversations;
 pub mod handler;
+pub mod messaging;
 pub mod quick_reply_validation;
 pub mod service;
 pub mod shared;
