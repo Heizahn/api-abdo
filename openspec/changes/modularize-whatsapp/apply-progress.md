@@ -1047,3 +1047,38 @@ Status: complete
 
 - `2.3`: complete
 - `3.3`: unchanged
+
+## PR4a: Settings validation helper extraction
+
+Branch: `feature/modularize-whatsapp-pr4a-settings-validation`
+
+Status: partial
+
+## Completed
+
+- Added the settings module boundary:
+  - `src/modules/whatsapp/settings/mod.rs`
+  - `src/modules/whatsapp/settings/validation.rs`
+- Moved validation helpers out of `src/modules/whatsapp/handler.rs`:
+  - `validate_access_token`
+  - `normalize_to_e164`
+- Updated `handler.rs` to import the helpers from `settings::validation`.
+- Kept settings CRUD, WhatsApp Numbers alias routes, and test-connection handlers in `handler.rs` for later slices.
+- Applied project version bump to `0.3.46` in:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/main.rs`
+  - `src/openapi.rs`
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.4`: partially advanced (validation helpers extracted; handlers still pending)
+- `3.3`: unchanged
