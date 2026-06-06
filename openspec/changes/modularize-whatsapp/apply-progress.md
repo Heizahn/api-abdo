@@ -529,3 +529,47 @@ Branch: `feature/modularize-whatsapp-pr2k-conversation-close-reopen`
 
 - `2.2`: remains **unchecked/partial** (close/reopen lifecycle extraction only)
 - `3.3`: unchanged
+
+## PR2l: Conversation AI controls extraction
+
+Status: complete
+
+Branch: `feature/modularize-whatsapp-pr2l-conversation-ai-controls`
+
+## Completed
+
+- Moved AI control endpoint definitions and handlers out of `src/modules/whatsapp/handler.rs` into `src/modules/whatsapp/conversations/lifecycle.rs`:
+  - `ResetAiStateResponse`
+  - `InterveneData`
+  - `InterveneResponse`
+  - `reset_ai_conv_state_handler`
+  - `intervene_conversation_handler`
+- In moved handlers, kept authorization/side-effect behavior consistent and switched to
+  direct `state.db.record_conversation_event(...)` persistence (best-effort warning on DB failures).
+- Updated `src/modules/whatsapp/conversations/handlers.rs` to re-export `__path_*` and handler symbols from
+  `conversations::lifecycle` for:
+  - `intervene_conversation_handler`
+  - `reset_ai_conv_state_handler`
+- Updated OpenAPI type imports in `src/openapi.rs` to reference:
+  - `crate::modules::whatsapp::conversations::lifecycle::{InterveneData, InterveneResponse, ResetAiStateResponse}`.
+- Project version metadata was kept aligned after PR2l changes:
+  - `Cargo.toml`
+  - `src/main.rs`
+  - `src/openapi.rs`
+
+## Notes
+
+- Task `2.2` remains intentionally **unchecked/partial** by design: conversation messaging/send/list/transfer/close/reopen etc remain in `handler.rs` by bounded scope.
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.2`: remains **unchecked/partial** (conversation AI controls moved; conversation flow extraction continues)
+- `3.3`: unchanged
