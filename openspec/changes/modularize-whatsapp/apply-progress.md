@@ -250,6 +250,10 @@ Branch: `feature/modularize-whatsapp-pr2e-conversation-read`
 - `cargo check --tests`
 - `git diff --check`
 
+- Re-run after final warning cleanup:
+  - `cargo check --tests`
+  - `cargo test`
+
 ## Task Status Impact
 
 - `2.2`: now partially advanced (query/read extraction only; no messaging/aux list body migration)
@@ -386,4 +390,50 @@ Branch: `feature/modularize-whatsapp-pr2h-conversation-mark-read`
 ## Task Status Impact
 
 - `2.2`: remains unchecked/partial (mark-read slice only)
+- `3.3`: unchanged
+
+## PR2i: Conversation take extraction
+
+Status: complete
+
+Branch: `feature/modularize-whatsapp-pr2i-conversation-take`
+
+## Completed
+
+- Moved `take_conversation_handler` from `src/modules/whatsapp/handler.rs` to
+  `src/modules/whatsapp/conversations/lifecycle.rs`, preserving behavior and
+  route contract.
+- Updated the moved handler to invoke `state.db.record_conversation_event(...)`
+  directly with best-effort warning on persistence failure (no change in
+  caller-facing result).
+- Reused shared helpers directly in the moved code:
+  - `shared::authz::{require_can_chat, require_workspace_actor_for_conversation}`
+  - `shared::workspace::resolve_workspace_name`
+  - `shared::mappers::{resolve_customer_name, resolve_last_message_agent_name_one}`
+  - `shared::response::conv_to_item`
+- Re-exported `take_conversation_handler` and `__path_take_conversation_handler`
+  from `src/modules/whatsapp/conversations/handlers.rs` via
+  `conversations::lifecycle`.
+- Kept transfer/close/reopen/send/initiate/mark-read and route ownership for all
+  non-targeted conversation/message domains in legacy `handler.rs`.
+- Bumped version metadata for PR2i:
+  - `Cargo.toml`
+  - `src/openapi.rs`
+  - `src/main.rs`
+
+## Notes
+
+- Task `2.2` remains **unchecked/partial** for PR2 as requested.
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.2`: remains unchecked/partial (take handler extracted; task remains scoped)
 - `3.3`: unchanged
