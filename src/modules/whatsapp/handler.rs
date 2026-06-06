@@ -3691,12 +3691,6 @@ async fn resolve_assigned_agent_name_one(
     shared::mappers::resolve_assigned_agent_name_one(state, conv).await
 }
 
-/// Ventana de 24h desde `last_inbound_at`. Usado por el gate de envío freeform,
-/// por `conv_to_item` y por el WS event `CONVERSACION_ESTADO`.
-pub(super) fn is_within_24h(last_inbound_at: Option<DateTime>) -> bool {
-    shared::time::is_within_24h(last_inbound_at)
-}
-
 /// Devuelve `(can_send_freeform, freeform_expires_at_iso)`.
 fn compute_freeform_state(last_inbound_at: Option<DateTime>) -> (bool, Option<String>) {
     shared::time::compute_freeform_state(last_inbound_at)
