@@ -108,7 +108,7 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         // Media: proxy de descarga (el binario vive en la CDN de Meta)
         .route(
             "/v1/auth-user/whatsapp/media/:media_id",
-            get(handler::get_media_handler),
+            get(messaging::download::get_media_handler),
         )
         // Media: límites por tipo — el front los lee para validar client-side.
         .route(

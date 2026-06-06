@@ -927,3 +927,48 @@ Status: partial
 
 - `2.3`: partially advanced (upload + limits extracted; download/proxy/cache/template-header upload still pending)
 - `3.3`: unchanged
+
+## PR3g: Messaging media download/cache extraction
+
+Branch: `feature/modularize-whatsapp-pr3g-media-download`
+
+Status: partial
+
+## Completed
+
+- Added `src/modules/whatsapp/messaging/download.rs` and moved media download/proxy/cache ownership out of `src/modules/whatsapp/handler.rs`:
+  - `get_media_handler`
+  - `build_media_response`
+  - `should_prefetch_media`
+  - `prefetch_media`
+  - `MediaPrefetchGuard`
+  - `download_media_with_retry`
+  - `download_media_info_with_retry`
+  - `download_media_body_with_retry`
+  - `MEDIA_DOWNLOAD_RETRY_DELAYS_MS`
+- Exported the `download` module in `src/modules/whatsapp/messaging/mod.rs` with `pub mod download;`.
+- Updated webhook media prefetch callsites in `handler.rs` to call moved download helpers.
+- Rewired the existing media download route in `src/modules/whatsapp/mod.rs` to use:
+  `messaging::download::get_media_handler`.
+- Updated OpenAPI registration to use:
+  `crate::modules::whatsapp::messaging::download::get_media_handler`.
+- Preserved Redis cache hit/miss/wait behavior, retry delays, fallback to Meta, response headers, lock release, relay/service/token behavior, route path, and route order.
+- Applied project version bump to `0.3.43` in:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/main.rs`
+  - `src/openapi.rs`
+- Kept template-header upload and inbound media-failure fallback in `handler.rs` for later slices.
+
+## Verification
+
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `2.3`: partially advanced (download/proxy/cache extracted; template-header upload and inbound media-failure fallback still pending)
+- `3.3`: unchanged
