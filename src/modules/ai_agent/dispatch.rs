@@ -2073,6 +2073,8 @@ async fn send_live_response(
         read_at: None,
         idempotency_key: None,
         reply_to_wa_message_id: None,
+        is_forwarded: None,
+        is_frequently_forwarded: None,
         url_preview: None,
         voice: false,
         template_name: None,

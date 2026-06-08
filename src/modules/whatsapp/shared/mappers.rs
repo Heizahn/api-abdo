@@ -35,6 +35,8 @@ pub(crate) fn msg_to_item(
         from_user_name,
         idempotency_key: m.idempotency_key,
         reply_to,
+        is_forwarded: m.is_forwarded,
+        is_frequently_forwarded: m.is_frequently_forwarded,
         url_preview: m.url_preview,
         voice: m.voice,
         template_name: m.template_name,

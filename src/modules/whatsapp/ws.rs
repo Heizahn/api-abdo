@@ -851,6 +851,8 @@ mod tests {
             from_user_name: None,
             idempotency_key: None,
             reply_to: None,
+            is_forwarded: None,
+            is_frequently_forwarded: None,
             url_preview: None,
             voice: false,
             template_name: None,

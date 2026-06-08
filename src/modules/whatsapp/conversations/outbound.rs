@@ -365,6 +365,8 @@ pub async fn initiate_conversation_handler(
         read_at: None,
         idempotency_key: Some(idempotency_key),
         reply_to_wa_message_id: None,
+        is_forwarded: None,
+        is_frequently_forwarded: None,
         url_preview: None,
         voice: false,
         template_name: Some(tpl_name.to_string()),

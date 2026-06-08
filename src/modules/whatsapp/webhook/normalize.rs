@@ -112,6 +112,9 @@ pub(crate) fn inbound_payload_markers(msg: &InboundMessage) -> String {
     if msg.reaction.is_some() {
         markers.push("reaction");
     }
+    if msg.errors.is_some() {
+        markers.push("errors");
+    }
     for key in msg.extra.keys() {
         markers.push(key.as_str());
     }
@@ -212,8 +215,10 @@ pub(crate) fn build_top_level_delta_message(
     });
 
     let context = target_context_id.map(|id| InboundContext {
-        id: id.to_string(),
+        id: Some(id.to_string()),
         from: None,
+        forwarded: None,
+        frequently_forwarded: None,
     });
 
     Some(InboundMessage {
@@ -232,6 +237,7 @@ pub(crate) fn build_top_level_delta_message(
         interactive: None,
         button: None,
         reaction: None,
+        errors: None,
         edit: if effective_msg_type == "edit" {
             Some(payload.clone())
         } else {
@@ -555,7 +561,7 @@ pub(crate) fn extract_inbound_delta_target_wa_id(msg: &InboundMessage) -> Option
     msg.context
         .as_ref()
         .and_then(|ctx| {
-            let id = ctx.id.trim();
+            let id = ctx.id.as_deref()?.trim();
             if id.is_empty() {
                 None
             } else {
@@ -677,6 +683,7 @@ mod webhook_normalization_tests {
             interactive: None,
             button: None,
             reaction: None,
+            errors: None,
             edit: None,
             revoke: None,
             group: None,
@@ -693,8 +700,10 @@ mod webhook_normalization_tests {
 
         let msg_with_blank_target = InboundMessage {
             context: Some(InboundContext {
-                id: "   ".to_string(),
+                id: Some("   ".to_string()),
                 from: None,
+                forwarded: None,
+                frequently_forwarded: None,
             }),
             ..make_message_base()
         };
@@ -705,8 +714,10 @@ mod webhook_normalization_tests {
 
         let msg_with_edit_context_in_payload = InboundMessage {
             context: Some(InboundContext {
-                id: "   ".to_string(),
+                id: Some("   ".to_string()),
                 from: None,
+                forwarded: None,
+                frequently_forwarded: None,
             }),
             edit: Some(serde_json::json!({
                 "context": { "id": "wamid.payload.ctx.001" },
@@ -753,11 +764,163 @@ mod webhook_normalization_tests {
         let msg = build_top_level_delta_message(&value, "revoke").unwrap();
         assert_eq!(msg.id, "wamid.revoke.top.001");
         assert_eq!(infer_inbound_effective_type(&msg), "revoke");
-        assert_eq!(msg.context.as_ref().unwrap().id, "wamid.orig.010");
+        assert_eq!(
+            msg.context.as_ref().unwrap().id.as_deref(),
+            Some("wamid.orig.010")
+        );
 
         assert_eq!(
             extract_inbound_delta_target_wa_id(&msg),
             Some("wamid.orig.010")
+        );
+    }
+
+    fn parse_single_message(json: &str) -> InboundMessage {
+        let payload: WebhookPayload = serde_json::from_str(json).unwrap();
+        payload
+            .entry
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .changes
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .value
+            .unwrap()
+            .messages
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn forwarded_image_without_context_id_parses_as_image_media() {
+        let msg = parse_single_message(
+            r#"{
+                "object":"whatsapp_business_account",
+                "entry":[{"id":"entry_id","changes":[{"field":"messages","value":{
+                    "messaging_product":"whatsapp",
+                    "metadata":{"display_phone_number":"16505553333","phone_number_id":"phone_number_id"},
+                    "contacts":[{"profile":{"name":"Cliente"},"wa_id":"584144271554"}],
+                    "messages":[{
+                        "context":{"forwarded":true},
+                        "from":"584144271554",
+                        "id":"wamid.forwarded",
+                        "timestamp":"1710000001",
+                        "type":"image",
+                        "image":{"id":"media_forwarded_123","mime_type":"image/jpeg","sha256":"def","caption":"foto reenviada"}
+                    }]
+                }}]}]
+            }"#,
+        );
+
+        assert_eq!(infer_inbound_effective_type(&msg), "image");
+        assert_eq!(msg.context.as_ref().and_then(|c| c.reply_to_id()), None);
+        assert!(msg.context.as_ref().is_some_and(|c| c.is_forwarded()));
+        assert!(!msg
+            .context
+            .as_ref()
+            .is_some_and(|c| c.is_frequently_forwarded()));
+
+        let content = extract_inbound_content(&msg, "image");
+        assert_eq!(content.media_id.as_deref(), Some("media_forwarded_123"));
+    }
+
+    #[test]
+    fn frequently_forwarded_image_without_context_id_parses_as_image_media() {
+        let msg = parse_single_message(
+            r#"{
+                "object":"whatsapp_business_account",
+                "entry":[{"id":"entry_id","changes":[{"field":"messages","value":{
+                    "messaging_product":"whatsapp",
+                    "metadata":{"display_phone_number":"16505553333","phone_number_id":"phone_number_id"},
+                    "messages":[{
+                        "context":{"frequently_forwarded":true},
+                        "from":"584144271554",
+                        "id":"wamid.freq_forwarded",
+                        "timestamp":"1710000002",
+                        "type":"image",
+                        "image":{"id":"media_freq_forwarded_123","mime_type":"image/jpeg","sha256":"ghi"}
+                    }]
+                }}]}]
+            }"#,
+        );
+
+        assert_eq!(infer_inbound_effective_type(&msg), "image");
+        assert_eq!(msg.context.as_ref().and_then(|c| c.reply_to_id()), None);
+        assert!(msg
+            .context
+            .as_ref()
+            .is_some_and(|c| c.is_frequently_forwarded()));
+        assert_eq!(
+            extract_inbound_content(&msg, "image").media_id.as_deref(),
+            Some("media_freq_forwarded_123")
+        );
+    }
+
+    #[test]
+    fn reply_image_keeps_context_id_but_media_id_comes_from_image() {
+        let msg = parse_single_message(
+            r#"{
+                "object":"whatsapp_business_account",
+                "entry":[{"id":"entry_id","changes":[{"field":"messages","value":{
+                    "messaging_product":"whatsapp",
+                    "metadata":{"display_phone_number":"16505553333","phone_number_id":"phone_number_id"},
+                    "messages":[{
+                        "context":{"from":"584144200000","id":"wamid.original"},
+                        "from":"584144271554",
+                        "id":"wamid.reply_image",
+                        "timestamp":"1710000003",
+                        "type":"image",
+                        "image":{"id":"media_reply_123","mime_type":"image/jpeg","sha256":"jkl"}
+                    }]
+                }}]}]
+            }"#,
+        );
+
+        assert_eq!(
+            msg.context
+                .as_ref()
+                .and_then(|c| c.reply_to_id())
+                .as_deref(),
+            Some("wamid.original")
+        );
+        assert_eq!(
+            extract_inbound_content(&msg, "image").media_id.as_deref(),
+            Some("media_reply_123")
+        );
+    }
+
+    #[test]
+    fn unknown_with_errors_parses_without_media() {
+        let msg = parse_single_message(
+            r#"{
+                "object":"whatsapp_business_account",
+                "entry":[{"id":"entry_id","changes":[{"field":"messages","value":{
+                    "messaging_product":"whatsapp",
+                    "metadata":{"display_phone_number":"16505553333","phone_number_id":"phone_number_id"},
+                    "messages":[{
+                        "from":"584144271554",
+                        "id":"wamid.unsupported",
+                        "timestamp":"1710000004",
+                        "errors":[{"code":130501,"details":"Message type is not currently supported","title":"Unsupported message type"}],
+                        "type":"unknown"
+                    }]
+                }}]}]
+            }"#,
+        );
+
+        assert_eq!(infer_inbound_effective_type(&msg), "unsupported");
+        assert!(msg.errors.as_ref().is_some_and(|errors| !errors.is_empty()));
+        let content = extract_inbound_content(&msg, "unsupported");
+        assert_eq!(content.media_id, None);
+        assert_eq!(
+            content.body.as_deref(),
+            Some("Mensaje no soportado por WhatsApp")
         );
     }
 
@@ -779,12 +942,15 @@ mod webhook_normalization_tests {
             interactive: None,
             button: None,
             reaction: None,
+            errors: None,
             edit: Some(serde_json::json!({})),
             revoke: None,
             group: None,
             context: Some(InboundContext {
-                id: "wamid.orig.001".to_string(),
+                id: Some("wamid.orig.001".to_string()),
                 from: None,
+                forwarded: None,
+                frequently_forwarded: None,
             }),
             extra: Default::default(),
         };
@@ -805,12 +971,15 @@ mod webhook_normalization_tests {
             interactive: None,
             button: None,
             reaction: None,
+            errors: None,
             edit: None,
             revoke: Some(serde_json::json!({ "text": "" })),
             group: None,
             context: Some(InboundContext {
-                id: "wamid.orig.002".to_string(),
+                id: Some("wamid.orig.002".to_string()),
                 from: None,
+                forwarded: None,
+                frequently_forwarded: None,
             }),
             extra: Default::default(),
         };
@@ -846,6 +1015,7 @@ mod webhook_normalization_tests {
             interactive: None,
             button: None,
             reaction: None,
+            errors: None,
             edit: Some(serde_json::json!({ "text": "hola" })),
             revoke: None,
             group: None,
@@ -869,6 +1039,7 @@ mod webhook_normalization_tests {
             interactive: None,
             button: None,
             reaction: None,
+            errors: None,
             edit: None,
             revoke: Some(serde_json::json!({ "reason": "policy" })),
             group: None,
@@ -894,6 +1065,7 @@ mod webhook_normalization_tests {
             interactive: None,
             button: None,
             reaction: None,
+            errors: None,
             edit: None,
             revoke: None,
             group: None,

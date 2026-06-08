@@ -265,6 +265,8 @@ pub async fn send_message_handler(
         read_at: None,
         idempotency_key: payload.idempotency_key.clone(),
         reply_to_wa_message_id: payload.reply_to.clone(),
+        is_forwarded: None,
+        is_frequently_forwarded: None,
         url_preview: None,
         voice: false,
         template_name: sent.template_fields.as_ref().map(|f| f.name.clone()),

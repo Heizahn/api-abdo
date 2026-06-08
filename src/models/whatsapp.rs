@@ -319,6 +319,12 @@ pub struct WaMessage {
     /// `context.id` cuando el cliente cita un mensaje del negocio.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_wa_message_id: Option<String>,
+    /// Metadata de Meta para mensajes reenviados. El media real sigue saliendo
+    /// del objeto de media (`image.id`, `document.id`, etc.), nunca del contexto.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_forwarded: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_frequently_forwarded: Option<bool>,
     /// Timestamp en que la IA procesó este mensaje inbound. NO equivale a
     /// `read` (no se manda mark_as_read a Meta) — solo señala que la IA lo
     /// vio y respondió/intentó responder. El front lo renderiza como un
@@ -499,6 +505,9 @@ pub struct InboundMessage {
     pub interactive: Option<serde_json::Value>,
     pub button: Option<serde_json::Value>,
     pub reaction: Option<serde_json::Value>,
+    /// Message-level errors for `type = "unknown"` / unsupported inbound payloads.
+    #[serde(default)]
+    pub errors: Option<Vec<StatusError>>,
     /// Meta webhook adicional: actualización (texto original actualizado).
     pub edit: Option<serde_json::Value>,
     /// Meta webhook adicional: mensaje revocado/eliminado.
@@ -516,9 +525,34 @@ pub struct InboundMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InboundContext {
-    pub id: String,
+    /// Present for replies/quoted messages, absent for forwarded-only context.
+    #[serde(default)]
+    pub id: Option<String>,
     #[allow(dead_code)]
+    #[serde(default)]
     pub from: Option<String>,
+    #[serde(default)]
+    pub forwarded: Option<bool>,
+    #[serde(default)]
+    pub frequently_forwarded: Option<bool>,
+}
+
+impl InboundContext {
+    pub fn reply_to_id(&self) -> Option<String> {
+        self.id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(ToString::to_string)
+    }
+
+    pub fn is_forwarded(&self) -> bool {
+        self.forwarded.unwrap_or(false)
+    }
+
+    pub fn is_frequently_forwarded(&self) -> bool {
+        self.frequently_forwarded.unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -889,6 +923,10 @@ pub struct MessageItem {
     /// Mensaje citado (quoted reply). `null` si no es respuesta o si el
     /// mensaje original ya no existe en la DB.
     pub reply_to: Option<ReplyToItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_forwarded: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_frequently_forwarded: Option<bool>,
     /// Preview de URL (OG/Twitter Card). `null` mientras el job de fetch no
     /// haya terminado, si el mensaje no tenía URL, o si el fetch falló.
     /// Cuando llega, el front lo recibe también por WS (`URL_PREVIEW_READY`).

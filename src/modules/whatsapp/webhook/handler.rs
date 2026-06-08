@@ -55,6 +55,35 @@ pub(crate) fn last_payload_store() -> &'static Mutex<Option<serde_json::Value>> 
     LAST_WEBHOOK_PAYLOAD.get_or_init(|| Mutex::new(None))
 }
 
+fn log_parse_error_sanitized(error: &serde_json::Error, raw: &serde_json::Value) {
+    let first_message = raw
+        .pointer("/entry/0/changes/0/value/messages/0")
+        .unwrap_or(&serde_json::Value::Null);
+    let raw_type = first_message
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let has_messages = raw.pointer("/entry/0/changes/0/value/messages").is_some();
+    let has_context = first_message.get("context").is_some();
+    let has_context_id = first_message.pointer("/context/id").is_some();
+    let has_image = first_message.get("image").is_some();
+    let has_image_id = first_message.pointer("/image/id").is_some();
+    let has_errors = first_message.get("errors").is_some()
+        || raw.pointer("/entry/0/changes/0/value/errors").is_some();
+
+    tracing::warn!(
+        "[webhook] parse error sanitized: error={} has_messages={} raw_type={} has_context={} context_id={} has_image={} image_id={} has_errors={}",
+        error,
+        has_messages,
+        raw_type,
+        has_context,
+        if has_context_id { "present" } else { "missing" },
+        has_image,
+        if has_image_id { "present" } else { "missing" },
+        has_errors
+    );
+}
+
 #[derive(serde::Deserialize)]
 pub struct WebhookVerifyParams {
     #[serde(rename = "hub.mode")]
@@ -288,16 +317,13 @@ pub async fn receive_webhook(
     // Guardar payload crudo ANTES del parse tipado — así el debug funciona
     // incluso cuando el shape no matchea nuestros structs (Meta agrega/cambia
     // campos sin avisar; queremos verlos para poder ajustar).
-    {
-        let raw: serde_json::Value =
-            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
-        *last_payload_store().lock().await = Some(raw);
-    }
+    let raw: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    *last_payload_store().lock().await = Some(raw.clone());
 
     let payload: WebhookPayload = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!("[webhook] JSON inválido: {}", e);
+            log_parse_error_sanitized(&e, &raw);
             return StatusCode::OK;
         }
     };
@@ -610,6 +636,24 @@ pub async fn receive_webhook(
 
                 for msg in messages {
                     let effective_msg_type = infer_inbound_effective_type(&msg);
+                    let context = msg.context.as_ref();
+                    let is_forwarded = context.is_some_and(|c| c.is_forwarded());
+                    let is_frequently_forwarded =
+                        context.is_some_and(|c| c.is_frequently_forwarded());
+                    let has_errors = msg.errors.as_ref().is_some_and(|errs| !errs.is_empty());
+                    tracing::debug!(
+                        "[webhook] inbound message id={} from={} type={} has_context={} context_id={} forwarded={} frequently_forwarded={} has_image={} image_id={} has_errors={}",
+                        msg.id,
+                        msg.from,
+                        effective_msg_type,
+                        msg.context.is_some(),
+                        if msg.context.as_ref().and_then(|c| c.id.as_deref()).is_some() { "present" } else { "missing" },
+                        is_forwarded,
+                        is_frequently_forwarded,
+                        msg.image.is_some(),
+                        if msg.image.as_ref().and_then(|image| image.id.as_deref()).is_some() { "present" } else { "missing" },
+                        has_errors
+                    );
                     if effective_msg_type != msg.msg_type {
                         tracing::warn!(
                             "[webhook] tipo inbound ajustado wa_id={} from={} original={} effective={} payload_keys={}",
@@ -625,6 +669,35 @@ pub async fn receive_webhook(
                             msg.id,
                             msg.from,
                             inbound_payload_markers(&msg)
+                        );
+                    }
+                    if effective_msg_type == "image" {
+                        if let Some(media_id) =
+                            msg.image.as_ref().and_then(|image| image.id.as_deref())
+                        {
+                            if is_forwarded || is_frequently_forwarded {
+                                tracing::debug!(
+                                    "[webhook] image inbound forwarded message_id={} media_id={} forwarded={} frequently_forwarded={}",
+                                    msg.id,
+                                    media_id,
+                                    is_forwarded,
+                                    is_frequently_forwarded
+                                );
+                            } else {
+                                tracing::debug!(
+                                    "[webhook] image inbound normal message_id={} media_id={}",
+                                    msg.id,
+                                    media_id
+                                );
+                            }
+                        }
+                    } else if matches!(effective_msg_type.as_str(), "unsupported" | "unknown") {
+                        let first_error = msg.errors.as_ref().and_then(|errs| errs.first());
+                        tracing::warn!(
+                            "[webhook] unsupported/unknown inbound message_id={} error_code={:?} error_title={:?}",
+                            msg.id,
+                            first_error.and_then(|e| e.code),
+                            first_error.and_then(|e| e.title.as_deref())
                         );
                     }
 
@@ -755,7 +828,9 @@ pub async fn receive_webhook(
                         read_by_user_id: None,
                         read_at: None,
                         idempotency_key: None,
-                        reply_to_wa_message_id: msg.context.as_ref().map(|c| c.id.clone()),
+                        reply_to_wa_message_id: msg.context.as_ref().and_then(|c| c.reply_to_id()),
+                        is_forwarded: Some(is_forwarded).filter(|v| *v),
+                        is_frequently_forwarded: Some(is_frequently_forwarded).filter(|v| *v),
                         url_preview: None,
                         voice,
                         template_name: None,
