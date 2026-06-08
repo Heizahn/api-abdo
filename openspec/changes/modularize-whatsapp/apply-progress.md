@@ -1127,3 +1127,44 @@ Status: partial
 
 - `2.4`: partially advanced (validation helpers extracted; handlers still pending)
 - `3.3`: unchanged
+
+## PR4c: Quick Replies and facade cleanup
+
+Branch: `feature/modularize-whatsapp-pr4c-quick-replies-cleanup`
+
+Status: complete
+
+## Completed
+
+- Cleaned `src/modules/whatsapp/handler.rs` by removing all quick-reply implementation
+  bodies and keeping only compatibility re-exports:
+  - `list_quick_replies_handler`
+  - `create_quick_reply_handler`
+  - `update_quick_reply_handler`
+  - `delete_quick_reply_handler`
+  - `set_quick_reply_active_handler`
+  - `duplicate_quick_reply_handler`
+  - `QuickRepliesQuery`
+- Confirmed routing and OpenAPI for quick replies already points to
+  `crate::modules::whatsapp::quick_replies::handlers::*`.
+- Kept template endpoints and implementation bodies in `handler.rs` for a later extraction slice.
+
+## Verification
+
+- `cargo fmt`
+- `cargo fmt --check`
+- `cargo check`
+- `cargo check --tests`
+- `cargo test`
+- `git diff --check`
+
+## Task Status Impact
+
+- `4.1`: partially complete (quick replies canonicalized; templates still pending in this slice)
+- `4.2`: partially complete (legacy handler shim reduced for quick replies)
+- `3.3`: unchanged
+
+## Rollback Boundary (PR4c)
+
+- Revert this PR4c commit to restore quick-reply implementations back into
+  `src/modules/whatsapp/handler.rs` and remove the `pub use super::quick_replies::handlers` shim.

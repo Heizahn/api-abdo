@@ -85,7 +85,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.47",
+        version = "0.3.48",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
@@ -169,12 +169,12 @@ use crate::modules::whatsapp::conversations::lifecycle::{
         crate::modules::whatsapp::messaging::download::get_media_handler,
         crate::modules::whatsapp::messaging::media::upload_media_handler,
         crate::modules::whatsapp::messaging::media::get_media_limits_handler,
-        crate::modules::whatsapp::handler::list_quick_replies_handler,
-        crate::modules::whatsapp::handler::create_quick_reply_handler,
-        crate::modules::whatsapp::handler::update_quick_reply_handler,
-        crate::modules::whatsapp::handler::delete_quick_reply_handler,
-        crate::modules::whatsapp::handler::set_quick_reply_active_handler,
-        crate::modules::whatsapp::handler::duplicate_quick_reply_handler,
+        crate::modules::whatsapp::quick_replies::handlers::list_quick_replies_handler,
+        crate::modules::whatsapp::quick_replies::handlers::create_quick_reply_handler,
+        crate::modules::whatsapp::quick_replies::handlers::update_quick_reply_handler,
+        crate::modules::whatsapp::quick_replies::handlers::delete_quick_reply_handler,
+        crate::modules::whatsapp::quick_replies::handlers::set_quick_reply_active_handler,
+        crate::modules::whatsapp::quick_replies::handlers::duplicate_quick_reply_handler,
         crate::modules::whatsapp::handler::list_templates_handler,
         crate::modules::whatsapp::handler::create_template_handler,
         crate::modules::whatsapp::handler::get_template_handler,
