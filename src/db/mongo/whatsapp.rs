@@ -848,6 +848,7 @@ impl WhatsAppRepository for MongoDB {
         let filter = doc! {
             "conversation_id": conversation_id,
             "direction": "in",
+            "msg_type": { "$nin": ["unsupported", "unknown"] },
             "$or": [
                 { "status": { "$exists": false } },
                 { "status": { "$ne": "read" } },
