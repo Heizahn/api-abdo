@@ -215,7 +215,7 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/v1/auth-user/whatsapp/templates/header-media",
-            post(messaging::media::upload_template_header_media_handler),
+            post(templates::header_media::upload_template_header_media_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/templates/:id",
