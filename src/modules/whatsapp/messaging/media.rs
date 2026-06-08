@@ -14,8 +14,8 @@ use crate::{
     error::ApiError,
     models::whatsapp::{MediaLimitsResponse, MediaTypeLimit, MediaUploadData, MediaUploadResponse},
     modules::whatsapp::{
-        handler::map_meta_error, service::WhatsAppService, shared::authz::require_can_chat,
-        shared::resolve_service_for_phone,
+        service::WhatsAppService, shared::authz::require_can_chat,
+        shared::resolve_service_for_phone, templates::meta::map_meta_error,
     },
     state::AppState,
 };

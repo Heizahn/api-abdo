@@ -1465,3 +1465,48 @@ Status: partial
 
 - Revert this PR4i commit set to restore template header-media route/OpenAPI ownership to
   `src/modules/whatsapp/messaging/media.rs` and remove `src/modules/whatsapp/templates/header_media.rs`.
+
+## PR4j: Handler shim cleanup subset
+
+Branch: `feature/modularize-whatsapp-pr4j-handler-cleanup`
+
+Status: partial
+
+## Completed
+
+- Removed the temporary `map_meta_error` compatibility shim from `src/modules/whatsapp/handler.rs`.
+- Updated remaining internal callers to import `map_meta_error` directly from
+  `src/modules/whatsapp/templates/meta.rs`:
+  - `src/modules/whatsapp/settings/handlers.rs`
+  - `src/modules/whatsapp/messaging/media.rs`
+- Removed dead quick-reply compatibility re-exports from `src/modules/whatsapp/handler.rs` because
+  routing and OpenAPI already reference `quick_replies::handlers` directly.
+- Bumped versioned artifacts to `0.3.55`: `Cargo.toml`, `Cargo.lock`, `src/main.rs`,
+  `src/openapi.rs`.
+- Updated `openspec/changes/modularize-whatsapp/tasks.md` task notes to record this partial 4.2
+  cleanup slice while keeping the checkbox unchecked.
+
+## Notes
+
+- This slice intentionally avoids broader `handler.rs` reductions because webhook ownership,
+  template status processing, and final route/OpenAPI parity verification are still outside the
+  current bounded cleanup subset.
+- Task `4.2` remains partial until the legacy handler becomes a genuinely minimal shim after final
+  parity work.
+
+## Verification
+
+- `cargo fmt`
+- `cargo check`
+- `git diff --check`
+
+## Task Status Impact
+
+- `4.2`: still partial (temporary template error shim and dead quick-reply re-exports removed; core
+  legacy webhook/template logic still lives in `handler.rs`)
+- `3.3`: unchanged
+
+## Rollback Boundary (PR4j)
+
+- Revert this PR4j commit set to restore the `handler.rs` compatibility re-export surface and the
+  previous import paths in `settings::handlers` / `messaging::media`.

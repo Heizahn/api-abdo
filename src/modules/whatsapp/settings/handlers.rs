@@ -18,9 +18,9 @@ use crate::{
 
 use super::validation::{normalize_to_e164, validate_access_token};
 use crate::modules::whatsapp::{
-    handler::map_meta_error,
     service::WhatsAppService,
     shared::{apply_media_relay, response::settings_to_item, settings_secret},
+    templates::meta::map_meta_error,
     ws::{broadcast_to_chat_users, ConversacionNoLeidaData, TicketPendienteData, WsServerEvent},
 };
 
