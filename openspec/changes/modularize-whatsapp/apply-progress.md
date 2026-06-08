@@ -1381,3 +1381,39 @@ Status: partial
 
 - Revert this PR4g commit set to restore template update ownership to
   `src/modules/whatsapp/handler.rs` and point route/OpenAPI ownership back to the legacy shim.
+
+## PR4h: Template helper ownership cleanup
+Branch: `feature/modularize-whatsapp-pr4h-template-helpers`
+Status: partial
+## Completed
+
+- Added `src/modules/whatsapp/templates/meta.rs` and moved shared template helper ownership out of
+  `src/modules/whatsapp/handler.rs`: `generate_template_name`, `flat_to_components`,
+  `validate_components`, `to_template_item`, `template_not_found`,
+  `parse_meta_template_category`, and `map_meta_error`.
+- Updated `src/modules/whatsapp/templates/handlers.rs` to consume `templates::meta` directly.
+- Reduced `src/modules/whatsapp/handler.rs` by removing the moved helper bodies and the dead
+  template CRUD compatibility re-exports.
+- Kept `map_meta_error` reachable through a temporary `handler.rs` re-export for unchanged
+  `settings::handlers` and `messaging::media` call sites.
+- Bumped versioned artifacts to `0.3.53`: `Cargo.toml`, `Cargo.lock`, `src/main.rs`,
+  `src/openapi.rs`.
+
+## Notes
+
+- Header-media routing intentionally stays in `messaging::media` for a later slice.
+- `4.1` and `4.2` remain partial because `templates/header_media.rs` and final facade/parity cleanup are still pending.
+
+## Verification
+- `cargo fmt`, `cargo check`, `git diff --check`
+
+## Task Status Impact
+
+- `4.1`: still partial (`templates/meta.rs` now exists; header-media ownership still pending)
+- `4.2`: still partial (template helper bodies and dead template re-exports removed from `handler.rs`)
+- `3.3`: unchanged
+
+## Rollback Boundary (PR4h)
+
+- Revert this PR4h commit set to restore shared template helper ownership and template compatibility
+  re-exports back to `src/modules/whatsapp/handler.rs`.
