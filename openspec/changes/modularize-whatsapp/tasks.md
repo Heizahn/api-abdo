@@ -42,7 +42,7 @@ Chain strategy: feature-branch-chain
 
 - [x] 3.1 Update `src/modules/whatsapp/mod.rs` to wire the new modules without changing the route inventory from `user_routes`, `webhook_routes`, or `ws_routes`.
 - [x] 3.2 Update `src/openapi.rs` path/component registrations per slice; verify semantic parity for every rewired WhatsApp endpoint.
-- [ ] 3.3 Add route inventory checks from `mod.rs` and OpenAPI diff checks from `/docs/openapi.json` for each PR slice.
+- [x] 3.3 Add route inventory checks from `mod.rs` and OpenAPI diff checks from `/docs/openapi.json` for each PR slice. _(PR4k added `mod.rs` inventory parity tests plus generated OpenAPI path/tag/security checks, and fixed the missing audit route registrations those checks exposed.)_
 
 ## Phase 4: Cleanup / Final Parity
 

@@ -293,3 +293,443 @@ pub fn user_routes() -> Router<Arc<AppState>> {
             post(messaging::reactions::react_message_handler),
         )
 }
+
+#[cfg(test)]
+mod tests {
+    use regex::Regex;
+    use serde_json::Value;
+    use std::collections::{BTreeMap, BTreeSet};
+    use utoipa::OpenApi;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    struct RouteInventoryEntry {
+        method: &'static str,
+        path: &'static str,
+        documented: bool,
+        tag: Option<&'static str>,
+    }
+
+    const fn documented(
+        method: &'static str,
+        path: &'static str,
+        tag: &'static str,
+    ) -> RouteInventoryEntry {
+        RouteInventoryEntry {
+            method,
+            path,
+            documented: true,
+            tag: Some(tag),
+        }
+    }
+
+    const fn undocumented(method: &'static str, path: &'static str) -> RouteInventoryEntry {
+        RouteInventoryEntry {
+            method,
+            path,
+            documented: false,
+            tag: None,
+        }
+    }
+
+    const EXPECTED_ROUTE_INVENTORY: &[RouteInventoryEntry] = &[
+        undocumented("GET", "/v1/webhook/whatsapp"),
+        undocumented("POST", "/v1/webhook/whatsapp"),
+        undocumented("GET", "/v1/ws/chat"),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/conversations",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/conversations/stats",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/conversations/:id",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/conversations/:id/client-link",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/conversations/:id/messages",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/conversations/:id/messages",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/conversations/:id/mark-read",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/conversations/:id/take",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/conversations/:id/transfer",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/conversations/:id/close",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/conversations/:id/reopen",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/conversations/:id/agent-state/reset",
+            "WhatsApp — Conversaciones",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/conversations/:id/intervene",
+            "WhatsApp — Conversaciones",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/conversations/initiate",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/transferable-agents",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/media/:media_id",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/media/limits",
+            "WhatsApp — Soporte",
+        ),
+        documented("POST", "/v1/auth-user/whatsapp/media", "WhatsApp — Soporte"),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/settings",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/settings",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "PUT",
+            "/v1/auth-user/whatsapp/settings/:id",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "DELETE",
+            "/v1/auth-user/whatsapp/settings/:id",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/settings/test-connection",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/settings/:id/test-connection",
+            "WhatsApp — Soporte",
+        ),
+        undocumented("GET", "/v1/auth-user/whatsapp/whatsapp-numbers"),
+        undocumented("POST", "/v1/auth-user/whatsapp/whatsapp-numbers"),
+        undocumented("PUT", "/v1/auth-user/whatsapp/whatsapp-numbers/:id"),
+        undocumented("DELETE", "/v1/auth-user/whatsapp/whatsapp-numbers/:id"),
+        undocumented(
+            "POST",
+            "/v1/auth-user/whatsapp/whatsapp-numbers/test-connection",
+        ),
+        undocumented(
+            "POST",
+            "/v1/auth-user/whatsapp/whatsapp-numbers/:id/test-connection",
+        ),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/quick-replies",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/quick-replies",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "PUT",
+            "/v1/auth-user/whatsapp/quick-replies/:id",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "DELETE",
+            "/v1/auth-user/whatsapp/quick-replies/:id",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "PATCH",
+            "/v1/auth-user/whatsapp/quick-replies/:id/active",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/quick-replies/:id/duplicate",
+            "WhatsApp — Soporte",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/templates",
+            "WhatsApp — Templates",
+        ),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/templates",
+            "WhatsApp — Templates",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/templates/header-media",
+            "WhatsApp — Templates",
+        ),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/templates/:id",
+            "WhatsApp — Templates",
+        ),
+        documented(
+            "PATCH",
+            "/v1/auth-user/whatsapp/templates/:id",
+            "WhatsApp — Templates",
+        ),
+        documented(
+            "DELETE",
+            "/v1/auth-user/whatsapp/templates/:id",
+            "WhatsApp — Templates",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/templates/:id/resync",
+            "WhatsApp — Templates",
+        ),
+        undocumented("GET", "/v1/auth-user/whatsapp/debug/last-webhook"),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/audit/messages",
+            "WhatsApp — Auditoría",
+        ),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/audit/metrics",
+            "WhatsApp — Auditoría",
+        ),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/audit/export",
+            "WhatsApp — Auditoría",
+        ),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/audit/conversations/:id/messages",
+            "WhatsApp — Auditoría",
+        ),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/audit/conversations/:id/timeline",
+            "WhatsApp — Auditoría",
+        ),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/tickets/categories",
+            "WhatsApp — Tickets",
+        ),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/tickets",
+            "WhatsApp — Tickets",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/tickets",
+            "WhatsApp — Tickets",
+        ),
+        documented(
+            "GET",
+            "/v1/auth-user/whatsapp/tickets/:id",
+            "WhatsApp — Tickets",
+        ),
+        documented(
+            "PATCH",
+            "/v1/auth-user/whatsapp/tickets/:id",
+            "WhatsApp — Tickets",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/conversations/:id/transfer-and-ticket",
+            "WhatsApp — Tickets",
+        ),
+        documented(
+            "POST",
+            "/v1/auth-user/whatsapp/messages/:id/react",
+            "WhatsApp — Messages",
+        ),
+    ];
+
+    #[test]
+    fn mod_rs_route_inventory_matches_expected() {
+        let actual = route_inventory_from_source();
+        let expected: Vec<(String, String)> = EXPECTED_ROUTE_INVENTORY
+            .iter()
+            .map(|entry| (entry.method.to_string(), entry.path.to_string()))
+            .collect();
+
+        assert_eq!(
+            actual, expected,
+            "WhatsApp route inventory drifted; update the expected inventory only after confirming contract parity.",
+        );
+    }
+
+    #[test]
+    fn openapi_whatsapp_inventory_matches_expected() {
+        let openapi = serde_json::to_value(crate::openapi::ApiDoc::openapi())
+            .expect("serialize OpenAPI document");
+        let paths = openapi
+            .get("paths")
+            .and_then(Value::as_object)
+            .expect("OpenAPI paths object");
+
+        assert_eq!(
+            openapi_whatsapp_inventory(paths),
+            expected_openapi_inventory(),
+            "WhatsApp OpenAPI path/method parity drifted; inspect /docs/openapi.json before accepting changes.",
+        );
+
+        for entry in EXPECTED_ROUTE_INVENTORY
+            .iter()
+            .filter(|entry| entry.documented)
+        {
+            let doc_path = route_path_to_openapi(entry.path);
+            let operation = paths
+                .get(&doc_path)
+                .and_then(Value::as_object)
+                .and_then(|path_item| path_item.get(&entry.method.to_ascii_lowercase()))
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing OpenAPI operation for {} {}",
+                        entry.method, doc_path
+                    )
+                });
+
+            let expected_tag = entry.tag.expect("documented routes must declare tags");
+            let actual_tags: Vec<&str> = operation
+                .get("tags")
+                .and_then(Value::as_array)
+                .expect("documented routes must expose tags")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            assert_eq!(
+                actual_tags,
+                vec![expected_tag],
+                "tag drift for {} {}",
+                entry.method,
+                doc_path,
+            );
+
+            let has_bearer_auth = operation
+                .get("security")
+                .and_then(Value::as_array)
+                .expect("documented routes must expose security")
+                .iter()
+                .any(|item| {
+                    item.as_object()
+                        .is_some_and(|object| object.contains_key("bearerAuth"))
+                });
+            assert!(
+                has_bearer_auth,
+                "missing bearerAuth security for {} {}",
+                entry.method, doc_path,
+            );
+        }
+    }
+
+    fn route_inventory_from_source() -> Vec<(String, String)> {
+        let route_re =
+            Regex::new(r#"(?s)\.route\(\s*"([^"]+)"\s*,\s*(get|post|put|patch|delete)\("#)
+                .expect("compile route inventory regex");
+
+        route_re
+            .captures_iter(include_str!("mod.rs"))
+            .map(|capture| (capture[2].to_ascii_uppercase(), capture[1].to_string()))
+            .collect()
+    }
+
+    fn expected_openapi_inventory() -> BTreeMap<String, BTreeSet<String>> {
+        let mut inventory = BTreeMap::<String, BTreeSet<String>>::new();
+
+        for entry in EXPECTED_ROUTE_INVENTORY
+            .iter()
+            .filter(|entry| entry.documented)
+        {
+            inventory
+                .entry(route_path_to_openapi(entry.path))
+                .or_default()
+                .insert(entry.method.to_ascii_lowercase());
+        }
+
+        inventory
+    }
+
+    fn openapi_whatsapp_inventory(
+        paths: &serde_json::Map<String, Value>,
+    ) -> BTreeMap<String, BTreeSet<String>> {
+        const HTTP_METHODS: &[&str] = &["get", "post", "put", "patch", "delete"];
+
+        paths
+            .iter()
+            .filter(|(path, _)| {
+                path.starts_with("/v1/auth-user/whatsapp")
+                    && !path.starts_with("/v1/auth-user/whatsapp/ai-agent")
+                    && !path.starts_with("/v1/auth-user/whatsapp/ai/")
+            })
+            .map(|(path, item)| {
+                let methods = item
+                    .as_object()
+                    .expect("OpenAPI path item object")
+                    .keys()
+                    .filter(|key| HTTP_METHODS.contains(&key.as_str()))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+
+                (path.clone(), methods)
+            })
+            .collect()
+    }
+
+    fn route_path_to_openapi(path: &str) -> String {
+        path.split('/')
+            .map(|segment| match segment.strip_prefix(':') {
+                Some(param) => format!("{{{}}}", param),
+                None => segment.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+}

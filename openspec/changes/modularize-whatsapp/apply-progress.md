@@ -1510,3 +1510,57 @@ Status: partial
 
 - Revert this PR4j commit set to restore the `handler.rs` compatibility re-export surface and the
   previous import paths in `settings::handlers` / `messaging::media`.
+
+## PR4k: Route inventory + OpenAPI parity checks
+
+Branch: `feature/modularize-whatsapp-pr4k-route-openapi-checks`
+
+Status: complete
+
+## Completed
+
+- Added lightweight WhatsApp route inventory parity coverage in `src/modules/whatsapp/mod.rs`:
+  - source-backed inventory check that snapshots every `.route(...)` entry from `mod.rs`
+  - generated OpenAPI parity check for documented WhatsApp routes, including method inventory,
+    expected tag ownership, and `bearerAuth` security declarations
+- Fixed the OpenAPI drift those checks exposed by registering the missing WhatsApp audit endpoints
+  in `src/openapi.rs` together with their schema components:
+  - `audit_messages_handler`
+  - `audit_metrics_handler`
+  - `audit_export_handler`
+  - `audit_conversation_messages_handler`
+  - `audit_conversation_timeline_handler`
+- Bumped versioned artifacts to `0.3.56`:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/main.rs`
+  - `src/openapi.rs`
+- Updated `openspec/changes/modularize-whatsapp/tasks.md` to mark `3.3` complete.
+
+## Notes
+
+- The new OpenAPI parity test intentionally ignores AI-agent routes that share the
+  `/v1/auth-user/whatsapp` prefix because task `3.3` is scoped to inventory driven from
+  `src/modules/whatsapp/mod.rs`.
+- The first parity run surfaced that the runtime audit routes were already public but missing from
+  generated OpenAPI registration; this slice fixed the documentation gap without changing runtime
+  route behavior.
+
+## Verification
+
+- `cargo fmt`
+- `cargo test mod_rs_route_inventory_matches_expected`
+- `cargo test openapi_whatsapp_inventory_matches_expected`
+- `cargo check`
+- `git diff --check`
+
+## Task Status Impact
+
+- `3.3`: complete
+- `4.2`: still partial
+- `4.3`: still pending (final full verification remains after cleanup finishes)
+
+## Rollback Boundary (PR4k)
+
+- Revert this PR4k slice to remove the `mod.rs` route/OpenAPI parity tests and restore the prior
+  OpenAPI audit registration state.
