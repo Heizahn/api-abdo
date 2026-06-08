@@ -577,3 +577,358 @@ pub(crate) fn extract_inbound_delta_target_wa_id(msg: &InboundMessage) -> Option
 pub(crate) fn should_apply_message_delta_update(effective_msg_type: &str) -> bool {
     matches!(effective_msg_type, "edit" | "revoke")
 }
+
+#[cfg(test)]
+mod webhook_normalization_tests {
+    use std::fs;
+
+    use crate::models::whatsapp::{
+        InboundContext, InboundMessage, InboundText, WebhookPayload, WebhookValue,
+    };
+
+    use super::*;
+
+    fn load_fixture(filename: &str) -> String {
+        let path = format!(
+            "{}/src/modules/whatsapp/fixtures/{filename}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("fixture missing: {} ({})", path, e))
+    }
+
+    fn first_message(payload: &WebhookPayload) -> &InboundMessage {
+        payload
+            .entry
+            .as_ref()
+            .and_then(|entries| entries.first())
+            .and_then(|entry| entry.changes.as_ref())
+            .and_then(|changes| changes.first())
+            .and_then(|change| change.value.as_ref())
+            .and_then(|value| value.messages.as_ref())
+            .and_then(|messages| messages.first())
+            .unwrap_or_else(|| panic!("fixture no trae mensajes entrantes"))
+    }
+
+    #[test]
+    fn inbound_edit_inference_and_markers() {
+        let payload: WebhookPayload =
+            serde_json::from_str(&load_fixture("webhook_edit.json")).unwrap();
+        let msg = first_message(&payload);
+
+        assert_eq!(infer_inbound_effective_type(msg), "edit");
+        assert!(inbound_payload_markers(msg).contains("edit"));
+        assert!(is_known_inbound_type("edit"));
+    }
+
+    #[test]
+    fn inbound_revoke_inference_and_markers() {
+        let payload: WebhookPayload =
+            serde_json::from_str(&load_fixture("webhook_revoke.json")).unwrap();
+        let msg = first_message(&payload);
+
+        assert_eq!(infer_inbound_effective_type(msg), "revoke");
+        assert!(inbound_payload_markers(msg).contains("revoke"));
+        assert!(is_known_inbound_type("revoke"));
+        assert_eq!(
+            extract_inbound_delta_target_wa_id(msg),
+            Some("wamid.orig.002")
+        );
+    }
+
+    #[test]
+    fn inbound_group_inference_and_markers() {
+        let payload: WebhookPayload =
+            serde_json::from_str(&load_fixture("webhook_group.json")).unwrap();
+        let msg = first_message(&payload);
+
+        assert_eq!(infer_inbound_effective_type(msg), "group");
+        assert!(inbound_payload_markers(msg).contains("group"));
+        assert!(is_known_inbound_type("group"));
+    }
+
+    #[test]
+    fn inbound_edit_revoke_extract_target_id() {
+        let edit_payload: WebhookPayload =
+            serde_json::from_str(&load_fixture("webhook_edit.json")).unwrap();
+
+        let edit_msg = first_message(&edit_payload);
+
+        assert_eq!(
+            extract_inbound_delta_target_wa_id(edit_msg),
+            Some("wamid.orig.001")
+        );
+        assert!(should_apply_message_delta_update("edit"));
+        assert!(should_apply_message_delta_update("revoke"));
+        assert!(!should_apply_message_delta_update("text"));
+
+        let make_message_base = || InboundMessage {
+            from: "1".into(),
+            id: "2".into(),
+            timestamp: None,
+            msg_type: "text".into(),
+            text: None,
+            image: None,
+            document: None,
+            audio: None,
+            video: None,
+            sticker: None,
+            location: None,
+            contacts: None,
+            interactive: None,
+            button: None,
+            reaction: None,
+            edit: None,
+            revoke: None,
+            group: None,
+            context: None,
+            extra: Default::default(),
+        };
+
+        let msg_without_target = make_message_base();
+
+        assert_eq!(
+            extract_inbound_delta_target_wa_id(&msg_without_target),
+            None
+        );
+
+        let msg_with_blank_target = InboundMessage {
+            context: Some(InboundContext {
+                id: "   ".to_string(),
+                from: None,
+            }),
+            ..make_message_base()
+        };
+        assert_eq!(
+            extract_inbound_delta_target_wa_id(&msg_with_blank_target),
+            None
+        );
+
+        let msg_with_edit_context_in_payload = InboundMessage {
+            context: Some(InboundContext {
+                id: "   ".to_string(),
+                from: None,
+            }),
+            edit: Some(serde_json::json!({
+                "context": { "id": "wamid.payload.ctx.001" },
+                "text": "Actualizado"
+            })),
+            ..make_message_base()
+        };
+
+        assert_eq!(
+            extract_inbound_delta_target_wa_id(&msg_with_edit_context_in_payload),
+            Some("wamid.payload.ctx.001")
+        );
+
+        let msg_with_message_id_in_revoke_payload = InboundMessage {
+            context: None,
+            edit: None,
+            revoke: Some(
+                serde_json::json!({ "id": "wamid.payload.revoke.001", "reason": "policy" }),
+            ),
+            ..make_message_base()
+        };
+
+        assert_eq!(
+            extract_inbound_delta_target_wa_id(&msg_with_message_id_in_revoke_payload),
+            Some("wamid.payload.revoke.001")
+        );
+    }
+
+    #[test]
+    fn top_level_delta_payload_builds_synthetic_message() {
+        let value: WebhookValue = serde_json::from_str(
+            r#"{
+                "metadata": {"display_phone_number":"+15551234567"},
+                "contacts": [{"wa_id":"5841400000000","profile":{"name":"Ana"}}],
+                "revoke": {
+                    "context": {"id": "wamid.orig.010"},
+                    "id": "wamid.revoke.top.001",
+                    "reason": "message_revoked_by_sender"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let msg = build_top_level_delta_message(&value, "revoke").unwrap();
+        assert_eq!(msg.id, "wamid.revoke.top.001");
+        assert_eq!(infer_inbound_effective_type(&msg), "revoke");
+        assert_eq!(msg.context.as_ref().unwrap().id, "wamid.orig.010");
+
+        assert_eq!(
+            extract_inbound_delta_target_wa_id(&msg),
+            Some("wamid.orig.010")
+        );
+    }
+
+    #[test]
+    fn inbound_edit_revoke_fallback_content() {
+        let edit_payload = InboundMessage {
+            from: "573001234567".to_string(),
+            id: "wamid.payload.009".to_string(),
+            timestamp: None,
+            msg_type: "text".to_string(),
+            text: None,
+            image: None,
+            document: None,
+            audio: None,
+            video: None,
+            sticker: None,
+            location: None,
+            contacts: None,
+            interactive: None,
+            button: None,
+            reaction: None,
+            edit: Some(serde_json::json!({})),
+            revoke: None,
+            group: None,
+            context: Some(InboundContext {
+                id: "wamid.orig.001".to_string(),
+                from: None,
+            }),
+            extra: Default::default(),
+        };
+
+        let revoke_payload = InboundMessage {
+            from: "573001234567".to_string(),
+            id: "wamid.payload.010".to_string(),
+            timestamp: None,
+            msg_type: "text".to_string(),
+            text: None,
+            image: None,
+            document: None,
+            audio: None,
+            video: None,
+            sticker: None,
+            location: None,
+            contacts: None,
+            interactive: None,
+            button: None,
+            reaction: None,
+            edit: None,
+            revoke: Some(serde_json::json!({ "text": "" })),
+            group: None,
+            context: Some(InboundContext {
+                id: "wamid.orig.002".to_string(),
+                from: None,
+            }),
+            extra: Default::default(),
+        };
+
+        let inferred_edit = infer_inbound_effective_type(&edit_payload);
+        let inferred_revoke = infer_inbound_effective_type(&revoke_payload);
+
+        assert_eq!(inferred_edit, "edit");
+        assert_eq!(inferred_revoke, "revoke");
+
+        let edit_content = extract_inbound_content(&edit_payload, &inferred_edit);
+        let revoke_content = extract_inbound_content(&revoke_payload, &inferred_revoke);
+
+        assert_eq!(edit_content.body, Some("Mensaje editado".to_string()));
+        assert_eq!(revoke_content.body, Some("Mensaje revocado".to_string()));
+    }
+
+    #[test]
+    fn inbound_raw_payload_is_stored_for_delta_types() {
+        let edit_payload = InboundMessage {
+            from: "573001234567".to_string(),
+            id: "wamid.payload.011".to_string(),
+            timestamp: None,
+            msg_type: "text".to_string(),
+            text: None,
+            image: None,
+            document: None,
+            audio: None,
+            video: None,
+            sticker: None,
+            location: None,
+            contacts: None,
+            interactive: None,
+            button: None,
+            reaction: None,
+            edit: Some(serde_json::json!({ "text": "hola" })),
+            revoke: None,
+            group: None,
+            context: None,
+            extra: Default::default(),
+        };
+
+        let revoke_payload = InboundMessage {
+            from: "573001234567".to_string(),
+            id: "wamid.payload.012".to_string(),
+            timestamp: None,
+            msg_type: "text".to_string(),
+            text: None,
+            image: None,
+            document: None,
+            audio: None,
+            video: None,
+            sticker: None,
+            location: None,
+            contacts: None,
+            interactive: None,
+            button: None,
+            reaction: None,
+            edit: None,
+            revoke: Some(serde_json::json!({ "reason": "policy" })),
+            group: None,
+            context: None,
+            extra: Default::default(),
+        };
+
+        let plain_payload = InboundMessage {
+            from: "573001234567".to_string(),
+            id: "wamid.payload.013".to_string(),
+            timestamp: None,
+            msg_type: "text".to_string(),
+            text: Some(InboundText {
+                body: "hola".to_string(),
+            }),
+            image: None,
+            document: None,
+            audio: None,
+            video: None,
+            sticker: None,
+            location: None,
+            contacts: None,
+            interactive: None,
+            button: None,
+            reaction: None,
+            edit: None,
+            revoke: None,
+            group: None,
+            context: None,
+            extra: Default::default(),
+        };
+
+        assert!(inbound_raw_payload(&edit_payload, "edit").is_some());
+        assert!(inbound_raw_payload(&revoke_payload, "revoke").is_some());
+        assert!(inbound_raw_payload(&plain_payload, "text").is_none());
+    }
+
+    #[test]
+    fn top_level_errors_are_parsed() {
+        let payload: WebhookPayload =
+            serde_json::from_str(&load_fixture("webhook_errors.json")).unwrap();
+        let change = payload
+            .entry
+            .as_ref()
+            .and_then(|entries| entries.first())
+            .and_then(|entry| entry.changes.as_ref())
+            .and_then(|changes| changes.first())
+            .unwrap_or_else(|| panic!("payload sin cambios"));
+
+        assert_eq!(change.field.as_deref(), Some("errors"));
+        let value = change
+            .value
+            .as_ref()
+            .unwrap_or_else(|| panic!("top-level errors sin value"));
+        let errors = value
+            .errors
+            .as_ref()
+            .unwrap_or_else(|| panic!("top-level errors sin lista"));
+
+        assert!(!errors.is_empty());
+        assert_eq!(errors[0].code, Some(130429));
+    }
+}

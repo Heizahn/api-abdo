@@ -1628,3 +1628,64 @@ Status: partial
 
 - Revert this PR4l commit set to restore `process_template_status` and the deleted legacy wrapper
   helpers back into `src/modules/whatsapp/handler.rs`.
+
+## PR4m: Webhook runtime ownership extraction
+
+Branch: `feature/modularize-whatsapp-pr4m-webhook-runtime`
+
+Status: complete
+
+## Completed
+
+- Moved the remaining webhook runtime ownership from `src/modules/whatsapp/handler.rs` into
+  `src/modules/whatsapp/webhook/handler.rs`:
+  - `receive_webhook`
+  - `apply_inbound_message_delta_update`
+  - `parse_unix_seconds_to_bson`
+- Centralized webhook conversation audit persistence in `src/modules/whatsapp/webhook/mod.rs`:
+  - shared `record_conv_event` helper now serves both `webhook::handler` and
+    `webhook::media_failures`
+- Reduced `src/modules/whatsapp/handler.rs` to a minimal compatibility shim that only re-exports:
+  - `verify_webhook`
+  - `receive_webhook`
+  - `debug_last_webhook_handler`
+- Relocated webhook normalization tests from the legacy shim into
+  `src/modules/whatsapp/webhook/normalize.rs` so test ownership matches the extracted runtime.
+- Bumped version metadata to `0.3.58` in:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/openapi.rs`
+  - `src/main.rs`
+- Re-audited pending OpenSpec tasks against the current codebase and marked these complete with
+  direct ownership evidence:
+  - `1.3`
+  - `2.1`
+  - `2.2`
+  - `4.2`
+
+## Verification
+
+- `cargo fmt`
+- `CARGO_TARGET_DIR=/home/humberto/Develop/.cargo-target-api-abdo cargo check`
+- `CARGO_TARGET_DIR=/home/humberto/Develop/.cargo-target-api-abdo cargo test webhook_normalization_tests`
+- `git diff --check`
+
+## Review Budget Note
+
+- Raw `git diff --shortstat`: `11 files changed, 1264 insertions(+), 1304 deletions(-)`
+- The slice is still behavior-focused and mostly mechanical ownership movement, but the raw patch size
+  exceeds the nominal 800-line review budget and should be fresh-reviewed with move-aware diff tools.
+
+## Task Status Impact
+
+- `1.3`: complete (`src/modules/whatsapp/handler.rs` is now a re-export-only compatibility facade)
+- `2.1`: complete (all webhook public handlers and runtime helpers now live under `webhook/*`)
+- `2.2`: complete (conversation REST ownership remains under `conversations::*` facade modules with
+  unchanged route order in `mod.rs`)
+- `4.2`: complete (legacy shim is minimal; final webhook ownership no longer lives in `handler.rs`)
+- `4.3`: still pending (full final verification slice remains separate)
+
+## Rollback Boundary (PR4m)
+
+- Revert this PR4m slice to restore webhook runtime ownership to `src/modules/whatsapp/handler.rs`,
+  move normalization tests back to the legacy shim, and undo the `0.3.58` version metadata bump.
