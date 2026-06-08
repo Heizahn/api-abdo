@@ -223,7 +223,7 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/v1/auth-user/whatsapp/templates/:id",
-            patch(handler::update_template_handler),
+            patch(templates::handlers::update_template_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/templates/:id",

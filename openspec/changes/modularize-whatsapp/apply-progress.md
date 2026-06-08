@@ -1324,3 +1324,60 @@ Status: partial
 
 - Revert this PR4f commit set to restore template create ownership and shared create helpers to
   `src/modules/whatsapp/handler.rs` and point route/OpenAPI ownership back to the legacy shim.
+
+## PR4g: Template update extraction
+
+Branch: `feature/modularize-whatsapp-pr4g-template-update`
+
+Status: partial
+
+## Completed
+
+- Moved template update ownership out of `src/modules/whatsapp/handler.rs` into
+  `src/modules/whatsapp/templates/handlers.rs`:
+  - `update_template_handler`
+- Reused the existing shared template helper functions from `src/modules/whatsapp/handler.rs`
+  to keep this update-only slice reviewable:
+  - `generate_template_name`
+  - `flat_to_components`
+  - `validate_components`
+  - `map_meta_error`
+- Rewired the template update route in `src/modules/whatsapp/mod.rs` to use
+  `templates::handlers::update_template_handler`.
+- Rewired the OpenAPI path registration in `src/openapi.rs` to point the template update
+  endpoint to `crate::modules::whatsapp::templates::handlers`.
+- Reduced `src/modules/whatsapp/handler.rs` by removing the template update body and keeping
+  only the compatibility re-export for that endpoint.
+- Applied project version bump to `0.3.52` in:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/main.rs`
+  - `src/openapi.rs`
+
+## Notes
+
+- This slice intentionally stays update-only after PR4f merged into the tracker so the chained
+  diff remains bounded and reviewable.
+- Template shared helper extraction remains out of scope here; the handler ownership move finished
+  the template CRUD route-handler extraction boundary, but the broader task remains open because
+  `templates/meta.rs` and `templates/header_media.rs` do not exist yet and template header-media
+  routing still lives under `messaging::media`.
+
+## Verification
+
+- `cargo fmt`
+- `cargo check`
+- `git diff --check`
+
+## Task Status Impact
+
+- `4.1`: still partial (template CRUD handler ownership moved, but `templates/meta.rs`,
+  `templates/header_media.rs`, and header-media routing remain open)
+- `4.2`: still partial (template update body moved, but shared template helpers and compatibility
+  exports still remain in `handler.rs`)
+- `3.3`: unchanged
+
+## Rollback Boundary (PR4g)
+
+- Revert this PR4g commit set to restore template update ownership to
+  `src/modules/whatsapp/handler.rs` and point route/OpenAPI ownership back to the legacy shim.
