@@ -9,6 +9,7 @@ pub mod quick_reply_validation;
 pub mod service;
 pub mod settings;
 pub mod shared;
+pub mod templates;
 pub mod tickets;
 pub mod url_preview;
 pub mod webhook;
@@ -210,7 +211,7 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/v1/auth-user/whatsapp/templates",
-            get(handler::list_templates_handler),
+            get(templates::handlers::list_templates_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/templates/header-media",
@@ -218,7 +219,7 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/v1/auth-user/whatsapp/templates/:id",
-            get(handler::get_template_handler),
+            get(templates::handlers::get_template_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/templates/:id",

@@ -1168,3 +1168,57 @@ Status: complete
 
 - Revert this PR4c commit to restore quick-reply implementations back into
   `src/modules/whatsapp/handler.rs` and remove the `pub use super::quick_replies::handlers` shim.
+
+## PR4d: Template read handler extraction
+
+Branch: `feature/modularize-whatsapp-pr4d-template-read`
+
+Status: partial
+
+## Completed
+
+- Added `src/modules/whatsapp/templates/` with:
+  - `mod.rs`
+  - `handlers.rs`
+- Moved template read/query ownership out of `src/modules/whatsapp/handler.rs` into
+  `src/modules/whatsapp/templates/handlers.rs`:
+  - `TemplatesListQuery`
+  - `list_templates_handler`
+  - `get_template_handler`
+  - shared template read helpers `to_template_item` and `template_not_found`
+- Rewired template read routes in `src/modules/whatsapp/mod.rs` to use
+  `templates::handlers::{list_templates_handler, get_template_handler}`.
+- Rewired OpenAPI path registrations in `src/openapi.rs` to point the template list/get
+  endpoints to `crate::modules::whatsapp::templates::handlers`.
+- Reduced `src/modules/whatsapp/handler.rs` by removing template list/get bodies and
+  keeping compatibility re-exports for the moved handlers/query type.
+- Applied project version bump to `0.3.49` in:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/main.rs`
+  - `src/openapi.rs`
+
+## Notes
+
+- This slice intentionally stops at the smallest coherent template boundary that stays
+  under the 800-line review budget: read/query handlers only.
+- Template mutation flows (`create`, `update`, `delete`, `resync`) remain in
+  `src/modules/whatsapp/handler.rs` for the next chained slice.
+
+## Verification
+
+- `cargo fmt`
+- `cargo check`
+- `cargo check --tests`
+- `git diff --check`
+
+## Task Status Impact
+
+- `4.1`: still partial (template read ownership moved; template mutation handlers still pending)
+- `4.2`: still partial (legacy shim reduced further, but mutation handlers still live in `handler.rs`)
+- `3.3`: unchanged
+
+## Rollback Boundary (PR4d)
+
+- Revert this PR4d commit set to restore template list/get handlers and shared read helpers
+  to `src/modules/whatsapp/handler.rs` and remove `src/modules/whatsapp/templates/`.
