@@ -4,6 +4,7 @@ pub mod backfill;
 pub mod conversations;
 pub mod handler;
 pub mod messaging;
+pub mod quick_replies;
 pub mod quick_reply_validation;
 pub mod service;
 pub mod settings;
@@ -180,27 +181,27 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         // Quick replies (snippets de texto)
         .route(
             "/v1/auth-user/whatsapp/quick-replies",
-            get(handler::list_quick_replies_handler),
+            get(quick_replies::handlers::list_quick_replies_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/quick-replies",
-            post(handler::create_quick_reply_handler),
+            post(quick_replies::handlers::create_quick_reply_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/quick-replies/:id",
-            put(handler::update_quick_reply_handler),
+            put(quick_replies::handlers::update_quick_reply_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/quick-replies/:id",
-            delete(handler::delete_quick_reply_handler),
+            delete(quick_replies::handlers::delete_quick_reply_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/quick-replies/:id/active",
-            patch(handler::set_quick_reply_active_handler),
+            patch(quick_replies::handlers::set_quick_reply_active_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/quick-replies/:id/duplicate",
-            post(handler::duplicate_quick_reply_handler),
+            post(quick_replies::handlers::duplicate_quick_reply_handler),
         )
         // Templates CRUD (WaTemplates — DB local)
         .route(

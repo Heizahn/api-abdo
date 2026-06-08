@@ -46,6 +46,6 @@ Chain strategy: feature-branch-chain
 
 ## Phase 4: Cleanup / Final Parity
 
-- [ ] 4.1 Move quick replies into `quick_replies/{mod.rs,handlers.rs}` and templates into `templates/{mod.rs,handlers.rs,meta.rs,header_media.rs}`.
+- [ ] 4.1 Move quick replies into `quick_replies/{mod.rs,handlers.rs}` and templates into `templates/{mod.rs,handlers.rs,meta.rs,header_media.rs}`. (This slice completed Quick Replies ownership; template extraction remains pending.)
 - [ ] 4.2 Trim `handler.rs` to a minimal legacy shim; remove dead exports only after PR4 OpenAPI parity passes.
 - [ ] 4.3 Final verification: `cargo check`, targeted WhatsApp regression tests, full route inventory, and OpenAPI parity against the pre-refactor contract.
