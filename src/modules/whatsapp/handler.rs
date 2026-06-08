@@ -922,15 +922,6 @@ pub async fn receive_webhook(
 // QUICK REPLIES (mensajes rápidos)
 // ============================================
 
-#[allow(unused_imports)]
-pub use super::quick_replies::handlers::{
-    create_quick_reply_handler, delete_quick_reply_handler, duplicate_quick_reply_handler,
-    list_quick_replies_handler, set_quick_reply_active_handler, update_quick_reply_handler,
-    QuickRepliesQuery,
-};
-
-pub(crate) use super::templates::meta::map_meta_error;
-
 // ============================================
 // HELPERS INTERNOS
 // ============================================
