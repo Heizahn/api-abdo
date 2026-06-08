@@ -1564,3 +1564,67 @@ Status: complete
 
 - Revert this PR4k slice to remove the `mod.rs` route/OpenAPI parity tests and restore the prior
   OpenAPI audit registration state.
+
+## PR4l: Handler shim dead-wrapper cleanup
+
+Branch: `feature/modularize-whatsapp-pr4l-handler-map`
+
+Status: partial
+
+## Completed
+
+- Moved webhook template-status ownership out of `src/modules/whatsapp/handler.rs` into
+  `src/modules/whatsapp/webhook/status.rs`:
+  - `process_template_status`
+- Reduced `src/modules/whatsapp/handler.rs` by removing dead local wrapper helpers that were
+  already owned by `shared::*`:
+  - `iso8601`
+  - `conv_to_item`
+  - `compute_meta_throttle_state`
+  - `resolve_customer_name`
+  - `resolve_last_message_agent_name_one`
+  - `resolve_assigned_agent_name_one`
+  - `compute_freeform_state`
+  - `resolve_workspace_name`
+  - `msg_to_item`
+  - `build_message_item`
+  - `preview_truncate`
+  - `resolve_reply_to_for_one`
+  - `build_conversation_item`
+- Updated the remaining legacy webhook flow in `handler.rs` to call `shared::*` and
+  `webhook::status::process_template_status` directly instead of routing through local shims.
+- Kept `receive_webhook`, `apply_inbound_message_delta_update`, `record_conv_event`,
+  `parse_unix_seconds_to_bson`, and the normalization test module in `handler.rs` because moving
+  those bodies together is the next larger autonomous slice.
+
+## Split Map
+
+- `handler.rs` remaining ownership after PR4l:
+  - Webhook entrypoint/runtime: `receive_webhook`
+  - Webhook delta mutation helper: `apply_inbound_message_delta_update`
+  - Webhook conversation audit helper: `record_conv_event`
+  - Tiny parser helper: `parse_unix_seconds_to_bson`
+  - Legacy test placement: `webhook_normalization_tests`
+- Next safe autonomous split candidate:
+  - Move `receive_webhook` + `apply_inbound_message_delta_update` + `record_conv_event`
+    into `webhook::handler`/`webhook::*` while keeping the test module in place or relocating it
+    separately.
+  - Estimated review impact for that next slice: medium/high because the webhook runtime body is
+    still the dominant remaining ownership block.
+
+## Verification
+
+- `cargo fmt`
+- `cargo check`
+- `git diff --check`
+
+## Task Status Impact
+
+- `4.2`: still partial (legacy shim trimmed further, but `receive_webhook` and its runtime helpers
+  still live in `handler.rs`)
+- `4.3`: unchanged
+
+## Rollback Boundary (PR4l)
+
+- Revert this PR4l commit set to restore `process_template_status` and the deleted legacy wrapper
+  helpers back into `src/modules/whatsapp/handler.rs`.

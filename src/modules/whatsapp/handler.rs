@@ -6,28 +6,19 @@ use axum::{
 use mongodb::bson::DateTime;
 use std::sync::Arc;
 
-use crate::{
-    db::{WaTemplateRepository, WhatsAppRepository},
-    error::ApiError,
-    models::whatsapp::*,
-    state::AppState,
-};
+use crate::{db::WhatsAppRepository, models::whatsapp::*, state::AppState};
 
 use super::assignment::assign_conversation;
 use super::messaging::download::{prefetch_media, should_prefetch_media};
 use super::settings::validation::normalize_to_e164;
 use super::shared;
-use super::templates::meta::to_template_item;
 use super::webhook::handler::{last_payload_store, verify_meta_signature};
 use super::webhook::media_failures::schedule_inbound_media_failure_fallback;
 use super::webhook::status::{
     has_meta_throttle_131049, is_inbound_media_failure_status, log_webhook_top_level_errors,
-    InboundMediaFailureDetails,
+    process_template_status, InboundMediaFailureDetails,
 };
-use super::ws::{
-    broadcast_all, broadcast_to_chat_users, build_template_updated_event,
-    emit_to_phone_number_agents, ConversacionNoLeidaData, WsServerEvent,
-};
+use super::ws::{broadcast_all, broadcast_to_chat_users, ConversacionNoLeidaData, WsServerEvent};
 
 use super::webhook::normalize::{
     build_top_level_delta_message, describe_top_level_group, extract_inbound_content,
@@ -137,7 +128,7 @@ async fn apply_inbound_message_delta_update(
                 }
             }
 
-            let updated_message_item = build_message_item(state, updated).await;
+            let updated_message_item = shared::build_message_item(state, updated).await;
 
             let ev = WsServerEvent::MensajeModificado {
                 conversation_id: updated_message_item.conversation_id.clone(),
@@ -338,7 +329,7 @@ pub async fn receive_webhook(
                                 meta_error_title: updated.meta_error_title.clone(),
                                 meta_error_message: updated.meta_error_message.clone(),
                                 meta_error_details: updated.meta_error_details.clone(),
-                                failed_at: updated.failed_at.map(iso8601),
+                                failed_at: updated.failed_at.map(shared::time::iso8601),
                             };
                             // sent/delivered/read son routine — DEBUG. failed es
                             // accionable y queda en WARN para que no se pierda.
@@ -381,7 +372,7 @@ pub async fn receive_webhook(
                                 } else {
                                     tracing::warn!(
                                         "[webhook] meta_throttle_until seteado por 131049 (conv={}, until={})",
-                                        updated.conversation_id.to_hex(), iso8601(until)
+                                        updated.conversation_id.to_hex(), shared::time::iso8601(until)
                                     );
                                     let conv_now = state
                                         .db
@@ -390,20 +381,20 @@ pub async fn receive_webhook(
                                         .ok()
                                         .flatten();
                                     let (can_send_freeform, freeform_expires_at) =
-                                        compute_freeform_state(
+                                        shared::time::compute_freeform_state(
                                             conv_now.as_ref().and_then(|c| c.last_inbound_at),
                                         );
                                     let last_inbound_iso = conv_now
                                         .as_ref()
                                         .and_then(|c| c.last_inbound_at)
-                                        .map(iso8601);
+                                        .map(shared::time::iso8601);
                                     let estado_ev = WsServerEvent::ConversacionEstado {
                                         conversation_id: updated.conversation_id.to_hex(),
                                         last_inbound_at: last_inbound_iso,
                                         can_send_freeform,
                                         freeform_expires_at,
                                         meta_throttled: true,
-                                        meta_throttle_until: Some(iso8601(until)),
+                                        meta_throttle_until: Some(shared::time::iso8601(until)),
                                     };
                                     broadcast_all(&state.ws_registry, &estado_ev).await;
                                 }
@@ -799,10 +790,10 @@ pub async fn receive_webhook(
                     if conv_created {
                         let ws_name =
                             Some(settings.workspace_name.clone()).filter(|w| !w.is_empty());
-                        let resolved = resolve_customer_name(&state, &conv_now).await;
+                        let resolved = shared::resolve_customer_name(&state, &conv_now).await;
                         // Conv recién creada → assigned_to siempre null acá.
                         let new_ev = WsServerEvent::ConversacionNueva {
-                            conversation: conv_to_item(
+                            conversation: shared::response::conv_to_item(
                                 conv_now.clone(),
                                 false,
                                 None,
@@ -823,12 +814,12 @@ pub async fn receive_webhook(
                     }
 
                     // MENSAJE_NUEVO a todos los conectados; el front filtra por conversación abierta.
-                    let reply_to = resolve_reply_to_for_one(&state, &saved).await;
+                    let reply_to = shared::resolve_reply_to_for_one(&state, &saved).await;
                     let saved_oid = saved.id;
                     let preview_text = saved.body.clone();
                     // Clon para el dispatch IA (corre en tokio::spawn más abajo).
                     let saved_for_dispatch = saved.clone();
-                    let message_item = msg_to_item(saved, None, reply_to);
+                    let message_item = shared::mappers::msg_to_item(saved, None, reply_to);
                     let agent_count = state.ws_registry.read().await.len();
                     tracing::debug!(
                         "[webhook] broadcast MENSAJE_NUEVO wa_id={} conv={} → {} agente(s) conectados",
@@ -846,10 +837,10 @@ pub async fn receive_webhook(
                     // El inbound también libera cualquier engagement throttle
                     // (131049) activo (lo limpia `update_last_inbound_at`).
                     let (can_send_freeform, freeform_expires_at) =
-                        compute_freeform_state(Some(msg_ts));
+                        shared::time::compute_freeform_state(Some(msg_ts));
                     let estado_ev = WsServerEvent::ConversacionEstado {
                         conversation_id: conv_id.to_hex(),
-                        last_inbound_at: Some(iso8601(msg_ts)),
+                        last_inbound_at: Some(shared::time::iso8601(msg_ts)),
                         can_send_freeform,
                         freeform_expires_at,
                         meta_throttled: false,
@@ -929,211 +920,10 @@ pub async fn receive_webhook(
 // HELPERS DE MAPEO
 // ============================================
 
-#[allow(dead_code)]
-fn iso8601(dt: DateTime) -> String {
-    dt.try_to_rfc3339_string().unwrap_or_default()
-}
-
-fn conv_to_item(
-    c: WaConversation,
-    include_client_id: bool,
-    last_opened_at: Option<DateTime>,
-    workspace_name: Option<String>,
-    resolved_name: Option<String>,
-    last_message_from_user_name: Option<String>,
-    assigned_to_name: Option<String>,
-) -> ConversationItem {
-    shared::response::conv_to_item(
-        c,
-        include_client_id,
-        last_opened_at,
-        workspace_name,
-        resolved_name,
-        last_message_from_user_name,
-        assigned_to_name,
-    )
-}
-
-/// Devuelve `(meta_throttled, meta_throttle_until_iso)`. Si el cooldown ya
-/// expiró, devuelve `(false, None)` — un campo seteado en el pasado no debe
-/// confundir al front.
-#[allow(dead_code)]
-fn compute_meta_throttle_state(until: Option<DateTime>) -> (bool, Option<String>) {
-    shared::response::compute_meta_throttle_state(until)
-}
-
-/// Resuelve el nombre del contacto para una conversación contra `Clients`:
-/// si tiene `client_id` linkeado lo usa; si no, intenta por teléfono. Devuelve
-/// `None` cuando no matchea en DB — el caller cae a `WaConversation.name`.
-async fn resolve_customer_name(state: &Arc<AppState>, conv: &WaConversation) -> Option<String> {
-    shared::mappers::resolve_customer_name(state, conv).await
-}
-
-/// Resuelve el nombre del agente que envió el último mensaje.
-async fn resolve_last_message_agent_name_one(
-    state: &Arc<AppState>,
-    conv: &WaConversation,
-) -> Option<String> {
-    shared::mappers::resolve_last_message_agent_name_one(state, conv).await
-}
-
-/// Resuelve el nombre del agente actualmente asignado.
-async fn resolve_assigned_agent_name_one(
-    state: &Arc<AppState>,
-    conv: &WaConversation,
-) -> Option<String> {
-    shared::mappers::resolve_assigned_agent_name_one(state, conv).await
-}
-
-/// Devuelve `(can_send_freeform, freeform_expires_at_iso)`.
-fn compute_freeform_state(last_inbound_at: Option<DateTime>) -> (bool, Option<String>) {
-    shared::time::compute_freeform_state(last_inbound_at)
-}
-
-/// Atajo para handlers que tocan una sola conversación: resuelve `workspace_name`
-/// por su `business_phone` vía `WaSettings`.
-async fn resolve_workspace_name(state: &Arc<AppState>, business_phone: &str) -> Option<String> {
-    shared::workspace::resolve_workspace_name(state, business_phone).await
-}
-
-fn msg_to_item(
-    m: WaMessage,
-    from_user_name: Option<String>,
-    reply_to: Option<ReplyToItem>,
-) -> MessageItem {
-    shared::mappers::msg_to_item(m, from_user_name, reply_to)
-}
-
-/// Atajo usado por jobs async (`url_preview`, `ai_agent::dispatch`) para armar
-/// un `MessageItem` completo a partir de un `WaMessage` recién releído:
-/// resuelve `sent_by_name` y `reply_to` en un solo call. Costo: 1-2 queries
-/// a `Users` / `WaMessages`.
-pub async fn build_message_item(state: &Arc<AppState>, m: WaMessage) -> MessageItem {
-    shared::mappers::build_message_item(state, m).await
-}
-
-/// Trunca el cuerpo del mensaje citado a ~80 chars (seguro en UTF-8).
-/// Se usa sólo para preview en la UI; el mensaje original completo sigue
-/// disponible por su `wa_message_id`.
-#[allow(dead_code)]
-fn preview_truncate(s: &str, max_chars: usize) -> String {
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i >= max_chars {
-            out.push('…');
-            break;
-        }
-        out.push(c);
-    }
-    out
-}
-
-/// Atajo para un solo mensaje: reusa el helper batch y devuelve el `ReplyToItem`
-/// correspondiente si existe.
-async fn resolve_reply_to_for_one(state: &Arc<AppState>, m: &WaMessage) -> Option<ReplyToItem> {
-    shared::mappers::resolve_reply_to_for_one(state, m).await
-}
-
 /// Convierte un timestamp de Meta (Unix seconds en string) a `bson::DateTime`.
 fn parse_unix_seconds_to_bson(s: &str) -> Option<DateTime> {
     let secs: i64 = s.parse().ok()?;
     Some(DateTime::from_millis(secs.checked_mul(1000)?))
-}
-
-/// Construye un `ConversationItem` completo desde un `WaConversation` resolviendo
-/// workspace_name + nombres en una sola pasada. Reusable desde otros módulos
-/// del feature (tickets) sin tener que reexportar todos los helpers internos.
-#[allow(dead_code)]
-pub(super) async fn build_conversation_item(
-    state: &Arc<AppState>,
-    conv: WaConversation,
-    caller_id: &str,
-) -> Result<ConversationItem, ApiError> {
-    let oid = conv.id.unwrap_or_default();
-    let opens = state
-        .db
-        .get_conversation_opens(caller_id, &[oid])
-        .await
-        .map_err(ApiError::DatabaseError)?;
-    let last_opened = opens.get(&oid).copied();
-    let workspace_name = resolve_workspace_name(state, &conv.business_phone).await;
-    let resolved = resolve_customer_name(state, &conv).await;
-    let agent_name = resolve_last_message_agent_name_one(state, &conv).await;
-    let assigned_name = resolve_assigned_agent_name_one(state, &conv).await;
-    Ok(conv_to_item(
-        conv,
-        true,
-        last_opened,
-        workspace_name,
-        resolved,
-        agent_name,
-        assigned_name,
-    ))
-}
-
-// ---------------------------------------------------------------------------
-// Bundle 6 — process_template_status (webhook handler)
-// ---------------------------------------------------------------------------
-
-/// Procesa un evento `message_template_status_update` del webhook de Meta.
-/// Mapea el `event` a `WaTemplateStatus`, actualiza en DB, emite WS.
-/// Siempre retorna sin error — el webhook debe devolver 200.
-async fn process_template_status(
-    state: &Arc<AppState>,
-    meta_template_id: &str,
-    event: &str,
-    reason: Option<&str>,
-) {
-    // 1. Mapear event Meta → (WaTemplateStatus, rejection_reason)
-    let (new_status, rejection_reason): (WaTemplateStatus, Option<String>) =
-        match event.to_uppercase().as_str() {
-            "APPROVED" => (WaTemplateStatus::Approved, None),
-            "REJECTED" => (WaTemplateStatus::Rejected, reason.map(|s| s.to_string())),
-            "FLAGGED" => (
-                WaTemplateStatus::Rejected,
-                Some("flagged_by_meta_quality".to_string()),
-            ),
-            "PAUSED" => (WaTemplateStatus::Paused, reason.map(|s| s.to_string())),
-            "DISABLED" => (WaTemplateStatus::Disabled, reason.map(|s| s.to_string())),
-            "PENDING" | "IN_REVIEW" => (WaTemplateStatus::Pending, None),
-            other => {
-                tracing::warn!(
-                    "[webhook] process_template_status: evento desconocido '{}' para meta_id={}",
-                    other,
-                    meta_template_id
-                );
-                return;
-            }
-        };
-
-    // 2. Actualizar en DB
-    match state
-        .db
-        .update_template_status(meta_template_id, new_status, rejection_reason)
-        .await
-    {
-        Ok(None) => {
-            tracing::warn!(
-                "[webhook] process_template_status: template con meta_id={} no encontrado en DB",
-                meta_template_id
-            );
-        }
-        Ok(Some((updated_doc, prev_status))) => {
-            // 3. Si cambió el status, emitir WS
-            if prev_status != new_status {
-                let item = to_template_item(updated_doc.clone());
-                let ws_payload = build_template_updated_event(&item, Some(prev_status));
-                emit_to_phone_number_agents(state, &updated_doc.phone_number_id, ws_payload).await;
-            }
-        }
-        Err(e) => {
-            tracing::error!(
-                "[webhook] process_template_status: DB error para meta_id={}: {}",
-                meta_template_id,
-                e
-            );
-        }
-    }
 }
 
 #[cfg(test)]
