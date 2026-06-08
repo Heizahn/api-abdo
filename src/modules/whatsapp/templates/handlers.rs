@@ -17,18 +17,20 @@ use crate::{
 };
 
 use super::super::{
-    handler::{flat_to_components, generate_template_name, map_meta_error, validate_components},
     messaging::media::swap_header_handles_in_components,
     service::WhatsAppService,
     shared::{
         authz::{require_can_chat, require_superadmin},
         settings_secret,
-        time::iso8601,
     },
     ws::{
         build_template_created_event, build_template_deleted_event, build_template_updated_event,
         emit_to_phone_number_agents,
     },
+};
+use super::meta::{
+    flat_to_components, generate_template_name, map_meta_error, parse_meta_template_category,
+    template_not_found, to_template_item, validate_components,
 };
 
 #[derive(serde::Deserialize)]
@@ -40,48 +42,6 @@ pub struct TemplatesListQuery {
     pub search: Option<String>,
     pub limit: Option<i64>,
     pub cursor: Option<String>,
-}
-
-/// Convierte un `WaTemplate` de DB al shape de response `WaTemplateItem`.
-pub(in crate::modules::whatsapp) fn to_template_item(t: WaTemplate) -> WaTemplateItem {
-    WaTemplateItem {
-        id: t.id.map(|o| o.to_hex()).unwrap_or_default(),
-        phone_number_id: t.phone_number_id,
-        name: t.name,
-        display_name: t.display_name,
-        name_input: t.name_input,
-        language: t.language,
-        category: t.category,
-        components: t.components,
-        body_placeholders: t.body_placeholders,
-        status: t.status,
-        rejection_reason: t.rejection_reason,
-        meta_template_id: t.meta_template_id,
-        is_system: t.is_system,
-        submit_to_meta: t.submit_to_meta,
-        created_by: t.created_by,
-        created_by_name: t.created_by_name,
-        created_at: iso8601(t.created_at),
-        updated_at: iso8601(t.updated_at),
-    }
-}
-
-/// Error canónico para plantilla no encontrada (404).
-pub(in crate::modules::whatsapp) fn template_not_found() -> ApiError {
-    ApiError::domain_simple(
-        StatusCode::NOT_FOUND,
-        "template_not_found",
-        "Plantilla no encontrada",
-    )
-}
-
-fn parse_meta_template_category(raw: Option<&str>) -> Option<WaTemplateCategory> {
-    match raw?.trim().to_uppercase().as_str() {
-        "MARKETING" => Some(WaTemplateCategory::Marketing),
-        "UTILITY" | "SERVICE" => Some(WaTemplateCategory::Utility),
-        "AUTHENTICATION" => Some(WaTemplateCategory::Authentication),
-        _ => None,
-    }
 }
 
 #[utoipa::path(
