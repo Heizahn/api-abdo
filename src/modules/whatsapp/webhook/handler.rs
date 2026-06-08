@@ -84,6 +84,19 @@ fn log_parse_error_sanitized(error: &serde_json::Error, raw: &serde_json::Value)
     );
 }
 
+fn is_meta_unknown_type_notice(msg: &InboundMessage, effective_msg_type: &str) -> bool {
+    matches!(effective_msg_type, "unsupported" | "unknown")
+        && msg
+            .errors
+            .as_ref()
+            .is_some_and(|errors| errors.iter().any(|error| error.code == Some(131051)))
+        && msg.image.is_none()
+        && msg.document.is_none()
+        && msg.audio.is_none()
+        && msg.video.is_none()
+        && msg.sticker.is_none()
+}
+
 #[derive(serde::Deserialize)]
 pub struct WebhookVerifyParams {
     #[serde(rename = "hub.mode")]
@@ -699,6 +712,15 @@ pub async fn receive_webhook(
                             first_error.and_then(|e| e.code),
                             first_error.and_then(|e| e.title.as_deref())
                         );
+                    }
+
+                    if is_meta_unknown_type_notice(&msg, &effective_msg_type) {
+                        tracing::warn!(
+                            "[webhook] omitiendo aviso Meta 131051 como burbuja visible message_id={} payload_keys={}",
+                            msg.id,
+                            inbound_payload_markers(&msg)
+                        );
+                        continue;
                     }
 
                     if effective_msg_type == "reaction"
