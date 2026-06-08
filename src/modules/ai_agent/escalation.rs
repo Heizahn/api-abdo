@@ -28,6 +28,7 @@ use crate::{
         ai_agent::{AiAgent, AiAgentMode},
         whatsapp::{WaConversationEventInput, WaMessage},
     },
+    modules::whatsapp::shared::build_message_item,
     state::AppState,
 };
 
@@ -283,7 +284,7 @@ async fn send_farewell_message(
         .await
         .map_err(|e| format!("touch_conversation: {}", e))?;
 
-    let item = crate::modules::whatsapp::handler::build_message_item(state, saved).await;
+    let item = build_message_item(state, saved).await;
     let ev = crate::modules::whatsapp::ws::WsServerEvent::MensajeNuevo {
         conversation_id: conv_id.to_hex(),
         message: item,
