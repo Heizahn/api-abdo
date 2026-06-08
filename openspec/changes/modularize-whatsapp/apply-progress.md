@@ -1689,3 +1689,60 @@ Status: complete
 
 - Revert this PR4m slice to restore webhook runtime ownership to `src/modules/whatsapp/handler.rs`,
   move normalization tests back to the legacy shim, and undo the `0.3.58` version metadata bump.
+
+## PR4n: Final verification
+
+Branch: `feature/modularize-whatsapp-pr4n-final-verification`
+
+Status: complete
+
+## Completed
+
+- Ran the final verification checklist in the isolated PR4n worktree using `CARGO_TARGET_DIR=/home/humberto/Develop/.cargo-target-api-abdo`.
+- Confirmed `src/modules/whatsapp/handler.rs` is now a minimal 6-line legacy compatibility shim that only re-exports:
+  - `verify_webhook`
+  - `receive_webhook`
+  - `debug_last_webhook_handler`
+- Confirmed WhatsApp route ownership and inventory parity stay in `src/modules/whatsapp/mod.rs`, with passing route inventory and OpenAPI parity tests from task `3.3`.
+- Confirmed the public webhook contract remains mounted outside JWT/rate-limit groups in `src/axum_router.rs` and that webhook runtime behavior continues to live under `src/modules/whatsapp/webhook/*` with passing normalization regression coverage.
+- Created `openspec/changes/modularize-whatsapp/verify-report.md` with concise PASS evidence.
+- Updated `openspec/changes/modularize-whatsapp/tasks.md` to mark `4.3` complete.
+
+## Verification
+
+- `git status --short --branch`
+- `git diff --check`
+- `cargo fmt --check`
+- `CARGO_TARGET_DIR=/home/humberto/Develop/.cargo-target-api-abdo cargo check`
+- `CARGO_TARGET_DIR=/home/humberto/Develop/.cargo-target-api-abdo cargo check --tests`
+- `CARGO_TARGET_DIR=/home/humberto/Develop/.cargo-target-api-abdo cargo test`
+- `CARGO_TARGET_DIR=/home/humberto/Develop/.cargo-target-api-abdo cargo test mod_rs_route_inventory_matches_expected`
+- `CARGO_TARGET_DIR=/home/humberto/Develop/.cargo-target-api-abdo cargo test openapi_whatsapp_inventory_matches_expected`
+- `CARGO_TARGET_DIR=/home/humberto/Develop/.cargo-target-api-abdo cargo test webhook_normalization_tests`
+
+## Results
+
+- `git status --short --branch` showed `## feature/modularize-whatsapp-pr4n-final-verification` with a clean tree before artifact edits.
+- `git diff --check` passed before verification and again after the OpenSpec artifact updates.
+- `cargo fmt --check` passed.
+- `cargo check` passed.
+- `cargo check --tests` passed.
+- `cargo test` passed with `156 passed; 0 failed`.
+- Targeted route/OpenAPI parity tests passed: `2/2`.
+- Targeted webhook normalization regression tests passed: `8/8`.
+
+## Task Status Impact
+
+- `4.3`: complete
+- Change status: `13/13` tasks complete and ready for verify/archive handoff.
+
+## Versioning Note
+
+- No version bump was applied in this final slice because only OpenSpec verification artifacts changed; runtime code and generated API metadata were already versioned at `0.3.58` in PR4m.
+
+## Rollback Boundary (PR4n)
+
+- Revert only the OpenSpec verification artifact updates:
+  - `openspec/changes/modularize-whatsapp/tasks.md`
+  - `openspec/changes/modularize-whatsapp/apply-progress.md`
+  - `openspec/changes/modularize-whatsapp/verify-report.md`
