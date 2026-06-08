@@ -44,27 +44,31 @@ use crate::models::users::{
     UserResponseEnvelope,
 };
 use crate::models::whatsapp::{
-    ConversationClientLinkData, ConversationClientLinkItem, ConversationClientLinkResponse,
-    ConversationDetailResponse, ConversationItem, ConversationMessagesResponse, ConversationStats,
-    ConversationStatsResponse, ConversationsListResponse, CreateQuickReplyRequest,
-    CreateSettingsRequest, CreateTicketRequest, CreateWaTemplateRequest, DeleteWaTemplateData,
-    DeleteWaTemplateResponse, DuplicateQuickReplyRequest, HeaderMediaUploadData,
-    HeaderMediaUploadResponse, InitiateConversationRequest, LocationPayload, MarkReadData,
-    MarkReadResponse, MediaLimitsResponse, MediaSendPayload, MediaTypeLimit, MediaUploadData,
-    MediaUploadResponse, MessageItem, QuickRepliesListResponse, QuickReplyButton, QuickReplyCtaUrl,
-    QuickReplyHeader, QuickReplyItem, QuickReplyList, QuickReplyListRow, QuickReplyListSection,
-    QuickReplyResponse, ReplyToItem, SendMessageData, SendMessageRequest, SendMessageResponse,
-    SendTemplatePayload, SettingsItem, SettingsListResponse, SettingsResponse,
-    TakeConversationResponse, TicketCategoriesResponse, TicketCategoryItem, TicketItem,
-    TicketResponse, TicketTimelineEntryItem, TicketsListResponse, ToggleActiveRequest,
-    TransferAndTicketData, TransferAndTicketRequest, TransferAndTicketResponse,
-    TransferConversationRequest, TransferableAgentItem, TransferableAgentsResponse,
-    TrivialResponse, UpdateQuickReplyRequest, UpdateResponse, UpdateSettingsRequest,
-    UpdateTicketStatusRequest, UpdateWaTemplateRequest, UrlPreview, WaPurposeConfig,
-    WaPurposeUsage, WaPurposes, WaPurposesPatch, WaTemplateButtonInput, WaTemplateCategory,
-    WaTemplateHeaderInput, WaTemplateItem, WaTemplateResponse, WaTemplateStatus,
-    WaTemplatesListResponse, WaTestConnectionData, WaTestConnectionRequest,
-    WaTestConnectionResponse, WaTestConnectionSource, WaTicketTimelineEntry,
+    AuditAssignedToHistoryItem, AuditConversationEventItem, AuditConversationHeader,
+    AuditConversationTimeline, AuditConversationTimelineResponse, AuditMessageItem,
+    AuditMessagesResponse, AuditMetricsByAgent, AuditMetricsByDay, AuditMetricsByType,
+    AuditMetricsData, AuditMetricsResponse, AuditMetricsSummary, ConversationClientLinkData,
+    ConversationClientLinkItem, ConversationClientLinkResponse, ConversationDetailResponse,
+    ConversationItem, ConversationMessagesResponse, ConversationStats, ConversationStatsResponse,
+    ConversationsListResponse, CreateQuickReplyRequest, CreateSettingsRequest, CreateTicketRequest,
+    CreateWaTemplateRequest, DeleteWaTemplateData, DeleteWaTemplateResponse,
+    DuplicateQuickReplyRequest, HeaderMediaUploadData, HeaderMediaUploadResponse,
+    InitiateConversationRequest, LocationPayload, MarkReadData, MarkReadResponse,
+    MediaLimitsResponse, MediaSendPayload, MediaTypeLimit, MediaUploadData, MediaUploadResponse,
+    MessageItem, QuickRepliesListResponse, QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader,
+    QuickReplyItem, QuickReplyList, QuickReplyListRow, QuickReplyListSection, QuickReplyResponse,
+    ReplyToItem, SendMessageData, SendMessageRequest, SendMessageResponse, SendTemplatePayload,
+    SettingsItem, SettingsListResponse, SettingsResponse, TakeConversationResponse,
+    TicketCategoriesResponse, TicketCategoryItem, TicketItem, TicketResponse,
+    TicketTimelineEntryItem, TicketsListResponse, ToggleActiveRequest, TransferAndTicketData,
+    TransferAndTicketRequest, TransferAndTicketResponse, TransferConversationRequest,
+    TransferableAgentItem, TransferableAgentsResponse, TrivialResponse, UpdateQuickReplyRequest,
+    UpdateResponse, UpdateSettingsRequest, UpdateTicketStatusRequest, UpdateWaTemplateRequest,
+    UrlPreview, WaPurposeConfig, WaPurposeUsage, WaPurposes, WaPurposesPatch,
+    WaTemplateButtonInput, WaTemplateCategory, WaTemplateHeaderInput, WaTemplateItem,
+    WaTemplateResponse, WaTemplateStatus, WaTemplatesListResponse, WaTestConnectionData,
+    WaTestConnectionRequest, WaTestConnectionResponse, WaTestConnectionSource,
+    WaTicketTimelineEntry,
 };
 use crate::models::zabbix::{MonthlyTraffic, ZabbixTrafficResponse};
 use crate::modules::ai_agent::business_data::{AiToolMetaItem, AiToolsListResponse};
@@ -85,7 +89,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.55",
+        version = "0.3.56",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
@@ -183,6 +187,11 @@ use crate::modules::whatsapp::conversations::lifecycle::{
         crate::modules::whatsapp::templates::handlers::resync_template_handler,
         crate::modules::whatsapp::templates::header_media::upload_template_header_media_handler,
         crate::modules::whatsapp::messaging::reactions::react_message_handler,
+        crate::modules::whatsapp::audit::audit_messages_handler,
+        crate::modules::whatsapp::audit::audit_metrics_handler,
+        crate::modules::whatsapp::audit::audit_export_handler,
+        crate::modules::whatsapp::audit::audit_conversation_messages_handler,
+        crate::modules::whatsapp::audit::audit_conversation_timeline_handler,
         // WhatsApp — Tickets
         crate::modules::whatsapp::tickets::list_ticket_categories_handler,
         crate::modules::whatsapp::tickets::list_tickets_handler,
@@ -298,6 +307,12 @@ use crate::modules::whatsapp::conversations::lifecycle::{
             HeaderMediaUploadResponse, HeaderMediaUploadData,
             WaPurposeUsage,
             UpdateResponse,
+            // WhatsApp — Audit
+            AuditMessageItem, AuditMessagesResponse,
+            AuditConversationHeader, AuditConversationEventItem, AuditAssignedToHistoryItem,
+            AuditConversationTimeline, AuditConversationTimelineResponse,
+            AuditMetricsSummary, AuditMetricsByDay, AuditMetricsByAgent, AuditMetricsByType,
+            AuditMetricsData, AuditMetricsResponse,
             // Users — CRUD
             UserItem, UserListResponse, UserResponseEnvelope, OkResponse,
             SetUserVisibleRequest, UpdateUserRequest, CreateUserBody, SetUserPasswordRequest,
