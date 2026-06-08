@@ -9,7 +9,7 @@ use crate::{
     state::AppState,
 };
 
-use super::status::InboundMediaFailureDetails;
+use super::{record_conv_event, status::InboundMediaFailureDetails};
 use crate::modules::whatsapp::{
     service::WhatsAppService,
     shared::{apply_media_relay, mappers, response, settings_secret},
@@ -336,13 +336,4 @@ pub(crate) async fn schedule_inbound_media_failure_fallback(
         }
     }
     notify_inbound_media_failure(state, wa_id, recipient_phone, business_phone, failure).await;
-}
-
-/// Persiste un evento de ciclo de vida de conversación. Best-effort:
-/// si la inserción falla se loggea pero NO se propaga el error — la
-/// auditoría no debe bloquear la respuesta HTTP del agente.
-async fn record_conv_event(state: &AppState, input: WaConversationEventInput<'_>) {
-    if let Err(e) = state.db.record_conversation_event(input).await {
-        tracing::warn!("record_conversation_event failed: {}", e);
-    }
 }
