@@ -9,15 +9,22 @@ use mongodb::bson::oid::ObjectId;
 
 use crate::{
     auth::user_jwt::UserProfileClaims,
-    db::{WaTemplateListFilter, WaTemplateRepository, WhatsAppRepository},
+    crypto::aes::decrypt_payload,
+    db::{WaTemplateListFilter, WaTemplateRepository, WaTemplateUpdatePatch, WhatsAppRepository},
     error::ApiError,
     models::whatsapp::*,
     state::AppState,
 };
 
-use super::super::shared::{
-    authz::{require_can_chat, require_superadmin},
-    time::iso8601,
+use super::super::{
+    handler::map_meta_error,
+    service::WhatsAppService,
+    shared::{
+        authz::{require_can_chat, require_superadmin},
+        settings_secret,
+        time::iso8601,
+    },
+    ws::{build_template_deleted_event, build_template_updated_event, emit_to_phone_number_agents},
 };
 
 #[derive(serde::Deserialize)]
@@ -62,6 +69,15 @@ pub(in crate::modules::whatsapp) fn template_not_found() -> ApiError {
         "template_not_found",
         "Plantilla no encontrada",
     )
+}
+
+fn parse_meta_template_category(raw: Option<&str>) -> Option<WaTemplateCategory> {
+    match raw?.trim().to_uppercase().as_str() {
+        "MARKETING" => Some(WaTemplateCategory::Marketing),
+        "UTILITY" | "SERVICE" => Some(WaTemplateCategory::Utility),
+        "AUTHENTICATION" => Some(WaTemplateCategory::Authentication),
+        _ => None,
+    }
 }
 
 #[utoipa::path(
@@ -230,5 +246,233 @@ pub async fn get_template_handler(
     Ok(Json(WaTemplateResponse {
         ok: true,
         data: to_template_item(doc),
+    }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/v1/auth-user/whatsapp/templates/{id}",
+    tag = "WhatsApp — Templates",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ObjectId hex de la plantilla")),
+    responses(
+        (status = 200, description = "Plantilla eliminada", body = DeleteWaTemplateResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Sólo SUPERADMIN"),
+        (status = 404, description = "template_not_found"),
+        (status = 409, description = "template_in_use_cannot_delete"),
+        (status = 502, description = "meta_rejected"),
+    )
+)]
+pub async fn delete_template_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+) -> Result<Json<DeleteWaTemplateResponse>, ApiError> {
+    require_superadmin(&state, &claims.id).await?;
+
+    let oid = ObjectId::parse_str(&id).map_err(|_| template_not_found())?;
+
+    let doc = state
+        .db
+        .find_template_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(template_not_found)?;
+
+    let in_use = state
+        .db
+        .count_templates_in_purposes(&doc.phone_number_id, &doc.name)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    if !in_use.is_empty() {
+        return Err(ApiError::domain_with_details(
+            StatusCode::CONFLICT,
+            "template_in_use_cannot_delete",
+            "La plantilla está en uso en propósitos del sistema",
+            serde_json::json!({ "purposes": in_use }),
+        ));
+    }
+
+    if let Some(ref meta_id) = doc.meta_template_id {
+        let settings = state
+            .db
+            .find_wa_settings_by_phone_number_id(&doc.phone_number_id)
+            .await
+            .map_err(ApiError::DatabaseError)?
+            .ok_or_else(|| {
+                ApiError::domain_with_field(
+                    StatusCode::NOT_FOUND,
+                    "phone_number_not_found",
+                    "phone_number_id",
+                    "El número de WhatsApp no está configurado",
+                )
+            })?;
+        let token = decrypt_payload(&settings_secret(), &settings.access_token)
+            .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
+        let waba_id = settings.whatsapp_business_account_id.trim().to_string();
+
+        let wa = WhatsAppService::new(
+            state.reqwest_client.clone(),
+            settings.phone_number_id.clone(),
+            token,
+        );
+
+        if let Err(e) = wa.delete_template_meta(&waba_id, meta_id, &doc.name).await {
+            return Err(map_meta_error(&e, "Meta rechazó el borrado del template"));
+        }
+    }
+
+    state
+        .db
+        .delete_template(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    let ws_payload = build_template_deleted_event(
+        &oid.to_hex(),
+        &doc.name,
+        &doc.language,
+        &doc.phone_number_id,
+    );
+    emit_to_phone_number_agents(&state, &doc.phone_number_id, ws_payload).await;
+
+    Ok(Json(DeleteWaTemplateResponse {
+        ok: true,
+        data: DeleteWaTemplateData { id: oid.to_hex() },
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/templates/{id}/resync",
+    tag = "WhatsApp — Templates",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ObjectId hex de la plantilla")),
+    responses(
+        (status = 200, description = "Estado/categoría sincronizados desde Meta", body = WaTemplateResponse),
+        (status = 400, description = "draft_cannot_resync (la plantilla está en DRAFT)"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Sólo SUPERADMIN"),
+        (status = 404, description = "template_not_found"),
+        (status = 502, description = "meta_rejected (Meta no devolvió el template)"),
+    )
+)]
+pub async fn resync_template_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+) -> Result<Json<WaTemplateResponse>, ApiError> {
+    require_superadmin(&state, &claims.id).await?;
+
+    let oid = ObjectId::parse_str(&id).map_err(|_| template_not_found())?;
+
+    let doc = state
+        .db
+        .find_template_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(template_not_found)?;
+
+    let meta_id = doc.meta_template_id.as_deref().ok_or_else(|| {
+        ApiError::domain_simple(
+            StatusCode::BAD_REQUEST,
+            "draft_cannot_resync",
+            "La plantilla está en DRAFT — todavía no fue enviada a Meta, no hay nada que sincronizar",
+        )
+    })?;
+
+    let settings = state
+        .db
+        .find_wa_settings_by_phone_number_id(&doc.phone_number_id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| {
+            ApiError::domain_with_field(
+                StatusCode::NOT_FOUND,
+                "phone_number_not_found",
+                "phone_number_id",
+                "El número de WhatsApp no está configurado",
+            )
+        })?;
+
+    let token = decrypt_payload(&settings_secret(), &settings.access_token)
+        .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
+
+    let wa = WhatsAppService::new(
+        state.reqwest_client.clone(),
+        settings.phone_number_id.clone(),
+        token,
+    );
+
+    let info = wa
+        .get_template_meta(meta_id)
+        .await
+        .map_err(|e| map_meta_error(&e, "Meta no devolvió el template"))?;
+
+    let (new_status, rejection_reason): (WaTemplateStatus, Option<String>) =
+        match info.status.to_uppercase().as_str() {
+            "APPROVED" => (WaTemplateStatus::Approved, None),
+            "REJECTED" => (WaTemplateStatus::Rejected, info.rejected_reason),
+            "FLAGGED" => (
+                WaTemplateStatus::Rejected,
+                Some("flagged_by_meta_quality".to_string()),
+            ),
+            "PAUSED" => (WaTemplateStatus::Paused, info.rejected_reason),
+            "DISABLED" => (WaTemplateStatus::Disabled, info.rejected_reason),
+            "PENDING" | "IN_REVIEW" | "" => (WaTemplateStatus::Pending, None),
+            other => {
+                return Err(ApiError::Internal(format!(
+                    "Meta devolvió un status desconocido: '{}'",
+                    other
+                )));
+            }
+        };
+    let prev_status = doc.status;
+    let prev_category = doc.category;
+    let new_category = parse_meta_template_category(info.category.as_deref());
+
+    let updated_doc = state
+        .db
+        .update_template(
+            &oid,
+            WaTemplateUpdatePatch {
+                name: None,
+                display_name: None,
+                name_input: None,
+                category: new_category,
+                components: None,
+                body_placeholders: None,
+                status: Some(new_status),
+                rejection_reason: Some(rejection_reason),
+                meta_template_id: None,
+                is_system: None,
+                submit_to_meta: None,
+            },
+        )
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(template_not_found)?;
+
+    let item = to_template_item(updated_doc);
+    let category_changed = new_category.is_some_and(|cat| cat != prev_category);
+    let status_changed = item.status != prev_status;
+
+    if status_changed || category_changed {
+        let payload = build_template_updated_event(
+            &item,
+            if status_changed {
+                Some(prev_status)
+            } else {
+                None
+            },
+        );
+        emit_to_phone_number_agents(&state, &item.phone_number_id, payload).await;
+    }
+
+    Ok(Json(WaTemplateResponse {
+        ok: true,
+        data: item,
     }))
 }

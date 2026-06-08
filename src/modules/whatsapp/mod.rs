@@ -227,11 +227,11 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/v1/auth-user/whatsapp/templates/:id",
-            delete(handler::delete_template_handler),
+            delete(templates::handlers::delete_template_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/templates/:id/resync",
-            post(handler::resync_template_handler),
+            post(templates::handlers::resync_template_handler),
         )
         // Debug
         .route(
