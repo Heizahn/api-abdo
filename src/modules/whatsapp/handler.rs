@@ -1,6 +1,6 @@
 use axum::{
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     Extension, Json,
 };
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::{
     auth::user_jwt::UserProfileClaims,
     crypto::aes::decrypt_payload,
-    db::{WaTemplateListFilter, WaTemplateRepository, WaTemplateUpdatePatch, WhatsAppRepository},
+    db::{WaTemplateRepository, WaTemplateUpdatePatch, WhatsAppRepository},
     error::ApiError,
     models::whatsapp::*,
     state::AppState,
@@ -23,6 +23,7 @@ use super::service::WhatsAppService;
 use super::settings::validation::normalize_to_e164;
 use super::shared;
 use super::shared::settings_secret;
+use super::templates::handlers::{template_not_found, to_template_item};
 use super::webhook::handler::{last_payload_store, verify_meta_signature};
 use super::webhook::media_failures::schedule_inbound_media_failure_fallback;
 use super::webhook::status::{
@@ -944,6 +945,11 @@ pub use super::quick_replies::handlers::{
     QuickRepliesQuery,
 };
 
+#[allow(unused_imports)]
+pub use super::templates::handlers::{
+    get_template_handler, list_templates_handler, TemplatesListQuery,
+};
+
 // ============================================
 // HELPERS INTERNOS
 // ============================================
@@ -1155,34 +1161,6 @@ fn count_placeholders(text: &str) -> u32 {
 // ============================================
 // TEMPLATES CRUD (WaTemplates — DB local)
 // ============================================
-
-// ---------------------------------------------------------------------------
-// Helpers compartidos
-// ---------------------------------------------------------------------------
-
-/// Convierte un `WaTemplate` de DB al shape de response `WaTemplateItem`.
-fn to_template_item(t: WaTemplate) -> WaTemplateItem {
-    WaTemplateItem {
-        id: t.id.map(|o| o.to_hex()).unwrap_or_default(),
-        phone_number_id: t.phone_number_id,
-        name: t.name,
-        display_name: t.display_name,
-        name_input: t.name_input,
-        language: t.language,
-        category: t.category,
-        components: t.components,
-        body_placeholders: t.body_placeholders,
-        status: t.status,
-        rejection_reason: t.rejection_reason,
-        meta_template_id: t.meta_template_id,
-        is_system: t.is_system,
-        submit_to_meta: t.submit_to_meta,
-        created_by: t.created_by,
-        created_by_name: t.created_by_name,
-        created_at: iso8601(t.created_at),
-        updated_at: iso8601(t.updated_at),
-    }
-}
 
 /// Slugifica una cadena a formato Meta-safe:
 /// lowercase, non-alnum → `_`, strip non-ASCII, colapsar `_` consecutivos,
@@ -1485,29 +1463,9 @@ pub(super) async fn require_superadmin(
     shared::authz::require_superadmin(state, user_id).await
 }
 
-/// Error canónico para plantilla no encontrada (404).
-fn template_not_found() -> ApiError {
-    ApiError::domain_simple(
-        StatusCode::NOT_FOUND,
-        "template_not_found",
-        "Plantilla no encontrada",
-    )
-}
-
 // ---------------------------------------------------------------------------
 // POST /v1/auth-user/whatsapp/templates
 // ---------------------------------------------------------------------------
-
-#[derive(serde::Deserialize)]
-pub struct TemplatesListQuery {
-    pub phone_number_id: String,
-    pub status: Option<String>,
-    pub category: Option<String>,
-    pub only_system: Option<bool>,
-    pub search: Option<String>,
-    pub limit: Option<i64>,
-    pub cursor: Option<String>,
-}
 
 #[utoipa::path(
     post,
@@ -1706,186 +1664,6 @@ pub async fn create_template_handler(
     Ok(Json(WaTemplateResponse {
         ok: true,
         data: item,
-    }))
-}
-
-// ---------------------------------------------------------------------------
-// GET /v1/auth-user/whatsapp/templates (reemplaza el anterior)
-// ---------------------------------------------------------------------------
-
-#[utoipa::path(
-    get,
-    path = "/v1/auth-user/whatsapp/templates",
-    tag = "WhatsApp — Templates",
-    security(("bearerAuth" = [])),
-    params(
-        ("phone_number_id" = String, Query, description = "phone_number_id del workspace (requerido)"),
-        ("status" = Option<String>, Query, description = "Filtrar por status(es) separados por coma"),
-        ("category" = Option<String>, Query, description = "MARKETING | UTILITY | AUTHENTICATION"),
-        ("only_system" = Option<bool>, Query, description = "Si true, sólo plantillas del sistema"),
-        ("search" = Option<String>, Query, description = "Búsqueda substring en display_name y name"),
-        ("limit" = Option<i64>, Query, description = "Default 50, máx 100"),
-        ("cursor" = Option<String>, Query, description = "Cursor opaco de paginación"),
-    ),
-    responses(
-        (status = 200, description = "Lista de plantillas", body = WaTemplatesListResponse),
-        (status = 400, description = "Parámetros inválidos"),
-        (status = 401, description = "No autorizado"),
-        (status = 403, description = "Requiere bCanChat"),
-        (status = 404, description = "phone_number_not_found"),
-    )
-)]
-pub async fn list_templates_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<UserProfileClaims>,
-    Query(q): Query<TemplatesListQuery>,
-) -> Result<Json<WaTemplatesListResponse>, ApiError> {
-    require_can_chat(&state, &claims.id).await?;
-
-    let phone_number_id = q.phone_number_id.trim().to_string();
-    if phone_number_id.is_empty() {
-        return Err(ApiError::domain_simple(
-            StatusCode::BAD_REQUEST,
-            "invalid_query",
-            "phone_number_id es requerido",
-        ));
-    }
-
-    // Verificar que el WaSettings existe
-    state
-        .db
-        .find_wa_settings_by_phone_number_id(&phone_number_id)
-        .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or_else(|| {
-            ApiError::domain_with_field(
-                StatusCode::NOT_FOUND,
-                "phone_number_not_found",
-                "phone_number_id",
-                "El número de WhatsApp no está configurado",
-            )
-        })?;
-
-    // Parsear status CSV
-    let status_vec: Option<Vec<WaTemplateStatus>> = if let Some(s) = &q.status {
-        let mut parsed = Vec::new();
-        for part in s.split(',') {
-            let trimmed = part.trim();
-            let st = match trimmed.to_uppercase().as_str() {
-                "DRAFT" => WaTemplateStatus::Draft,
-                "PENDING" => WaTemplateStatus::Pending,
-                "APPROVED" => WaTemplateStatus::Approved,
-                "REJECTED" => WaTemplateStatus::Rejected,
-                "PAUSED" => WaTemplateStatus::Paused,
-                "DISABLED" => WaTemplateStatus::Disabled,
-                _ => {
-                    return Err(ApiError::domain_simple(
-                        StatusCode::BAD_REQUEST,
-                        "invalid_query",
-                        "Status inválido",
-                    ));
-                }
-            };
-            parsed.push(st);
-        }
-        if parsed.is_empty() {
-            None
-        } else {
-            Some(parsed)
-        }
-    } else {
-        None
-    };
-
-    // Parsear category
-    let category_filter: Option<WaTemplateCategory> = if let Some(c) = &q.category {
-        Some(match c.trim().to_uppercase().as_str() {
-            "MARKETING" => WaTemplateCategory::Marketing,
-            "UTILITY" => WaTemplateCategory::Utility,
-            "AUTHENTICATION" => WaTemplateCategory::Authentication,
-            _ => {
-                return Err(ApiError::domain_simple(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_query",
-                    "Categoría inválida",
-                ));
-            }
-        })
-    } else {
-        None
-    };
-
-    let limit = q.limit.unwrap_or(50).clamp(1, 100);
-
-    let filter = WaTemplateListFilter {
-        phone_number_id: &phone_number_id,
-        status: status_vec.as_deref(),
-        category: category_filter,
-        only_system: q.only_system.unwrap_or(false),
-        search: q.search.as_deref(),
-        limit,
-        cursor: q.cursor.as_deref(),
-    };
-
-    let templates = state
-        .db
-        .list_templates_filtered(filter)
-        .await
-        .map_err(ApiError::DatabaseError)?;
-
-    let next_cursor = if (templates.len() as i64) < limit {
-        None
-    } else {
-        templates.last().and_then(|t| {
-            t.id.map(|id| format!("{}_{}", t.created_at.timestamp_millis(), id.to_hex()))
-        })
-    };
-
-    let data: Vec<WaTemplateItem> = templates.into_iter().map(to_template_item).collect();
-
-    Ok(Json(WaTemplatesListResponse {
-        ok: true,
-        data,
-        next_cursor,
-    }))
-}
-
-// ---------------------------------------------------------------------------
-// GET /v1/auth-user/whatsapp/templates/:id
-// ---------------------------------------------------------------------------
-
-#[utoipa::path(
-    get,
-    path = "/v1/auth-user/whatsapp/templates/{id}",
-    tag = "WhatsApp — Templates",
-    security(("bearerAuth" = [])),
-    params(("id" = String, Path, description = "ObjectId hex de la plantilla")),
-    responses(
-        (status = 200, description = "Detalle de plantilla", body = WaTemplateResponse),
-        (status = 401, description = "No autorizado"),
-        (status = 403, description = "Sólo SUPERADMIN"),
-        (status = 404, description = "template_not_found"),
-    )
-)]
-pub async fn get_template_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<UserProfileClaims>,
-    Path(id): Path<String>,
-) -> Result<Json<WaTemplateResponse>, ApiError> {
-    require_superadmin(&state, &claims.id).await?;
-
-    let oid = ObjectId::parse_str(&id).map_err(|_| template_not_found())?;
-
-    let doc = state
-        .db
-        .find_template_by_id(&oid)
-        .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or_else(template_not_found)?;
-
-    Ok(Json(WaTemplateResponse {
-        ok: true,
-        data: to_template_item(doc),
     }))
 }
 
