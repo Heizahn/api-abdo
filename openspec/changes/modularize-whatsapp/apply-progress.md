@@ -1271,3 +1271,56 @@ Status: partial
 
 - Revert this PR4e commit set to restore template delete/resync handlers to
   `src/modules/whatsapp/handler.rs` and point route/OpenAPI ownership back to the legacy shim.
+
+## PR4f: Template create extraction
+
+Branch: `feature/modularize-whatsapp-pr4f-template-create`
+
+Status: partial
+
+## Completed
+
+- Moved template create ownership out of `src/modules/whatsapp/handler.rs` into
+  `src/modules/whatsapp/templates/handlers.rs`:
+  - `create_template_handler`
+- Reused the existing shared template helper functions from `src/modules/whatsapp/handler.rs`
+  instead of moving them in this slice to keep the review diff under budget:
+  - `generate_template_name`
+  - `flat_to_components`
+  - `validate_components`
+- Rewired the template create route in `src/modules/whatsapp/mod.rs` to use
+  `templates::handlers::create_template_handler`.
+- Rewired the OpenAPI path registration in `src/openapi.rs` to point the template create
+  endpoint to `crate::modules::whatsapp::templates::handlers`.
+- Reduced `src/modules/whatsapp/handler.rs` by removing the template create body and keeping
+  compatibility re-exports/imports for the remaining update flow.
+- Applied project version bump to `0.3.51` in:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/openapi.rs`
+
+## Notes
+
+- This slice intentionally stops before `update_template_handler` to keep the PR4f diff inside
+  the forced chained review budget.
+- Task `4.1` remains unchecked/partial because template update ownership still lives in
+  `src/modules/whatsapp/handler.rs`.
+- Task `4.2` remains unchecked/partial because the legacy shim is still non-minimal until the
+  update handler moves.
+
+## Verification
+
+- `cargo fmt`
+- `cargo check`
+- `git diff --check`
+
+## Task Status Impact
+
+- `4.1`: still partial (template create ownership moved; update still pending)
+- `4.2`: still partial (legacy shim reduced further, but update still lives in `handler.rs`)
+- `3.3`: unchanged
+
+## Rollback Boundary (PR4f)
+
+- Revert this PR4f commit set to restore template create ownership and shared create helpers to
+  `src/modules/whatsapp/handler.rs` and point route/OpenAPI ownership back to the legacy shim.

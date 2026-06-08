@@ -46,6 +46,6 @@ Chain strategy: feature-branch-chain
 
 ## Phase 4: Cleanup / Final Parity
 
-- [ ] 4.1 Move quick replies into `quick_replies/{mod.rs,handlers.rs}` and templates into `templates/{mod.rs,handlers.rs,meta.rs,header_media.rs}`. (PR4c completed Quick Replies ownership. PR4d moved template list/get ownership into `templates::handlers`; PR4e moved template delete/resync ownership there. Create/update still remain in `handler.rs` for the next bounded slice.)
-- [ ] 4.2 Trim `handler.rs` to a minimal legacy shim; remove dead exports only after PR4 OpenAPI parity passes. (PR4d removed template list/get bodies and kept compatibility re-exports; PR4e also removed delete/resync bodies, but create/update still keep the shim non-minimal.)
+- [ ] 4.1 Move quick replies into `quick_replies/{mod.rs,handlers.rs}` and templates into `templates/{mod.rs,handlers.rs,meta.rs,header_media.rs}`. (PR4c completed Quick Replies ownership. PR4d moved template list/get ownership into `templates::handlers`; PR4e moved template delete/resync ownership there; PR4f moved template create ownership there. Update still remains in `handler.rs` for the final bounded slice.)
+- [ ] 4.2 Trim `handler.rs` to a minimal legacy shim; remove dead exports only after PR4 OpenAPI parity passes. (PR4d removed template list/get bodies and kept compatibility re-exports; PR4e also removed delete/resync bodies; PR4f removed the create body, but update still keeps the shim non-minimal.)
 - [ ] 4.3 Final verification: `cargo check`, targeted WhatsApp regression tests, full route inventory, and OpenAPI parity against the pre-refactor contract.

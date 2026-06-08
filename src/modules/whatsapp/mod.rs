@@ -207,7 +207,7 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         // Templates CRUD (WaTemplates — DB local)
         .route(
             "/v1/auth-user/whatsapp/templates",
-            post(handler::create_template_handler),
+            post(templates::handlers::create_template_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/templates",
