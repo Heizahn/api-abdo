@@ -1417,3 +1417,51 @@ Status: partial
 
 - Revert this PR4h commit set to restore shared template helper ownership and template compatibility
   re-exports back to `src/modules/whatsapp/handler.rs`.
+
+## PR4i: Template header-media ownership
+
+Branch: `feature/modularize-whatsapp-pr4i-template-header-media`
+
+Status: partial
+
+## Completed
+
+- Added `src/modules/whatsapp/templates/header_media.rs` and moved template header-media upload
+  handler ownership out of `src/modules/whatsapp/messaging/media.rs`:
+  - `upload_template_header_media_handler`
+  - local header-media validation helpers `header_media_limits` and `sha256_hex`
+- Rewired the `/v1/auth-user/whatsapp/templates/header-media` route in
+  `src/modules/whatsapp/mod.rs` to use `templates::header_media`.
+- Rewired the OpenAPI path registration in `src/openapi.rs` to point the template header-media
+  endpoint to `crate::modules::whatsapp::templates::header_media`.
+- Reduced `src/modules/whatsapp/messaging/media.rs` by removing the template header-media upload
+  handler and keeping generic media upload/limit flows plus template handle-swap logic in place.
+- Bumped versioned artifacts to `0.3.54`: `Cargo.toml`, `Cargo.lock`, `src/main.rs`,
+  `src/openapi.rs`.
+
+## Notes
+
+- This slice intentionally keeps `swap_header_handles_in_components` in `messaging::media` because
+  template create/update flows still consume it and generic media/template-handle behavior was out
+  of scope for PR4i.
+- Task `4.1` is now complete because `templates/header_media.rs` exists and the route/OpenAPI
+  ownership no longer lives under `messaging::media`.
+- Task `4.2` remains partial because `handler.rs` still carries compatibility surface such as the
+  temporary `map_meta_error` re-export.
+
+## Verification
+
+- `cargo fmt`
+- `cargo check`
+- `git diff --check`
+
+## Task Status Impact
+
+- `4.1`: complete
+- `4.2`: still partial
+- `3.3`: unchanged
+
+## Rollback Boundary (PR4i)
+
+- Revert this PR4i commit set to restore template header-media route/OpenAPI ownership to
+  `src/modules/whatsapp/messaging/media.rs` and remove `src/modules/whatsapp/templates/header_media.rs`.
