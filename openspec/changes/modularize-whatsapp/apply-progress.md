@@ -1222,3 +1222,52 @@ Status: partial
 
 - Revert this PR4d commit set to restore template list/get handlers and shared read helpers
   to `src/modules/whatsapp/handler.rs` and remove `src/modules/whatsapp/templates/`.
+
+## PR4e: Template delete/resync extraction
+
+Branch: `feature/modularize-whatsapp-pr4e-template-mutations`
+
+Status: partial
+
+## Completed
+
+- Moved existing-template mutation ownership out of `src/modules/whatsapp/handler.rs` into
+  `src/modules/whatsapp/templates/handlers.rs`:
+  - `delete_template_handler`
+  - `resync_template_handler`
+  - local `parse_meta_template_category` helper used only by resync
+- Rewired template delete/resync routes in `src/modules/whatsapp/mod.rs` to use
+  `templates::handlers::{delete_template_handler, resync_template_handler}`.
+- Rewired OpenAPI path registrations in `src/openapi.rs` to point the template delete/resync
+  endpoints to `crate::modules::whatsapp::templates::handlers`.
+- Reduced `src/modules/whatsapp/handler.rs` by removing template delete/resync bodies and
+  keeping compatibility re-exports for the moved handlers.
+- Applied project version bump to `0.3.50` in:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `src/main.rs`
+  - `src/openapi.rs`
+
+## Notes
+
+- This slice intentionally stops at the smaller existing-template mutation boundary that stays
+  inside the forced chained review budget.
+- Template create/update flows still remain in `src/modules/whatsapp/handler.rs` for the next
+  chained slice.
+
+## Verification
+
+- `cargo fmt`
+- `cargo check`
+- `git diff --check`
+
+## Task Status Impact
+
+- `4.1`: still partial (template delete/resync ownership moved; create/update still pending)
+- `4.2`: still partial (legacy shim reduced further, but create/update still live in `handler.rs`)
+- `3.3`: unchanged
+
+## Rollback Boundary (PR4e)
+
+- Revert this PR4e commit set to restore template delete/resync handlers to
+  `src/modules/whatsapp/handler.rs` and point route/OpenAPI ownership back to the legacy shim.
