@@ -1,0 +1,24 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "changes": [
+        {
+          "field": "errors",
+          "value": {
+            "metadata": {
+              "display_phone_number": "+15551234567"
+            },
+            "errors": [
+              {
+                "code": 130429,
+                "title": "Webhook de prueba",
+                "message": "Error de notificación de ejemplo"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

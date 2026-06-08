@@ -1,0 +1,41 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "metadata": {
+              "display_phone_number": "+15551234567"
+            },
+            "contacts": [
+              {
+                "wa_id": "5841400000000",
+                "profile": {
+                  "name": "Juan"
+                }
+              }
+            ],
+            "messages": [
+              {
+                "from": "5841400000000",
+                "id": "wamid.edit.001",
+                "type": "text",
+                "text": {
+                  "body": "Mensaje original"
+                },
+                "context": {
+                  "id": "wamid.orig.001"
+                },
+                "edit": {
+                  "message": "Mensaje editado para cliente"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

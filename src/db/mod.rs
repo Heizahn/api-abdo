@@ -665,6 +665,23 @@ pub trait WhatsAppRepository {
         wa_message_id: &str,
         status: &str,
     ) -> Result<bool, String>;
+    /// Si el último mensaje de la conversación es `wa_message_id == wa_id`,
+    /// refresca *atómicamente* el preview/metadata del último mensaje y deja el
+    /// resto coherente con `Touch`. Devuelve `true` cuando la condición y el
+    /// update aplican; `false` si la conversación cambió y ya no apunta al
+    /// mismo `wa_message_id` (ej. carrera de eventos de inbound).
+    async fn update_conversation_preview_if_last(
+        &self,
+        id: &ObjectId,
+        wa_message_id: &str,
+        preview: &str,
+        msg_type: &str,
+        direction: &str,
+        from_user_id: Option<&str>,
+        media_filename: Option<&str>,
+        status: Option<&str>,
+        last_message_at: mongodb::bson::DateTime,
+    ) -> Result<bool, String>;
     /// Setea `last_inbound_at` en la conversación al timestamp indicado. Se usa
     /// desde el webhook al recibir un mensaje entrante para llevar la ventana
     /// de 24h (freeform) alineada con Meta.
@@ -809,6 +826,18 @@ pub trait WhatsAppRepository {
         conversation_id: &ObjectId,
         agent_id: &str,
     ) -> Result<Vec<String>, String>;
+    /// Actualiza el contenido visible de un mensaje existente (`body` y `raw_payload`).
+    /// Para `revoke` también limpia campos renderables para reflejar el estado de
+    /// mensaje retirado (media, payloads estructurados y metadatos de plantilla).
+    /// Se usa para normalizar inbounds `edit` y `revoke` apuntando a un mensaje
+    /// previo.
+    async fn update_message_body_by_wa_id(
+        &self,
+        wa_message_id: &str,
+        body: &str,
+        raw_payload: Option<&serde_json::Value>,
+        message_type: &str,
+    ) -> Result<Option<WaMessage>, String>;
     /// Busca un mensaje por `(conversation_id, idempotency_key)`. Fuente de verdad
     /// para reintentos idempotentes: permite detectar envíos previos `failed` y reintentarlos.
     async fn find_message_by_idempotency(
