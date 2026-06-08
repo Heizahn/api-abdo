@@ -31,9 +31,8 @@ use super::webhook::status::{
     InboundMediaFailureDetails,
 };
 use super::ws::{
-    broadcast_all, broadcast_to_chat_users, build_template_created_event,
-    build_template_updated_event, emit_to_phone_number_agents, ConversacionNoLeidaData,
-    WsServerEvent,
+    broadcast_all, broadcast_to_chat_users, build_template_updated_event,
+    emit_to_phone_number_agents, ConversacionNoLeidaData, WsServerEvent,
 };
 
 use super::webhook::normalize::{
@@ -938,8 +937,8 @@ pub use super::quick_replies::handlers::{
 
 #[allow(unused_imports)]
 pub use super::templates::handlers::{
-    delete_template_handler, get_template_handler, list_templates_handler, resync_template_handler,
-    TemplatesListQuery,
+    create_template_handler, delete_template_handler, get_template_handler, list_templates_handler,
+    resync_template_handler, TemplatesListQuery,
 };
 
 // ============================================
@@ -1060,30 +1059,6 @@ fn parse_unix_seconds_to_bson(s: &str) -> Option<DateTime> {
     Some(DateTime::from_millis(secs.checked_mul(1000)?))
 }
 
-// ============================================
-// HELPERS — QUICK REPLIES
-// ============================================
-
-/// Exige `bCanChat == true` (o `nRole == 0`, super admin) y devuelve el
-/// `User` completo (para que el caller tenga el rol sin re-consultar DB).
-/// El `user_jwt_auth_middleware` solo valida que el token sea de staff; el
-/// permiso de chat vive en `Users`.
-///
-/// Los super admins (`nRole == 0.0`) bypasean el gate de `bCanChat` —
-/// "super admin = acceso a todo" es regla transversal del sistema, así que
-/// no se les debe negar el módulo de WhatsApp aunque tengan `bCanChat=false`.
-///
-/// Los call sites que sólo necesitan el gate escriben
-/// `require_can_chat(&state, &claims.id).await?;` y el valor se descarta. Los
-/// que además necesitan el rol (`can_edit`, auditoría, etc.) lo capturan con
-/// `let caller = require_can_chat(...).await?;`.
-pub(super) async fn require_can_chat(
-    state: &Arc<AppState>,
-    user_id: &str,
-) -> Result<crate::models::users::User, ApiError> {
-    shared::authz::require_can_chat(state, user_id).await
-}
-
 /// Construye un `ConversationItem` completo desde un `WaConversation` resolviendo
 /// workspace_name + nombres en una sola pasada. Reusable desde otros módulos
 /// del feature (tickets) sin tener que reexportar todos los helpers internos.
@@ -1150,10 +1125,6 @@ fn count_placeholders(text: &str) -> u32 {
     max_idx
 }
 
-// ============================================
-// TEMPLATES CRUD (WaTemplates — DB local)
-// ============================================
-
 /// Slugifica una cadena a formato Meta-safe:
 /// lowercase, non-alnum → `_`, strip non-ASCII, colapsar `_` consecutivos,
 /// trim trailing `_`, max 512 chars.
@@ -1192,7 +1163,10 @@ fn slugify(s: &str) -> String {
 }
 
 /// Genera el `name` Meta a partir del `name_input` y el flag `is_system`.
-fn generate_template_name(name_input: &str, is_system: bool) -> String {
+pub(in crate::modules::whatsapp) fn generate_template_name(
+    name_input: &str,
+    is_system: bool,
+) -> String {
     let slug = slugify(name_input);
     if is_system {
         let today = chrono::Utc::now().format("%Y%m%d").to_string();
@@ -1211,7 +1185,7 @@ fn generate_template_name(name_input: &str, is_system: bool) -> String {
 /// - `body`   → `{ type: "BODY", text, example?: { body_text: [[…samples]] } }`
 /// - `footer` → `{ type: "FOOTER", text }` (omite si vacío)
 /// - `buttons`→ `{ type: "BUTTONS", buttons: […] }` (omite si vacío)
-fn flat_to_components(
+pub(in crate::modules::whatsapp) fn flat_to_components(
     header: Option<&WaTemplateHeaderInput>,
     body: &str,
     body_samples: Option<&Vec<String>>,
@@ -1276,7 +1250,9 @@ fn flat_to_components(
     comps
 }
 
-fn validate_components(comps: &[serde_json::Value]) -> Result<u32, ApiError> {
+pub(in crate::modules::whatsapp) fn validate_components(
+    comps: &[serde_json::Value],
+) -> Result<u32, ApiError> {
     let has_body = comps.iter().any(|c| {
         c.get("type")
             .and_then(|v| v.as_str())
@@ -1453,210 +1429,6 @@ pub(super) async fn require_superadmin(
     user_id: &str,
 ) -> Result<crate::models::users::User, ApiError> {
     shared::authz::require_superadmin(state, user_id).await
-}
-
-// ---------------------------------------------------------------------------
-// POST /v1/auth-user/whatsapp/templates
-// ---------------------------------------------------------------------------
-
-#[utoipa::path(
-    post,
-    path = "/v1/auth-user/whatsapp/templates",
-    tag = "WhatsApp — Templates",
-    security(("bearerAuth" = [])),
-    request_body = CreateWaTemplateRequest,
-    responses(
-        (status = 200, description = "Plantilla creada", body = WaTemplateResponse),
-        (status = 400, description = "Datos inválidos (name_required, name_invalid, invalid_component)"),
-        (status = 401, description = "No autorizado"),
-        (status = 403, description = "Requiere bCanChat"),
-        (status = 404, description = "phone_number_not_found"),
-        (status = 409, description = "name_already_exists"),
-        (status = 502, description = "meta_rejected"),
-    )
-)]
-pub async fn create_template_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(claims): Extension<UserProfileClaims>,
-    Json(body): Json<CreateWaTemplateRequest>,
-) -> Result<Json<WaTemplateResponse>, ApiError> {
-    // Auth: bCanChat (superadmin bypass implícito en require_can_chat)
-    let creator = require_can_chat(&state, &claims.id).await?;
-
-    // 1. Validar name_input no vacío
-    if body.name_input.trim().is_empty() {
-        return Err(ApiError::domain_with_field(
-            StatusCode::BAD_REQUEST,
-            "name_required",
-            "name_input",
-            "El nombre es requerido",
-        ));
-    }
-
-    // 2. Resolver WaSettings por phone_number_id
-    let settings = state
-        .db
-        .find_wa_settings_by_phone_number_id(&body.phone_number_id)
-        .await
-        .map_err(ApiError::DatabaseError)?
-        .ok_or_else(|| {
-            ApiError::domain_with_field(
-                StatusCode::NOT_FOUND,
-                "phone_number_not_found",
-                "phone_number_id",
-                "El número de WhatsApp no está configurado",
-            )
-        })?;
-
-    // 3. Generar `name`
-    let name = generate_template_name(&body.name_input, body.is_system);
-
-    // 4. Validar name contra regex Meta
-    {
-        let re = regex::Regex::new(r"^[a-z][a-z0-9_]{0,511}$").expect("regex válido");
-        if !re.is_match(&name) {
-            return Err(ApiError::domain_with_field(
-                StatusCode::BAD_REQUEST,
-                "name_invalid",
-                "name_input",
-                "Nombre inválido. Usa solo letras minúsculas, números y guión bajo (debe empezar con letra)",
-            ));
-        }
-    }
-
-    // 5. Construir components desde los flat fields y validar
-    let components = flat_to_components(
-        body.header.as_ref(),
-        &body.body,
-        body.body_samples.as_ref(),
-        body.footer.as_deref(),
-        body.buttons.as_ref(),
-    );
-    let body_placeholders = validate_components(&components)?;
-
-    // 7. Resolver created_by_name (ya tenemos creator del paso de auth)
-    let created_by_name = creator.name.clone();
-
-    // 8. Verificar unicidad (phone_number_id, name, language)
-    let existing = state
-        .db
-        .find_template_by_phone_name_lang(&body.phone_number_id, &name, &body.language)
-        .await
-        .map_err(ApiError::DatabaseError)?;
-    if existing.is_some() {
-        return Err(ApiError::domain_with_field(
-            StatusCode::CONFLICT,
-            "name_already_exists",
-            "name_input",
-            "Ya existe una plantilla con ese nombre en este idioma",
-        ));
-    }
-
-    let now = DateTime::now();
-    let mut status = WaTemplateStatus::Draft;
-    let mut meta_template_id: Option<String> = None;
-
-    // 9. Si submit_to_meta == true: crear en Meta
-    if body.submit_to_meta {
-        if settings.access_token.is_empty() {
-            return Err(ApiError::Internal(
-                "workspace sin access_token configurado".into(),
-            ));
-        }
-        let token = decrypt_payload(&settings_secret(), &settings.access_token)
-            .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
-
-        let waba_id = settings.whatsapp_business_account_id.trim().to_string();
-        if waba_id.is_empty() {
-            return Err(ApiError::Internal(
-                "workspace sin whatsapp_business_account_id configurado".into(),
-            ));
-        }
-
-        let category_str = match body.category {
-            WaTemplateCategory::Marketing => "MARKETING",
-            WaTemplateCategory::Utility => "UTILITY",
-            WaTemplateCategory::Authentication => "AUTHENTICATION",
-        };
-        // Clonar components y swapear header media_id → handle Meta fresh.
-        // El original (sin swap) se mantiene para persistir en DB, así que el
-        // handle Meta (single-use, corto) nunca se guarda.
-        let mut components_for_meta = components.clone();
-        swap_header_handles_in_components(&state, &mut components_for_meta, &token).await?;
-        let components_val = serde_json::Value::Array(components_for_meta);
-
-        let wa = WhatsAppService::new(
-            state.reqwest_client.clone(),
-            settings.phone_number_id.clone(),
-            token,
-        );
-
-        match wa
-            .create_template_meta(
-                &waba_id,
-                &name,
-                &body.language,
-                category_str,
-                &components_val,
-            )
-            .await
-        {
-            Ok(resp) => {
-                status = WaTemplateStatus::Pending;
-                meta_template_id = Some(resp.id);
-            }
-            Err(e) => {
-                return Err(map_meta_error(&e, "Meta rechazó la plantilla"));
-            }
-        }
-    }
-
-    // 11. Insertar en DB
-    let doc = WaTemplate {
-        id: None,
-        phone_number_id: body.phone_number_id.clone(),
-        name: name.clone(),
-        display_name: body.name_input.clone(),
-        name_input: body.name_input.clone(),
-        language: body.language.clone(),
-        category: body.category,
-        components,
-        body_placeholders,
-        status,
-        rejection_reason: None,
-        meta_template_id,
-        is_system: body.is_system,
-        submit_to_meta: body.submit_to_meta,
-        created_by: claims.id.clone(),
-        created_by_name,
-        created_at: now,
-        updated_at: now,
-    };
-
-    let saved = state.db.create_template(doc).await.map_err(|e| {
-        if e == "name_already_exists" {
-            ApiError::domain_with_field(
-                StatusCode::CONFLICT,
-                "name_already_exists",
-                "name_input",
-                "Ya existe una plantilla con ese nombre en este idioma",
-            )
-        } else {
-            ApiError::DatabaseError(e)
-        }
-    })?;
-
-    // 12. Construir item
-    let item = to_template_item(saved);
-
-    // 13. Emit WS
-    let ws_payload = build_template_created_event(&item);
-    emit_to_phone_number_agents(&state, &body.phone_number_id, ws_payload).await;
-
-    Ok(Json(WaTemplateResponse {
-        ok: true,
-        data: item,
-    }))
 }
 
 // ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@ use axum::{
     http::StatusCode,
     Extension, Json,
 };
-use mongodb::bson::oid::ObjectId;
+use mongodb::bson::{oid::ObjectId, DateTime};
 
 use crate::{
     auth::user_jwt::UserProfileClaims,
@@ -17,14 +17,18 @@ use crate::{
 };
 
 use super::super::{
-    handler::map_meta_error,
+    handler::{flat_to_components, generate_template_name, map_meta_error, validate_components},
+    messaging::media::swap_header_handles_in_components,
     service::WhatsAppService,
     shared::{
         authz::{require_can_chat, require_superadmin},
         settings_secret,
         time::iso8601,
     },
-    ws::{build_template_deleted_event, build_template_updated_event, emit_to_phone_number_agents},
+    ws::{
+        build_template_created_event, build_template_deleted_event, build_template_updated_event,
+        emit_to_phone_number_agents,
+    },
 };
 
 #[derive(serde::Deserialize)]
@@ -78,6 +82,190 @@ fn parse_meta_template_category(raw: Option<&str>) -> Option<WaTemplateCategory>
         "AUTHENTICATION" => Some(WaTemplateCategory::Authentication),
         _ => None,
     }
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/templates",
+    tag = "WhatsApp — Templates",
+    security(("bearerAuth" = [])),
+    request_body = CreateWaTemplateRequest,
+    responses(
+        (status = 200, description = "Plantilla creada", body = WaTemplateResponse),
+        (status = 400, description = "Datos inválidos (name_required, name_invalid, invalid_component)"),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Requiere bCanChat"),
+        (status = 404, description = "phone_number_not_found"),
+        (status = 409, description = "name_already_exists"),
+        (status = 502, description = "meta_rejected"),
+    )
+)]
+pub async fn create_template_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Json(body): Json<CreateWaTemplateRequest>,
+) -> Result<Json<WaTemplateResponse>, ApiError> {
+    let creator = require_can_chat(&state, &claims.id).await?;
+
+    if body.name_input.trim().is_empty() {
+        return Err(ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            "name_required",
+            "name_input",
+            "El nombre es requerido",
+        ));
+    }
+
+    let settings = state
+        .db
+        .find_wa_settings_by_phone_number_id(&body.phone_number_id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| {
+            ApiError::domain_with_field(
+                StatusCode::NOT_FOUND,
+                "phone_number_not_found",
+                "phone_number_id",
+                "El número de WhatsApp no está configurado",
+            )
+        })?;
+
+    let name = generate_template_name(&body.name_input, body.is_system);
+
+    {
+        let re = regex::Regex::new(r"^[a-z][a-z0-9_]{0,511}$").expect("regex válido");
+        if !re.is_match(&name) {
+            return Err(ApiError::domain_with_field(
+                StatusCode::BAD_REQUEST,
+                "name_invalid",
+                "name_input",
+                "Nombre inválido. Usa solo letras minúsculas, números y guión bajo (debe empezar con letra)",
+            ));
+        }
+    }
+
+    let components = flat_to_components(
+        body.header.as_ref(),
+        &body.body,
+        body.body_samples.as_ref(),
+        body.footer.as_deref(),
+        body.buttons.as_ref(),
+    );
+    let body_placeholders = validate_components(&components)?;
+    let created_by_name = creator.name.clone();
+
+    let existing = state
+        .db
+        .find_template_by_phone_name_lang(&body.phone_number_id, &name, &body.language)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    if existing.is_some() {
+        return Err(ApiError::domain_with_field(
+            StatusCode::CONFLICT,
+            "name_already_exists",
+            "name_input",
+            "Ya existe una plantilla con ese nombre en este idioma",
+        ));
+    }
+
+    let now = DateTime::now();
+    let mut status = WaTemplateStatus::Draft;
+    let mut meta_template_id: Option<String> = None;
+
+    if body.submit_to_meta {
+        if settings.access_token.is_empty() {
+            return Err(ApiError::Internal(
+                "workspace sin access_token configurado".into(),
+            ));
+        }
+        let token = decrypt_payload(&settings_secret(), &settings.access_token)
+            .ok_or_else(|| ApiError::Internal("no se pudo descifrar access_token".into()))?;
+
+        let waba_id = settings.whatsapp_business_account_id.trim().to_string();
+        if waba_id.is_empty() {
+            return Err(ApiError::Internal(
+                "workspace sin whatsapp_business_account_id configurado".into(),
+            ));
+        }
+
+        let category_str = match body.category {
+            WaTemplateCategory::Marketing => "MARKETING",
+            WaTemplateCategory::Utility => "UTILITY",
+            WaTemplateCategory::Authentication => "AUTHENTICATION",
+        };
+
+        let mut components_for_meta = components.clone();
+        swap_header_handles_in_components(&state, &mut components_for_meta, &token).await?;
+        let components_val = serde_json::Value::Array(components_for_meta);
+
+        let wa = WhatsAppService::new(
+            state.reqwest_client.clone(),
+            settings.phone_number_id.clone(),
+            token,
+        );
+
+        match wa
+            .create_template_meta(
+                &waba_id,
+                &name,
+                &body.language,
+                category_str,
+                &components_val,
+            )
+            .await
+        {
+            Ok(resp) => {
+                status = WaTemplateStatus::Pending;
+                meta_template_id = Some(resp.id);
+            }
+            Err(e) => {
+                return Err(map_meta_error(&e, "Meta rechazó la plantilla"));
+            }
+        }
+    }
+
+    let doc = WaTemplate {
+        id: None,
+        phone_number_id: body.phone_number_id.clone(),
+        name: name.clone(),
+        display_name: body.name_input.clone(),
+        name_input: body.name_input.clone(),
+        language: body.language.clone(),
+        category: body.category,
+        components,
+        body_placeholders,
+        status,
+        rejection_reason: None,
+        meta_template_id,
+        is_system: body.is_system,
+        submit_to_meta: body.submit_to_meta,
+        created_by: claims.id.clone(),
+        created_by_name,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let saved = state.db.create_template(doc).await.map_err(|e| {
+        if e == "name_already_exists" {
+            ApiError::domain_with_field(
+                StatusCode::CONFLICT,
+                "name_already_exists",
+                "name_input",
+                "Ya existe una plantilla con ese nombre en este idioma",
+            )
+        } else {
+            ApiError::DatabaseError(e)
+        }
+    })?;
+
+    let item = to_template_item(saved);
+    let ws_payload = build_template_created_event(&item);
+    emit_to_phone_number_agents(&state, &body.phone_number_id, ws_payload).await;
+
+    Ok(Json(WaTemplateResponse {
+        ok: true,
+        data: item,
+    }))
 }
 
 #[utoipa::path(
