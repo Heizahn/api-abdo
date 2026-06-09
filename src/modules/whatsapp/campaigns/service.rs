@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use futures::stream::StreamExt;
 use futures::TryStreamExt;
 use mongodb::bson::{doc, oid::ObjectId, Bson, DateTime, Document};
+use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument, UpdateModifications};
 use serde::{Deserialize, Serialize};
 
 use crate::{error::ApiError, modules::whatsapp::shared::time::iso8601, state::AppState};
@@ -38,12 +39,18 @@ struct WaCampaignDoc {
     template_components: Option<Vec<serde_json::Value>>,
     filters: CampaignPreviewRequest,
     status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    confirming_from: Option<String>,
     total_recipients: u64,
     total_can_send: u64,
     total_invalid_phone: u64,
     total_duplicated_phone: u64,
     total_excluded: u64,
     created_by: String,
+    #[serde(default)]
+    confirmed_by: Option<String>,
+    #[serde(default)]
+    confirmed_at: Option<DateTime>,
     created_at: DateTime,
     updated_at: DateTime,
 }
@@ -148,12 +155,15 @@ pub async fn create_campaign(
         template_components: request.template_components,
         filters: request.filters,
         status: "draft".to_string(),
+        confirming_from: None,
         total_recipients: totals.matched as u64,
         total_can_send: totals.can_send as u64,
         total_invalid_phone: totals.invalid_phone as u64,
         total_duplicated_phone: totals.duplicated_phone as u64,
         total_excluded: 0,
         created_by: created_by.to_string(),
+        confirmed_by: None,
+        confirmed_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -208,6 +218,91 @@ pub async fn get_campaign(
         .db
         .db
         .collection::<WaCampaignDoc>("WaCampaigns")
+        .find_one(doc! { "_id": campaign_id })
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+        .ok_or(ApiError::NotFound)?;
+
+    Ok(CampaignSummaryResponse {
+        ok: true,
+        data: campaign_to_summary(campaign),
+    })
+}
+
+pub async fn confirm_campaign(
+    state: &AppState,
+    campaign_id: &str,
+    confirmed_by: &str,
+) -> Result<CampaignSummaryResponse, ApiError> {
+    let campaign_id = parse_campaign_id(campaign_id)?;
+    let campaigns = state.db.db.collection::<WaCampaignDoc>("WaCampaigns");
+    let recipients = state
+        .db
+        .db
+        .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients");
+
+    let campaign = claim_campaign_for_confirmation(&campaigns, &campaign_id).await?;
+
+    let effective_recipients = recipients
+        .count_documents(effective_recipient_filter(campaign_id.clone()))
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+    if effective_recipients == 0 {
+        restore_campaign_after_failed_confirmation(
+            &campaigns,
+            &campaign_id,
+            campaign.status.as_str(),
+        )
+        .await?;
+        return Err(ApiError::domain_simple(
+            StatusCode::BAD_REQUEST,
+            "campaign_has_no_effective_recipients",
+            "Campaign must have at least one non-excluded pending recipient that can be sent.",
+        ));
+    }
+
+    let now = DateTime::now();
+    let result = campaigns
+        .update_one(
+            doc! { "_id": campaign_id, "status": "confirming", "confirming_from": &campaign.status },
+            doc! {
+                "$set": {
+                    "status": "queued",
+                    "confirmed_by": confirmed_by,
+                    "confirmed_at": now,
+                    "updated_at": now,
+                },
+                "$unset": { "confirming_from": "" }
+            },
+        )
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    if result.matched_count == 0 {
+        let campaign = campaigns
+            .find_one(doc! { "_id": campaign_id })
+            .await
+            .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+            .ok_or(ApiError::NotFound)?;
+
+        if campaign.status == "confirming" || campaign.status == "queued" {
+            return Err(ApiError::domain_simple(
+                StatusCode::CONFLICT,
+                "campaign_confirmation_in_progress",
+                "Campaign confirmation is already in progress or completed.",
+            ));
+        }
+
+        if !is_confirmable_campaign_status(&campaign.status) {
+            return Err(ApiError::domain_simple(
+                StatusCode::CONFLICT,
+                "campaign_not_confirmable",
+                "Only draft or previewed campaigns can be confirmed.",
+            ));
+        }
+    }
+
+    let campaign = campaigns
         .find_one(doc! { "_id": campaign_id })
         .await
         .map_err(|e| ApiError::DatabaseError(e.to_string()))?
@@ -327,30 +422,20 @@ pub async fn update_campaign_recipient_exclusions(
         ));
     }
 
-    let campaigns = state.db.db.collection::<WaCampaignDoc>("WaCampaigns");
-    let campaign = campaigns
-        .find_one(doc! { "_id": campaign_id })
-        .await
-        .map_err(|e| ApiError::DatabaseError(e.to_string()))?
-        .ok_or(ApiError::NotFound)?;
-
-    if !is_editable_campaign_status(&campaign.status) {
-        return Err(ApiError::domain_simple(
-            StatusCode::CONFLICT,
-            "campaign_not_editable",
-            "Only draft or previewed campaigns can update recipient exclusions.",
-        ));
-    }
-
     let recipient_ids = parse_recipient_object_ids(&request.recipient_ids)?;
+
+    let campaigns = state.db.db.collection::<WaCampaignDoc>("WaCampaigns");
+    let campaign = claim_campaign_for_editing(&campaigns, &campaign_id).await?;
+    let original_status = campaign.status.clone();
     let recipients = state
         .db
         .db
         .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients");
 
-    let mut updated = 0;
-    if !recipient_ids.is_empty() {
-        updated = recipients
+    let updated = if recipient_ids.is_empty() {
+        0
+    } else {
+        match recipients
             .update_many(
                 doc! {
                     "_id": { "$in": recipient_ids },
@@ -362,20 +447,59 @@ pub async fn update_campaign_recipient_exclusions(
                 doc! { "$set": { "excluded": request.excluded, "updated_at": DateTime::now() } },
             )
             .await
-            .map_err(|e| ApiError::DatabaseError(e.to_string()))?
-            .modified_count;
-    }
+        {
+            Ok(result) => result.modified_count,
+            Err(e) => {
+                let _ = restore_campaign_after_failed_exclusion(
+                    &campaigns,
+                    &campaign_id,
+                    &original_status,
+                    None,
+                )
+                .await;
+                return Err(ApiError::DatabaseError(e.to_string()));
+            }
+        }
+    };
 
-    let total_excluded = count_effectively_excluded_recipients(&recipients, campaign_id).await?;
+    let total_excluded = match count_effectively_excluded_recipients(&recipients, campaign_id).await
+    {
+        Ok(total) => total,
+        Err(err) => {
+            let _ = restore_campaign_after_failed_exclusion(
+                &campaigns,
+                &campaign_id,
+                &original_status,
+                None,
+            )
+            .await;
+            return Err(err);
+        }
+    };
     let total_effective_can_send =
-        count_effective_can_send_recipients(&recipients, campaign_id).await?;
-    campaigns
-        .update_one(
-            doc! { "_id": campaign_id },
-            doc! { "$set": { "total_excluded": total_excluded as i64, "updated_at": DateTime::now() } },
-        )
-        .await
-        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+        match count_effective_can_send_recipients(&recipients, campaign_id).await {
+            Ok(total) => total,
+            Err(err) => {
+                let _ = restore_campaign_after_failed_exclusion(
+                    &campaigns,
+                    &campaign_id,
+                    &original_status,
+                    None,
+                )
+                .await;
+                return Err(err);
+            }
+        };
+    if let Err(e) = restore_campaign_after_failed_exclusion(
+        &campaigns,
+        &campaign_id,
+        &original_status,
+        Some(total_excluded),
+    )
+    .await
+    {
+        return Err(e);
+    }
 
     Ok(UpdateCampaignRecipientExclusionsResponse {
         ok: true,
@@ -410,14 +534,18 @@ async fn count_effective_can_send_recipients(
     campaign_id: ObjectId,
 ) -> Result<u64, ApiError> {
     recipients
-        .count_documents(doc! {
-            "campaign_id": campaign_id,
-            "can_send": true,
-            "excluded": false,
-            "status": "pending",
-        })
+        .count_documents(effective_recipient_filter(campaign_id))
         .await
         .map_err(|e| ApiError::DatabaseError(e.to_string()))
+}
+
+fn effective_recipient_filter(campaign_id: ObjectId) -> Document {
+    doc! {
+        "campaign_id": campaign_id,
+        "can_send": true,
+        "excluded": false,
+        "status": "pending",
+    }
 }
 
 fn parse_recipient_object_ids(ids: &[String]) -> Result<Vec<ObjectId>, ApiError> {
@@ -450,6 +578,176 @@ fn parse_recipient_object_ids(ids: &[String]) -> Result<Vec<ObjectId>, ApiError>
 
 fn is_editable_campaign_status(status: &str) -> bool {
     matches!(status, "draft" | "previewed")
+}
+
+fn is_confirmable_campaign_status(status: &str) -> bool {
+    matches!(status, "draft" | "previewed")
+}
+
+fn confirmable_campaign_statuses() -> Vec<&'static str> {
+    vec!["draft", "previewed"]
+}
+
+async fn claim_campaign_for_confirmation(
+    campaigns: &mongodb::Collection<WaCampaignDoc>,
+    campaign_id: &ObjectId,
+) -> Result<WaCampaignDoc, ApiError> {
+    let opts = FindOneAndUpdateOptions::builder()
+        .return_document(ReturnDocument::Before)
+        .build();
+    let filter =
+        doc! { "_id": campaign_id.clone(), "status": { "$in": confirmable_campaign_statuses() } };
+    let pipeline = vec![doc! {
+        "$set": {
+            "status": "confirming",
+            "confirming_from": "$status",
+            "updated_at": DateTime::now(),
+        }
+    }];
+
+    let campaign = campaigns
+        .find_one_and_update(filter, UpdateModifications::Pipeline(pipeline))
+        .with_options(opts)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    if let Some(campaign) = campaign {
+        return Ok(campaign);
+    }
+
+    let current = campaigns
+        .find_one(doc! { "_id": campaign_id.clone() })
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    match current {
+        None => Err(ApiError::NotFound),
+        Some(campaign) if campaign.status == "confirming" || campaign.status == "queued" => {
+            Err(ApiError::domain_simple(
+                StatusCode::CONFLICT,
+                "campaign_confirmation_in_progress",
+                "Campaign confirmation is already in progress or completed.",
+            ))
+        }
+        Some(_) => Err(ApiError::domain_simple(
+            StatusCode::CONFLICT,
+            "campaign_not_confirmable",
+            "Only draft or previewed campaigns can be confirmed.",
+        )),
+    }
+}
+
+async fn claim_campaign_for_editing(
+    campaigns: &mongodb::Collection<WaCampaignDoc>,
+    campaign_id: &ObjectId,
+) -> Result<WaCampaignDoc, ApiError> {
+    let opts = FindOneAndUpdateOptions::builder()
+        .return_document(ReturnDocument::Before)
+        .build();
+    let filter =
+        doc! { "_id": campaign_id.clone(), "status": { "$in": confirmable_campaign_statuses() } };
+    let pipeline = vec![doc! {
+        "$set": {
+            "status": "editing",
+            "updated_at": DateTime::now(),
+        }
+    }];
+
+    let campaign = campaigns
+        .find_one_and_update(filter, UpdateModifications::Pipeline(pipeline))
+        .with_options(opts)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    if let Some(campaign) = campaign {
+        return Ok(campaign);
+    }
+
+    let current = campaigns
+        .find_one(doc! { "_id": campaign_id.clone() })
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    match current {
+        None => Err(ApiError::NotFound),
+        Some(_) => Err(ApiError::domain_simple(
+            StatusCode::CONFLICT,
+            "campaign_not_editable",
+            "Only draft or previewed campaigns can update recipient exclusions.",
+        )),
+    }
+}
+
+async fn restore_campaign_after_failed_confirmation(
+    campaigns: &mongodb::Collection<WaCampaignDoc>,
+    campaign_id: &ObjectId,
+    original_status: &str,
+) -> Result<(), ApiError> {
+    let restore_status = if is_editable_campaign_status(original_status) {
+        original_status
+    } else {
+        "draft"
+    };
+
+    campaigns
+        .update_one(
+            doc! { "_id": campaign_id.clone(), "status": "confirming" },
+            doc! {
+                "$set": { "status": restore_status, "updated_at": DateTime::now() },
+                "$unset": { "confirming_from": "" }
+            },
+        )
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    Ok(())
+}
+
+async fn restore_campaign_after_failed_exclusion(
+    campaigns: &mongodb::Collection<WaCampaignDoc>,
+    campaign_id: &ObjectId,
+    original_status: &str,
+    total_excluded: Option<u64>,
+) -> Result<(), ApiError> {
+    let restore_status = if is_editable_campaign_status(original_status) {
+        original_status
+    } else {
+        "draft"
+    };
+
+    let mut set = doc! {
+        "status": restore_status,
+        "updated_at": DateTime::now(),
+    };
+    if let Some(total_excluded) = total_excluded {
+        set.insert("total_excluded", Bson::Int64(total_excluded as i64));
+    }
+
+    let result = campaigns
+        .update_one(
+            doc! { "_id": campaign_id.clone(), "status": "editing" },
+            doc! { "$set": set },
+        )
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    if result.matched_count == 0 {
+        let current = campaigns
+            .find_one(doc! { "_id": campaign_id.clone() })
+            .await
+            .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+        return match current {
+            None => Err(ApiError::NotFound),
+            Some(_) => Err(ApiError::domain_simple(
+                StatusCode::CONFLICT,
+                "campaign_not_editable",
+                "Only draft or previewed campaigns can update recipient exclusions.",
+            )),
+        };
+    }
+
+    Ok(())
 }
 
 async fn cleanup_campaign_snapshot(
@@ -751,7 +1049,13 @@ fn campaign_to_summary(campaign: WaCampaignDoc) -> CampaignSummary {
         total_invalid_phone: campaign.total_invalid_phone,
         total_duplicated_phone: campaign.total_duplicated_phone,
         total_excluded: campaign.total_excluded,
+        total_effective_can_send: total_effective_can_send(
+            campaign.total_can_send,
+            campaign.total_excluded,
+        ),
         created_by: campaign.created_by,
+        confirmed_by: campaign.confirmed_by,
+        confirmed_at: campaign.confirmed_at.map(iso8601),
         created_at: iso8601(campaign.created_at),
         updated_at: iso8601(campaign.updated_at),
     }
@@ -1114,6 +1418,38 @@ mod tests {
         }
     }
 
+    fn base_campaign(status: &str) -> WaCampaignDoc {
+        let now = DateTime::from_millis(1_800_000_000_000);
+        WaCampaignDoc {
+            id: Some(ObjectId::parse_str("64f000000000000000000001").unwrap()),
+            name: "June Promo".to_string(),
+            template_name: "promo_template".to_string(),
+            template_language: "es".to_string(),
+            template_components: None,
+            filters: CampaignPreviewRequest {
+                provider_ids: None,
+                sector_ids: None,
+                balance_filter: None,
+                client_state: Some(ClientStateFilter::Active),
+                include_all_active: None,
+                page: None,
+                per_page: None,
+            },
+            status: status.to_string(),
+            confirming_from: None,
+            total_recipients: 5,
+            total_can_send: 4,
+            total_invalid_phone: 1,
+            total_duplicated_phone: 0,
+            total_excluded: 1,
+            created_by: "creator-1".to_string(),
+            confirmed_by: Some("admin-1".to_string()),
+            confirmed_at: Some(now),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
     #[test]
     fn suspended_filter_matches_only_suspended_state() {
         let request = CampaignPreviewRequest {
@@ -1280,6 +1616,44 @@ mod tests {
     }
 
     #[test]
+    fn effective_recipient_filter_requires_campaign_sendable_non_excluded_pending_rows() {
+        let campaign_id = ObjectId::parse_str("64f000000000000000000001").unwrap();
+
+        assert_eq!(
+            effective_recipient_filter(campaign_id),
+            doc! {
+                "campaign_id": campaign_id,
+                "can_send": true,
+                "excluded": false,
+                "status": "pending",
+            }
+        );
+    }
+
+    #[test]
+    fn confirmable_campaign_status_allows_only_draft_and_previewed() {
+        assert!(is_confirmable_campaign_status("draft"));
+        assert!(is_confirmable_campaign_status("previewed"));
+        assert!(!is_confirmable_campaign_status("confirming"));
+        assert!(!is_confirmable_campaign_status("queued"));
+        assert!(!is_confirmable_campaign_status("editing"));
+        assert!(!is_confirmable_campaign_status("running"));
+        assert!(!is_confirmable_campaign_status("completed"));
+        assert!(!is_confirmable_campaign_status("cancelled"));
+        assert_eq!(confirmable_campaign_statuses(), vec!["draft", "previewed"]);
+    }
+
+    #[test]
+    fn campaign_summary_maps_effective_total_and_confirmed_fields() {
+        let summary = campaign_to_summary(base_campaign("queued"));
+
+        assert_eq!(summary.status, "queued");
+        assert_eq!(summary.total_effective_can_send, 3);
+        assert_eq!(summary.confirmed_by.as_deref(), Some("admin-1"));
+        assert!(summary.confirmed_at.is_some());
+    }
+
+    #[test]
     fn campaign_list_filter_matches_status_and_escaped_search() {
         let query = CampaignListQuery {
             page: None,
@@ -1400,8 +1774,25 @@ mod tests {
     fn editable_campaign_status_allows_only_draft_and_previewed() {
         assert!(is_editable_campaign_status("draft"));
         assert!(is_editable_campaign_status("previewed"));
+        assert!(!is_editable_campaign_status("editing"));
+        assert!(!is_editable_campaign_status("confirming"));
         assert!(!is_editable_campaign_status("queued"));
         assert!(!is_editable_campaign_status("running"));
         assert!(!is_editable_campaign_status("completed"));
+    }
+
+    #[test]
+    fn exclusion_guard_rejects_queued_campaigns() {
+        assert!(!is_editable_campaign_status("queued"));
+    }
+
+    #[test]
+    fn exclusion_guard_rejects_confirming_campaigns() {
+        assert!(!is_editable_campaign_status("confirming"));
+    }
+
+    #[test]
+    fn exclusion_guard_rejects_editing_campaigns() {
+        assert!(!is_editable_campaign_status("editing"));
     }
 }

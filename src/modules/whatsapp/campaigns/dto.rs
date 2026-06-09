@@ -209,7 +209,10 @@ pub struct CampaignSummary {
     pub total_invalid_phone: u64,
     pub total_duplicated_phone: u64,
     pub total_excluded: u64,
+    pub total_effective_can_send: u64,
     pub created_by: String,
+    pub confirmed_by: Option<String>,
+    pub confirmed_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

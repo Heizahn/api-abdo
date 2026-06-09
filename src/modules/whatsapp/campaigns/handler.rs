@@ -18,8 +18,8 @@ use super::{
         UpdateCampaignRecipientExclusionsResponse,
     },
     service::{
-        create_campaign, get_campaign, get_campaign_recipients, list_campaigns, preview_recipients,
-        update_campaign_recipient_exclusions,
+        confirm_campaign, create_campaign, get_campaign, get_campaign_recipients, list_campaigns,
+        preview_recipients, update_campaign_recipient_exclusions,
     },
 };
 
@@ -65,6 +65,30 @@ pub async fn create_campaign_handler(
 ) -> Result<Json<CampaignSummaryResponse>, ApiError> {
     require_superadmin(&state, &claims.id).await?;
     create_campaign(&state, &claims.id, request).await.map(Json)
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/whatsapp-campaigns/{id}/confirm",
+    tag = "WhatsApp — Campaigns",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "Campaign ObjectId")),
+    responses(
+        (status = 200, description = "Confirm a WhatsApp campaign and lock it as queued without sending messages", body = CampaignSummaryResponse),
+        (status = 400, description = "Invalid campaign id or no effective recipients"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "SUPERADMIN role required"),
+        (status = 404, description = "Campaign not found"),
+        (status = 409, description = "Campaign status is not confirmable"),
+    )
+)]
+pub async fn confirm_campaign_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+) -> Result<Json<CampaignSummaryResponse>, ApiError> {
+    require_superadmin(&state, &claims.id).await?;
+    confirm_campaign(&state, &id, &claims.id).await.map(Json)
 }
 
 #[utoipa::path(

@@ -72,6 +72,10 @@ pub fn user_routes() -> Router<Arc<AppState>> {
             patch(campaigns::handler::update_campaign_recipient_exclusions_handler),
         )
         .route(
+            "/v1/admin/whatsapp-campaigns/:id/confirm",
+            post(campaigns::handler::confirm_campaign_handler),
+        )
+        .route(
             "/v1/admin/whatsapp-campaigns/:id",
             get(campaigns::handler::get_campaign_handler),
         )
@@ -388,6 +392,11 @@ mod tests {
         documented(
             "PATCH",
             "/v1/admin/whatsapp-campaigns/:id/recipients/exclusions",
+            "WhatsApp — Campaigns",
+        ),
+        documented(
+            "POST",
+            "/v1/admin/whatsapp-campaigns/:id/confirm",
             "WhatsApp — Campaigns",
         ),
         documented(
