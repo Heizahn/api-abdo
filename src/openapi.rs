@@ -81,6 +81,11 @@ use crate::modules::calculations::handler::{
 };
 use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingResponse};
 use crate::modules::payments::handler::RejectReportRequest;
+use crate::modules::whatsapp::campaigns::dto::{
+    BalanceFilter, BalanceRange, CampaignPreviewRecipient, CampaignPreviewRequest,
+    CampaignPreviewResponse, CampaignPreviewTotals, ClientStateFilter, DerivedClientState,
+    PhoneStatus,
+};
 use crate::modules::whatsapp::conversations::lifecycle::{
     InterveneData, InterveneResponse, ResetAiStateResponse,
 };
@@ -89,7 +94,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.60",
+        version = "0.3.61",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
@@ -192,6 +197,8 @@ use crate::modules::whatsapp::conversations::lifecycle::{
         crate::modules::whatsapp::audit::audit_export_handler,
         crate::modules::whatsapp::audit::audit_conversation_messages_handler,
         crate::modules::whatsapp::audit::audit_conversation_timeline_handler,
+        // WhatsApp — Campaigns
+        crate::modules::whatsapp::campaigns::handler::preview_campaign_recipients_handler,
         // WhatsApp — Tickets
         crate::modules::whatsapp::tickets::list_ticket_categories_handler,
         crate::modules::whatsapp::tickets::list_tickets_handler,
@@ -313,6 +320,10 @@ use crate::modules::whatsapp::conversations::lifecycle::{
             AuditConversationTimeline, AuditConversationTimelineResponse,
             AuditMetricsSummary, AuditMetricsByDay, AuditMetricsByAgent, AuditMetricsByType,
             AuditMetricsData, AuditMetricsResponse,
+            // WhatsApp — Campaigns
+            CampaignPreviewRequest, BalanceFilter, BalanceRange, ClientStateFilter,
+            CampaignPreviewResponse, CampaignPreviewTotals, CampaignPreviewRecipient,
+            PhoneStatus, DerivedClientState,
             // Users — CRUD
             UserItem, UserListResponse, UserResponseEnvelope, OkResponse,
             SetUserVisibleRequest, UpdateUserRequest, CreateUserBody, SetUserPasswordRequest,
@@ -392,6 +403,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
         (name = "Utils", description = "Helpers: ping, versión, BCV, bancos, IP PPPoE, Zabbix, imágenes, política de privacidad"),
         (name = "WhatsApp — Soporte", description = "Chat de soporte vía WhatsApp Business API"),
         (name = "WhatsApp — Templates", description = "CRUD de plantillas de WhatsApp (WaTemplates). Writes requieren SUPERADMIN; GET list requiere bCanChat."),
+        (name = "WhatsApp — Campaigns", description = "Campaign recipient preview. SUPERADMIN-only; no Meta messages are sent."),
         (name = "WhatsApp — Tickets", description = "Tickets de soporte derivados de conversaciones WA. POST cierra la conv referenciada; estados: open/in_progress/resolved/closed/cancelled. Acceso requiere bCanChat."),
         (name = "WhatsApp — AI Agent", description = "Configuración del Asistente Virtual (Gemini) por workspace WhatsApp. PR 1: settings + FAQs. SUPERADMIN-only."),
         (name = "Users — CRUD", description = "Gestión de usuarios (staff/admin). Requiere rol SUPERADMIN (nRole == 0.0) salvo `/me/password`."),

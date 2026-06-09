@@ -1,6 +1,7 @@
 pub mod assignment;
 pub mod audit;
 pub mod backfill;
+pub mod campaigns;
 pub mod conversations;
 pub mod handler;
 pub mod messaging;
@@ -49,6 +50,10 @@ pub fn user_routes() -> Router<Arc<AppState>> {
         .route(
             "/v1/auth-user/whatsapp/conversations",
             get(conversations::handlers::list_conversations_handler),
+        )
+        .route(
+            "/v1/admin/whatsapp-campaigns/preview",
+            post(campaigns::handler::preview_campaign_recipients_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/conversations/stats",
