@@ -122,6 +122,28 @@ pub struct CampaignRecipientsQuery {
     pub per_page: Option<u32>,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateCampaignRecipientExclusionsRequest {
+    pub recipient_ids: Vec<String>,
+    pub excluded: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UpdateCampaignRecipientExclusionsResponse {
+    pub ok: bool,
+    pub data: UpdateCampaignRecipientExclusionsData,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UpdateCampaignRecipientExclusionsData {
+    pub campaign_id: String,
+    pub requested: u64,
+    pub updated: u64,
+    pub total_excluded: u64,
+    pub total_can_send: u64,
+    pub total_effective_can_send: u64,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CampaignSummaryResponse {
     pub ok: bool,

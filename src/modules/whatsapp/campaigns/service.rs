@@ -15,6 +15,8 @@ use super::{
         CampaignPreviewTotals, CampaignRecipientItem, CampaignRecipientsQuery,
         CampaignRecipientsResponse, CampaignSummary, CampaignSummaryResponse, ClientStateFilter,
         CreateCampaignRequest, DerivedClientState, PhoneStatus,
+        UpdateCampaignRecipientExclusionsData, UpdateCampaignRecipientExclusionsRequest,
+        UpdateCampaignRecipientExclusionsResponse,
     },
     phone::normalize_phone_to_whatsapp,
 };
@@ -267,6 +269,146 @@ pub async fn get_campaign_recipients(
     })
 }
 
+pub async fn update_campaign_recipient_exclusions(
+    state: &AppState,
+    campaign_id: &str,
+    request: UpdateCampaignRecipientExclusionsRequest,
+) -> Result<UpdateCampaignRecipientExclusionsResponse, ApiError> {
+    let campaign_id = parse_campaign_id(campaign_id)?;
+    let requested = request.recipient_ids.len() as u64;
+    if request.recipient_ids.is_empty() {
+        return Err(ApiError::domain_simple(
+            StatusCode::BAD_REQUEST,
+            "recipient_ids_required",
+            "Provide at least one campaign recipient id.",
+        ));
+    }
+
+    let campaigns = state.db.db.collection::<WaCampaignDoc>("WaCampaigns");
+    let campaign = campaigns
+        .find_one(doc! { "_id": campaign_id })
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+        .ok_or(ApiError::NotFound)?;
+
+    if !is_editable_campaign_status(&campaign.status) {
+        return Err(ApiError::domain_simple(
+            StatusCode::CONFLICT,
+            "campaign_not_editable",
+            "Only draft or previewed campaigns can update recipient exclusions.",
+        ));
+    }
+
+    let recipient_ids = parse_recipient_object_ids(&request.recipient_ids)?;
+    let recipients = state
+        .db
+        .db
+        .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients");
+
+    let mut updated = 0;
+    if !recipient_ids.is_empty() {
+        updated = recipients
+            .update_many(
+                doc! {
+                    "_id": { "$in": recipient_ids },
+                    "campaign_id": campaign_id,
+                    "can_send": true,
+                    "excluded": { "$ne": request.excluded },
+                    "status": "pending",
+                },
+                doc! { "$set": { "excluded": request.excluded, "updated_at": DateTime::now() } },
+            )
+            .await
+            .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+            .modified_count;
+    }
+
+    let total_excluded = count_effectively_excluded_recipients(&recipients, campaign_id).await?;
+    let total_effective_can_send =
+        count_effective_can_send_recipients(&recipients, campaign_id).await?;
+    campaigns
+        .update_one(
+            doc! { "_id": campaign_id },
+            doc! { "$set": { "total_excluded": total_excluded as i64, "updated_at": DateTime::now() } },
+        )
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    Ok(UpdateCampaignRecipientExclusionsResponse {
+        ok: true,
+        data: UpdateCampaignRecipientExclusionsData {
+            campaign_id: campaign_id.to_hex(),
+            requested,
+            updated,
+            total_excluded,
+            total_can_send: campaign.total_can_send,
+            total_effective_can_send,
+        },
+    })
+}
+
+async fn count_effectively_excluded_recipients(
+    recipients: &mongodb::Collection<WaCampaignRecipientDoc>,
+    campaign_id: ObjectId,
+) -> Result<u64, ApiError> {
+    recipients
+        .count_documents(doc! {
+            "campaign_id": campaign_id,
+            "can_send": true,
+            "excluded": true,
+            "status": "pending",
+        })
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))
+}
+
+async fn count_effective_can_send_recipients(
+    recipients: &mongodb::Collection<WaCampaignRecipientDoc>,
+    campaign_id: ObjectId,
+) -> Result<u64, ApiError> {
+    recipients
+        .count_documents(doc! {
+            "campaign_id": campaign_id,
+            "can_send": true,
+            "excluded": false,
+            "status": "pending",
+        })
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))
+}
+
+fn parse_recipient_object_ids(ids: &[String]) -> Result<Vec<ObjectId>, ApiError> {
+    let mut parsed = Vec::with_capacity(ids.len());
+
+    for id in ids {
+        let id = id.trim();
+        if id.is_empty() {
+            return Err(ApiError::domain_with_field(
+                StatusCode::BAD_REQUEST,
+                "invalid_recipient_ids",
+                "recipient_ids",
+                "Provide only non-empty valid ObjectId recipient ids.",
+            ));
+        }
+
+        let object_id = ObjectId::parse_str(id).map_err(|_| {
+            ApiError::domain_with_field(
+                StatusCode::BAD_REQUEST,
+                "invalid_recipient_ids",
+                "recipient_ids",
+                "Provide only non-empty valid ObjectId recipient ids.",
+            )
+        })?;
+        parsed.push(object_id);
+    }
+
+    Ok(parsed)
+}
+
+fn is_editable_campaign_status(status: &str) -> bool {
+    matches!(status, "draft" | "previewed")
+}
+
 async fn cleanup_campaign_snapshot(
     state: &AppState,
     campaign_id: ObjectId,
@@ -402,10 +544,8 @@ fn preview_to_snapshot_recipient(
     }
 }
 
-fn snapshot_status(phone_status: &PhoneStatus, can_send: bool, excluded: bool) -> String {
-    if excluded {
-        "excluded".to_string()
-    } else if matches!(phone_status, PhoneStatus::Invalid) {
+fn snapshot_status(phone_status: &PhoneStatus, can_send: bool, _excluded: bool) -> String {
+    if matches!(phone_status, PhoneStatus::Invalid) {
         "invalid_phone".to_string()
     } else if matches!(phone_status, PhoneStatus::Duplicated) {
         "duplicated_phone".to_string()
@@ -414,6 +554,39 @@ fn snapshot_status(phone_status: &PhoneStatus, can_send: bool, excluded: bool) -
     } else {
         "invalid_phone".to_string()
     }
+}
+
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+struct RecipientExclusionCounters {
+    total_excluded: u64,
+    total_can_send: u64,
+    total_effective_can_send: u64,
+}
+
+#[cfg(test)]
+fn calculate_recipient_exclusion_counters<'a>(
+    rows: impl IntoIterator<Item = (bool, bool, &'a str)>,
+) -> RecipientExclusionCounters {
+    let mut counters = RecipientExclusionCounters {
+        total_excluded: 0,
+        total_can_send: 0,
+        total_effective_can_send: 0,
+    };
+
+    for (can_send, excluded, status) in rows {
+        if can_send {
+            counters.total_can_send += 1;
+        }
+        if can_send && status == "pending" && excluded {
+            counters.total_excluded += 1;
+        }
+        if can_send && status == "pending" && !excluded {
+            counters.total_effective_can_send += 1;
+        }
+    }
+
+    counters
 }
 
 fn campaign_to_summary(campaign: WaCampaignDoc) -> CampaignSummary {
@@ -821,6 +994,40 @@ mod tests {
     }
 
     #[test]
+    fn parse_recipient_object_ids_rejects_blank_ids() {
+        let err = parse_recipient_object_ids(&[" ".to_string()]).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, ref field, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && code == "invalid_recipient_ids"
+                    && field.as_deref() == Some("recipient_ids")
+        ));
+    }
+
+    #[test]
+    fn parse_recipient_object_ids_rejects_malformed_ids() {
+        let err = parse_recipient_object_ids(&["not-an-object-id".to_string()]).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, ref field, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && code == "invalid_recipient_ids"
+                    && field.as_deref() == Some("recipient_ids")
+        ));
+    }
+
+    #[test]
+    fn parse_recipient_object_ids_accepts_valid_ids() {
+        let id = ObjectId::new();
+        let parsed = parse_recipient_object_ids(&[id.to_hex()]).unwrap();
+
+        assert_eq!(parsed, vec![id]);
+    }
+
+    #[test]
     fn snapshot_maps_invalid_phone_to_non_sendable_invalid_status() {
         let campaign_id = ObjectId::new();
         let now = DateTime::now();
@@ -885,5 +1092,68 @@ mod tests {
         let skip = pagination_skip(u32::MAX, MAX_PER_PAGE);
         assert_eq!(skip, u64::from(u32::MAX - 1) * u64::from(MAX_PER_PAGE));
         assert!(skip > u64::from(u32::MAX));
+    }
+
+    #[test]
+    fn exclusion_counters_exclude_sendable_pending_recipients_without_changing_total_can_send() {
+        let counters = calculate_recipient_exclusion_counters(vec![
+            (true, true, "pending"),
+            (true, false, "pending"),
+            (false, true, "invalid_phone"),
+        ]);
+
+        assert_eq!(counters.total_excluded, 1);
+        assert_eq!(counters.total_can_send, 2);
+        assert_eq!(counters.total_effective_can_send, 1);
+    }
+
+    #[test]
+    fn exclusion_counters_reinclude_sendable_pending_recipients_without_changing_total_can_send() {
+        let before = calculate_recipient_exclusion_counters(vec![
+            (true, true, "pending"),
+            (true, false, "pending"),
+        ]);
+        let after = calculate_recipient_exclusion_counters(vec![
+            (true, false, "pending"),
+            (true, false, "pending"),
+        ]);
+
+        assert_eq!(before.total_excluded, 1);
+        assert_eq!(after.total_excluded, 0);
+        assert_eq!(before.total_can_send, after.total_can_send);
+        assert_eq!(after.total_effective_can_send, 2);
+    }
+
+    #[test]
+    fn exclusion_counters_are_idempotent_for_repeated_same_state() {
+        let exclude_once = calculate_recipient_exclusion_counters(vec![(true, true, "pending")]);
+        let exclude_twice = calculate_recipient_exclusion_counters(vec![(true, true, "pending")]);
+        let include_once = calculate_recipient_exclusion_counters(vec![(true, false, "pending")]);
+        let include_twice = calculate_recipient_exclusion_counters(vec![(true, false, "pending")]);
+
+        assert_eq!(exclude_once, exclude_twice);
+        assert_eq!(include_once, include_twice);
+    }
+
+    #[test]
+    fn exclusion_counters_ignore_invalid_and_duplicated_phone_rows() {
+        let counters = calculate_recipient_exclusion_counters(vec![
+            (false, true, "invalid_phone"),
+            (false, true, "duplicated_phone"),
+            (true, true, "pending"),
+        ]);
+
+        assert_eq!(counters.total_excluded, 1);
+        assert_eq!(counters.total_can_send, 1);
+        assert_eq!(counters.total_effective_can_send, 0);
+    }
+
+    #[test]
+    fn editable_campaign_status_allows_only_draft_and_previewed() {
+        assert!(is_editable_campaign_status("draft"));
+        assert!(is_editable_campaign_status("previewed"));
+        assert!(!is_editable_campaign_status("queued"));
+        assert!(!is_editable_campaign_status("running"));
+        assert!(!is_editable_campaign_status("completed"));
     }
 }

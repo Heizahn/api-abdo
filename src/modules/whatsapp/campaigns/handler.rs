@@ -14,8 +14,12 @@ use super::{
     dto::{
         CampaignPreviewRequest, CampaignPreviewResponse, CampaignRecipientsQuery,
         CampaignRecipientsResponse, CampaignSummaryResponse, CreateCampaignRequest,
+        UpdateCampaignRecipientExclusionsRequest, UpdateCampaignRecipientExclusionsResponse,
     },
-    service::{create_campaign, get_campaign, get_campaign_recipients, preview_recipients},
+    service::{
+        create_campaign, get_campaign, get_campaign_recipients, preview_recipients,
+        update_campaign_recipient_exclusions,
+    },
 };
 
 #[utoipa::path(
@@ -111,4 +115,32 @@ pub async fn get_campaign_recipients_handler(
 ) -> Result<Json<CampaignRecipientsResponse>, ApiError> {
     require_superadmin(&state, &claims.id).await?;
     get_campaign_recipients(&state, &id, query).await.map(Json)
+}
+
+#[utoipa::path(
+    patch,
+    path = "/v1/admin/whatsapp-campaigns/{id}/recipients/exclusions",
+    tag = "WhatsApp — Campaigns",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "Campaign ObjectId")),
+    request_body = UpdateCampaignRecipientExclusionsRequest,
+    responses(
+        (status = 200, description = "Toggle manual exclusion for technically sendable campaign recipient snapshot rows", body = UpdateCampaignRecipientExclusionsResponse),
+        (status = 400, description = "Invalid campaign id, empty recipient_ids, or invalid recipient_ids"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "SUPERADMIN role required"),
+        (status = 404, description = "Campaign not found"),
+        (status = 409, description = "Campaign status is not editable"),
+    )
+)]
+pub async fn update_campaign_recipient_exclusions_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateCampaignRecipientExclusionsRequest>,
+) -> Result<Json<UpdateCampaignRecipientExclusionsResponse>, ApiError> {
+    require_superadmin(&state, &claims.id).await?;
+    update_campaign_recipient_exclusions(&state, &id, request)
+        .await
+        .map(Json)
 }

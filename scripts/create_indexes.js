@@ -415,6 +415,68 @@ print("  ✅ AiCoverageZones.is_active + state + municipality");
 print("");
 
 // ============================================
+// COLECCIÓN: WaCampaigns
+// ============================================
+print("📦 Colección: WaCampaigns");
+
+db.WaCampaigns.createIndex(
+  { "created_at": -1 },
+  { name: "idx_wa_campaigns_created_desc", background: true }
+);
+print("  ✅ WaCampaigns.created_at desc");
+
+db.WaCampaigns.createIndex(
+  { "status": 1 },
+  { name: "idx_wa_campaigns_status", background: true }
+);
+print("  ✅ WaCampaigns.status");
+
+print("");
+
+// ============================================
+// COLECCIÓN: WaCampaignRecipients
+// ============================================
+print("📦 Colección: WaCampaignRecipients");
+
+db.WaCampaignRecipients.createIndex(
+  { "campaign_id": 1 },
+  { name: "idx_wa_campaign_recipients_campaign", background: true }
+);
+print("  ✅ WaCampaignRecipients.campaign_id");
+
+db.WaCampaignRecipients.createIndex(
+  { "campaign_id": 1, "client_id": 1 },
+  { name: "idx_wa_campaign_recipients_campaign_client", unique: true, background: true }
+);
+print("  ✅ WaCampaignRecipients.campaign_id + client_id (unique)");
+
+db.WaCampaignRecipients.createIndex(
+  { "campaign_id": 1, "phone_normalized": 1 },
+  { name: "idx_wa_campaign_recipients_campaign_phone", background: true }
+);
+print("  ✅ WaCampaignRecipients.campaign_id + phone_normalized");
+
+db.WaCampaignRecipients.createIndex(
+  { "campaign_id": 1, "status": 1 },
+  { name: "idx_wa_campaign_recipients_campaign_status", background: true }
+);
+print("  ✅ WaCampaignRecipients.campaign_id + status");
+
+db.WaCampaignRecipients.createIndex(
+  { "campaign_id": 1, "excluded": 1 },
+  { name: "idx_wa_campaign_recipients_campaign_excluded", background: true }
+);
+print("  ✅ WaCampaignRecipients.campaign_id + excluded");
+
+db.WaCampaignRecipients.createIndex(
+  { "campaign_id": 1, "can_send": 1, "excluded": 1, "status": 1 },
+  { name: "idx_wa_campaign_recipients_effective_sendable", background: true }
+);
+print("  ✅ WaCampaignRecipients.campaign_id + can_send + excluded + status");
+
+print("");
+
+// ============================================
 // COLECCIÓN: WaMessages — auditoría cross-conversation
 // ============================================
 print("📦 Colección: WaMessages (auditoría)");
@@ -553,7 +615,7 @@ print("📋 VERIFICACIÓN DE ÍNDICES");
 print("=".repeat(60));
 print("");
 
-const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes", "WaTemplates", "wa_template_media.files", "WaConversations", "WaConversationEvents", "WaMessages", "WaTickets", "AiAgents", "AiAgentFaqs", "AiInteractions", "AiPlans", "AiCoverageZones"];
+const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes", "WaTemplates", "wa_template_media.files", "WaCampaigns", "WaCampaignRecipients", "WaConversations", "WaConversationEvents", "WaMessages", "WaTickets", "AiAgents", "AiAgentFaqs", "AiInteractions", "AiPlans", "AiCoverageZones"];
 toVerify.forEach(col => {
   print(col + ":");
   db.getCollection(col).getIndexes().forEach(idx => {

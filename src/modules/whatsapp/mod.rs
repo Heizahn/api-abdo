@@ -64,6 +64,10 @@ pub fn user_routes() -> Router<Arc<AppState>> {
             get(campaigns::handler::get_campaign_recipients_handler),
         )
         .route(
+            "/v1/admin/whatsapp-campaigns/:id/recipients/exclusions",
+            patch(campaigns::handler::update_campaign_recipient_exclusions_handler),
+        )
+        .route(
             "/v1/admin/whatsapp-campaigns/:id",
             get(campaigns::handler::get_campaign_handler),
         )
@@ -356,6 +360,31 @@ mod tests {
             "GET",
             "/v1/auth-user/whatsapp/conversations",
             "WhatsApp — Soporte",
+        ),
+        documented(
+            "POST",
+            "/v1/admin/whatsapp-campaigns",
+            "WhatsApp — Campaigns",
+        ),
+        documented(
+            "POST",
+            "/v1/admin/whatsapp-campaigns/preview",
+            "WhatsApp — Campaigns",
+        ),
+        documented(
+            "GET",
+            "/v1/admin/whatsapp-campaigns/:id/recipients",
+            "WhatsApp — Campaigns",
+        ),
+        documented(
+            "PATCH",
+            "/v1/admin/whatsapp-campaigns/:id/recipients/exclusions",
+            "WhatsApp — Campaigns",
+        ),
+        documented(
+            "GET",
+            "/v1/admin/whatsapp-campaigns/:id",
+            "WhatsApp — Campaigns",
         ),
         documented(
             "GET",
@@ -722,7 +751,8 @@ mod tests {
         paths
             .iter()
             .filter(|(path, _)| {
-                path.starts_with("/v1/auth-user/whatsapp")
+                (path.starts_with("/v1/auth-user/whatsapp")
+                    || path.starts_with("/v1/admin/whatsapp-campaigns"))
                     && !path.starts_with("/v1/auth-user/whatsapp/ai-agent")
                     && !path.starts_with("/v1/auth-user/whatsapp/ai/")
             })

@@ -85,7 +85,8 @@ use crate::modules::whatsapp::campaigns::dto::{
     BalanceFilter, BalanceRange, CampaignPreviewRecipient, CampaignPreviewRequest,
     CampaignPreviewResponse, CampaignPreviewTotals, CampaignRecipientItem, CampaignRecipientsQuery,
     CampaignRecipientsResponse, CampaignSummary, CampaignSummaryResponse, ClientStateFilter,
-    CreateCampaignRequest, DerivedClientState, PhoneStatus,
+    CreateCampaignRequest, DerivedClientState, PhoneStatus, UpdateCampaignRecipientExclusionsData,
+    UpdateCampaignRecipientExclusionsRequest, UpdateCampaignRecipientExclusionsResponse,
 };
 use crate::modules::whatsapp::conversations::lifecycle::{
     InterveneData, InterveneResponse, ResetAiStateResponse,
@@ -95,7 +96,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.62",
+        version = "0.3.63",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
@@ -203,6 +204,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
         crate::modules::whatsapp::campaigns::handler::create_campaign_handler,
         crate::modules::whatsapp::campaigns::handler::get_campaign_handler,
         crate::modules::whatsapp::campaigns::handler::get_campaign_recipients_handler,
+        crate::modules::whatsapp::campaigns::handler::update_campaign_recipient_exclusions_handler,
         // WhatsApp — Tickets
         crate::modules::whatsapp::tickets::list_ticket_categories_handler,
         crate::modules::whatsapp::tickets::list_tickets_handler,
@@ -329,6 +331,8 @@ use crate::modules::whatsapp::conversations::lifecycle::{
             CampaignPreviewResponse, CampaignPreviewTotals, CampaignPreviewRecipient,
             PhoneStatus, DerivedClientState, CreateCampaignRequest, CampaignRecipientsQuery,
             CampaignSummaryResponse, CampaignSummary, CampaignRecipientsResponse, CampaignRecipientItem,
+            UpdateCampaignRecipientExclusionsRequest, UpdateCampaignRecipientExclusionsResponse,
+            UpdateCampaignRecipientExclusionsData,
             // Users — CRUD
             UserItem, UserListResponse, UserResponseEnvelope, OkResponse,
             SetUserVisibleRequest, UpdateUserRequest, CreateUserBody, SetUserPasswordRequest,
