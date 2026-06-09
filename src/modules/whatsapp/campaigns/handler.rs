@@ -12,12 +12,13 @@ use crate::{
 
 use super::{
     dto::{
-        CampaignPreviewRequest, CampaignPreviewResponse, CampaignRecipientsQuery,
-        CampaignRecipientsResponse, CampaignSummaryResponse, CreateCampaignRequest,
-        UpdateCampaignRecipientExclusionsRequest, UpdateCampaignRecipientExclusionsResponse,
+        CampaignListQuery, CampaignListResponse, CampaignPreviewRequest, CampaignPreviewResponse,
+        CampaignRecipientsQuery, CampaignRecipientsResponse, CampaignSummaryResponse,
+        CreateCampaignRequest, UpdateCampaignRecipientExclusionsRequest,
+        UpdateCampaignRecipientExclusionsResponse,
     },
     service::{
-        create_campaign, get_campaign, get_campaign_recipients, preview_recipients,
+        create_campaign, get_campaign, get_campaign_recipients, list_campaigns, preview_recipients,
         update_campaign_recipient_exclusions,
     },
 };
@@ -64,6 +65,35 @@ pub async fn create_campaign_handler(
 ) -> Result<Json<CampaignSummaryResponse>, ApiError> {
     require_superadmin(&state, &claims.id).await?;
     create_campaign(&state, &claims.id, request).await.map(Json)
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/admin/whatsapp-campaigns",
+    tag = "WhatsApp — Campaigns",
+    security(("bearerAuth" = [])),
+    params(
+        ("page" = Option<u32>, Query, description = "Page number, starting at 1. Default 1"),
+        ("limit" = Option<u32>, Query, description = "Page size. Default 20, max 100"),
+        ("status" = Option<String>, Query, description = "Campaign status exact match"),
+        ("search" = Option<String>, Query, description = "Case-insensitive search in name and template_name"),
+        ("created_from" = Option<String>, Query, description = "ISO-8601 lower bound for created_at"),
+        ("created_to" = Option<String>, Query, description = "ISO-8601 upper bound for created_at"),
+    ),
+    responses(
+        (status = 200, description = "List WhatsApp campaigns ordered by creation date descending", body = CampaignListResponse),
+        (status = 400, description = "Invalid date filter"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "SUPERADMIN role required"),
+    )
+)]
+pub async fn list_campaigns_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Query(query): Query<CampaignListQuery>,
+) -> Result<Json<CampaignListResponse>, ApiError> {
+    require_superadmin(&state, &claims.id).await?;
+    list_campaigns(&state, query).await.map(Json)
 }
 
 #[utoipa::path(

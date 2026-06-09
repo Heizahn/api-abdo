@@ -11,7 +11,8 @@ use crate::{error::ApiError, modules::whatsapp::shared::time::iso8601, state::Ap
 
 use super::{
     dto::{
-        BalanceFilter, CampaignPreviewRecipient, CampaignPreviewRequest, CampaignPreviewResponse,
+        BalanceFilter, CampaignListItem, CampaignListQuery, CampaignListResponse,
+        CampaignPreviewRecipient, CampaignPreviewRequest, CampaignPreviewResponse,
         CampaignPreviewTotals, CampaignRecipientItem, CampaignRecipientsQuery,
         CampaignRecipientsResponse, CampaignSummary, CampaignSummaryResponse, ClientStateFilter,
         CreateCampaignRequest, DerivedClientState, PhoneStatus,
@@ -23,6 +24,8 @@ use super::{
 
 const DEFAULT_PER_PAGE: u32 = 100;
 const MAX_PER_PAGE: u32 = 500;
+const DEFAULT_CAMPAIGN_LIST_LIMIT: u32 = 20;
+const MAX_CAMPAIGN_LIST_LIMIT: u32 = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WaCampaignDoc {
@@ -213,6 +216,46 @@ pub async fn get_campaign(
     Ok(CampaignSummaryResponse {
         ok: true,
         data: campaign_to_summary(campaign),
+    })
+}
+
+pub async fn list_campaigns(
+    state: &AppState,
+    query: CampaignListQuery,
+) -> Result<CampaignListResponse, ApiError> {
+    let page = query.page.unwrap_or(1).max(1);
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_CAMPAIGN_LIST_LIMIT)
+        .clamp(1, MAX_CAMPAIGN_LIST_LIMIT);
+    let skip = pagination_skip(page, limit);
+    let filter = build_campaign_list_filter(&query)?;
+    let campaigns = state.db.db.collection::<WaCampaignDoc>("WaCampaigns");
+    let total = campaigns
+        .count_documents(filter.clone())
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+    let campaign_items = campaigns
+        .find(filter)
+        .sort(doc! { "created_at": -1, "_id": -1 })
+        .skip(skip)
+        .limit(limit as i64)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+        .into_iter()
+        .map(campaign_to_list_item)
+        .collect();
+
+    Ok(CampaignListResponse {
+        ok: true,
+        page,
+        limit,
+        total,
+        total_pages: total_pages(total, limit),
+        campaigns: campaign_items,
     })
 }
 
@@ -438,6 +481,111 @@ fn pagination_skip_usize(page: u32, per_page: u32) -> usize {
     usize::try_from(pagination_skip(page, per_page)).unwrap_or(usize::MAX)
 }
 
+fn total_pages(total: u64, limit: u32) -> u64 {
+    if total == 0 {
+        0
+    } else {
+        total.div_ceil(u64::from(limit.max(1)))
+    }
+}
+
+fn total_effective_can_send(total_can_send: u64, total_excluded: u64) -> u64 {
+    total_can_send.saturating_sub(total_excluded)
+}
+
+fn build_campaign_list_filter(query: &CampaignListQuery) -> Result<Document, ApiError> {
+    let mut filter = Document::new();
+
+    if let Some(status) = query
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        filter.insert("status", status);
+    }
+
+    if let Some(search) = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let escaped = regex_escape(search);
+        filter.insert(
+            "$or",
+            vec![
+                doc! { "name": { "$regex": &escaped, "$options": "i" } },
+                doc! { "template_name": { "$regex": &escaped, "$options": "i" } },
+            ],
+        );
+    }
+
+    let created_from = match query
+        .created_from
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(value) => Some(parse_campaign_list_iso_date(value, "created_from")?),
+        None => None,
+    };
+    let created_to = match query
+        .created_to
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(value) => Some(parse_campaign_list_iso_date(value, "created_to")?),
+        None => None,
+    };
+    if let (Some(from), Some(to)) = (created_from, created_to) {
+        if from > to {
+            return Err(ApiError::ValidationError {
+                code: "invalid_date_range".to_string(),
+                field: "created_from".to_string(),
+                message: "'created_from' must be before or equal to 'created_to'".to_string(),
+            });
+        }
+    }
+    let mut created_at = Document::new();
+    if let Some(value) = created_from {
+        created_at.insert("$gte", value);
+    }
+    if let Some(value) = created_to {
+        created_at.insert("$lte", value);
+    }
+    if !created_at.is_empty() {
+        filter.insert("created_at", created_at);
+    }
+
+    Ok(filter)
+}
+
+fn parse_campaign_list_iso_date(value: &str, field: &str) -> Result<DateTime, ApiError> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|dt| DateTime::from_millis(dt.timestamp_millis()))
+        .map_err(|_| ApiError::ValidationError {
+            code: "invalid_date".to_string(),
+            field: field.to_string(),
+            message: format!("'{}' must be ISO-8601", field),
+        })
+}
+
+fn regex_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() * 2);
+    for ch in value.chars() {
+        if matches!(
+            ch,
+            '\\' | '^' | '$' | '.' | '|' | '?' | '*' | '+' | '(' | ')' | '[' | ']' | '{' | '}'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
 async fn build_recipients_snapshot(
     state: &AppState,
     request: &CampaignPreviewRequest,
@@ -603,6 +751,28 @@ fn campaign_to_summary(campaign: WaCampaignDoc) -> CampaignSummary {
         total_invalid_phone: campaign.total_invalid_phone,
         total_duplicated_phone: campaign.total_duplicated_phone,
         total_excluded: campaign.total_excluded,
+        created_by: campaign.created_by,
+        created_at: iso8601(campaign.created_at),
+        updated_at: iso8601(campaign.updated_at),
+    }
+}
+
+fn campaign_to_list_item(campaign: WaCampaignDoc) -> CampaignListItem {
+    CampaignListItem {
+        id: campaign.id.map(|id| id.to_hex()).unwrap_or_default(),
+        name: campaign.name,
+        template_name: campaign.template_name,
+        template_language: campaign.template_language,
+        status: campaign.status,
+        total_recipients: campaign.total_recipients,
+        total_can_send: campaign.total_can_send,
+        total_invalid_phone: campaign.total_invalid_phone,
+        total_duplicated_phone: campaign.total_duplicated_phone,
+        total_excluded: campaign.total_excluded,
+        total_effective_can_send: total_effective_can_send(
+            campaign.total_can_send,
+            campaign.total_excluded,
+        ),
         created_by: campaign.created_by,
         created_at: iso8601(campaign.created_at),
         updated_at: iso8601(campaign.updated_at),
@@ -1092,6 +1262,84 @@ mod tests {
         let skip = pagination_skip(u32::MAX, MAX_PER_PAGE);
         assert_eq!(skip, u64::from(u32::MAX - 1) * u64::from(MAX_PER_PAGE));
         assert!(skip > u64::from(u32::MAX));
+    }
+
+    #[test]
+    fn total_pages_rounds_up_and_handles_empty_results() {
+        assert_eq!(total_pages(0, 20), 0);
+        assert_eq!(total_pages(1, 20), 1);
+        assert_eq!(total_pages(20, 20), 1);
+        assert_eq!(total_pages(21, 20), 2);
+        assert_eq!(total_pages(100, 20), 5);
+    }
+
+    #[test]
+    fn total_effective_can_send_uses_saturating_subtraction() {
+        assert_eq!(total_effective_can_send(90, 10), 80);
+        assert_eq!(total_effective_can_send(5, 10), 0);
+    }
+
+    #[test]
+    fn campaign_list_filter_matches_status_and_escaped_search() {
+        let query = CampaignListQuery {
+            page: None,
+            limit: None,
+            status: Some("draft".to_string()),
+            search: Some("promo.2026".to_string()),
+            created_from: None,
+            created_to: None,
+        };
+
+        assert_eq!(
+            build_campaign_list_filter(&query).unwrap(),
+            doc! {
+                "status": "draft",
+                "$or": [
+                    { "name": { "$regex": "promo\\.2026", "$options": "i" } },
+                    { "template_name": { "$regex": "promo\\.2026", "$options": "i" } },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn campaign_list_filter_rejects_invalid_created_date() {
+        let query = CampaignListQuery {
+            page: None,
+            limit: None,
+            status: None,
+            search: None,
+            created_from: Some("not-a-date".to_string()),
+            created_to: None,
+        };
+
+        let err = build_campaign_list_filter(&query).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::ValidationError { ref code, ref field, .. }
+                if code == "invalid_date" && field == "created_from"
+        ));
+    }
+
+    #[test]
+    fn campaign_list_filter_rejects_inverted_created_date_range() {
+        let query = CampaignListQuery {
+            page: None,
+            limit: None,
+            status: None,
+            search: None,
+            created_from: Some("2026-06-10T00:00:00Z".to_string()),
+            created_to: Some("2026-06-09T00:00:00Z".to_string()),
+        };
+
+        let err = build_campaign_list_filter(&query).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::ValidationError { ref code, ref field, .. }
+                if code == "invalid_date_range" && field == "created_from"
+        ));
     }
 
     #[test]

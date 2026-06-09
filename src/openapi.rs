@@ -82,8 +82,9 @@ use crate::modules::calculations::handler::{
 use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingResponse};
 use crate::modules::payments::handler::RejectReportRequest;
 use crate::modules::whatsapp::campaigns::dto::{
-    BalanceFilter, BalanceRange, CampaignPreviewRecipient, CampaignPreviewRequest,
-    CampaignPreviewResponse, CampaignPreviewTotals, CampaignRecipientItem, CampaignRecipientsQuery,
+    BalanceFilter, BalanceRange, CampaignListItem, CampaignListQuery, CampaignListResponse,
+    CampaignPreviewRecipient, CampaignPreviewRequest, CampaignPreviewResponse,
+    CampaignPreviewTotals, CampaignRecipientItem, CampaignRecipientsQuery,
     CampaignRecipientsResponse, CampaignSummary, CampaignSummaryResponse, ClientStateFilter,
     CreateCampaignRequest, DerivedClientState, PhoneStatus, UpdateCampaignRecipientExclusionsData,
     UpdateCampaignRecipientExclusionsRequest, UpdateCampaignRecipientExclusionsResponse,
@@ -96,7 +97,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.63",
+        version = "0.3.64",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
@@ -202,6 +203,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
         // WhatsApp — Campaigns
         crate::modules::whatsapp::campaigns::handler::preview_campaign_recipients_handler,
         crate::modules::whatsapp::campaigns::handler::create_campaign_handler,
+        crate::modules::whatsapp::campaigns::handler::list_campaigns_handler,
         crate::modules::whatsapp::campaigns::handler::get_campaign_handler,
         crate::modules::whatsapp::campaigns::handler::get_campaign_recipients_handler,
         crate::modules::whatsapp::campaigns::handler::update_campaign_recipient_exclusions_handler,
@@ -330,6 +332,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
             CampaignPreviewRequest, BalanceFilter, BalanceRange, ClientStateFilter,
             CampaignPreviewResponse, CampaignPreviewTotals, CampaignPreviewRecipient,
             PhoneStatus, DerivedClientState, CreateCampaignRequest, CampaignRecipientsQuery,
+            CampaignListQuery, CampaignListResponse, CampaignListItem,
             CampaignSummaryResponse, CampaignSummary, CampaignRecipientsResponse, CampaignRecipientItem,
             UpdateCampaignRecipientExclusionsRequest, UpdateCampaignRecipientExclusionsResponse,
             UpdateCampaignRecipientExclusionsData,

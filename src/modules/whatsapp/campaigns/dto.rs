@@ -123,6 +123,50 @@ pub struct CampaignRecipientsQuery {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+pub struct CampaignListQuery {
+    #[serde(default)]
+    pub page: Option<u32>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub search: Option<String>,
+    #[serde(default)]
+    pub created_from: Option<String>,
+    #[serde(default)]
+    pub created_to: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CampaignListResponse {
+    pub ok: bool,
+    pub page: u32,
+    pub limit: u32,
+    pub total: u64,
+    pub total_pages: u64,
+    pub campaigns: Vec<CampaignListItem>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CampaignListItem {
+    pub id: String,
+    pub name: String,
+    pub template_name: String,
+    pub template_language: String,
+    pub status: String,
+    pub total_recipients: u64,
+    pub total_can_send: u64,
+    pub total_invalid_phone: u64,
+    pub total_duplicated_phone: u64,
+    pub total_excluded: u64,
+    pub total_effective_can_send: u64,
+    pub created_by: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateCampaignRecipientExclusionsRequest {
     pub recipient_ids: Vec<String>,
     pub excluded: bool,
