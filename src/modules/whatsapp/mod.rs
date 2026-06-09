@@ -52,8 +52,20 @@ pub fn user_routes() -> Router<Arc<AppState>> {
             get(conversations::handlers::list_conversations_handler),
         )
         .route(
+            "/v1/admin/whatsapp-campaigns",
+            post(campaigns::handler::create_campaign_handler),
+        )
+        .route(
             "/v1/admin/whatsapp-campaigns/preview",
             post(campaigns::handler::preview_campaign_recipients_handler),
+        )
+        .route(
+            "/v1/admin/whatsapp-campaigns/:id/recipients",
+            get(campaigns::handler::get_campaign_recipients_handler),
+        )
+        .route(
+            "/v1/admin/whatsapp-campaigns/:id",
+            get(campaigns::handler::get_campaign_handler),
         )
         .route(
             "/v1/auth-user/whatsapp/conversations/stats",

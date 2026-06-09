@@ -1,21 +1,72 @@
 use std::collections::{HashMap, HashSet};
+use std::convert::TryFrom;
 
 use axum::http::StatusCode;
 use futures::stream::StreamExt;
-use mongodb::bson::{doc, oid::ObjectId, Bson, Document};
+use futures::TryStreamExt;
+use mongodb::bson::{doc, oid::ObjectId, Bson, DateTime, Document};
+use serde::{Deserialize, Serialize};
 
-use crate::{error::ApiError, state::AppState};
+use crate::{error::ApiError, modules::whatsapp::shared::time::iso8601, state::AppState};
 
 use super::{
     dto::{
         BalanceFilter, CampaignPreviewRecipient, CampaignPreviewRequest, CampaignPreviewResponse,
-        CampaignPreviewTotals, ClientStateFilter, DerivedClientState, PhoneStatus,
+        CampaignPreviewTotals, CampaignRecipientItem, CampaignRecipientsQuery,
+        CampaignRecipientsResponse, CampaignSummary, CampaignSummaryResponse, ClientStateFilter,
+        CreateCampaignRequest, DerivedClientState, PhoneStatus,
     },
     phone::normalize_phone_to_whatsapp,
 };
 
 const DEFAULT_PER_PAGE: u32 = 100;
 const MAX_PER_PAGE: u32 = 500;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WaCampaignDoc {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    id: Option<ObjectId>,
+    name: String,
+    template_name: String,
+    template_language: String,
+    #[serde(default)]
+    template_components: Option<Vec<serde_json::Value>>,
+    filters: CampaignPreviewRequest,
+    status: String,
+    total_recipients: u64,
+    total_can_send: u64,
+    total_invalid_phone: u64,
+    total_duplicated_phone: u64,
+    total_excluded: u64,
+    created_by: String,
+    created_at: DateTime,
+    updated_at: DateTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WaCampaignRecipientDoc {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    id: Option<ObjectId>,
+    campaign_id: ObjectId,
+    client_id: String,
+    client_name: String,
+    provider_id: Option<String>,
+    provider_name: Option<String>,
+    sector_id: Option<String>,
+    sector_name: Option<String>,
+    customer_status_raw: String,
+    customer_status_derived: DerivedClientState,
+    balance: f64,
+    phone_original: String,
+    phone_normalized: Option<String>,
+    phone_status: PhoneStatus,
+    can_send: bool,
+    reason: Option<String>,
+    excluded: bool,
+    status: String,
+    created_at: DateTime,
+    updated_at: DateTime,
+}
 
 struct CandidateClient {
     id: String,
@@ -47,7 +98,217 @@ pub async fn preview_recipients(
         .per_page
         .unwrap_or(DEFAULT_PER_PAGE)
         .clamp(1, MAX_PER_PAGE);
-    let filter = build_client_filter(&request)?;
+    let (totals, recipients) = build_recipients_snapshot(state, &request).await?;
+    let start = pagination_skip_usize(page, per_page);
+    let recipients = recipients
+        .into_iter()
+        .skip(start)
+        .take(per_page as usize)
+        .collect();
+
+    Ok(CampaignPreviewResponse {
+        ok: true,
+        totals,
+        recipients,
+        page,
+        per_page,
+    })
+}
+
+pub async fn create_campaign(
+    state: &AppState,
+    created_by: &str,
+    request: CreateCampaignRequest,
+) -> Result<CampaignSummaryResponse, ApiError> {
+    if request.name.trim().is_empty() {
+        return Err(ApiError::BadRequest("campaign_name_required".to_string()));
+    }
+    if request.template_name.trim().is_empty() {
+        return Err(ApiError::BadRequest("template_name_required".to_string()));
+    }
+    if request.template_language.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "template_language_required".to_string(),
+        ));
+    }
+
+    let (totals, recipients) = build_recipients_snapshot(state, &request.filters).await?;
+    let now = DateTime::now();
+    let campaign_id = ObjectId::new();
+    let campaign = WaCampaignDoc {
+        id: Some(campaign_id.clone()),
+        name: request.name.trim().to_string(),
+        template_name: request.template_name.trim().to_string(),
+        template_language: request.template_language.trim().to_string(),
+        template_components: request.template_components,
+        filters: request.filters,
+        status: "draft".to_string(),
+        total_recipients: totals.matched as u64,
+        total_can_send: totals.can_send as u64,
+        total_invalid_phone: totals.invalid_phone as u64,
+        total_duplicated_phone: totals.duplicated_phone as u64,
+        total_excluded: 0,
+        created_by: created_by.to_string(),
+        created_at: now,
+        updated_at: now,
+    };
+
+    let recipient_docs = recipients
+        .into_iter()
+        .map(|recipient| preview_to_snapshot_recipient(campaign_id.clone(), recipient, now))
+        .collect::<Vec<_>>();
+
+    if !recipient_docs.is_empty() {
+        let recipients_result = state
+            .db
+            .db
+            .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients")
+            .insert_many(recipient_docs)
+            .await
+            .map_err(|e| {
+                ApiError::DatabaseError(format!("campaign snapshot recipients insert failed: {e}"))
+            });
+        if let Err(err) = recipients_result {
+            if let Err(cleanup_err) = cleanup_campaign_snapshot(state, campaign_id.clone()).await {
+                return Err(cleanup_err);
+            }
+            return Err(err);
+        }
+    }
+
+    let campaigns = state.db.db.collection::<WaCampaignDoc>("WaCampaigns");
+    let campaign_insert_result = campaigns
+        .insert_one(&campaign)
+        .await
+        .map_err(|e| ApiError::DatabaseError(format!("campaign insert failed: {e}")));
+    if let Err(err) = campaign_insert_result {
+        if let Err(cleanup_err) = cleanup_campaign_snapshot(state, campaign_id).await {
+            return Err(cleanup_err);
+        }
+        return Err(err);
+    }
+
+    Ok(CampaignSummaryResponse {
+        ok: true,
+        data: campaign_to_summary(campaign),
+    })
+}
+
+pub async fn get_campaign(
+    state: &AppState,
+    campaign_id: &str,
+) -> Result<CampaignSummaryResponse, ApiError> {
+    let campaign_id = parse_campaign_id(campaign_id)?;
+    let campaign = state
+        .db
+        .db
+        .collection::<WaCampaignDoc>("WaCampaigns")
+        .find_one(doc! { "_id": campaign_id })
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+        .ok_or(ApiError::NotFound)?;
+
+    Ok(CampaignSummaryResponse {
+        ok: true,
+        data: campaign_to_summary(campaign),
+    })
+}
+
+pub async fn get_campaign_recipients(
+    state: &AppState,
+    campaign_id: &str,
+    query: CampaignRecipientsQuery,
+) -> Result<CampaignRecipientsResponse, ApiError> {
+    let campaign_id = parse_campaign_id(campaign_id)?;
+    let page = query.page.unwrap_or(1).max(1);
+    let per_page = query
+        .per_page
+        .unwrap_or(DEFAULT_PER_PAGE)
+        .clamp(1, MAX_PER_PAGE);
+    let skip = pagination_skip(page, per_page);
+    let campaigns = state.db.db.collection::<WaCampaignDoc>("WaCampaigns");
+    let campaign_exists = campaigns
+        .find_one(doc! { "_id": campaign_id.clone() })
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+        .is_some();
+    if !campaign_exists {
+        return Err(ApiError::NotFound);
+    }
+    let collection = state
+        .db
+        .db
+        .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients");
+    let filter = doc! { "campaign_id": campaign_id };
+    let total = collection
+        .count_documents(filter.clone())
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+    let recipients = collection
+        .find(filter)
+        .sort(doc! { "client_name": 1, "_id": 1 })
+        .skip(skip)
+        .limit(per_page as i64)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+        .into_iter()
+        .map(recipient_to_item)
+        .collect();
+
+    Ok(CampaignRecipientsResponse {
+        ok: true,
+        data: recipients,
+        page,
+        per_page,
+        total,
+    })
+}
+
+async fn cleanup_campaign_snapshot(
+    state: &AppState,
+    campaign_id: ObjectId,
+) -> Result<(), ApiError> {
+    state
+        .db
+        .db
+        .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients")
+        .delete_many(doc! { "campaign_id": campaign_id })
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+    state
+        .db
+        .db
+        .collection::<WaCampaignDoc>("WaCampaigns")
+        .delete_many(doc! { "_id": campaign_id.clone() })
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+    Ok(())
+}
+
+fn pagination_skip(page: u32, per_page: u32) -> u64 {
+    u64::from(page.saturating_sub(1)).saturating_mul(u64::from(per_page))
+}
+
+fn pagination_skip_usize(page: u32, per_page: u32) -> usize {
+    usize::try_from(pagination_skip(page, per_page)).unwrap_or(usize::MAX)
+}
+
+async fn build_recipients_snapshot(
+    state: &AppState,
+    request: &CampaignPreviewRequest,
+) -> Result<(CampaignPreviewTotals, Vec<CampaignPreviewRecipient>), ApiError> {
+    if !has_allowed_filter(request) {
+        return Err(ApiError::domain_simple(
+            StatusCode::BAD_REQUEST,
+            "campaign_preview_requires_filter",
+            "Provide at least one filter, or explicitly request all active clients.",
+        ));
+    }
+
+    let filter = build_client_filter(request)?;
     let projection = doc! {
         "_id": 1,
         "sName": 1,
@@ -104,21 +365,100 @@ pub async fn preview_recipients(
     let providers = load_providers(state, provider_ids).await?;
     let sectors = load_sectors(state, sector_ids).await?;
 
-    let (totals, recipients) = build_preview_recipients(candidates, &providers, &sectors);
-    let start = ((page - 1) * per_page) as usize;
-    let recipients = recipients
-        .into_iter()
-        .skip(start)
-        .take(per_page as usize)
-        .collect();
+    Ok(build_preview_recipients(candidates, &providers, &sectors))
+}
 
-    Ok(CampaignPreviewResponse {
-        ok: true,
-        totals,
-        recipients,
-        page,
-        per_page,
-    })
+fn parse_campaign_id(id: &str) -> Result<ObjectId, ApiError> {
+    ObjectId::parse_str(id).map_err(|_| ApiError::BadRequest("invalid_campaign_id".to_string()))
+}
+
+fn preview_to_snapshot_recipient(
+    campaign_id: ObjectId,
+    recipient: CampaignPreviewRecipient,
+    now: DateTime,
+) -> WaCampaignRecipientDoc {
+    let status = snapshot_status(&recipient.phone_status, recipient.can_send, false);
+    WaCampaignRecipientDoc {
+        id: None,
+        campaign_id,
+        client_id: recipient.client_id,
+        client_name: recipient.name,
+        provider_id: recipient.provider_id,
+        provider_name: recipient.provider_name,
+        sector_id: recipient.sector_id,
+        sector_name: recipient.sector_name,
+        customer_status_raw: recipient.client_state_raw,
+        customer_status_derived: recipient.client_state_derived,
+        balance: recipient.balance,
+        phone_original: recipient.phone_original,
+        phone_normalized: recipient.phone_normalized,
+        phone_status: recipient.phone_status,
+        can_send: recipient.can_send,
+        reason: recipient.reason,
+        excluded: false,
+        status,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+fn snapshot_status(phone_status: &PhoneStatus, can_send: bool, excluded: bool) -> String {
+    if excluded {
+        "excluded".to_string()
+    } else if matches!(phone_status, PhoneStatus::Invalid) {
+        "invalid_phone".to_string()
+    } else if matches!(phone_status, PhoneStatus::Duplicated) {
+        "duplicated_phone".to_string()
+    } else if can_send {
+        "pending".to_string()
+    } else {
+        "invalid_phone".to_string()
+    }
+}
+
+fn campaign_to_summary(campaign: WaCampaignDoc) -> CampaignSummary {
+    CampaignSummary {
+        id: campaign.id.map(|id| id.to_hex()).unwrap_or_default(),
+        name: campaign.name,
+        template_name: campaign.template_name,
+        template_language: campaign.template_language,
+        template_components: campaign.template_components,
+        filters: campaign.filters,
+        status: campaign.status,
+        total_recipients: campaign.total_recipients,
+        total_can_send: campaign.total_can_send,
+        total_invalid_phone: campaign.total_invalid_phone,
+        total_duplicated_phone: campaign.total_duplicated_phone,
+        total_excluded: campaign.total_excluded,
+        created_by: campaign.created_by,
+        created_at: iso8601(campaign.created_at),
+        updated_at: iso8601(campaign.updated_at),
+    }
+}
+
+fn recipient_to_item(recipient: WaCampaignRecipientDoc) -> CampaignRecipientItem {
+    CampaignRecipientItem {
+        id: recipient.id.map(|id| id.to_hex()).unwrap_or_default(),
+        campaign_id: recipient.campaign_id.to_hex(),
+        client_id: recipient.client_id,
+        client_name: recipient.client_name,
+        provider_id: recipient.provider_id,
+        provider_name: recipient.provider_name,
+        sector_id: recipient.sector_id,
+        sector_name: recipient.sector_name,
+        customer_status_raw: recipient.customer_status_raw,
+        customer_status_derived: recipient.customer_status_derived,
+        balance: recipient.balance,
+        phone_original: recipient.phone_original,
+        phone_normalized: recipient.phone_normalized,
+        phone_status: recipient.phone_status,
+        can_send: recipient.can_send,
+        reason: recipient.reason,
+        excluded: recipient.excluded,
+        status: recipient.status,
+        created_at: iso8601(recipient.created_at),
+        updated_at: iso8601(recipient.updated_at),
+    }
 }
 
 fn build_preview_recipients(
@@ -478,5 +818,72 @@ mod tests {
         let page_two = recipients.into_iter().skip(1).take(1).collect::<Vec<_>>();
         assert!(matches!(page_two[0].phone_status, PhoneStatus::Duplicated));
         assert!(!page_two[0].can_send);
+    }
+
+    #[test]
+    fn snapshot_maps_invalid_phone_to_non_sendable_invalid_status() {
+        let campaign_id = ObjectId::new();
+        let now = DateTime::now();
+        let recipient = CampaignPreviewRecipient {
+            client_id: "client-1".to_string(),
+            name: "Invalid Phone".to_string(),
+            phone_original: "not-a-phone".to_string(),
+            phone_normalized: None,
+            phone_status: PhoneStatus::Invalid,
+            can_send: false,
+            reason: Some("invalid_phone".to_string()),
+            provider_id: None,
+            provider_name: None,
+            provider_tag: None,
+            sector_id: None,
+            sector_name: None,
+            client_state_raw: "Activo".to_string(),
+            client_state_derived: DerivedClientState::Solvente,
+            balance: 0.0,
+        };
+
+        let snapshot = preview_to_snapshot_recipient(campaign_id, recipient, now);
+
+        assert!(!snapshot.can_send);
+        assert!(!snapshot.excluded);
+        assert_eq!(snapshot.status, "invalid_phone");
+        assert!(matches!(snapshot.phone_status, PhoneStatus::Invalid));
+    }
+
+    #[test]
+    fn snapshot_maps_duplicated_phone_to_non_sendable_duplicated_status() {
+        let campaign_id = ObjectId::new();
+        let now = DateTime::now();
+        let recipient = CampaignPreviewRecipient {
+            client_id: "client-2".to_string(),
+            name: "Duplicated Phone".to_string(),
+            phone_original: "0412 123 4567".to_string(),
+            phone_normalized: Some("584121234567".to_string()),
+            phone_status: PhoneStatus::Duplicated,
+            can_send: false,
+            reason: Some("duplicated_phone".to_string()),
+            provider_id: None,
+            provider_name: None,
+            provider_tag: None,
+            sector_id: None,
+            sector_name: None,
+            client_state_raw: "Activo".to_string(),
+            client_state_derived: DerivedClientState::Solvente,
+            balance: 0.0,
+        };
+
+        let snapshot = preview_to_snapshot_recipient(campaign_id, recipient, now);
+
+        assert!(!snapshot.can_send);
+        assert!(!snapshot.excluded);
+        assert_eq!(snapshot.status, "duplicated_phone");
+        assert!(matches!(snapshot.phone_status, PhoneStatus::Duplicated));
+    }
+
+    #[test]
+    fn pagination_skip_uses_wide_math() {
+        let skip = pagination_skip(u32::MAX, MAX_PER_PAGE);
+        assert_eq!(skip, u64::from(u32::MAX - 1) * u64::from(MAX_PER_PAGE));
+        assert!(skip > u64::from(u32::MAX));
     }
 }

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct CampaignPreviewRequest {
     #[serde(default)]
     pub provider_ids: Option<Vec<String>>,
@@ -19,7 +19,7 @@ pub struct CampaignPreviewRequest {
     pub per_page: Option<u32>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientStateFilter {
     Active,
@@ -29,13 +29,13 @@ pub enum ClientStateFilter {
     Any,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct BalanceRange {
     pub min: f64,
     pub max: f64,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct BalanceFilter {
     #[serde(default)]
     pub lt: Option<f64>,
@@ -60,7 +60,7 @@ pub struct CampaignPreviewResponse {
     pub per_page: u32,
 }
 
-#[derive(Debug, Serialize, ToSchema, Default)]
+#[derive(Debug, Clone, Serialize, ToSchema, Default)]
 pub struct CampaignPreviewTotals {
     pub matched: usize,
     pub can_send: usize,
@@ -68,7 +68,7 @@ pub struct CampaignPreviewTotals {
     pub duplicated_phone: usize,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PhoneStatus {
     Valid,
@@ -76,7 +76,7 @@ pub enum PhoneStatus {
     Duplicated,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DerivedClientState {
     Moroso,
@@ -84,7 +84,7 @@ pub enum DerivedClientState {
     Suspended,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct CampaignPreviewRecipient {
     pub client_id: String,
     pub name: String,
@@ -101,4 +101,82 @@ pub struct CampaignPreviewRecipient {
     pub client_state_raw: String,
     pub client_state_derived: DerivedClientState,
     pub balance: f64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateCampaignRequest {
+    pub name: String,
+    pub template_name: String,
+    pub template_language: String,
+    #[serde(default)]
+    #[schema(value_type = Option<Vec<Object>>)]
+    pub template_components: Option<Vec<serde_json::Value>>,
+    pub filters: CampaignPreviewRequest,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CampaignRecipientsQuery {
+    #[serde(default)]
+    pub page: Option<u32>,
+    #[serde(default)]
+    pub per_page: Option<u32>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CampaignSummaryResponse {
+    pub ok: bool,
+    pub data: CampaignSummary,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CampaignSummary {
+    pub id: String,
+    pub name: String,
+    pub template_name: String,
+    pub template_language: String,
+    #[schema(value_type = Option<Vec<Object>>)]
+    pub template_components: Option<Vec<serde_json::Value>>,
+    pub filters: CampaignPreviewRequest,
+    pub status: String,
+    pub total_recipients: u64,
+    pub total_can_send: u64,
+    pub total_invalid_phone: u64,
+    pub total_duplicated_phone: u64,
+    pub total_excluded: u64,
+    pub created_by: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CampaignRecipientsResponse {
+    pub ok: bool,
+    pub data: Vec<CampaignRecipientItem>,
+    pub page: u32,
+    pub per_page: u32,
+    pub total: u64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CampaignRecipientItem {
+    pub id: String,
+    pub campaign_id: String,
+    pub client_id: String,
+    pub client_name: String,
+    pub provider_id: Option<String>,
+    pub provider_name: Option<String>,
+    pub sector_id: Option<String>,
+    pub sector_name: Option<String>,
+    pub customer_status_raw: String,
+    pub customer_status_derived: DerivedClientState,
+    pub balance: f64,
+    pub phone_original: String,
+    pub phone_normalized: Option<String>,
+    pub phone_status: PhoneStatus,
+    pub can_send: bool,
+    pub reason: Option<String>,
+    pub excluded: bool,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
 }

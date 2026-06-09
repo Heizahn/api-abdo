@@ -83,8 +83,9 @@ use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingRespo
 use crate::modules::payments::handler::RejectReportRequest;
 use crate::modules::whatsapp::campaigns::dto::{
     BalanceFilter, BalanceRange, CampaignPreviewRecipient, CampaignPreviewRequest,
-    CampaignPreviewResponse, CampaignPreviewTotals, ClientStateFilter, DerivedClientState,
-    PhoneStatus,
+    CampaignPreviewResponse, CampaignPreviewTotals, CampaignRecipientItem, CampaignRecipientsQuery,
+    CampaignRecipientsResponse, CampaignSummary, CampaignSummaryResponse, ClientStateFilter,
+    CreateCampaignRequest, DerivedClientState, PhoneStatus,
 };
 use crate::modules::whatsapp::conversations::lifecycle::{
     InterveneData, InterveneResponse, ResetAiStateResponse,
@@ -94,7 +95,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.61",
+        version = "0.3.62",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
@@ -199,6 +200,9 @@ use crate::modules::whatsapp::conversations::lifecycle::{
         crate::modules::whatsapp::audit::audit_conversation_timeline_handler,
         // WhatsApp — Campaigns
         crate::modules::whatsapp::campaigns::handler::preview_campaign_recipients_handler,
+        crate::modules::whatsapp::campaigns::handler::create_campaign_handler,
+        crate::modules::whatsapp::campaigns::handler::get_campaign_handler,
+        crate::modules::whatsapp::campaigns::handler::get_campaign_recipients_handler,
         // WhatsApp — Tickets
         crate::modules::whatsapp::tickets::list_ticket_categories_handler,
         crate::modules::whatsapp::tickets::list_tickets_handler,
@@ -323,7 +327,8 @@ use crate::modules::whatsapp::conversations::lifecycle::{
             // WhatsApp — Campaigns
             CampaignPreviewRequest, BalanceFilter, BalanceRange, ClientStateFilter,
             CampaignPreviewResponse, CampaignPreviewTotals, CampaignPreviewRecipient,
-            PhoneStatus, DerivedClientState,
+            PhoneStatus, DerivedClientState, CreateCampaignRequest, CampaignRecipientsQuery,
+            CampaignSummaryResponse, CampaignSummary, CampaignRecipientsResponse, CampaignRecipientItem,
             // Users — CRUD
             UserItem, UserListResponse, UserResponseEnvelope, OkResponse,
             SetUserVisibleRequest, UpdateUserRequest, CreateUserBody, SetUserPasswordRequest,
