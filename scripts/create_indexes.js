@@ -506,18 +506,25 @@ db.WaMessages.createIndex(
 );
 print("  ✅ WaMessages.conversation_id + _id desc");
 
-// Idempotencia de envíos manuales/retries del panel. Sparse porque la mayoría
-// de mensajes no usan idempotency_key.
+// Idempotencia de envíos manuales/retries del panel. Usar partial index en vez
+// de sparse: MongoDB sí indexa `null` cuando el campo existe, y muchos mensajes
+// inbound/system guardan `idempotency_key: null`.
+const existingWaMessagesIdempotencyIndex = db.WaMessages.getIndexes()
+  .find(idx => idx.name === "idx_wamsgs_conv_idempotency");
+if (existingWaMessagesIdempotencyIndex && !existingWaMessagesIdempotencyIndex.partialFilterExpression) {
+  db.WaMessages.dropIndex("idx_wamsgs_conv_idempotency");
+  print("  ℹ️ WaMessages.idx_wamsgs_conv_idempotency legacy sparse index replaced");
+}
 db.WaMessages.createIndex(
   { "conversation_id": 1, "idempotency_key": 1 },
   {
     name: "idx_wamsgs_conv_idempotency",
     unique: true,
-    sparse: true,
+    partialFilterExpression: { "idempotency_key": { $type: "string" } },
     background: true
   }
 );
-print("  ✅ WaMessages.conversation_id + idempotency_key (unique, sparse)");
+print("  ✅ WaMessages.conversation_id + idempotency_key (unique, partial string)");
 
 // Filtros típicos de auditoría: rango de fechas + agente.
 db.WaMessages.createIndex(
