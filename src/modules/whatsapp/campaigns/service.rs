@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::http::StatusCode;
 use futures::stream::StreamExt;
@@ -25,7 +27,10 @@ use super::{
         UpdateCampaignRecipientExclusionsResponse, UpdateCampaignRequest, UpdateCampaignResponse,
     },
     phone::normalize_phone_to_whatsapp,
-    template_resolver::extract_template_placeholders,
+    template_resolver::{
+        extract_template_placeholders, resolve_campaign_template_components,
+        CampaignTemplateRecipientSnapshot, CampaignTemplateResolveError,
+    },
 };
 
 const DEFAULT_PER_PAGE: u32 = 100;
@@ -33,6 +38,8 @@ const MAX_PER_PAGE: u32 = 500;
 const DEFAULT_CAMPAIGN_LIST_LIMIT: u32 = 20;
 const MAX_CAMPAIGN_LIST_LIMIT: u32 = 100;
 const RETIRED_CLIENT_STATE: &str = "Retirado";
+const CAMPAIGN_WORKER_INTERVAL_SECS: u64 = 5;
+const CAMPAIGN_WORKER_BATCH_SIZE: usize = 50;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WaCampaignDoc {
@@ -69,6 +76,8 @@ struct WaCampaignDoc {
     started_at: Option<DateTime>,
     #[serde(default)]
     run_mode: Option<String>,
+    #[serde(default)]
+    dry_run_completed_at: Option<DateTime>,
     created_at: DateTime,
     updated_at: DateTime,
 }
@@ -315,8 +324,26 @@ struct WaCampaignRecipientDoc {
     reason: Option<String>,
     excluded: bool,
     status: String,
+    #[serde(default)]
+    attempts: i64,
+    #[serde(default)]
+    last_attempt_at: Option<DateTime>,
+    #[serde(default)]
+    error_code: Option<String>,
+    #[serde(default)]
+    error_message: Option<String>,
+    #[serde(default)]
+    validated_at: Option<DateTime>,
     created_at: DateTime,
     updated_at: DateTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CampaignDryRunProgress {
+    pending: u64,
+    sending: u64,
+    validated: u64,
+    failed: u64,
 }
 
 struct CandidateClient {
@@ -420,6 +447,7 @@ pub async fn create_campaign(
         started_by: None,
         started_at: None,
         run_mode: None,
+        dry_run_completed_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -948,6 +976,236 @@ pub async fn update_campaign_recipient_exclusions(
     })
 }
 
+pub async fn run_campaign_dry_run_worker(state: Arc<AppState>) {
+    tracing::info!(
+        interval_secs = CAMPAIGN_WORKER_INTERVAL_SECS,
+        batch_size = CAMPAIGN_WORKER_BATCH_SIZE,
+        "WhatsApp campaign dry-run worker started"
+    );
+
+    let mut interval = tokio::time::interval(Duration::from_secs(CAMPAIGN_WORKER_INTERVAL_SECS));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        interval.tick().await;
+        if let Err(err) =
+            process_running_dry_run_campaigns(&state, CAMPAIGN_WORKER_BATCH_SIZE).await
+        {
+            tracing::error!(error = %err, "WhatsApp campaign dry-run worker tick failed");
+        }
+    }
+}
+
+async fn process_running_dry_run_campaigns(
+    state: &AppState,
+    batch_size: usize,
+) -> Result<(), ApiError> {
+    let campaigns = state.db.db.collection::<WaCampaignDoc>("WaCampaigns");
+    let running = campaigns
+        .find(running_dry_run_campaign_filter())
+        .sort(doc! { "started_at": 1, "_id": 1 })
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    for campaign in running {
+        process_campaign_dry_run_batch(state, &campaign, batch_size).await?;
+    }
+
+    Ok(())
+}
+
+async fn process_campaign_dry_run_batch(
+    state: &AppState,
+    campaign: &WaCampaignDoc,
+    batch_size: usize,
+) -> Result<(), ApiError> {
+    if !should_process_campaign_dry_run(campaign) {
+        return Ok(());
+    }
+
+    let Some(campaign_id) = campaign.id else {
+        return Ok(());
+    };
+
+    tracing::info!(
+        campaign_id = %campaign_id,
+        batch_size,
+        "WhatsApp campaign dry-run batch started"
+    );
+
+    let recipients = state
+        .db
+        .db
+        .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients");
+
+    let mut claimed = 0usize;
+    while claimed < batch_size {
+        let Some(recipient) = claim_next_dry_run_recipient(&recipients, campaign_id).await? else {
+            break;
+        };
+        claimed += 1;
+        resolve_claimed_dry_run_recipient(&recipients, campaign, recipient).await?;
+    }
+
+    finalize_campaign_dry_run_if_done(state, campaign_id).await?;
+    Ok(())
+}
+
+async fn claim_next_dry_run_recipient(
+    recipients: &mongodb::Collection<WaCampaignRecipientDoc>,
+    campaign_id: ObjectId,
+) -> Result<Option<WaCampaignRecipientDoc>, ApiError> {
+    let opts = FindOneAndUpdateOptions::builder()
+        .return_document(ReturnDocument::After)
+        .build();
+
+    recipients
+        .find_one_and_update(
+            dry_run_recipient_claim_filter(campaign_id),
+            dry_run_recipient_claim_update(DateTime::now()),
+        )
+        .sort(doc! { "created_at": 1, "_id": 1 })
+        .with_options(opts)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))
+}
+
+async fn resolve_claimed_dry_run_recipient(
+    recipients: &mongodb::Collection<WaCampaignRecipientDoc>,
+    campaign: &WaCampaignDoc,
+    recipient: WaCampaignRecipientDoc,
+) -> Result<(), ApiError> {
+    let Some(recipient_id) = recipient.id else {
+        return Ok(());
+    };
+    let Some(campaign_id) = campaign.id else {
+        return Ok(());
+    };
+
+    let snapshot = recipient_to_template_snapshot(&recipient);
+    let now = DateTime::now();
+    let result = resolve_campaign_template_components(
+        campaign.template_components.as_deref(),
+        campaign.template_variable_bindings.as_deref(),
+        &snapshot,
+    );
+
+    match result {
+        Ok(_) => {
+            recipients
+                .update_one(
+                    doc! { "_id": recipient_id, "campaign_id": campaign_id, "status": "sending" },
+                    dry_run_recipient_validated_update(now),
+                )
+                .await
+                .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+            tracing::info!(
+                campaign_id = %campaign_id,
+                recipient_id = %recipient_id,
+                "WhatsApp campaign dry-run recipient validated"
+            );
+        }
+        Err(err) => {
+            let error_code = err.code();
+            recipients
+                .update_one(
+                    doc! { "_id": recipient_id, "campaign_id": campaign_id, "status": "sending" },
+                    dry_run_recipient_failed_update(
+                        error_code,
+                        safe_resolver_error_message(&err),
+                        now,
+                    ),
+                )
+                .await
+                .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+            tracing::warn!(
+                campaign_id = %campaign_id,
+                recipient_id = %recipient_id,
+                error_code,
+                "WhatsApp campaign dry-run recipient failed"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn finalize_campaign_dry_run_if_done(
+    state: &AppState,
+    campaign_id: ObjectId,
+) -> Result<(), ApiError> {
+    let recipients = state
+        .db
+        .db
+        .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients");
+    let campaigns = state.db.db.collection::<WaCampaignDoc>("WaCampaigns");
+
+    let progress = load_dry_run_progress(&recipients, campaign_id).await?;
+    let Some(status) = dry_run_completion_status(&progress) else {
+        return Ok(());
+    };
+
+    let now = DateTime::now();
+    let result = campaigns
+        .update_one(
+            doc! {
+                "_id": campaign_id,
+                "status": "running",
+                "run_mode": "dry_run",
+            },
+            doc! {
+                "$set": {
+                    "status": status,
+                    "dry_run_completed_at": now,
+                    "updated_at": now,
+                }
+            },
+        )
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    if result.modified_count > 0 {
+        tracing::info!(
+            campaign_id = %campaign_id,
+            status,
+            pending = progress.pending,
+            sending = progress.sending,
+            validated = progress.validated,
+            failed = progress.failed,
+            "WhatsApp campaign dry-run completed"
+        );
+    }
+
+    Ok(())
+}
+
+async fn load_dry_run_progress(
+    recipients: &mongodb::Collection<WaCampaignRecipientDoc>,
+    campaign_id: ObjectId,
+) -> Result<CampaignDryRunProgress, ApiError> {
+    Ok(CampaignDryRunProgress {
+        pending: recipients
+            .count_documents(dry_run_status_count_filter(campaign_id, "pending"))
+            .await
+            .map_err(|e| ApiError::DatabaseError(e.to_string()))?,
+        sending: recipients
+            .count_documents(dry_run_status_count_filter(campaign_id, "sending"))
+            .await
+            .map_err(|e| ApiError::DatabaseError(e.to_string()))?,
+        validated: recipients
+            .count_documents(dry_run_status_count_filter(campaign_id, "validated"))
+            .await
+            .map_err(|e| ApiError::DatabaseError(e.to_string()))?,
+        failed: recipients
+            .count_documents(dry_run_status_count_filter(campaign_id, "failed"))
+            .await
+            .map_err(|e| ApiError::DatabaseError(e.to_string()))?,
+    })
+}
+
 async fn count_effectively_excluded_recipients(
     recipients: &mongodb::Collection<WaCampaignRecipientDoc>,
     campaign_id: ObjectId,
@@ -980,6 +1238,104 @@ fn effective_recipient_filter(campaign_id: ObjectId) -> Document {
         "excluded": false,
         "status": "pending",
     }
+}
+
+fn running_dry_run_campaign_filter() -> Document {
+    doc! { "status": "running", "run_mode": "dry_run" }
+}
+
+fn should_process_campaign_dry_run(campaign: &WaCampaignDoc) -> bool {
+    campaign.status == "running" && campaign.run_mode.as_deref() == Some("dry_run")
+}
+
+fn dry_run_recipient_claim_filter(campaign_id: ObjectId) -> Document {
+    doc! {
+        "campaign_id": campaign_id,
+        "can_send": true,
+        "excluded": false,
+        "status": "pending",
+    }
+}
+
+#[cfg(test)]
+fn dry_run_recipient_is_claimable(recipient: &WaCampaignRecipientDoc) -> bool {
+    recipient.can_send && !recipient.excluded && recipient.status == "pending"
+}
+
+fn dry_run_recipient_claim_update(now: DateTime) -> Document {
+    doc! {
+        "$set": {
+            "status": "sending",
+            "last_attempt_at": now,
+            "updated_at": now,
+        },
+        "$inc": { "attempts": 1i64 }
+    }
+}
+
+fn dry_run_recipient_validated_update(now: DateTime) -> Document {
+    doc! {
+        "$set": {
+            "status": "validated",
+            "validated_at": now,
+            "updated_at": now,
+        },
+        "$unset": {
+            "error_code": "",
+            "error_message": "",
+        }
+    }
+}
+
+fn dry_run_recipient_failed_update(
+    error_code: &str,
+    error_message: String,
+    now: DateTime,
+) -> Document {
+    doc! {
+        "$set": {
+            "status": "failed",
+            "error_code": error_code,
+            "error_message": error_message,
+            "updated_at": now,
+        }
+    }
+}
+
+fn dry_run_status_count_filter(campaign_id: ObjectId, status: &str) -> Document {
+    doc! {
+        "campaign_id": campaign_id,
+        "can_send": true,
+        "excluded": false,
+        "status": status,
+    }
+}
+
+fn dry_run_completion_status(progress: &CampaignDryRunProgress) -> Option<&'static str> {
+    if progress.pending > 0 || progress.sending > 0 {
+        None
+    } else if progress.failed == 0 {
+        Some("dry_run_completed")
+    } else {
+        Some("dry_run_completed_with_errors")
+    }
+}
+
+fn recipient_to_template_snapshot(
+    recipient: &WaCampaignRecipientDoc,
+) -> CampaignTemplateRecipientSnapshot {
+    CampaignTemplateRecipientSnapshot {
+        client_name: recipient.client_name.clone(),
+        balance: recipient.balance,
+        payment_due_day: recipient.payment_due_day,
+        sector_name: recipient.sector_name.clone(),
+        customer_status_derived: recipient.customer_status_derived.clone(),
+        phone_normalized: recipient.phone_normalized.clone(),
+    }
+}
+
+fn safe_resolver_error_message(error: &CampaignTemplateResolveError) -> String {
+    error.code().to_string()
 }
 
 fn parse_recipient_object_ids(ids: &[String]) -> Result<Vec<ObjectId>, ApiError> {
@@ -1860,6 +2216,11 @@ fn preview_to_snapshot_recipient(
         reason: recipient.reason,
         excluded: false,
         status,
+        attempts: 0,
+        last_attempt_at: None,
+        error_code: None,
+        error_message: None,
+        validated_at: None,
         created_at: now,
         updated_at: now,
     }
@@ -1934,6 +2295,7 @@ fn campaign_to_summary(campaign: WaCampaignDoc) -> CampaignSummary {
         started_by: campaign.started_by,
         started_at: campaign.started_at.map(iso8601),
         run_mode: campaign.run_mode,
+        dry_run_completed_at: campaign.dry_run_completed_at.map(iso8601),
         total_recipients: campaign.total_recipients,
         total_can_send: campaign.total_can_send,
         total_invalid_phone: campaign.total_invalid_phone,
@@ -1969,6 +2331,7 @@ fn campaign_to_list_item(campaign: WaCampaignDoc) -> CampaignListItem {
             .unwrap_or(0),
         status: campaign.status,
         run_mode: campaign.run_mode,
+        dry_run_completed_at: campaign.dry_run_completed_at.map(iso8601),
         total_recipients: campaign.total_recipients,
         total_can_send: campaign.total_can_send,
         total_invalid_phone: campaign.total_invalid_phone,
@@ -2005,6 +2368,11 @@ fn recipient_to_item(recipient: WaCampaignRecipientDoc) -> CampaignRecipientItem
         reason: recipient.reason,
         excluded: recipient.excluded,
         status: recipient.status,
+        attempts: recipient.attempts,
+        last_attempt_at: recipient.last_attempt_at.map(iso8601),
+        error_code: recipient.error_code,
+        error_message: recipient.error_message,
+        validated_at: recipient.validated_at.map(iso8601),
         created_at: iso8601(recipient.created_at),
         updated_at: iso8601(recipient.updated_at),
     }
@@ -2383,6 +2751,39 @@ mod tests {
             started_by: None,
             started_at: None,
             run_mode: None,
+            dry_run_completed_at: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn base_recipient(status: &str) -> WaCampaignRecipientDoc {
+        let now = DateTime::from_millis(1_800_000_000_000);
+        WaCampaignRecipientDoc {
+            id: Some(ObjectId::parse_str("64f000000000000000000101").unwrap()),
+            campaign_id: ObjectId::parse_str("64f000000000000000000001").unwrap(),
+            client_id: "client-1".to_string(),
+            client_name: "Client One".to_string(),
+            provider_id: None,
+            provider_name: None,
+            sector_id: None,
+            sector_name: Some("Downtown".to_string()),
+            customer_status_raw: "Activo".to_string(),
+            customer_status_derived: DerivedClientState::Solvente,
+            balance: 10.5,
+            payment_due_day: Some(20),
+            phone_original: "0412 123 4567".to_string(),
+            phone_normalized: Some("584121234567".to_string()),
+            phone_status: PhoneStatus::Valid,
+            can_send: true,
+            reason: None,
+            excluded: false,
+            status: status.to_string(),
+            attempts: 0,
+            last_attempt_at: None,
+            error_code: None,
+            error_message: None,
+            validated_at: None,
             created_at: now,
             updated_at: now,
         }
@@ -3252,6 +3653,11 @@ mod tests {
             reason: None,
             excluded: false,
             status: "pending".to_string(),
+            attempts: 0,
+            last_attempt_at: None,
+            error_code: None,
+            error_message: None,
+            validated_at: None,
             created_at: now,
             updated_at: now,
         });
@@ -3327,6 +3733,209 @@ mod tests {
                 "status": "pending",
             }
         );
+    }
+
+    #[test]
+    fn dry_run_claim_pending_recipient_builds_atomic_sending_update() {
+        let campaign_id = ObjectId::parse_str("64f000000000000000000001").unwrap();
+        let now = DateTime::from_millis(1_800_000_000_100);
+        let recipient = base_recipient("pending");
+
+        assert!(dry_run_recipient_is_claimable(&recipient));
+        assert_eq!(
+            dry_run_recipient_claim_filter(campaign_id),
+            effective_recipient_filter(campaign_id)
+        );
+        assert_eq!(
+            dry_run_recipient_claim_update(now),
+            doc! {
+                "$set": {
+                    "status": "sending",
+                    "last_attempt_at": now,
+                    "updated_at": now,
+                },
+                "$inc": { "attempts": 1i64 }
+            }
+        );
+    }
+
+    #[test]
+    fn dry_run_claim_does_not_take_excluded_recipients() {
+        let mut recipient = base_recipient("pending");
+        recipient.excluded = true;
+
+        assert!(!dry_run_recipient_is_claimable(&recipient));
+    }
+
+    #[test]
+    fn dry_run_claim_does_not_take_non_sendable_recipients() {
+        let mut recipient = base_recipient("pending");
+        recipient.can_send = false;
+
+        assert!(!dry_run_recipient_is_claimable(&recipient));
+    }
+
+    #[test]
+    fn dry_run_claim_does_not_take_invalid_or_duplicated_statuses() {
+        for status in [
+            "invalid_phone",
+            "duplicated_phone",
+            "sending",
+            "validated",
+            "failed",
+        ] {
+            assert!(!dry_run_recipient_is_claimable(&base_recipient(status)));
+        }
+    }
+
+    #[test]
+    fn dry_run_resolver_ok_marks_sending_recipient_validated_and_clears_error() {
+        let now = DateTime::from_millis(1_800_000_000_200);
+        let mut campaign = base_campaign("running");
+        campaign.run_mode = Some("dry_run".to_string());
+        campaign.template_components = Some(vec![serde_json::json!({
+            "type": "BODY",
+            "text": "Hello {{1}}"
+        })]);
+        campaign.template_variable_bindings = Some(vec![static_body_binding(1, "World").into()]);
+
+        let recipient = base_recipient("sending");
+        let resolved = resolve_campaign_template_components(
+            campaign.template_components.as_deref(),
+            campaign.template_variable_bindings.as_deref(),
+            &recipient_to_template_snapshot(&recipient),
+        );
+
+        assert!(resolved.is_ok());
+        assert_eq!(
+            dry_run_recipient_validated_update(now),
+            doc! {
+                "$set": {
+                    "status": "validated",
+                    "validated_at": now,
+                    "updated_at": now,
+                },
+                "$unset": {
+                    "error_code": "",
+                    "error_message": "",
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn dry_run_resolver_error_marks_sending_recipient_failed_with_safe_error() {
+        let now = DateTime::from_millis(1_800_000_000_300);
+        let mut campaign = base_campaign("running");
+        campaign.run_mode = Some("dry_run".to_string());
+        campaign.template_components = Some(vec![serde_json::json!({
+            "type": "BODY",
+            "text": "Due {{1}}"
+        })]);
+        campaign.template_variable_bindings = Some(vec![payment_due_day_body_binding(1).into()]);
+
+        let mut recipient = base_recipient("sending");
+        recipient.payment_due_day = None;
+        let err = resolve_campaign_template_components(
+            campaign.template_components.as_deref(),
+            campaign.template_variable_bindings.as_deref(),
+            &recipient_to_template_snapshot(&recipient),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code(), "missing_recipient_field");
+        assert_eq!(safe_resolver_error_message(&err), "missing_recipient_field");
+        assert_eq!(
+            dry_run_recipient_failed_update(err.code(), safe_resolver_error_message(&err), now),
+            doc! {
+                "$set": {
+                    "status": "failed",
+                    "error_code": "missing_recipient_field",
+                    "error_message": "missing_recipient_field",
+                    "updated_at": now,
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn dry_run_finalization_without_failed_recipients_completes_successfully() {
+        let progress = CampaignDryRunProgress {
+            pending: 0,
+            sending: 0,
+            validated: 3,
+            failed: 0,
+        };
+
+        assert_eq!(
+            dry_run_completion_status(&progress),
+            Some("dry_run_completed")
+        );
+    }
+
+    #[test]
+    fn dry_run_finalization_with_failed_recipients_completes_with_errors() {
+        let progress = CampaignDryRunProgress {
+            pending: 0,
+            sending: 0,
+            validated: 2,
+            failed: 1,
+        };
+
+        assert_eq!(
+            dry_run_completion_status(&progress),
+            Some("dry_run_completed_with_errors")
+        );
+    }
+
+    #[test]
+    fn dry_run_finalization_waits_for_pending_or_sending_recipients() {
+        assert_eq!(
+            dry_run_completion_status(&CampaignDryRunProgress {
+                pending: 1,
+                sending: 0,
+                validated: 0,
+                failed: 0,
+            }),
+            None
+        );
+        assert_eq!(
+            dry_run_completion_status(&CampaignDryRunProgress {
+                pending: 0,
+                sending: 1,
+                validated: 0,
+                failed: 0,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn dry_run_worker_selection_only_processes_running_dry_run_campaigns() {
+        let mut campaign = base_campaign("running");
+        campaign.run_mode = Some("dry_run".to_string());
+
+        assert!(should_process_campaign_dry_run(&campaign));
+        assert_eq!(
+            running_dry_run_campaign_filter(),
+            doc! { "status": "running", "run_mode": "dry_run" }
+        );
+    }
+
+    #[test]
+    fn dry_run_worker_selection_rejects_queued_draft_and_other_run_modes() {
+        for status in ["queued", "draft", "previewed"] {
+            let mut campaign = base_campaign(status);
+            campaign.run_mode = Some("dry_run".to_string());
+            assert!(!should_process_campaign_dry_run(&campaign));
+        }
+
+        let mut live_campaign = base_campaign("running");
+        live_campaign.run_mode = Some("live".to_string());
+        assert!(!should_process_campaign_dry_run(&live_campaign));
+
+        let missing_run_mode = base_campaign("running");
+        assert!(!should_process_campaign_dry_run(&missing_run_mode));
     }
 
     #[test]
