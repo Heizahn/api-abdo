@@ -11,8 +11,11 @@ use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument, UpdateModificati
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    db::WaTemplateRepository, error::ApiError, models::whatsapp::WaTemplate,
-    modules::whatsapp::shared::time::iso8601, state::AppState,
+    db::{WaTemplateRepository, WhatsAppRepository},
+    error::ApiError,
+    models::whatsapp::{WaSettings, WaTemplate},
+    modules::whatsapp::shared::time::iso8601,
+    state::AppState,
 };
 
 use super::{
@@ -31,6 +34,9 @@ use super::{
     template_resolver::{
         extract_template_placeholders, resolve_campaign_template_components,
         CampaignTemplateRecipientSnapshot, CampaignTemplateResolveError,
+    },
+    template_send_builder::{
+        build_campaign_template_send_components, CampaignTemplateSendBuildError,
     },
 };
 
@@ -82,6 +88,12 @@ struct WaCampaignDoc {
     run_mode: Option<String>,
     #[serde(default)]
     dry_run_completed_at: Option<DateTime>,
+    #[serde(default)]
+    send_started_by: Option<String>,
+    #[serde(default)]
+    send_started_at: Option<DateTime>,
+    #[serde(default)]
+    send_completed_at: Option<DateTime>,
     created_at: DateTime,
     updated_at: DateTime,
 }
@@ -467,6 +479,9 @@ pub async fn create_campaign(
         started_at: None,
         run_mode: None,
         dry_run_completed_at: None,
+        send_started_by: None,
+        send_started_at: None,
+        send_completed_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -797,6 +812,101 @@ pub async fn start_campaign(
     Ok(CampaignSummaryResponse {
         ok: true,
         data: campaign_to_summary(campaign),
+    })
+}
+
+pub async fn send_campaign(
+    state: &AppState,
+    campaign_id: &str,
+    send_started_by: &str,
+) -> Result<CampaignSummaryResponse, ApiError> {
+    let campaign_id = parse_campaign_id(campaign_id)?;
+    let campaigns = state.db.db.collection::<WaCampaignDoc>("WaCampaigns");
+    let recipients = state
+        .db
+        .db
+        .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients");
+
+    let campaign = campaigns
+        .find_one(doc! { "_id": campaign_id })
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+        .ok_or(ApiError::NotFound)?;
+
+    validate_sendable_campaign(&campaign)?;
+
+    let phone_number_id = campaign
+        .phone_number_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(missing_phone_number_id_error)?;
+
+    let settings = state
+        .db
+        .find_wa_settings_by_phone_number_id(phone_number_id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(whatsapp_account_not_found_error)?;
+    validate_wa_settings_for_real_send(&settings)?;
+
+    let validated_filter = validated_real_send_recipient_filter(campaign_id);
+    let validated_count = recipients
+        .count_documents(validated_filter.clone())
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+    if validated_count == 0 {
+        return Err(ApiError::domain_simple(
+            StatusCode::BAD_REQUEST,
+            "campaign_has_no_validated_recipients",
+            "Campaign must have at least one validated non-excluded recipient before real send.",
+        ));
+    }
+
+    let sample_recipient = recipients
+        .find_one(validated_filter)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+        .ok_or_else(|| {
+            ApiError::domain_simple(
+                StatusCode::BAD_REQUEST,
+                "campaign_has_no_validated_recipients",
+                "Campaign must have at least one validated non-excluded recipient before real send.",
+            )
+        })?;
+    validate_campaign_send_components_for_recipient(&campaign, &sample_recipient)?;
+
+    let now = DateTime::now();
+    let result = campaigns
+        .update_one(
+            doc! { "_id": campaign_id, "status": "dry_run_completed" },
+            send_campaign_update_doc(send_started_by, now),
+        )
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    if result.matched_count == 0 {
+        let campaign = campaigns
+            .find_one(doc! { "_id": campaign_id })
+            .await
+            .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+            .ok_or(ApiError::NotFound)?;
+
+        if campaign.status != "dry_run_completed" {
+            return Err(campaign_not_sendable());
+        }
+    }
+
+    let campaign = campaigns
+        .find_one(doc! { "_id": campaign_id })
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+        .ok_or(ApiError::NotFound)?;
+    let progress = load_campaign_progress(&recipients, campaign_id).await?;
+
+    Ok(CampaignSummaryResponse {
+        ok: true,
+        data: campaign_to_summary_with_progress(campaign, Some(progress)),
     })
 }
 
@@ -2217,13 +2327,7 @@ fn validate_startable_campaign(campaign: &WaCampaignDoc) -> Result<(), ApiError>
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            ApiError::domain_simple(
-                StatusCode::BAD_REQUEST,
-                "missing_phone_number_id",
-                "Campaign must have a phone_number_id before starting.",
-            )
-        })?;
+        .ok_or_else(missing_phone_number_id_error)?;
 
     if campaign.template_name.trim().is_empty() {
         return Err(ApiError::BadRequest("template_name_required".to_string()));
@@ -2237,11 +2341,109 @@ fn validate_startable_campaign(campaign: &WaCampaignDoc) -> Result<(), ApiError>
     Ok(())
 }
 
+fn validate_sendable_campaign(campaign: &WaCampaignDoc) -> Result<(), ApiError> {
+    if campaign.status != "dry_run_completed" {
+        return Err(campaign_not_sendable());
+    }
+
+    campaign
+        .phone_number_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(missing_phone_number_id_error)?;
+
+    if campaign.template_name.trim().is_empty() {
+        return Err(ApiError::BadRequest("template_name_required".to_string()));
+    }
+    if campaign.template_language.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "template_language_required".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_wa_settings_for_real_send(settings: &WaSettings) -> Result<(), ApiError> {
+    if !settings.active {
+        return Err(ApiError::domain_simple(
+            StatusCode::BAD_REQUEST,
+            "whatsapp_account_inactive",
+            "The selected WhatsApp account is inactive.",
+        ));
+    }
+    if settings.phone_number_id.trim().is_empty() || settings.access_token.trim().is_empty() {
+        return Err(whatsapp_account_not_found_error());
+    }
+    Ok(())
+}
+
+fn validate_campaign_send_components_for_recipient(
+    campaign: &WaCampaignDoc,
+    recipient: &WaCampaignRecipientDoc,
+) -> Result<(), ApiError> {
+    let snapshot = recipient_to_template_snapshot(recipient);
+    build_campaign_template_send_components(
+        campaign.template_components.as_deref(),
+        campaign.template_variable_bindings.as_deref(),
+        campaign.template_media_bindings.as_deref(),
+        &snapshot,
+    )
+    .map(|_| ())
+    .map_err(campaign_send_build_error_to_api_error)
+}
+
+fn campaign_send_build_error_to_api_error(error: CampaignTemplateSendBuildError) -> ApiError {
+    let code = error.code();
+    let field = match code {
+        "missing_template_media_binding"
+        | "duplicate_template_media_binding"
+        | "unexpected_template_media_binding"
+        | "unsupported_template_header_combination" => "template_media_bindings",
+        "invalid_media_link" => "template_media_bindings.value",
+        "invalid_template_media_binding" => "template_media_bindings.value",
+        "mismatched_template_media_type" => "template_media_bindings.media_type",
+        _ => "template_variable_bindings",
+    };
+
+    ApiError::domain_with_field(
+        StatusCode::BAD_REQUEST,
+        code,
+        field,
+        "Campaign template send components could not be built for real send.",
+    )
+}
+
+fn missing_phone_number_id_error() -> ApiError {
+    ApiError::domain_simple(
+        StatusCode::BAD_REQUEST,
+        "missing_phone_number_id",
+        "Campaign must have a phone_number_id before starting.",
+    )
+}
+
+fn whatsapp_account_not_found_error() -> ApiError {
+    ApiError::domain_simple(
+        StatusCode::BAD_REQUEST,
+        "whatsapp_account_not_found",
+        "Selected WhatsApp account was not found or is missing credentials.",
+    )
+}
+
 fn campaign_not_startable() -> ApiError {
     ApiError::domain_simple(
         StatusCode::CONFLICT,
         "campaign_not_startable",
         "Only queued campaigns can be started.",
+    )
+}
+
+fn campaign_not_sendable() -> ApiError {
+    ApiError::domain_simple(
+        StatusCode::CONFLICT,
+        "campaign_not_sendable",
+        "Only dry_run_completed campaigns can start real sending.",
     )
 }
 
@@ -2254,6 +2456,30 @@ fn start_campaign_update_doc(started_by: &str, now: DateTime) -> Document {
             "updated_at": now,
             "run_mode": "dry_run",
         }
+    }
+}
+
+fn send_campaign_update_doc(send_started_by: &str, now: DateTime) -> Document {
+    doc! {
+        "$set": {
+            "status": "sending",
+            "run_mode": "real",
+            "send_started_by": send_started_by,
+            "send_started_at": now,
+            "updated_at": now,
+        },
+        "$unset": {
+            "send_completed_at": "",
+        }
+    }
+}
+
+fn validated_real_send_recipient_filter(campaign_id: ObjectId) -> Document {
+    doc! {
+        "campaign_id": campaign_id,
+        "can_send": true,
+        "excluded": false,
+        "status": "validated",
     }
 }
 
@@ -2565,6 +2791,9 @@ fn campaign_to_summary_with_progress(
         started_at: campaign.started_at.map(iso8601),
         run_mode: campaign.run_mode,
         dry_run_completed_at: campaign.dry_run_completed_at.map(iso8601),
+        send_started_by: campaign.send_started_by,
+        send_started_at: campaign.send_started_at.map(iso8601),
+        send_completed_at: campaign.send_completed_at.map(iso8601),
         progress: progress.map(campaign_progress_to_dto),
         total_recipients: campaign.total_recipients,
         total_can_send: campaign.total_can_send,
@@ -3107,6 +3336,31 @@ mod tests {
             started_at: None,
             run_mode: None,
             dry_run_completed_at: None,
+            send_started_by: None,
+            send_started_at: None,
+            send_completed_at: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn wa_settings(active: bool, phone_number_id: &str, access_token: &str) -> WaSettings {
+        let now = DateTime::from_millis(1_800_000_000_000);
+        WaSettings {
+            id: Some(ObjectId::parse_str("64f000000000000000000201").unwrap()),
+            phone: "584222236777".to_string(),
+            workspace_name: "Main".to_string(),
+            phone_number_id: phone_number_id.to_string(),
+            whatsapp_business_account_id: "waba-1".to_string(),
+            access_token: access_token.to_string(),
+            agents: vec![],
+            active,
+            purposes: crate::models::whatsapp::WaPurposes::default(),
+            templates_synced_at: None,
+            enable_guardrails: true,
+            enable_conversation_state: true,
+            pre_classifier_enabled: false,
+            trivial_responses: vec![],
             created_at: now,
             updated_at: now,
         }
@@ -4957,6 +5211,212 @@ mod tests {
             second,
             Err(ApiError::Domain { status, ref code, .. })
                 if status == StatusCode::CONFLICT && code == "campaign_not_startable"
+        ));
+    }
+
+    #[test]
+    fn send_dry_run_completed_campaign_builds_real_transition() {
+        let mut campaign = base_campaign("dry_run_completed");
+        campaign.run_mode = Some("dry_run".to_string());
+        campaign.dry_run_completed_at = Some(DateTime::from_millis(1_800_000_000_001));
+
+        validate_sendable_campaign(&campaign).unwrap();
+        let now = DateTime::from_millis(1_800_000_000_002);
+        let update = send_campaign_update_doc("admin-2", now);
+
+        assert_eq!(
+            update,
+            doc! {
+                "$set": {
+                    "status": "sending",
+                    "run_mode": "real",
+                    "send_started_by": "admin-2",
+                    "send_started_at": now,
+                    "updated_at": now,
+                },
+                "$unset": { "send_completed_at": "" }
+            }
+        );
+
+        campaign.status = "sending".to_string();
+        campaign.run_mode = Some("real".to_string());
+        campaign.send_started_by = Some("admin-2".to_string());
+        campaign.send_started_at = Some(now);
+        let summary = campaign_to_summary(campaign);
+
+        assert_eq!(summary.status, "sending");
+        assert_eq!(summary.run_mode.as_deref(), Some("real"));
+        assert_eq!(summary.send_started_by.as_deref(), Some("admin-2"));
+        assert!(summary.send_started_at.is_some());
+    }
+
+    #[test]
+    fn send_non_completed_dry_run_statuses_return_conflict() {
+        for status_value in [
+            "draft",
+            "previewed",
+            "queued",
+            "running",
+            "dry_run_completed_with_errors",
+            "sending",
+            "completed",
+            "completed_with_errors",
+            "cancelled",
+        ] {
+            let err = validate_sendable_campaign(&base_campaign(status_value)).unwrap_err();
+
+            assert!(matches!(
+                err,
+                ApiError::Domain { status, ref code, .. }
+                    if status == StatusCode::CONFLICT && code == "campaign_not_sendable"
+            ));
+        }
+    }
+
+    #[test]
+    fn send_missing_campaign_maps_to_not_found_contract() {
+        let missing: Option<WaCampaignDoc> = None;
+
+        assert!(matches!(
+            missing.ok_or(ApiError::NotFound),
+            Err(ApiError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn send_with_no_validated_recipients_returns_validation_error_without_status_change() {
+        let campaign = base_campaign("dry_run_completed");
+        let validated_recipients = 0_u64;
+
+        validate_sendable_campaign(&campaign).unwrap();
+        let err = if validated_recipients == 0 {
+            Err(ApiError::domain_simple(
+                StatusCode::BAD_REQUEST,
+                "campaign_has_no_validated_recipients",
+                "Campaign must have at least one validated non-excluded recipient before real send.",
+            ))
+        } else {
+            Ok(())
+        }
+        .unwrap_err();
+
+        assert_eq!(campaign.status, "dry_run_completed");
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, .. }
+                if status == StatusCode::BAD_REQUEST && code == "campaign_has_no_validated_recipients"
+        ));
+    }
+
+    #[test]
+    fn send_legacy_without_phone_number_id_returns_validation_error() {
+        let mut campaign = base_campaign("dry_run_completed");
+        campaign.phone_number_id = None;
+
+        let err = validate_sendable_campaign(&campaign).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, .. }
+                if status == StatusCode::BAD_REQUEST && code == "missing_phone_number_id"
+        ));
+    }
+
+    #[test]
+    fn send_validates_whatsapp_account_active_and_credentials() {
+        assert!(validate_wa_settings_for_real_send(&wa_settings(true, "123", "cipher")).is_ok());
+
+        let inactive =
+            validate_wa_settings_for_real_send(&wa_settings(false, "123", "cipher")).unwrap_err();
+        assert!(matches!(
+            inactive,
+            ApiError::Domain { status, ref code, .. }
+                if status == StatusCode::BAD_REQUEST && code == "whatsapp_account_inactive"
+        ));
+
+        for settings in [
+            wa_settings(true, "", "cipher"),
+            wa_settings(true, "123", ""),
+        ] {
+            let err = validate_wa_settings_for_real_send(&settings).unwrap_err();
+            assert!(matches!(
+                err,
+                ApiError::Domain { status, ref code, .. }
+                    if status == StatusCode::BAD_REQUEST && code == "whatsapp_account_not_found"
+            ));
+        }
+    }
+
+    #[test]
+    fn send_validated_recipient_filter_targets_only_validated_sendable_rows() {
+        let campaign_id = ObjectId::parse_str("64f000000000000000000001").unwrap();
+
+        assert_eq!(
+            validated_real_send_recipient_filter(campaign_id),
+            doc! {
+                "campaign_id": campaign_id,
+                "can_send": true,
+                "excluded": false,
+                "status": "validated",
+            }
+        );
+    }
+
+    #[test]
+    fn send_media_required_without_binding_returns_missing_media_error() {
+        let mut campaign = base_campaign("dry_run_completed");
+        campaign.template_components = Some(vec![
+            serde_json::json!({ "type": "HEADER", "format": "IMAGE" }),
+            serde_json::json!({ "type": "BODY", "text": "Hola" }),
+        ]);
+        let recipient = base_recipient("validated");
+
+        let err =
+            validate_campaign_send_components_for_recipient(&campaign, &recipient).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, ref field, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && code == "missing_template_media_binding"
+                    && field.as_deref() == Some("template_media_bindings")
+        ));
+    }
+
+    #[test]
+    fn send_media_invalid_link_returns_builder_error() {
+        let mut campaign = base_campaign("dry_run_completed");
+        campaign.template_components = Some(vec![
+            serde_json::json!({ "type": "HEADER", "format": "IMAGE" }),
+            serde_json::json!({ "type": "BODY", "text": "Hola" }),
+        ]);
+        campaign.template_media_bindings = Some(vec![header_image_link_binding(
+            "http://example.com/header.jpg",
+        )]);
+        let recipient = base_recipient("validated");
+
+        let err =
+            validate_campaign_send_components_for_recipient(&campaign, &recipient).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, ref field, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && code == "invalid_media_link"
+                    && field.as_deref() == Some("template_media_bindings.value")
+        ));
+    }
+
+    #[test]
+    fn double_send_first_transition_then_second_returns_conflict() {
+        let first = validate_sendable_campaign(&base_campaign("dry_run_completed"));
+        let second = validate_sendable_campaign(&base_campaign("sending"));
+
+        assert!(first.is_ok());
+        assert!(matches!(
+            second,
+            Err(ApiError::Domain { status, ref code, .. })
+                if status == StatusCode::CONFLICT && code == "campaign_not_sendable"
         ));
     }
 

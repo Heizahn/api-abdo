@@ -80,6 +80,10 @@ pub fn user_routes() -> Router<Arc<AppState>> {
             post(campaigns::handler::start_campaign_handler),
         )
         .route(
+            "/v1/admin/whatsapp-campaigns/:id/send",
+            post(campaigns::handler::send_campaign_handler),
+        )
+        .route(
             "/v1/admin/whatsapp-campaigns/:id",
             get(campaigns::handler::get_campaign_handler),
         )

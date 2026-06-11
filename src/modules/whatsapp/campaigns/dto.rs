@@ -324,6 +324,9 @@ pub struct CampaignSummary {
     pub started_at: Option<String>,
     pub run_mode: Option<String>,
     pub dry_run_completed_at: Option<String>,
+    pub send_started_by: Option<String>,
+    pub send_started_at: Option<String>,
+    pub send_completed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<CampaignProgress>,
     pub total_recipients: u64,

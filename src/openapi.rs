@@ -100,7 +100,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.75",
+        version = "0.3.77",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
@@ -208,6 +208,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
         crate::modules::whatsapp::campaigns::handler::create_campaign_handler,
         crate::modules::whatsapp::campaigns::handler::confirm_campaign_handler,
         crate::modules::whatsapp::campaigns::handler::start_campaign_handler,
+        crate::modules::whatsapp::campaigns::handler::send_campaign_handler,
         crate::modules::whatsapp::campaigns::handler::list_campaigns_handler,
         crate::modules::whatsapp::campaigns::handler::get_campaign_handler,
         crate::modules::whatsapp::campaigns::handler::update_campaign_handler,
