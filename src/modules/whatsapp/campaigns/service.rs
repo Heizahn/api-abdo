@@ -1609,6 +1609,21 @@ where
     };
 
     let snapshot = recipient_to_template_snapshot(&recipient);
+    let masked_phone = recipient
+        .phone_normalized
+        .as_deref()
+        .map(mask_phone)
+        .unwrap_or_else(|| "<missing>".to_string());
+    tracing::info!(
+        campaign_id = %campaign_id,
+        recipient_id = %recipient_id,
+        phone_normalized = %masked_phone,
+        template_name = %campaign.template_name,
+        template_language = %campaign.template_language,
+        phone_number_id = %campaign.phone_number_id.as_deref().unwrap_or_default(),
+        "WhatsApp campaign recipient send started"
+    );
+
     let now = DateTime::now();
     let components = match build_campaign_template_send_components(
         campaign.template_components.as_deref(),
@@ -1643,8 +1658,11 @@ where
             tracing::info!(
                 campaign_id = %campaign_id,
                 recipient_id = %recipient_id,
+                phone_normalized = %masked_phone,
+                template_name = %campaign.template_name,
                 meta_message_id = %safe_meta_message_id(&meta_message_id),
-                "WhatsApp campaign recipient sent"
+                final_status = "sent",
+                "WhatsApp campaign recipient send completed"
             );
         }
         Err(err) => {
@@ -1665,7 +1683,10 @@ where
             tracing::warn!(
                 campaign_id = %campaign_id,
                 recipient_id = %recipient_id,
+                phone_normalized = %masked_phone,
+                template_name = %campaign.template_name,
                 error_code = %err.code,
+                final_status = "send_failed",
                 "WhatsApp campaign recipient send failed"
             );
         }
@@ -2101,6 +2122,15 @@ fn safe_meta_message_id(meta_message_id: &str) -> String {
     } else {
         format!("{}…", &meta_message_id[..MAX_LEN])
     }
+}
+
+fn mask_phone(phone: &str) -> String {
+    let len = phone.len();
+    if len <= 4 {
+        return "****".to_string();
+    }
+    let suffix_start = len.saturating_sub(4);
+    format!("***{}", &phone[suffix_start..])
 }
 
 fn status_count_filter(campaign_id: ObjectId, status: &str) -> Document {
