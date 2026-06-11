@@ -300,6 +300,16 @@ pub struct WaMessage {
     /// UUID del agente que envió (solo outbound)
     #[serde(default)]
     pub sent_by: Option<String>,
+    /// Origen funcional del mensaje. `None` para mensajes humanos/legacy;
+    /// `"campaign"` para envíos reales creados por campañas masivas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Campaña que originó el mensaje cuando `source == "campaign"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub campaign_id: Option<ObjectId>,
+    /// Recipient snapshot que originó el mensaje cuando `source == "campaign"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub campaign_recipient_id: Option<ObjectId>,
     /// Solo para inbound: UUID del primer agente que abrió la conversación y
     /// disparó el `mark-read` que cambió este mensaje a `status = "read"`.
     /// First-read-wins: una vez seteado no se sobreescribe en transfers ni
@@ -917,6 +927,14 @@ pub struct MessageItem {
     pub from_user_id: Option<String>,
     /// Nombre del agente que envió el mensaje (best-effort).
     pub from_user_name: Option<String>,
+    /// Origen funcional del mensaje. `"campaign"` permite renderizar/filtrar
+    /// envíos masivos sin confundirlos con respuestas humanas.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub campaign_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub campaign_recipient_id: Option<String>,
     /// Clave de idempotencia provista por el front al enviar (eco en la respuesta).
     /// El front la usa para deduplicar contra el evento WS `MENSAJE_NUEVO`.
     pub idempotency_key: Option<String>,

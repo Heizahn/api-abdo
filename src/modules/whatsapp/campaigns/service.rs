@@ -17,7 +17,7 @@ use crate::{
     crypto::aes::decrypt_payload,
     db::{WaTemplateMediaRef, WaTemplateMediaRepository, WaTemplateRepository, WhatsAppRepository},
     error::ApiError,
-    models::whatsapp::{WaSettings, WaTemplate},
+    models::whatsapp::{WaConversationEventInput, WaMessage, WaSettings, WaTemplate},
     modules::whatsapp::{
         service::{MediaRelay, MetaApiError, WhatsAppService},
         shared::{settings_secret, time::iso8601},
@@ -1614,6 +1614,7 @@ where
             mark_campaign_recipient_send_failed(&recipients, campaign, &recipient, err).await?;
         } else {
             send_claimed_campaign_recipient(
+                state,
                 &recipients,
                 sender,
                 campaign,
@@ -1728,6 +1729,7 @@ async fn claim_next_validated_recipient_for_send(
 }
 
 async fn send_claimed_campaign_recipient<S>(
+    state: &AppState,
     recipients: &mongodb::Collection<WaCampaignRecipientDoc>,
     sender: &S,
     campaign: &WaCampaignDoc,
@@ -1782,7 +1784,10 @@ where
         }
     };
 
-    match sender.send_template(campaign, &recipient, components).await {
+    match sender
+        .send_template(campaign, &recipient, components.clone())
+        .await
+    {
         Ok(result) => {
             let meta_message_id = result.meta_message_id;
             recipients
@@ -1792,6 +1797,26 @@ where
                 )
                 .await
                 .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+            if let Err(err) = record_campaign_send_in_chat(
+                state,
+                campaign,
+                &recipient,
+                recipient_id,
+                &meta_message_id,
+                &components,
+                now,
+            )
+            .await
+            {
+                tracing::warn!(
+                    campaign_id = %campaign_id,
+                    recipient_id = %recipient_id,
+                    meta_message_id = %safe_meta_message_id(&meta_message_id),
+                    error = %err,
+                    "WhatsApp campaign recipient sent but chat history record failed"
+                );
+            }
             tracing::info!(
                 campaign_id = %campaign_id,
                 recipient_id = %recipient_id,
@@ -1830,6 +1855,217 @@ where
     }
 
     Ok(())
+}
+
+async fn record_campaign_send_in_chat(
+    state: &AppState,
+    campaign: &WaCampaignDoc,
+    recipient: &WaCampaignRecipientDoc,
+    recipient_id: ObjectId,
+    meta_message_id: &str,
+    components: &[serde_json::Value],
+    sent_at: DateTime,
+) -> Result<(), String> {
+    let campaign_id = campaign
+        .id
+        .ok_or_else(|| "campaign missing _id".to_string())?;
+    let phone_number_id = campaign
+        .phone_number_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "campaign missing phone_number_id".to_string())?;
+    let settings = state
+        .db
+        .find_wa_settings_by_phone_number_id(phone_number_id)
+        .await?
+        .ok_or_else(|| "whatsapp settings not found for campaign phone_number_id".to_string())?;
+    let customer_phone = recipient
+        .phone_normalized
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "recipient missing normalized phone".to_string())?;
+
+    let existing_conversation = state
+        .db
+        .find_conversation_by_phones(customer_phone, &settings.phone)
+        .await?;
+    let conversation_preexisted = existing_conversation.is_some();
+
+    let (conv, conv_created) = state
+        .db
+        .upsert_conversation(customer_phone, &settings.phone, None)
+        .await?;
+    let conv_id = conv
+        .id
+        .ok_or_else(|| "conversation missing _id after upsert".to_string())?;
+
+    if conv_created {
+        if let Ok(client_oid) = ObjectId::parse_str(recipient.client_id.trim()) {
+            if let Err(err) = state
+                .db
+                .update_conversation_client_id(&conv_id, &client_oid)
+                .await
+            {
+                tracing::warn!(
+                    campaign_id = %campaign_id,
+                    recipient_id = %recipient_id,
+                    error = %err,
+                    "campaign chat record could not link conversation client_id"
+                );
+            }
+        }
+
+        let input = WaConversationEventInput {
+            conversation_id: &conv_id,
+            business_phone: &settings.phone,
+            event_type: "created",
+            actor_id: None,
+            actor_name: None,
+            target_id: None,
+            target_name: None,
+            note: Some("campaign_send"),
+        };
+        if let Err(err) = state.db.record_conversation_event(input).await {
+            tracing::warn!(
+                campaign_id = %campaign_id,
+                recipient_id = %recipient_id,
+                error = %err,
+                "campaign chat record could not write conversation event"
+            );
+        }
+
+        // Safe inbox mode: a conversation born only from a campaign should not
+        // become pending/operator work until the customer replies or an agent
+        // explicitly reopens/takes it.
+        if let Err(err) = state.db.close_conversation(&conv_id).await {
+            tracing::warn!(
+                campaign_id = %campaign_id,
+                recipient_id = %recipient_id,
+                error = %err,
+                "campaign chat record could not close silent conversation"
+            );
+        }
+    }
+
+    let preview = render_campaign_template_preview(campaign, components);
+    let components_value = if components.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Array(components.to_vec()))
+    };
+
+    let msg = WaMessage {
+        id: None,
+        conversation_id: conv_id,
+        wa_message_id: meta_message_id.to_string(),
+        direction: "out".to_string(),
+        msg_type: "template".to_string(),
+        body: Some(preview.clone()),
+        media_id: None,
+        media_mime_type: None,
+        media_filename: None,
+        status: Some("sent".to_string()),
+        meta_error_code: None,
+        meta_error_title: None,
+        meta_error_message: None,
+        meta_error_details: None,
+        failed_at: None,
+        sent_by: None,
+        source: Some("campaign".to_string()),
+        campaign_id: Some(campaign_id),
+        campaign_recipient_id: Some(recipient_id),
+        read_by_user_id: None,
+        read_at: None,
+        idempotency_key: None,
+        reply_to_wa_message_id: None,
+        is_forwarded: None,
+        is_frequently_forwarded: None,
+        url_preview: None,
+        voice: false,
+        template_name: Some(campaign.template_name.clone()),
+        template_language: Some(campaign.template_language.clone()),
+        template_components: components_value,
+        interactive_payload: None,
+        contacts_payload: None,
+        location: None,
+        reactions: vec![],
+        raw_payload: None,
+        ai_processed_at: None,
+        timestamp: sent_at,
+    };
+
+    let saved = state.db.save_message(msg).await?;
+
+    // Safe sidebar mode: only existing conversations get their last-message
+    // preview bumped. Newly-created campaign-only conversations stay closed and
+    // silent, but their history is available when opened directly/refreshed.
+    if conversation_preexisted {
+        let touch = crate::db::ConversationTouch {
+            preview: &preview,
+            msg_type: &saved.msg_type,
+            direction: "out",
+            wa_message_id: &saved.wa_message_id,
+            from_user_id: None,
+            media_filename: saved.media_filename.as_deref(),
+            status: Some("sent"),
+            increment_unread: false,
+            last_message_at: Some(sent_at),
+        };
+        state.db.touch_conversation(&conv_id, touch).await?;
+    }
+
+    Ok(())
+}
+
+fn render_campaign_template_preview(
+    campaign: &WaCampaignDoc,
+    components: &[serde_json::Value],
+) -> String {
+    let Some(mut text) = campaign.template_components.as_deref().and_then(|stored| {
+        stored.iter().find_map(|component| {
+            component
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| value.eq_ignore_ascii_case("BODY"))?;
+            component
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+    }) else {
+        return format!("[plantilla: {}]", campaign.template_name);
+    };
+
+    if let Some(params) = components.iter().find_map(|component| {
+        component
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| value.eq_ignore_ascii_case("BODY"))?;
+        component
+            .get("parameters")
+            .and_then(serde_json::Value::as_array)
+    }) {
+        for (idx, param) in params.iter().enumerate() {
+            let Some(value) = param
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+            else {
+                continue;
+            };
+            text = text.replace(&format!("{{{{{}}}}}", idx + 1), value);
+        }
+    }
+
+    if text.is_empty() {
+        format!("[plantilla: {}]", campaign.template_name)
+    } else {
+        text
+    }
 }
 
 async fn resolve_claimed_dry_run_recipient(
@@ -4321,6 +4557,88 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[test]
+    fn campaign_template_preview_renders_body_parameters() {
+        let mut campaign = base_campaign("sending");
+        campaign.template_components = Some(vec![serde_json::json!({
+            "type": "BODY",
+            "text": "Hola {{1}}, tu saldo es {{2}}"
+        })]);
+        let components = vec![serde_json::json!({
+            "type": "BODY",
+            "parameters": [
+                { "type": "text", "text": "Ana" },
+                { "type": "text", "text": "$10.50" }
+            ]
+        })];
+
+        assert_eq!(
+            render_campaign_template_preview(&campaign, &components),
+            "Hola Ana, tu saldo es $10.50"
+        );
+    }
+
+    #[test]
+    fn campaign_template_preview_falls_back_without_body() {
+        let campaign = base_campaign("sending");
+
+        assert_eq!(
+            render_campaign_template_preview(&campaign, &[]),
+            "[plantilla: promo_template]"
+        );
+    }
+
+    #[test]
+    fn campaign_message_source_maps_to_message_item() {
+        let campaign_id = ObjectId::parse_str("64f000000000000000000001").unwrap();
+        let recipient_id = ObjectId::parse_str("64f000000000000000000002").unwrap();
+        let msg = WaMessage {
+            id: Some(ObjectId::parse_str("64f000000000000000000003").unwrap()),
+            conversation_id: ObjectId::parse_str("64f000000000000000000004").unwrap(),
+            wa_message_id: "wamid.campaign".to_string(),
+            direction: "out".to_string(),
+            msg_type: "template".to_string(),
+            body: Some("Hola Ana".to_string()),
+            media_id: None,
+            media_mime_type: None,
+            media_filename: None,
+            status: Some("sent".to_string()),
+            meta_error_code: None,
+            meta_error_title: None,
+            meta_error_message: None,
+            meta_error_details: None,
+            failed_at: None,
+            sent_by: None,
+            source: Some("campaign".to_string()),
+            campaign_id: Some(campaign_id),
+            campaign_recipient_id: Some(recipient_id),
+            read_by_user_id: None,
+            read_at: None,
+            idempotency_key: None,
+            reply_to_wa_message_id: None,
+            is_forwarded: None,
+            is_frequently_forwarded: None,
+            url_preview: None,
+            voice: false,
+            template_name: Some("promo_template".to_string()),
+            template_language: Some("es".to_string()),
+            template_components: None,
+            interactive_payload: None,
+            contacts_payload: None,
+            location: None,
+            reactions: vec![],
+            raw_payload: None,
+            ai_processed_at: None,
+            timestamp: DateTime::from_millis(1_800_000_000_000),
+        };
+
+        let item = crate::modules::whatsapp::shared::mappers::msg_to_item(msg, None, None);
+
+        assert_eq!(item.source.as_deref(), Some("campaign"));
+        assert_eq!(item.campaign_id, Some(campaign_id.to_hex()));
+        assert_eq!(item.campaign_recipient_id, Some(recipient_id.to_hex()));
     }
 
     fn wa_settings(active: bool, phone_number_id: &str, access_token: &str) -> WaSettings {
