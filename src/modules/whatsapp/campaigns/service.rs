@@ -11,6 +11,7 @@ use futures::stream::StreamExt;
 use futures::TryStreamExt;
 use mongodb::bson::{doc, oid::ObjectId, Bson, DateTime, Document};
 use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument, UpdateModifications};
+use mongodb::Collection;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -27,15 +28,16 @@ use crate::{
 
 use super::{
     dto::{
-        BalanceFilter, CampaignListItem, CampaignListQuery, CampaignListResponse,
-        CampaignPreviewRecipient, CampaignPreviewRequest, CampaignPreviewResponse,
-        CampaignPreviewTotals, CampaignProgress, CampaignRecipientItem, CampaignRecipientsQuery,
-        CampaignRecipientsResponse, CampaignSummary, CampaignSummaryResponse, ClientStateFilter,
-        CreateCampaignRequest, DerivedClientState, PhoneStatus, TemplateClientField,
-        TemplateMediaBinding, TemplateMediaComponent, TemplateMediaSource, TemplateMediaType,
-        TemplateVariableBinding, TemplateVariableComponent, TemplateVariableSource,
-        UpdateCampaignRecipientExclusionsData, UpdateCampaignRecipientExclusionsRequest,
-        UpdateCampaignRecipientExclusionsResponse, UpdateCampaignRequest, UpdateCampaignResponse,
+        BalanceFilter, CampaignAutoPrepareResult, CampaignListItem, CampaignListQuery,
+        CampaignListResponse, CampaignPreviewRecipient, CampaignPreviewRequest,
+        CampaignPreviewResponse, CampaignPreviewTotals, CampaignProgress, CampaignRecipientItem,
+        CampaignRecipientsQuery, CampaignRecipientsResponse, CampaignSummary,
+        CampaignSummaryResponse, ClientStateFilter, CreateCampaignRequest, DerivedClientState,
+        PhoneStatus, TemplateClientField, TemplateMediaBinding, TemplateMediaComponent,
+        TemplateMediaSource, TemplateMediaType, TemplateVariableBinding, TemplateVariableComponent,
+        TemplateVariableSource, UpdateCampaignRecipientExclusionsData,
+        UpdateCampaignRecipientExclusionsRequest, UpdateCampaignRecipientExclusionsResponse,
+        UpdateCampaignRequest, UpdateCampaignResponse,
     },
     phone::normalize_phone_to_whatsapp,
     template_resolver::{
@@ -814,6 +816,7 @@ pub async fn create_campaign(
             "template_language_required".to_string(),
         ));
     }
+    let auto_prepare = request.auto_prepare.unwrap_or(false);
     let phone_number_id = normalize_optional_phone_number_id(request.phone_number_id.as_deref())?;
     validate_create_template_variable_bindings(request.template_variable_bindings.as_deref())?;
     validate_template_media_bindings(request.template_media_bindings.as_deref())?;
@@ -895,9 +898,24 @@ pub async fn create_campaign(
         return Err(err);
     }
 
+    if auto_prepare {
+        return match auto_prepare_campaign_internal(state, campaign_id.clone(), created_by).await {
+            Ok(campaign) => Ok(CampaignSummaryResponse {
+                ok: true,
+                data: campaign_to_summary(campaign),
+                auto_prepare: Some(CampaignAutoPrepareResult {
+                    confirmed: true,
+                    validation_started: true,
+                }),
+            }),
+            Err(err) => Err(auto_prepare_failed_error(campaign_id, "prepare", err)),
+        };
+    }
+
     Ok(CampaignSummaryResponse {
         ok: true,
         data: campaign_to_summary(campaign),
+        auto_prepare: None,
     })
 }
 
@@ -923,6 +941,7 @@ pub async fn get_campaign(
     Ok(CampaignSummaryResponse {
         ok: true,
         data: campaign_to_summary_with_progress(campaign, Some(progress)),
+        auto_prepare: None,
     })
 }
 
@@ -1048,6 +1067,50 @@ pub async fn confirm_campaign(
     confirmed_by: &str,
 ) -> Result<CampaignSummaryResponse, ApiError> {
     let campaign_id = parse_campaign_id(campaign_id)?;
+    let campaign = confirm_campaign_internal(state, campaign_id, confirmed_by).await?;
+
+    Ok(CampaignSummaryResponse {
+        ok: true,
+        data: campaign_to_summary(campaign),
+        auto_prepare: None,
+    })
+}
+
+pub async fn start_campaign(
+    state: &AppState,
+    campaign_id: &str,
+    started_by: &str,
+) -> Result<CampaignSummaryResponse, ApiError> {
+    let campaign_id = parse_campaign_id(campaign_id)?;
+    let campaign = start_campaign_validation_internal(state, campaign_id, started_by).await?;
+
+    Ok(CampaignSummaryResponse {
+        ok: true,
+        data: campaign_to_summary(campaign),
+        auto_prepare: None,
+    })
+}
+
+async fn auto_prepare_campaign_internal(
+    state: &AppState,
+    campaign_id: ObjectId,
+    requested_by: &str,
+) -> Result<WaCampaignDoc, ApiError> {
+    confirm_campaign_internal(state, campaign_id.clone(), requested_by).await?;
+    match start_campaign_validation_internal(state, campaign_id.clone(), requested_by).await {
+        Ok(campaign) => Ok(campaign),
+        Err(err) => {
+            restore_auto_prepare_created_campaign(state, &campaign_id).await?;
+            Err(err)
+        }
+    }
+}
+
+async fn confirm_campaign_internal(
+    state: &AppState,
+    campaign_id: ObjectId,
+    confirmed_by: &str,
+) -> Result<WaCampaignDoc, ApiError> {
     let campaigns = state.db.db.collection::<WaCampaignDoc>("WaCampaigns");
     let recipients = state
         .db
@@ -1066,10 +1129,7 @@ pub async fn confirm_campaign(
         return Err(err);
     }
 
-    let effective_recipients = recipients
-        .count_documents(effective_recipient_filter(campaign_id.clone()))
-        .await
-        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+    let effective_recipients = count_effective_recipients(&recipients, campaign_id.clone()).await?;
     if effective_recipients == 0 {
         restore_campaign_after_failed_confirmation(
             &campaigns,
@@ -1077,26 +1137,14 @@ pub async fn confirm_campaign(
             campaign.status.as_str(),
         )
         .await?;
-        return Err(ApiError::domain_simple(
-            StatusCode::BAD_REQUEST,
-            "campaign_has_no_effective_recipients",
-            "Campaign must have at least one non-excluded pending recipient that can be sent.",
-        ));
+        return Err(campaign_has_no_effective_recipients_error());
     }
 
     let now = DateTime::now();
     let result = campaigns
         .update_one(
             doc! { "_id": campaign_id, "status": "confirming", "confirming_from": &campaign.status },
-            doc! {
-                "$set": {
-                    "status": "queued",
-                    "confirmed_by": confirmed_by,
-                    "confirmed_at": now,
-                    "updated_at": now,
-                },
-                "$unset": { "confirming_from": "" }
-            },
+            confirm_campaign_update_doc(confirmed_by, now),
         )
         .await
         .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
@@ -1125,24 +1173,18 @@ pub async fn confirm_campaign(
         }
     }
 
-    let campaign = campaigns
+    campaigns
         .find_one(doc! { "_id": campaign_id })
         .await
         .map_err(|e| ApiError::DatabaseError(e.to_string()))?
-        .ok_or(ApiError::NotFound)?;
-
-    Ok(CampaignSummaryResponse {
-        ok: true,
-        data: campaign_to_summary(campaign),
-    })
+        .ok_or(ApiError::NotFound)
 }
 
-pub async fn start_campaign(
+async fn start_campaign_validation_internal(
     state: &AppState,
-    campaign_id: &str,
+    campaign_id: ObjectId,
     started_by: &str,
-) -> Result<CampaignSummaryResponse, ApiError> {
-    let campaign_id = parse_campaign_id(campaign_id)?;
+) -> Result<WaCampaignDoc, ApiError> {
     let campaigns = state.db.db.collection::<WaCampaignDoc>("WaCampaigns");
     let recipients = state
         .db
@@ -1157,16 +1199,9 @@ pub async fn start_campaign(
 
     validate_startable_campaign(&campaign)?;
 
-    let effective_recipients = recipients
-        .count_documents(effective_recipient_filter(campaign_id.clone()))
-        .await
-        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+    let effective_recipients = count_effective_recipients(&recipients, campaign_id.clone()).await?;
     if effective_recipients == 0 {
-        return Err(ApiError::domain_simple(
-            StatusCode::BAD_REQUEST,
-            "campaign_has_no_effective_recipients",
-            "Campaign must have at least one non-excluded pending recipient that can be sent.",
-        ));
+        return Err(campaign_has_no_effective_recipients_error());
     }
 
     let now = DateTime::now();
@@ -1190,16 +1225,77 @@ pub async fn start_campaign(
         }
     }
 
-    let campaign = campaigns
+    campaigns
         .find_one(doc! { "_id": campaign_id })
         .await
         .map_err(|e| ApiError::DatabaseError(e.to_string()))?
-        .ok_or(ApiError::NotFound)?;
+        .ok_or(ApiError::NotFound)
+}
 
-    Ok(CampaignSummaryResponse {
-        ok: true,
-        data: campaign_to_summary(campaign),
-    })
+async fn count_effective_recipients(
+    recipients: &Collection<WaCampaignRecipientDoc>,
+    campaign_id: ObjectId,
+) -> Result<u64, ApiError> {
+    recipients
+        .count_documents(effective_recipient_filter(campaign_id))
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))
+}
+
+async fn restore_auto_prepare_created_campaign(
+    state: &AppState,
+    campaign_id: &ObjectId,
+) -> Result<(), ApiError> {
+    state
+        .db
+        .db
+        .collection::<WaCampaignDoc>("WaCampaigns")
+        .update_one(
+            doc! { "_id": campaign_id },
+            restore_auto_prepare_created_campaign_update_doc(DateTime::now()),
+        )
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    Ok(())
+}
+
+fn auto_prepare_failed_error(campaign_id: ObjectId, stage: &str, source: ApiError) -> ApiError {
+    ApiError::Domain {
+        status: StatusCode::BAD_REQUEST,
+        code: "campaign_auto_prepare_failed".to_string(),
+        field: Some("auto_prepare".to_string()),
+        message: "Campaign was created as draft, but automatic preparation failed. Review and correct it manually.".to_string(),
+        details: Some(serde_json::json!({
+            "campaign_id": campaign_id.to_hex(),
+            "stage": stage,
+            "cause": api_error_code(&source),
+        })),
+    }
+}
+
+fn api_error_code(err: &ApiError) -> String {
+    match err {
+        ApiError::BadRequest(code) | ApiError::Conflict(code) => code.clone(),
+        ApiError::Domain { code, .. } => code.clone(),
+        ApiError::ValidationError { code, .. } => code.clone(),
+        ApiError::NotFound => "not_found".to_string(),
+        ApiError::Unauthorized(_) => "unauthorized".to_string(),
+        ApiError::Forbidden => "forbidden".to_string(),
+        ApiError::WrongPassword => "wrong_password".to_string(),
+        ApiError::SamePassword => "same_password".to_string(),
+        ApiError::WeakPassword => "weak_password".to_string(),
+        ApiError::WindowExpired => "window_expired".to_string(),
+        ApiError::MissingTemplateParams => "missing_template_params".to_string(),
+        ApiError::WindowClosed => "window_closed".to_string(),
+        ApiError::ConversationNotTakeable => "conversacion_no_tomable".to_string(),
+        ApiError::ClosedRequiresTemplate => "conversacion_cerrada_requiere_plantilla".to_string(),
+        ApiError::DatabaseError(_) => "database_error".to_string(),
+        ApiError::CacheError(_) => "cache_error".to_string(),
+        ApiError::SmsError(_) => "sms_error".to_string(),
+        ApiError::Internal(_) => "internal_error".to_string(),
+        ApiError::InternalServerError => "internal_server_error".to_string(),
+    }
 }
 
 pub async fn send_campaign(
@@ -1294,6 +1390,7 @@ pub async fn send_campaign(
     Ok(CampaignSummaryResponse {
         ok: true,
         data: campaign_to_summary_with_progress(campaign, Some(progress)),
+        auto_prepare: None,
     })
 }
 
@@ -3600,6 +3697,14 @@ fn campaign_send_build_error_to_api_error(error: CampaignTemplateSendBuildError)
     )
 }
 
+fn campaign_has_no_effective_recipients_error() -> ApiError {
+    ApiError::domain_simple(
+        StatusCode::BAD_REQUEST,
+        "campaign_has_no_effective_recipients",
+        "Campaign must have at least one non-excluded pending recipient that can be sent.",
+    )
+}
+
 fn missing_phone_number_id_error() -> ApiError {
     ApiError::domain_simple(
         StatusCode::BAD_REQUEST,
@@ -3630,6 +3735,36 @@ fn campaign_not_sendable() -> ApiError {
         "campaign_not_sendable",
         "Only dry_run_completed campaigns can start real sending.",
     )
+}
+
+fn restore_auto_prepare_created_campaign_update_doc(now: DateTime) -> Document {
+    doc! {
+        "$set": {
+            "status": "draft",
+            "updated_at": now,
+        },
+        "$unset": {
+            "confirming_from": "",
+            "confirmed_by": "",
+            "confirmed_at": "",
+            "started_by": "",
+            "started_at": "",
+            "run_mode": "",
+            "dry_run_completed_at": "",
+        }
+    }
+}
+
+fn confirm_campaign_update_doc(confirmed_by: &str, now: DateTime) -> Document {
+    doc! {
+        "$set": {
+            "status": "queued",
+            "confirmed_by": confirmed_by,
+            "confirmed_at": now,
+            "updated_at": now,
+        },
+        "$unset": { "confirming_from": "" }
+    }
 }
 
 fn start_campaign_update_doc(started_by: &str, now: DateTime) -> Document {
@@ -4821,6 +4956,64 @@ mod tests {
         let summary = campaign_to_summary(campaign);
 
         assert_eq!(summary.phone_number_id.as_deref(), Some("987654321"));
+    }
+
+    #[test]
+    fn create_without_auto_prepare_keeps_default_manual_flow() {
+        let payload = serde_json::json!({
+            "name": "June Promo",
+            "phone_number_id": "987654321",
+            "template_name": "promo_template",
+            "template_language": "es",
+            "filters": { "client_state": "active" }
+        });
+
+        let request: CreateCampaignRequest = serde_json::from_value(payload).unwrap();
+
+        assert_eq!(request.auto_prepare, None);
+    }
+
+    #[test]
+    fn create_with_auto_prepare_true_deserializes_flag() {
+        let payload = serde_json::json!({
+            "name": "June Promo",
+            "phone_number_id": "987654321",
+            "template_name": "promo_template",
+            "template_language": "es",
+            "filters": { "client_state": "active" },
+            "auto_prepare": true
+        });
+
+        let request: CreateCampaignRequest = serde_json::from_value(payload).unwrap();
+
+        assert_eq!(request.auto_prepare, Some(true));
+    }
+
+    #[test]
+    fn auto_prepare_response_reports_confirmed_and_validation_started() {
+        let mut campaign = base_campaign("running");
+        campaign.run_mode = Some("dry_run".to_string());
+        campaign.confirmed_by = Some("admin-1".to_string());
+        campaign.confirmed_at = Some(DateTime::from_millis(1_800_000_000_001));
+        campaign.started_by = Some("admin-1".to_string());
+        campaign.started_at = Some(DateTime::from_millis(1_800_000_000_002));
+
+        let response = CampaignSummaryResponse {
+            ok: true,
+            data: campaign_to_summary(campaign),
+            auto_prepare: Some(CampaignAutoPrepareResult {
+                confirmed: true,
+                validation_started: true,
+            }),
+        };
+
+        assert_eq!(response.data.status, "running");
+        assert_eq!(response.data.run_mode.as_deref(), Some("dry_run"));
+        assert_eq!(response.data.confirmed_by.as_deref(), Some("admin-1"));
+        assert!(response.data.confirmed_at.is_some());
+        assert_eq!(response.data.started_by.as_deref(), Some("admin-1"));
+        assert!(response.data.started_at.is_some());
+        assert!(response.auto_prepare.unwrap().validation_started);
     }
 
     #[test]
@@ -6525,6 +6718,80 @@ mod tests {
         assert_eq!(summary.started_by.as_deref(), Some("admin-2"));
         assert_eq!(summary.run_mode.as_deref(), Some("dry_run"));
         assert!(summary.started_at.is_some());
+    }
+
+    #[test]
+    fn auto_prepare_uses_confirm_and_start_dry_run_transitions_only() {
+        let confirm_time = DateTime::from_millis(1_800_000_000_001);
+        let start_time = DateTime::from_millis(1_800_000_000_002);
+
+        assert_eq!(
+            confirm_campaign_update_doc("admin-2", confirm_time),
+            doc! {
+                "$set": {
+                    "status": "queued",
+                    "confirmed_by": "admin-2",
+                    "confirmed_at": confirm_time,
+                    "updated_at": confirm_time,
+                },
+                "$unset": { "confirming_from": "" }
+            }
+        );
+        assert_eq!(
+            start_campaign_update_doc("admin-2", start_time),
+            doc! {
+                "$set": {
+                    "status": "running",
+                    "started_by": "admin-2",
+                    "started_at": start_time,
+                    "updated_at": start_time,
+                    "run_mode": "dry_run",
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn auto_prepare_failure_rollback_restores_created_campaign_to_draft() {
+        let now = DateTime::from_millis(1_800_000_000_003);
+
+        assert_eq!(
+            restore_auto_prepare_created_campaign_update_doc(now),
+            doc! {
+                "$set": {
+                    "status": "draft",
+                    "updated_at": now,
+                },
+                "$unset": {
+                    "confirming_from": "",
+                    "confirmed_by": "",
+                    "confirmed_at": "",
+                    "started_by": "",
+                    "started_at": "",
+                    "run_mode": "",
+                    "dry_run_completed_at": "",
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn auto_prepare_failure_error_includes_campaign_id_and_cause() {
+        let campaign_id = ObjectId::parse_str("64f000000000000000000001").unwrap();
+        let err = auto_prepare_failed_error(
+            campaign_id,
+            "prepare",
+            ApiError::BadRequest("template_name_required".to_string()),
+        );
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, ref details, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && code == "campaign_auto_prepare_failed"
+                    && details.as_ref().and_then(|value| value.get("campaign_id")).and_then(|value| value.as_str()) == Some("64f000000000000000000001")
+                    && details.as_ref().and_then(|value| value.get("cause")).and_then(|value| value.as_str()) == Some("template_name_required")
+        ));
     }
 
     #[test]

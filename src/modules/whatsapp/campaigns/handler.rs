@@ -53,7 +53,7 @@ pub async fn preview_campaign_recipients_handler(
     security(("bearerAuth" = [])),
     request_body = CreateCampaignRequest,
     responses(
-        (status = 200, description = "Create a draft WhatsApp campaign and freeze its recipient snapshot", body = CampaignSummaryResponse),
+        (status = 200, description = "Create a draft WhatsApp campaign and optionally auto-confirm/start dry-run validation when auto_prepare=true", body = CampaignSummaryResponse),
         (status = 400, description = "Invalid request or missing campaign filters"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "SUPERADMIN role required"),

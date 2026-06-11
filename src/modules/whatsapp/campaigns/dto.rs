@@ -123,6 +123,8 @@ pub struct CreateCampaignRequest {
     #[serde(default)]
     pub template_media_bindings: Option<Vec<TemplateMediaBinding>>,
     pub filters: CampaignPreviewRequest,
+    #[serde(default)]
+    pub auto_prepare: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -306,6 +308,14 @@ pub struct UpdateCampaignRecipientExclusionsData {
 pub struct CampaignSummaryResponse {
     pub ok: bool,
     pub data: CampaignSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_prepare: Option<CampaignAutoPrepareResult>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CampaignAutoPrepareResult {
+    pub confirmed: bool,
+    pub validation_started: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
