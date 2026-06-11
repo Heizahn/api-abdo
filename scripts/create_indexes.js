@@ -415,6 +415,68 @@ print("  ✅ AiCoverageZones.is_active + state + municipality");
 print("");
 
 // ============================================
+// COLECCIÓN: WaCampaigns
+// ============================================
+print("📦 Colección: WaCampaigns");
+
+db.WaCampaigns.createIndex(
+  { "created_at": -1 },
+  { name: "idx_wa_campaigns_created_desc", background: true }
+);
+print("  ✅ WaCampaigns.created_at desc");
+
+db.WaCampaigns.createIndex(
+  { "status": 1 },
+  { name: "idx_wa_campaigns_status", background: true }
+);
+print("  ✅ WaCampaigns.status");
+
+print("");
+
+// ============================================
+// COLECCIÓN: WaCampaignRecipients
+// ============================================
+print("📦 Colección: WaCampaignRecipients");
+
+db.WaCampaignRecipients.createIndex(
+  { "campaign_id": 1 },
+  { name: "idx_wa_campaign_recipients_campaign", background: true }
+);
+print("  ✅ WaCampaignRecipients.campaign_id");
+
+db.WaCampaignRecipients.createIndex(
+  { "campaign_id": 1, "client_id": 1 },
+  { name: "idx_wa_campaign_recipients_campaign_client", unique: true, background: true }
+);
+print("  ✅ WaCampaignRecipients.campaign_id + client_id (unique)");
+
+db.WaCampaignRecipients.createIndex(
+  { "campaign_id": 1, "phone_normalized": 1 },
+  { name: "idx_wa_campaign_recipients_campaign_phone", background: true }
+);
+print("  ✅ WaCampaignRecipients.campaign_id + phone_normalized");
+
+db.WaCampaignRecipients.createIndex(
+  { "campaign_id": 1, "status": 1 },
+  { name: "idx_wa_campaign_recipients_campaign_status", background: true }
+);
+print("  ✅ WaCampaignRecipients.campaign_id + status");
+
+db.WaCampaignRecipients.createIndex(
+  { "campaign_id": 1, "excluded": 1 },
+  { name: "idx_wa_campaign_recipients_campaign_excluded", background: true }
+);
+print("  ✅ WaCampaignRecipients.campaign_id + excluded");
+
+db.WaCampaignRecipients.createIndex(
+  { "campaign_id": 1, "can_send": 1, "excluded": 1, "status": 1 },
+  { name: "idx_wa_campaign_recipients_effective_sendable", background: true }
+);
+print("  ✅ WaCampaignRecipients.campaign_id + can_send + excluded + status");
+
+print("");
+
+// ============================================
 // COLECCIÓN: WaMessages — auditoría cross-conversation
 // ============================================
 print("📦 Colección: WaMessages (auditoría)");
@@ -444,18 +506,25 @@ db.WaMessages.createIndex(
 );
 print("  ✅ WaMessages.conversation_id + _id desc");
 
-// Idempotencia de envíos manuales/retries del panel. Sparse porque la mayoría
-// de mensajes no usan idempotency_key.
+// Idempotencia de envíos manuales/retries del panel. Usar partial index en vez
+// de sparse: MongoDB sí indexa `null` cuando el campo existe, y muchos mensajes
+// inbound/system guardan `idempotency_key: null`.
+const existingWaMessagesIdempotencyIndex = db.WaMessages.getIndexes()
+  .find(idx => idx.name === "idx_wamsgs_conv_idempotency");
+if (existingWaMessagesIdempotencyIndex && !existingWaMessagesIdempotencyIndex.partialFilterExpression) {
+  db.WaMessages.dropIndex("idx_wamsgs_conv_idempotency");
+  print("  ℹ️ WaMessages.idx_wamsgs_conv_idempotency legacy sparse index replaced");
+}
 db.WaMessages.createIndex(
   { "conversation_id": 1, "idempotency_key": 1 },
   {
     name: "idx_wamsgs_conv_idempotency",
     unique: true,
-    sparse: true,
+    partialFilterExpression: { "idempotency_key": { $type: "string" } },
     background: true
   }
 );
-print("  ✅ WaMessages.conversation_id + idempotency_key (unique, sparse)");
+print("  ✅ WaMessages.conversation_id + idempotency_key (unique, partial string)");
 
 // Filtros típicos de auditoría: rango de fechas + agente.
 db.WaMessages.createIndex(
@@ -553,7 +622,7 @@ print("📋 VERIFICACIÓN DE ÍNDICES");
 print("=".repeat(60));
 print("");
 
-const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes", "WaTemplates", "wa_template_media.files", "WaConversations", "WaConversationEvents", "WaMessages", "WaTickets", "AiAgents", "AiAgentFaqs", "AiInteractions", "AiPlans", "AiCoverageZones"];
+const toVerify = ["Clients", "Payments", "Debts", "PartPayments", "PaymentReports", "Users", "verification_codes", "WaTemplates", "wa_template_media.files", "WaCampaigns", "WaCampaignRecipients", "WaConversations", "WaConversationEvents", "WaMessages", "WaTickets", "AiAgents", "AiAgentFaqs", "AiInteractions", "AiPlans", "AiCoverageZones"];
 toVerify.forEach(col => {
   print(col + ":");
   db.getCollection(col).getIndexes().forEach(idx => {

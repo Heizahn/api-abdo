@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::fs::create_dir("./uploads").await?;
     }
 
-    tracing::info!("🚀 Iniciando API ABDO v0.3.60");
+    tracing::info!("🚀 Iniciando API ABDO v{}", env!("CARGO_PKG_VERSION"));
     tracing::info!("Environment: {}", cfg.rust_log);
 
     // 3. Inicializar estado de aplicación (MongoDB + Redis)
@@ -73,6 +73,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state_for_conv_events = state.clone();
     tokio::spawn(async move {
         modules::whatsapp::backfill::run_conversation_events_backfill(state_for_conv_events).await;
+    });
+
+    let state_for_campaigns = state.clone();
+    tokio::spawn(async move {
+        modules::whatsapp::campaigns::service::run_campaign_dry_run_worker(state_for_campaigns)
+            .await;
+    });
+
+    let state_for_campaign_sends = state.clone();
+    tokio::spawn(async move {
+        modules::whatsapp::campaigns::service::run_campaign_send_worker(state_for_campaign_sends)
+            .await;
     });
 
     // Seed lazy de planes y zonas de cobertura para el AI Agent. Solo

@@ -291,6 +291,7 @@ pub(in crate::modules::whatsapp) fn to_template_item(t: WaTemplate) -> WaTemplat
         language: t.language,
         category: t.category,
         components: t.components,
+        default_media_binding: None,
         body_placeholders: t.body_placeholders,
         status: t.status,
         rejection_reason: t.rejection_reason,
