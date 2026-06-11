@@ -25,6 +25,7 @@ use super::{
         UpdateCampaignRecipientExclusionsResponse, UpdateCampaignRequest, UpdateCampaignResponse,
     },
     phone::normalize_phone_to_whatsapp,
+    template_resolver::extract_template_placeholders,
 };
 
 const DEFAULT_PER_PAGE: u32 = 100;
@@ -66,7 +67,7 @@ struct WaCampaignDoc {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum StoredTemplateClientField {
+pub(crate) enum StoredTemplateClientField {
     ClientName,
     Balance,
     PaymentDueDay,
@@ -78,17 +79,17 @@ enum StoredTemplateClientField {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredTemplateVariableBinding {
-    component: TemplateVariableComponent,
-    index: i32,
-    placeholder: String,
-    source: TemplateVariableSource,
+pub(crate) struct StoredTemplateVariableBinding {
+    pub(crate) component: TemplateVariableComponent,
+    pub(crate) index: i32,
+    pub(crate) placeholder: String,
+    pub(crate) source: TemplateVariableSource,
     #[serde(default)]
-    value: Option<String>,
+    pub(crate) value: Option<String>,
     #[serde(default)]
-    client_field: Option<StoredTemplateClientField>,
+    pub(crate) client_field: Option<StoredTemplateClientField>,
     #[serde(default)]
-    button_index: Option<i32>,
+    pub(crate) button_index: Option<i32>,
 }
 
 trait TemplateVariableBindingLike {
@@ -162,6 +163,55 @@ impl TemplateVariableBindingLike for StoredTemplateVariableBinding {
     }
 
     fn legacy_provider_name_present(&self) -> bool {
+        matches!(
+            self.client_field,
+            Some(StoredTemplateClientField::ProviderName)
+        )
+    }
+
+    fn button_index(&self) -> Option<i32> {
+        self.button_index
+    }
+}
+
+impl crate::modules::whatsapp::campaigns::template_resolver::CampaignTemplateVariableBindingLike
+    for StoredTemplateVariableBinding
+{
+    fn component(&self) -> Option<TemplateVariableComponent> {
+        Some(self.component.clone())
+    }
+
+    fn index(&self) -> i32 {
+        self.index
+    }
+
+    fn source(&self) -> Option<TemplateVariableSource> {
+        Some(self.source.clone())
+    }
+
+    fn value(&self) -> Option<&str> {
+        self.value.as_deref()
+    }
+
+    fn client_field(&self) -> Option<TemplateClientField> {
+        match self.client_field {
+            Some(StoredTemplateClientField::ClientName) => Some(TemplateClientField::ClientName),
+            Some(StoredTemplateClientField::Balance) => Some(TemplateClientField::Balance),
+            Some(StoredTemplateClientField::PaymentDueDay) => {
+                Some(TemplateClientField::PaymentDueDay)
+            }
+            Some(StoredTemplateClientField::SectorName) => Some(TemplateClientField::SectorName),
+            Some(StoredTemplateClientField::CustomerStatusDerived) => {
+                Some(TemplateClientField::CustomerStatusDerived)
+            }
+            Some(StoredTemplateClientField::PhoneNormalized) => {
+                Some(TemplateClientField::PhoneNormalized)
+            }
+            Some(StoredTemplateClientField::ProviderName) | None => None,
+        }
+    }
+
+    fn has_unsupported_client_field(&self) -> bool {
         matches!(
             self.client_field,
             Some(StoredTemplateClientField::ProviderName)
@@ -1377,7 +1427,13 @@ fn validate_bindings_against_template_components<T: TemplateVariableBindingLike>
     components: &[serde_json::Value],
     bindings: Option<&[T]>,
 ) -> Result<(), ApiError> {
-    let required = extract_template_placeholders(components)?;
+    let required = extract_template_placeholders(components).map_err(|err| {
+        ApiError::domain_simple(
+            StatusCode::BAD_REQUEST,
+            err.code(),
+            "Template contains placeholders in an unsupported component.",
+        )
+    })?;
     let bindings = bindings.unwrap_or(&[]);
 
     if required.is_empty() {
@@ -1432,93 +1488,6 @@ fn validate_bindings_against_template_components<T: TemplateVariableBindingLike>
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct TemplatePlaceholder {
-    component: TemplateVariableComponent,
-    index: i32,
-    button_index: Option<i32>,
-}
-
-fn extract_template_placeholders(
-    components: &[serde_json::Value],
-) -> Result<Vec<TemplatePlaceholder>, ApiError> {
-    let mut placeholders = Vec::new();
-
-    for component in components {
-        let component_type = component
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_ascii_uppercase();
-
-        match component_type.as_str() {
-            "BODY" => extract_text_placeholders(
-                component.get("text").and_then(serde_json::Value::as_str),
-                TemplateVariableComponent::Body,
-                None,
-                &mut placeholders,
-            ),
-            "HEADER" => extract_text_placeholders(
-                component.get("text").and_then(serde_json::Value::as_str),
-                TemplateVariableComponent::Header,
-                None,
-                &mut placeholders,
-            ),
-            "BUTTONS" => {
-                let buttons = component
-                    .get("buttons")
-                    .and_then(serde_json::Value::as_array)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
-                for (button_index, button) in buttons.iter().enumerate() {
-                    extract_text_placeholders(
-                        button.get("url").and_then(serde_json::Value::as_str),
-                        TemplateVariableComponent::Button,
-                        Some(button_index as i32),
-                        &mut placeholders,
-                    );
-                }
-            }
-            _ => {
-                if value_has_placeholder(component) {
-                    return Err(ApiError::domain_simple(
-                        StatusCode::BAD_REQUEST,
-                        "template_variable_unsupported_component",
-                        "Template contains placeholders in an unsupported component.",
-                    ));
-                }
-            }
-        }
-    }
-
-    placeholders.sort_by_key(|placeholder| {
-        (
-            component_sort_key(&placeholder.component),
-            placeholder.button_index.unwrap_or(-1),
-            placeholder.index,
-        )
-    });
-    placeholders.dedup();
-    Ok(placeholders)
-}
-
-fn extract_text_placeholders(
-    text: Option<&str>,
-    component: TemplateVariableComponent,
-    button_index: Option<i32>,
-    output: &mut Vec<TemplatePlaceholder>,
-) {
-    if let Some(text) = text {
-        for index in placeholder_indices(text) {
-            output.push(TemplatePlaceholder {
-                component: component.clone(),
-                index,
-                button_index,
-            });
-        }
-    }
-}
-
 fn placeholder_index(value: &str) -> Option<i32> {
     let mut indices = placeholder_indices(value);
     let first = indices.next()?;
@@ -1539,23 +1508,6 @@ fn placeholder_indices(value: &str) -> impl Iterator<Item = i32> + '_ {
             .ok()
             .filter(|index| *index >= 1)
     })
-}
-
-fn value_has_placeholder(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::String(value) => placeholder_indices(value).next().is_some(),
-        serde_json::Value::Array(values) => values.iter().any(value_has_placeholder),
-        serde_json::Value::Object(map) => map.values().any(value_has_placeholder),
-        _ => false,
-    }
-}
-
-fn component_sort_key(component: &TemplateVariableComponent) -> i32 {
-    match component {
-        TemplateVariableComponent::Header => 0,
-        TemplateVariableComponent::Body => 1,
-        TemplateVariableComponent::Button => 2,
-    }
 }
 
 fn pagination_skip(page: u32, per_page: u32) -> u64 {
@@ -2844,6 +2796,48 @@ mod tests {
                 if status == StatusCode::BAD_REQUEST
                     && code == "template_variable_client_field_unsupported"
                     && field.as_deref() == Some("template_variable_bindings.client_field")
+        ));
+    }
+
+    #[test]
+    fn confirm_template_with_non_text_header_placeholder_fails() {
+        let components = vec![serde_json::json!({
+            "type": "HEADER",
+            "format": "IMAGE",
+            "image": "https://example.com/{{1}}"
+        })];
+        let none_bindings: Option<&[TemplateVariableBinding]> = None;
+
+        let err =
+            validate_bindings_against_template_components(&components, none_bindings).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && code == "unsupported_template_variable_component"
+        ));
+    }
+
+    #[test]
+    fn confirm_template_with_non_url_button_placeholder_fails() {
+        let components = vec![serde_json::json!({
+            "type": "BUTTONS",
+            "buttons": [{
+                "type": "QUICK_REPLY",
+                "url": "https://example.com/{{1}}"
+            }]
+        })];
+        let none_bindings: Option<&[TemplateVariableBinding]> = None;
+
+        let err =
+            validate_bindings_against_template_components(&components, none_bindings).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && code == "unsupported_template_variable_component"
         ));
     }
 
