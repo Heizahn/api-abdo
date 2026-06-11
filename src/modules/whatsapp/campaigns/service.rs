@@ -19,10 +19,10 @@ use super::{
         CampaignPreviewRecipient, CampaignPreviewRequest, CampaignPreviewResponse,
         CampaignPreviewTotals, CampaignRecipientItem, CampaignRecipientsQuery,
         CampaignRecipientsResponse, CampaignSummary, CampaignSummaryResponse, ClientStateFilter,
-        CreateCampaignRequest, DerivedClientState, PhoneStatus, TemplateVariableBinding,
-        TemplateVariableComponent, TemplateVariableSource, UpdateCampaignRecipientExclusionsData,
-        UpdateCampaignRecipientExclusionsRequest, UpdateCampaignRecipientExclusionsResponse,
-        UpdateCampaignRequest, UpdateCampaignResponse,
+        CreateCampaignRequest, DerivedClientState, PhoneStatus, TemplateClientField,
+        TemplateVariableBinding, TemplateVariableComponent, TemplateVariableSource,
+        UpdateCampaignRecipientExclusionsData, UpdateCampaignRecipientExclusionsRequest,
+        UpdateCampaignRecipientExclusionsResponse, UpdateCampaignRequest, UpdateCampaignResponse,
     },
     phone::normalize_phone_to_whatsapp,
 };
@@ -45,7 +45,7 @@ struct WaCampaignDoc {
     #[serde(default)]
     template_components: Option<Vec<serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    template_variable_bindings: Option<Vec<TemplateVariableBinding>>,
+    template_variable_bindings: Option<Vec<StoredTemplateVariableBinding>>,
     filters: CampaignPreviewRequest,
     status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -62,6 +62,176 @@ struct WaCampaignDoc {
     confirmed_at: Option<DateTime>,
     created_at: DateTime,
     updated_at: DateTime,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredTemplateClientField {
+    ClientName,
+    Balance,
+    PaymentDueDay,
+    SectorName,
+    CustomerStatusDerived,
+    PhoneNormalized,
+    #[serde(rename = "provider_name")]
+    ProviderName,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredTemplateVariableBinding {
+    component: TemplateVariableComponent,
+    index: i32,
+    placeholder: String,
+    source: TemplateVariableSource,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    client_field: Option<StoredTemplateClientField>,
+    #[serde(default)]
+    button_index: Option<i32>,
+}
+
+trait TemplateVariableBindingLike {
+    fn component(&self) -> &TemplateVariableComponent;
+    fn index(&self) -> i32;
+    fn placeholder(&self) -> &str;
+    fn source(&self) -> &TemplateVariableSource;
+    fn value(&self) -> Option<&str>;
+    fn client_field_present(&self) -> bool;
+    fn legacy_provider_name_present(&self) -> bool;
+    fn button_index(&self) -> Option<i32>;
+}
+
+impl TemplateVariableBindingLike for TemplateVariableBinding {
+    fn component(&self) -> &TemplateVariableComponent {
+        &self.component
+    }
+
+    fn index(&self) -> i32 {
+        self.index
+    }
+
+    fn placeholder(&self) -> &str {
+        self.placeholder.as_str()
+    }
+
+    fn source(&self) -> &TemplateVariableSource {
+        &self.source
+    }
+
+    fn value(&self) -> Option<&str> {
+        self.value.as_deref()
+    }
+
+    fn client_field_present(&self) -> bool {
+        self.client_field.is_some()
+    }
+
+    fn legacy_provider_name_present(&self) -> bool {
+        false
+    }
+
+    fn button_index(&self) -> Option<i32> {
+        self.button_index
+    }
+}
+
+impl TemplateVariableBindingLike for StoredTemplateVariableBinding {
+    fn component(&self) -> &TemplateVariableComponent {
+        &self.component
+    }
+
+    fn index(&self) -> i32 {
+        self.index
+    }
+
+    fn placeholder(&self) -> &str {
+        self.placeholder.as_str()
+    }
+
+    fn source(&self) -> &TemplateVariableSource {
+        &self.source
+    }
+
+    fn value(&self) -> Option<&str> {
+        self.value.as_deref()
+    }
+
+    fn client_field_present(&self) -> bool {
+        self.client_field.is_some()
+    }
+
+    fn legacy_provider_name_present(&self) -> bool {
+        matches!(
+            self.client_field,
+            Some(StoredTemplateClientField::ProviderName)
+        )
+    }
+
+    fn button_index(&self) -> Option<i32> {
+        self.button_index
+    }
+}
+
+impl From<TemplateVariableBinding> for StoredTemplateVariableBinding {
+    fn from(binding: TemplateVariableBinding) -> Self {
+        Self {
+            component: binding.component,
+            index: binding.index,
+            placeholder: binding.placeholder,
+            source: binding.source,
+            value: binding.value,
+            client_field: binding.client_field.map(Into::into),
+            button_index: binding.button_index,
+        }
+    }
+}
+
+impl From<TemplateClientField> for StoredTemplateClientField {
+    fn from(field: TemplateClientField) -> Self {
+        match field {
+            TemplateClientField::ClientName => Self::ClientName,
+            TemplateClientField::Balance => Self::Balance,
+            TemplateClientField::PaymentDueDay => Self::PaymentDueDay,
+            TemplateClientField::SectorName => Self::SectorName,
+            TemplateClientField::CustomerStatusDerived => Self::CustomerStatusDerived,
+            TemplateClientField::PhoneNormalized => Self::PhoneNormalized,
+        }
+    }
+}
+
+impl StoredTemplateClientField {
+    fn to_public(&self) -> Option<TemplateClientField> {
+        match self {
+            Self::ClientName => Some(TemplateClientField::ClientName),
+            Self::Balance => Some(TemplateClientField::Balance),
+            Self::PaymentDueDay => Some(TemplateClientField::PaymentDueDay),
+            Self::SectorName => Some(TemplateClientField::SectorName),
+            Self::CustomerStatusDerived => Some(TemplateClientField::CustomerStatusDerived),
+            Self::PhoneNormalized => Some(TemplateClientField::PhoneNormalized),
+            Self::ProviderName => None,
+        }
+    }
+}
+
+impl StoredTemplateVariableBinding {
+    fn to_public(self) -> Option<TemplateVariableBinding> {
+        let client_field = match self.client_field {
+            Some(StoredTemplateClientField::ProviderName) => return None,
+            Some(field) => field.to_public(),
+            None => None,
+        };
+
+        Some(TemplateVariableBinding {
+            component: self.component,
+            index: self.index,
+            placeholder: self.placeholder,
+            source: self.source,
+            value: self.value,
+            client_field,
+            button_index: self.button_index,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,7 +338,9 @@ pub async fn create_campaign(
         template_name: request.template_name.trim().to_string(),
         template_language: request.template_language.trim().to_string(),
         template_components: request.template_components,
-        template_variable_bindings: request.template_variable_bindings,
+        template_variable_bindings: request
+            .template_variable_bindings
+            .map(|bindings| bindings.into_iter().map(Into::into).collect()),
         filters: request.filters,
         status: "draft".to_string(),
         confirming_from: None,
@@ -925,7 +1097,9 @@ fn apply_campaign_edit(
     campaign.template_name = request.template_name.trim().to_string();
     campaign.template_language = request.template_language.trim().to_string();
     campaign.template_components = request.template_components;
-    campaign.template_variable_bindings = request.template_variable_bindings;
+    campaign.template_variable_bindings = request
+        .template_variable_bindings
+        .map(|bindings| bindings.into_iter().map(Into::into).collect());
     campaign.filters = request.filters;
     campaign.status = if is_editable_campaign_status(&campaign.status) {
         campaign.status
@@ -1058,8 +1232,8 @@ fn normalize_optional_phone_number_id(value: Option<&str>) -> Result<Option<Stri
     }
 }
 
-fn validate_create_template_variable_bindings(
-    bindings: Option<&[TemplateVariableBinding]>,
+fn validate_create_template_variable_bindings<T: TemplateVariableBindingLike>(
+    bindings: Option<&[T]>,
 ) -> Result<(), ApiError> {
     if let Some(bindings) = bindings {
         validate_binding_basics(bindings)?;
@@ -1067,11 +1241,11 @@ fn validate_create_template_variable_bindings(
     Ok(())
 }
 
-fn validate_binding_basics(bindings: &[TemplateVariableBinding]) -> Result<(), ApiError> {
+fn validate_binding_basics<T: TemplateVariableBindingLike>(bindings: &[T]) -> Result<(), ApiError> {
     let mut seen = HashSet::new();
 
     for binding in bindings {
-        if binding.index < 1 {
+        if binding.index() < 1 {
             return Err(ApiError::domain_with_field(
                 StatusCode::BAD_REQUEST,
                 "invalid_template_variable_binding",
@@ -1079,8 +1253,8 @@ fn validate_binding_basics(bindings: &[TemplateVariableBinding]) -> Result<(), A
                 "Template variable binding index must be greater than or equal to 1.",
             ));
         }
-        if let TemplateVariableComponent::Button = binding.component {
-            if binding.button_index.is_some_and(|index| index < 0) {
+        if let TemplateVariableComponent::Button = binding.component() {
+            if binding.button_index().is_some_and(|index| index < 0) {
                 return Err(ApiError::domain_with_field(
                     StatusCode::BAD_REQUEST,
                     "invalid_template_variable_binding",
@@ -1091,9 +1265,9 @@ fn validate_binding_basics(bindings: &[TemplateVariableBinding]) -> Result<(), A
         }
 
         let key = (
-            binding.component.clone(),
-            binding.index,
-            binding.button_index,
+            binding.component().clone(),
+            binding.index(),
+            binding.button_index(),
         );
         if !seen.insert(key) {
             return Err(ApiError::domain_with_field(
@@ -1104,8 +1278,8 @@ fn validate_binding_basics(bindings: &[TemplateVariableBinding]) -> Result<(), A
             ));
         }
 
-        if let Some(placeholder_index) = placeholder_index(&binding.placeholder) {
-            if placeholder_index != binding.index {
+        if let Some(placeholder_index) = placeholder_index(binding.placeholder()) {
+            if placeholder_index != binding.index() {
                 return Err(ApiError::domain_with_field(
                     StatusCode::BAD_REQUEST,
                     "template_variable_placeholder_mismatch",
@@ -1115,11 +1289,10 @@ fn validate_binding_basics(bindings: &[TemplateVariableBinding]) -> Result<(), A
             }
         }
 
-        match binding.source {
+        match binding.source() {
             TemplateVariableSource::Static => {
                 if binding
-                    .value
-                    .as_deref()
+                    .value()
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .is_none()
@@ -1133,12 +1306,20 @@ fn validate_binding_basics(bindings: &[TemplateVariableBinding]) -> Result<(), A
                 }
             }
             TemplateVariableSource::ClientField => {
-                if binding.client_field.is_none() {
+                if !binding.client_field_present() {
                     return Err(ApiError::domain_with_field(
                         StatusCode::BAD_REQUEST,
                         "template_variable_client_field_required",
                         "template_variable_bindings.client_field",
                         "Client-field template variable bindings require a valid client_field.",
+                    ));
+                }
+                if binding.legacy_provider_name_present() {
+                    return Err(ApiError::domain_with_field(
+                        StatusCode::BAD_REQUEST,
+                        "template_variable_client_field_unsupported",
+                        "template_variable_bindings.client_field",
+                        "Legacy provider_name client_field bindings are no longer supported.",
                     ));
                 }
             }
@@ -1187,14 +1368,14 @@ async fn validate_confirmation_template(
 
 fn validate_bindings_against_template(
     template: &WaTemplate,
-    bindings: Option<&[TemplateVariableBinding]>,
+    bindings: Option<&[StoredTemplateVariableBinding]>,
 ) -> Result<(), ApiError> {
     validate_bindings_against_template_components(&template.components, bindings)
 }
 
-fn validate_bindings_against_template_components(
+fn validate_bindings_against_template_components<T: TemplateVariableBindingLike>(
     components: &[serde_json::Value],
-    bindings: Option<&[TemplateVariableBinding]>,
+    bindings: Option<&[T]>,
 ) -> Result<(), ApiError> {
     let required = extract_template_placeholders(components)?;
     let bindings = bindings.unwrap_or(&[]);
@@ -1227,9 +1408,9 @@ fn validate_bindings_against_template_components(
         .iter()
         .map(|binding| {
             (
-                binding.component.clone(),
-                binding.index,
-                binding.button_index,
+                binding.component().clone(),
+                binding.index(),
+                binding.button_index(),
             )
         })
         .collect::<HashSet<_>>();
@@ -1652,7 +1833,17 @@ fn campaign_to_summary(campaign: WaCampaignDoc) -> CampaignSummary {
         template_name: campaign.template_name,
         template_language: campaign.template_language,
         template_components: campaign.template_components,
-        template_variable_bindings: campaign.template_variable_bindings,
+        template_variable_bindings: campaign.template_variable_bindings.and_then(|bindings| {
+            let bindings = bindings
+                .into_iter()
+                .filter_map(StoredTemplateVariableBinding::to_public)
+                .collect::<Vec<_>>();
+            if bindings.is_empty() {
+                None
+            } else {
+                Some(bindings)
+            }
+        }),
         filters: campaign.filters,
         status: campaign.status,
         total_recipients: campaign.total_recipients,
@@ -2145,6 +2336,18 @@ mod tests {
         }
     }
 
+    fn legacy_provider_name_body_binding(index: i32) -> StoredTemplateVariableBinding {
+        StoredTemplateVariableBinding {
+            component: TemplateVariableComponent::Body,
+            index,
+            placeholder: format!("{{{{{index}}}}}"),
+            source: TemplateVariableSource::ClientField,
+            value: None,
+            client_field: Some(StoredTemplateClientField::ProviderName),
+            button_index: None,
+        }
+    }
+
     fn update_request(name: &str) -> UpdateCampaignRequest {
         UpdateCampaignRequest {
             name: name.to_string(),
@@ -2187,7 +2390,7 @@ mod tests {
     #[test]
     fn create_with_bindings_persists_to_summary() {
         let mut campaign = base_campaign("draft");
-        campaign.template_variable_bindings = Some(vec![static_body_binding(1, "ABDO")]);
+        campaign.template_variable_bindings = Some(vec![static_body_binding(1, "ABDO").into()]);
 
         let summary = campaign_to_summary(campaign);
 
@@ -2219,6 +2422,95 @@ mod tests {
         });
 
         assert!(serde_json::from_value::<TemplateVariableBinding>(payload).is_err());
+    }
+
+    #[test]
+    fn create_with_provider_name_client_field_fails_deserialization() {
+        let payload = serde_json::json!({
+            "name": "June Promo",
+            "template_name": "promo_template",
+            "template_language": "es",
+            "template_variable_bindings": [{
+                "component": "body",
+                "index": 1,
+                "placeholder": "{{1}}",
+                "source": "client_field",
+                "client_field": "provider_name"
+            }],
+            "filters": { "client_state": "active" }
+        });
+
+        assert!(serde_json::from_value::<CreateCampaignRequest>(payload).is_err());
+    }
+
+    #[test]
+    fn create_with_allowed_client_fields_passes_deserialization() {
+        for client_field in [
+            "client_name",
+            "balance",
+            "payment_due_day",
+            "sector_name",
+            "customer_status_derived",
+            "phone_normalized",
+        ] {
+            let payload = serde_json::json!({
+                "component": "body",
+                "index": 1,
+                "placeholder": "{{1}}",
+                "source": "client_field",
+                "client_field": client_field
+            });
+
+            assert!(
+                serde_json::from_value::<TemplateVariableBinding>(payload).is_ok(),
+                "{client_field} should remain an allowed client_field"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_provider_name_binding_deserializes_and_is_filtered_from_summary() {
+        let payload = doc! {
+            "_id": ObjectId::parse_str("64f000000000000000000001").unwrap(),
+            "name": "June Promo",
+            "phone_number_id": "1234567890",
+            "template_name": "promo_template",
+            "template_language": "es",
+            "template_components": Bson::Null,
+            "template_variable_bindings": vec![doc! {
+                "component": "body",
+                "index": 1,
+                "placeholder": "{{1}}",
+                "source": "client_field",
+                "client_field": "provider_name"
+            }],
+            "filters": doc! { "client_state": "active" },
+            "status": "draft",
+            "confirming_from": Bson::Null,
+            "total_recipients": 1i64,
+            "total_can_send": 1i64,
+            "total_invalid_phone": 0i64,
+            "total_duplicated_phone": 0i64,
+            "total_excluded": 0i64,
+            "created_by": "creator-1",
+            "confirmed_by": Bson::Null,
+            "confirmed_at": Bson::Null,
+            "created_at": DateTime::from_millis(1_800_000_000_000),
+            "updated_at": DateTime::from_millis(1_800_000_000_000)
+        };
+
+        let campaign = mongodb::bson::from_document::<WaCampaignDoc>(payload).unwrap();
+        assert_eq!(
+            campaign.template_variable_bindings.as_ref().map(Vec::len),
+            Some(1)
+        );
+
+        let summary = campaign_to_summary(campaign.clone());
+        assert!(summary.template_variable_bindings.is_none());
+
+        let list_item = campaign_to_list_item(campaign);
+        assert_eq!(list_item.template_variables_count, 1);
+        assert!(list_item.has_template_variables);
     }
 
     #[test]
@@ -2435,6 +2727,25 @@ mod tests {
     }
 
     #[test]
+    fn edit_with_provider_name_client_field_fails_deserialization() {
+        let payload = serde_json::json!({
+            "name": "June Promo",
+            "template_name": "promo_template",
+            "template_language": "es",
+            "template_variable_bindings": [{
+                "component": "body",
+                "index": 1,
+                "placeholder": "{{1}}",
+                "source": "client_field",
+                "client_field": "provider_name"
+            }],
+            "filters": { "client_state": "active" }
+        });
+
+        assert!(serde_json::from_value::<UpdateCampaignRequest>(payload).is_err());
+    }
+
+    #[test]
     fn edit_regeneration_failure_plan_preserves_existing_snapshot_until_snapshot_build_succeeds() {
         let invalid_filter_request = CampaignPreviewRequest {
             provider_ids: None,
@@ -2495,8 +2806,10 @@ mod tests {
     #[test]
     fn confirm_template_with_variables_without_bindings_fails() {
         let components = vec![serde_json::json!({ "type": "BODY", "text": "Hello {{1}}" })];
+        let none_bindings: Option<&[TemplateVariableBinding]> = None;
 
-        let err = validate_bindings_against_template_components(&components, None).unwrap_err();
+        let err =
+            validate_bindings_against_template_components(&components, none_bindings).unwrap_err();
 
         assert!(matches!(
             err,
@@ -2518,6 +2831,23 @@ mod tests {
     }
 
     #[test]
+    fn confirm_template_with_legacy_provider_name_binding_fails() {
+        let components = vec![serde_json::json!({ "type": "BODY", "text": "Hello {{1}}" })];
+        let bindings = vec![legacy_provider_name_body_binding(1)];
+
+        let err = validate_bindings_against_template_components(&components, Some(&bindings))
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, ref field, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && code == "template_variable_client_field_unsupported"
+                    && field.as_deref() == Some("template_variable_bindings.client_field")
+        ));
+    }
+
+    #[test]
     fn confirm_template_with_payment_due_day_variable_passes() {
         let components = vec![serde_json::json!({ "type": "BODY", "text": "Due day {{1}}" })];
         let bindings = vec![payment_due_day_body_binding(1)];
@@ -2530,8 +2860,9 @@ mod tests {
     #[test]
     fn confirm_template_without_variables_passes() {
         let components = vec![serde_json::json!({ "type": "BODY", "text": "Hello" })];
+        let none_bindings: Option<&[TemplateVariableBinding]> = None;
 
-        assert!(validate_bindings_against_template_components(&components, None).is_ok());
+        assert!(validate_bindings_against_template_components(&components, none_bindings).is_ok());
     }
 
     #[test]

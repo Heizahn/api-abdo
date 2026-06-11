@@ -163,7 +163,6 @@ pub enum TemplateClientField {
     ClientName,
     Balance,
     PaymentDueDay,
-    ProviderName,
     SectorName,
     CustomerStatusDerived,
     PhoneNormalized,
