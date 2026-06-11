@@ -8,7 +8,10 @@ use mongodb::bson::{doc, oid::ObjectId, Bson, DateTime, Document};
 use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument, UpdateModifications};
 use serde::{Deserialize, Serialize};
 
-use crate::{error::ApiError, modules::whatsapp::shared::time::iso8601, state::AppState};
+use crate::{
+    db::WaTemplateRepository, error::ApiError, models::whatsapp::WaTemplate,
+    modules::whatsapp::shared::time::iso8601, state::AppState,
+};
 
 use super::{
     dto::{
@@ -16,9 +19,9 @@ use super::{
         CampaignPreviewRecipient, CampaignPreviewRequest, CampaignPreviewResponse,
         CampaignPreviewTotals, CampaignRecipientItem, CampaignRecipientsQuery,
         CampaignRecipientsResponse, CampaignSummary, CampaignSummaryResponse, ClientStateFilter,
-        CreateCampaignRequest, DerivedClientState, PhoneStatus,
-        UpdateCampaignRecipientExclusionsData, UpdateCampaignRecipientExclusionsRequest,
-        UpdateCampaignRecipientExclusionsResponse,
+        CreateCampaignRequest, DerivedClientState, PhoneStatus, TemplateVariableBinding,
+        TemplateVariableComponent, TemplateVariableSource, UpdateCampaignRecipientExclusionsData,
+        UpdateCampaignRecipientExclusionsRequest, UpdateCampaignRecipientExclusionsResponse,
     },
     phone::normalize_phone_to_whatsapp,
 };
@@ -33,10 +36,14 @@ struct WaCampaignDoc {
     #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
     id: Option<ObjectId>,
     name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    phone_number_id: Option<String>,
     template_name: String,
     template_language: String,
     #[serde(default)]
     template_components: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    template_variable_bindings: Option<Vec<TemplateVariableBinding>>,
     filters: CampaignPreviewRequest,
     status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -143,6 +150,8 @@ pub async fn create_campaign(
             "template_language_required".to_string(),
         ));
     }
+    let phone_number_id = normalize_optional_phone_number_id(request.phone_number_id.as_deref())?;
+    validate_create_template_variable_bindings(request.template_variable_bindings.as_deref())?;
 
     let (totals, recipients) = build_recipients_snapshot(state, &request.filters).await?;
     let now = DateTime::now();
@@ -150,9 +159,11 @@ pub async fn create_campaign(
     let campaign = WaCampaignDoc {
         id: Some(campaign_id.clone()),
         name: request.name.trim().to_string(),
+        phone_number_id,
         template_name: request.template_name.trim().to_string(),
         template_language: request.template_language.trim().to_string(),
         template_components: request.template_components,
+        template_variable_bindings: request.template_variable_bindings,
         filters: request.filters,
         status: "draft".to_string(),
         confirming_from: None,
@@ -242,6 +253,16 @@ pub async fn confirm_campaign(
         .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients");
 
     let campaign = claim_campaign_for_confirmation(&campaigns, &campaign_id).await?;
+
+    if let Err(err) = validate_confirmation_template(state, &campaign).await {
+        restore_campaign_after_failed_confirmation(
+            &campaigns,
+            &campaign_id,
+            campaign.status.as_str(),
+        )
+        .await?;
+        return Err(err);
+    }
 
     let effective_recipients = recipients
         .count_documents(effective_recipient_filter(campaign_id.clone()))
@@ -771,6 +792,338 @@ async fn cleanup_campaign_snapshot(
     Ok(())
 }
 
+fn normalize_optional_phone_number_id(value: Option<&str>) -> Result<Option<String>, ApiError> {
+    match value.map(str::trim) {
+        Some("") => Err(ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            "invalid_phone_number_id",
+            "phone_number_id",
+            "phone_number_id cannot be empty when provided.",
+        )),
+        Some(value) => Ok(Some(value.to_string())),
+        None => Ok(None),
+    }
+}
+
+fn validate_create_template_variable_bindings(
+    bindings: Option<&[TemplateVariableBinding]>,
+) -> Result<(), ApiError> {
+    if let Some(bindings) = bindings {
+        validate_binding_basics(bindings)?;
+    }
+    Ok(())
+}
+
+fn validate_binding_basics(bindings: &[TemplateVariableBinding]) -> Result<(), ApiError> {
+    let mut seen = HashSet::new();
+
+    for binding in bindings {
+        if binding.index < 1 {
+            return Err(ApiError::domain_with_field(
+                StatusCode::BAD_REQUEST,
+                "invalid_template_variable_binding",
+                "template_variable_bindings.index",
+                "Template variable binding index must be greater than or equal to 1.",
+            ));
+        }
+        if let TemplateVariableComponent::Button = binding.component {
+            if binding.button_index.is_some_and(|index| index < 0) {
+                return Err(ApiError::domain_with_field(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_template_variable_binding",
+                    "template_variable_bindings.button_index",
+                    "Template button variable binding button_index must be greater than or equal to 0.",
+                ));
+            }
+        }
+
+        let key = (
+            binding.component.clone(),
+            binding.index,
+            binding.button_index,
+        );
+        if !seen.insert(key) {
+            return Err(ApiError::domain_with_field(
+                StatusCode::BAD_REQUEST,
+                "duplicate_template_variable_binding",
+                "template_variable_bindings",
+                "Template variable bindings cannot contain duplicate component/index/button_index entries.",
+            ));
+        }
+
+        if let Some(placeholder_index) = placeholder_index(&binding.placeholder) {
+            if placeholder_index != binding.index {
+                return Err(ApiError::domain_with_field(
+                    StatusCode::BAD_REQUEST,
+                    "template_variable_placeholder_mismatch",
+                    "template_variable_bindings.placeholder",
+                    "Template variable binding placeholder must match its index.",
+                ));
+            }
+        }
+
+        match binding.source {
+            TemplateVariableSource::Static => {
+                if binding
+                    .value
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
+                {
+                    return Err(ApiError::domain_with_field(
+                        StatusCode::BAD_REQUEST,
+                        "template_variable_static_value_required",
+                        "template_variable_bindings.value",
+                        "Static template variable bindings require a non-empty value.",
+                    ));
+                }
+            }
+            TemplateVariableSource::ClientField => {
+                if binding.client_field.is_none() {
+                    return Err(ApiError::domain_with_field(
+                        StatusCode::BAD_REQUEST,
+                        "template_variable_client_field_required",
+                        "template_variable_bindings.client_field",
+                        "Client-field template variable bindings require a valid client_field.",
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn validate_confirmation_template(
+    state: &AppState,
+    campaign: &WaCampaignDoc,
+) -> Result<(), ApiError> {
+    let phone_number_id = campaign
+        .phone_number_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError::domain_simple(
+                StatusCode::BAD_REQUEST,
+                "missing_phone_number_id",
+                "Campaign must have a phone_number_id before confirmation.",
+            )
+        })?;
+
+    let template = state
+        .db
+        .find_template_by_phone_name_lang(
+            phone_number_id,
+            campaign.template_name.as_str(),
+            campaign.template_language.as_str(),
+        )
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| {
+            ApiError::domain_simple(
+                StatusCode::BAD_REQUEST,
+                "campaign_template_not_found",
+                "Campaign template was not found for the selected phone_number_id, name, and language.",
+            )
+        })?;
+
+    validate_bindings_against_template(&template, campaign.template_variable_bindings.as_deref())
+}
+
+fn validate_bindings_against_template(
+    template: &WaTemplate,
+    bindings: Option<&[TemplateVariableBinding]>,
+) -> Result<(), ApiError> {
+    validate_bindings_against_template_components(&template.components, bindings)
+}
+
+fn validate_bindings_against_template_components(
+    components: &[serde_json::Value],
+    bindings: Option<&[TemplateVariableBinding]>,
+) -> Result<(), ApiError> {
+    let required = extract_template_placeholders(components)?;
+    let bindings = bindings.unwrap_or(&[]);
+
+    if required.is_empty() {
+        if bindings.is_empty() {
+            return Ok(());
+        }
+        return Err(ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            "template_variable_bindings_not_expected",
+            "template_variable_bindings",
+            "Template has no placeholders, so variable bindings are not expected.",
+        ));
+    }
+
+    validate_binding_basics(bindings)?;
+
+    let required_keys = required
+        .iter()
+        .map(|placeholder| {
+            (
+                placeholder.component.clone(),
+                placeholder.index,
+                placeholder.button_index,
+            )
+        })
+        .collect::<HashSet<_>>();
+    let binding_keys = bindings
+        .iter()
+        .map(|binding| {
+            (
+                binding.component.clone(),
+                binding.index,
+                binding.button_index,
+            )
+        })
+        .collect::<HashSet<_>>();
+
+    if binding_keys != required_keys {
+        let code = if binding_keys.is_subset(&required_keys) {
+            "template_variable_bindings_incomplete"
+        } else {
+            "template_variable_bindings_extra"
+        };
+        return Err(ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            code,
+            "template_variable_bindings",
+            "Template variable bindings must exactly match the template placeholders.",
+        ));
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TemplatePlaceholder {
+    component: TemplateVariableComponent,
+    index: i32,
+    button_index: Option<i32>,
+}
+
+fn extract_template_placeholders(
+    components: &[serde_json::Value],
+) -> Result<Vec<TemplatePlaceholder>, ApiError> {
+    let mut placeholders = Vec::new();
+
+    for component in components {
+        let component_type = component
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+
+        match component_type.as_str() {
+            "BODY" => extract_text_placeholders(
+                component.get("text").and_then(serde_json::Value::as_str),
+                TemplateVariableComponent::Body,
+                None,
+                &mut placeholders,
+            ),
+            "HEADER" => extract_text_placeholders(
+                component.get("text").and_then(serde_json::Value::as_str),
+                TemplateVariableComponent::Header,
+                None,
+                &mut placeholders,
+            ),
+            "BUTTONS" => {
+                let buttons = component
+                    .get("buttons")
+                    .and_then(serde_json::Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                for (button_index, button) in buttons.iter().enumerate() {
+                    extract_text_placeholders(
+                        button.get("url").and_then(serde_json::Value::as_str),
+                        TemplateVariableComponent::Button,
+                        Some(button_index as i32),
+                        &mut placeholders,
+                    );
+                }
+            }
+            _ => {
+                if value_has_placeholder(component) {
+                    return Err(ApiError::domain_simple(
+                        StatusCode::BAD_REQUEST,
+                        "template_variable_unsupported_component",
+                        "Template contains placeholders in an unsupported component.",
+                    ));
+                }
+            }
+        }
+    }
+
+    placeholders.sort_by_key(|placeholder| {
+        (
+            component_sort_key(&placeholder.component),
+            placeholder.button_index.unwrap_or(-1),
+            placeholder.index,
+        )
+    });
+    placeholders.dedup();
+    Ok(placeholders)
+}
+
+fn extract_text_placeholders(
+    text: Option<&str>,
+    component: TemplateVariableComponent,
+    button_index: Option<i32>,
+    output: &mut Vec<TemplatePlaceholder>,
+) {
+    if let Some(text) = text {
+        for index in placeholder_indices(text) {
+            output.push(TemplatePlaceholder {
+                component: component.clone(),
+                index,
+                button_index,
+            });
+        }
+    }
+}
+
+fn placeholder_index(value: &str) -> Option<i32> {
+    let mut indices = placeholder_indices(value);
+    let first = indices.next()?;
+    if indices.next().is_none() {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+fn placeholder_indices(value: &str) -> impl Iterator<Item = i32> + '_ {
+    value.match_indices("{{").filter_map(|(start, _)| {
+        let rest = &value[start + 2..];
+        let end = rest.find("}}")?;
+        rest[..end]
+            .trim()
+            .parse::<i32>()
+            .ok()
+            .filter(|index| *index >= 1)
+    })
+}
+
+fn value_has_placeholder(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(value) => placeholder_indices(value).next().is_some(),
+        serde_json::Value::Array(values) => values.iter().any(value_has_placeholder),
+        serde_json::Value::Object(map) => map.values().any(value_has_placeholder),
+        _ => false,
+    }
+}
+
+fn component_sort_key(component: &TemplateVariableComponent) -> i32 {
+    match component {
+        TemplateVariableComponent::Header => 0,
+        TemplateVariableComponent::Body => 1,
+        TemplateVariableComponent::Button => 2,
+    }
+}
+
 fn pagination_skip(page: u32, per_page: u32) -> u64 {
     u64::from(page.saturating_sub(1)).saturating_mul(u64::from(per_page))
 }
@@ -1039,9 +1392,11 @@ fn campaign_to_summary(campaign: WaCampaignDoc) -> CampaignSummary {
     CampaignSummary {
         id: campaign.id.map(|id| id.to_hex()).unwrap_or_default(),
         name: campaign.name,
+        phone_number_id: campaign.phone_number_id,
         template_name: campaign.template_name,
         template_language: campaign.template_language,
         template_components: campaign.template_components,
+        template_variable_bindings: campaign.template_variable_bindings,
         filters: campaign.filters,
         status: campaign.status,
         total_recipients: campaign.total_recipients,
@@ -1065,8 +1420,18 @@ fn campaign_to_list_item(campaign: WaCampaignDoc) -> CampaignListItem {
     CampaignListItem {
         id: campaign.id.map(|id| id.to_hex()).unwrap_or_default(),
         name: campaign.name,
+        phone_number_id: campaign.phone_number_id,
         template_name: campaign.template_name,
         template_language: campaign.template_language,
+        has_template_variables: campaign
+            .template_variable_bindings
+            .as_ref()
+            .is_some_and(|bindings| !bindings.is_empty()),
+        template_variables_count: campaign
+            .template_variable_bindings
+            .as_ref()
+            .map(Vec::len)
+            .unwrap_or(0),
         status: campaign.status,
         total_recipients: campaign.total_recipients,
         total_can_send: campaign.total_can_send,
@@ -1423,9 +1788,11 @@ mod tests {
         WaCampaignDoc {
             id: Some(ObjectId::parse_str("64f000000000000000000001").unwrap()),
             name: "June Promo".to_string(),
+            phone_number_id: Some("1234567890".to_string()),
             template_name: "promo_template".to_string(),
             template_language: "es".to_string(),
             template_components: None,
+            template_variable_bindings: None,
             filters: CampaignPreviewRequest {
                 provider_ids: None,
                 sector_ids: None,
@@ -1448,6 +1815,154 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    fn static_body_binding(index: i32, value: &str) -> TemplateVariableBinding {
+        TemplateVariableBinding {
+            component: TemplateVariableComponent::Body,
+            index,
+            placeholder: format!("{{{{{index}}}}}"),
+            source: TemplateVariableSource::Static,
+            value: Some(value.to_string()),
+            client_field: None,
+            button_index: None,
+        }
+    }
+
+    fn client_field_body_binding(index: i32) -> TemplateVariableBinding {
+        TemplateVariableBinding {
+            component: TemplateVariableComponent::Body,
+            index,
+            placeholder: format!("{{{{{index}}}}}"),
+            source: TemplateVariableSource::ClientField,
+            value: None,
+            client_field: Some(
+                crate::modules::whatsapp::campaigns::dto::TemplateClientField::ClientName,
+            ),
+            button_index: None,
+        }
+    }
+
+    #[test]
+    fn create_with_phone_number_id_persists_to_summary() {
+        let mut campaign = base_campaign("draft");
+        campaign.phone_number_id = Some("987654321".to_string());
+
+        let summary = campaign_to_summary(campaign);
+
+        assert_eq!(summary.phone_number_id.as_deref(), Some("987654321"));
+    }
+
+    #[test]
+    fn create_with_bindings_persists_to_summary() {
+        let mut campaign = base_campaign("draft");
+        campaign.template_variable_bindings = Some(vec![static_body_binding(1, "ABDO")]);
+
+        let summary = campaign_to_summary(campaign);
+
+        assert_eq!(summary.template_variable_bindings.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn create_with_empty_static_binding_fails() {
+        let err = validate_create_template_variable_bindings(Some(&[static_body_binding(1, " ")]))
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, ref field, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && code == "template_variable_static_value_required"
+                    && field.as_deref() == Some("template_variable_bindings.value")
+        ));
+    }
+
+    #[test]
+    fn create_with_invalid_client_field_fails_deserialization() {
+        let payload = serde_json::json!({
+            "component": "body",
+            "index": 1,
+            "placeholder": "{{1}}",
+            "source": "client_field",
+            "client_field": "not_allowed"
+        });
+
+        assert!(serde_json::from_value::<TemplateVariableBinding>(payload).is_err());
+    }
+
+    #[test]
+    fn create_with_duplicate_bindings_fails() {
+        let err = validate_create_template_variable_bindings(Some(&[
+            static_body_binding(1, "A"),
+            static_body_binding(1, "B"),
+        ]))
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, ref field, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && code == "duplicate_template_variable_binding"
+                    && field.as_deref() == Some("template_variable_bindings")
+        ));
+    }
+
+    #[test]
+    fn confirm_legacy_without_phone_number_id_fails() {
+        let mut campaign = base_campaign("draft");
+        campaign.phone_number_id = None;
+
+        let missing = campaign
+            .phone_number_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                ApiError::domain_simple(
+                    StatusCode::BAD_REQUEST,
+                    "missing_phone_number_id",
+                    "Campaign must have a phone_number_id before confirmation.",
+                )
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            missing,
+            ApiError::Domain { status, ref code, .. }
+                if status == StatusCode::BAD_REQUEST && code == "missing_phone_number_id"
+        ));
+    }
+
+    #[test]
+    fn confirm_template_with_variables_without_bindings_fails() {
+        let components = vec![serde_json::json!({ "type": "BODY", "text": "Hello {{1}}" })];
+
+        let err = validate_bindings_against_template_components(&components, None).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, ref field, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && code == "template_variable_bindings_incomplete"
+                    && field.as_deref() == Some("template_variable_bindings")
+        ));
+    }
+
+    #[test]
+    fn confirm_template_with_complete_variables_passes() {
+        let components = vec![serde_json::json!({ "type": "BODY", "text": "Hello {{1}}" })];
+        let bindings = vec![client_field_body_binding(1)];
+
+        assert!(
+            validate_bindings_against_template_components(&components, Some(&bindings)).is_ok()
+        );
+    }
+
+    #[test]
+    fn confirm_template_without_variables_passes() {
+        let components = vec![serde_json::json!({ "type": "BODY", "text": "Hello" })];
+
+        assert!(validate_bindings_against_template_components(&components, None).is_ok());
     }
 
     #[test]

@@ -106,12 +106,56 @@ pub struct CampaignPreviewRecipient {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateCampaignRequest {
     pub name: String,
+    #[serde(default)]
+    pub phone_number_id: Option<String>,
     pub template_name: String,
     pub template_language: String,
     #[serde(default)]
     #[schema(value_type = Option<Vec<Object>>)]
     pub template_components: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    pub template_variable_bindings: Option<Vec<TemplateVariableBinding>>,
     pub filters: CampaignPreviewRequest,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateVariableComponent {
+    Body,
+    Header,
+    Button,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateVariableSource {
+    Static,
+    ClientField,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateClientField {
+    ClientName,
+    Balance,
+    ProviderName,
+    SectorName,
+    CustomerStatusDerived,
+    PhoneNormalized,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+pub struct TemplateVariableBinding {
+    pub component: TemplateVariableComponent,
+    pub index: i32,
+    pub placeholder: String,
+    pub source: TemplateVariableSource,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub client_field: Option<TemplateClientField>,
+    #[serde(default)]
+    pub button_index: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -152,8 +196,11 @@ pub struct CampaignListResponse {
 pub struct CampaignListItem {
     pub id: String,
     pub name: String,
+    pub phone_number_id: Option<String>,
     pub template_name: String,
     pub template_language: String,
+    pub has_template_variables: bool,
+    pub template_variables_count: usize,
     pub status: String,
     pub total_recipients: u64,
     pub total_can_send: u64,
@@ -198,10 +245,12 @@ pub struct CampaignSummaryResponse {
 pub struct CampaignSummary {
     pub id: String,
     pub name: String,
+    pub phone_number_id: Option<String>,
     pub template_name: String,
     pub template_language: String,
     #[schema(value_type = Option<Vec<Object>>)]
     pub template_components: Option<Vec<serde_json::Value>>,
+    pub template_variable_bindings: Option<Vec<TemplateVariableBinding>>,
     pub filters: CampaignPreviewRequest,
     pub status: String,
     pub total_recipients: u64,

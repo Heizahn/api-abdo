@@ -86,8 +86,10 @@ use crate::modules::whatsapp::campaigns::dto::{
     CampaignPreviewRecipient, CampaignPreviewRequest, CampaignPreviewResponse,
     CampaignPreviewTotals, CampaignRecipientItem, CampaignRecipientsQuery,
     CampaignRecipientsResponse, CampaignSummary, CampaignSummaryResponse, ClientStateFilter,
-    CreateCampaignRequest, DerivedClientState, PhoneStatus, UpdateCampaignRecipientExclusionsData,
-    UpdateCampaignRecipientExclusionsRequest, UpdateCampaignRecipientExclusionsResponse,
+    CreateCampaignRequest, DerivedClientState, PhoneStatus, TemplateClientField,
+    TemplateVariableBinding, TemplateVariableComponent, TemplateVariableSource,
+    UpdateCampaignRecipientExclusionsData, UpdateCampaignRecipientExclusionsRequest,
+    UpdateCampaignRecipientExclusionsResponse,
 };
 use crate::modules::whatsapp::conversations::lifecycle::{
     InterveneData, InterveneResponse, ResetAiStateResponse,
@@ -97,7 +99,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.65",
+        version = "0.3.66",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
@@ -332,7 +334,8 @@ use crate::modules::whatsapp::conversations::lifecycle::{
             // WhatsApp — Campaigns
             CampaignPreviewRequest, BalanceFilter, BalanceRange, ClientStateFilter,
             CampaignPreviewResponse, CampaignPreviewTotals, CampaignPreviewRecipient,
-            PhoneStatus, DerivedClientState, CreateCampaignRequest, CampaignRecipientsQuery,
+            PhoneStatus, DerivedClientState, TemplateVariableComponent, TemplateVariableSource,
+            TemplateClientField, TemplateVariableBinding, CreateCampaignRequest, CampaignRecipientsQuery,
             CampaignListQuery, CampaignListResponse, CampaignListItem,
             CampaignSummaryResponse, CampaignSummary, CampaignRecipientsResponse, CampaignRecipientItem,
             UpdateCampaignRecipientExclusionsRequest, UpdateCampaignRecipientExclusionsResponse,
