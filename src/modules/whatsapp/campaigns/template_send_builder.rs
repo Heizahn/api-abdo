@@ -125,6 +125,9 @@ fn build_header_media_component(
             json!({ "link": value })
         }
         TemplateMediaSource::MediaId => json!({ "id": value }),
+        TemplateMediaSource::TemplateMediaId => {
+            return Err(CampaignTemplateSendBuildError::InvalidTemplateMediaBinding)
+        }
     };
 
     let mut parameter = serde_json::Map::new();
@@ -335,6 +338,30 @@ mod tests {
                     "parameters": [{ "type": "text", "text": "Maria Perez" }]
                 })
             ]
+        );
+    }
+
+    #[test]
+    fn rejects_unresolved_template_media_id() {
+        let components = media_template("IMAGE");
+        let bindings = vec![TemplateMediaBinding {
+            component: TemplateMediaComponent::Header,
+            media_type: TemplateMediaType::Image,
+            source: TemplateMediaSource::TemplateMediaId,
+            value: "665f00000000000000000001".to_string(),
+        }];
+
+        let err = build_campaign_template_send_components(
+            Some(&components),
+            Some(&[body_binding(TemplateClientField::ClientName)]),
+            Some(&bindings),
+            &recipient(),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            err,
+            CampaignTemplateSendBuildError::InvalidTemplateMediaBinding
         );
     }
 

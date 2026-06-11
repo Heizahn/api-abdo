@@ -1265,6 +1265,7 @@ pub struct StoreTemplateMediaInput<'a> {
 pub struct WaTemplateMediaRef {
     pub id: mongodb::bson::oid::ObjectId,
     pub phone_number_id: String,
+    pub format: String,
     pub mime_type: String,
     pub sha256: String,
     pub file_size: u64,

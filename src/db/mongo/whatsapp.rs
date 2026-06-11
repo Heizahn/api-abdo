@@ -2893,6 +2893,8 @@ struct WaTemplateMediaMetadata {
     #[serde(default)]
     phone_number_id: String,
     #[serde(default)]
+    format: String,
+    #[serde(default)]
     mime_type: String,
     #[serde(default)]
     sha256: String,
@@ -2920,12 +2922,14 @@ impl WaTemplateMediaRepository for MongoDB {
         if let Some(doc) = existing {
             let meta = doc.metadata.unwrap_or_else(|| WaTemplateMediaMetadata {
                 phone_number_id: input.phone_number_id.to_string(),
+                format: input.format.to_string(),
                 mime_type: input.mime_type.to_string(),
                 sha256: input.sha256.to_string(),
             });
             return Ok(WaTemplateMediaRef {
                 id: doc.id,
                 phone_number_id: meta.phone_number_id,
+                format: meta.format,
                 mime_type: meta.mime_type,
                 sha256: meta.sha256,
                 file_size: doc.length as u64,
@@ -2978,6 +2982,7 @@ impl WaTemplateMediaRepository for MongoDB {
         Ok(WaTemplateMediaRef {
             id: file_id,
             phone_number_id: input.phone_number_id.to_string(),
+            format: input.format.to_string(),
             mime_type: input.mime_type.to_string(),
             sha256: input.sha256.to_string(),
             file_size: input.bytes.len() as u64,
@@ -3000,12 +3005,14 @@ impl WaTemplateMediaRepository for MongoDB {
         Ok(doc.map(|d| {
             let meta = d.metadata.unwrap_or_else(|| WaTemplateMediaMetadata {
                 phone_number_id: String::new(),
+                format: String::new(),
                 mime_type: String::new(),
                 sha256: String::new(),
             });
             WaTemplateMediaRef {
                 id: d.id,
                 phone_number_id: meta.phone_number_id,
+                format: meta.format,
                 mime_type: meta.mime_type,
                 sha256: meta.sha256,
                 file_size: d.length as u64,

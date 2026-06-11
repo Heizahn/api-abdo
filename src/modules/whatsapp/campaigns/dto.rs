@@ -208,6 +208,7 @@ pub enum TemplateMediaType {
 pub enum TemplateMediaSource {
     Link,
     MediaId,
+    TemplateMediaId,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq, Eq)]

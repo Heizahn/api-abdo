@@ -1741,6 +1741,18 @@ pub struct WaTemplate {
     pub updated_at: DateTime,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WaTemplateDefaultMediaBinding {
+    pub component: String,
+    pub media_type: String,
+    pub source: String,
+    pub value: String,
+    pub mime_type: String,
+    pub file_size: u64,
+    pub sha256: String,
+    pub display_name: String,
+}
+
 /// Shape de response (string IDs + ISO-8601 dates).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct WaTemplateItem {
@@ -1752,6 +1764,8 @@ pub struct WaTemplateItem {
     pub language: String,
     pub category: WaTemplateCategory,
     pub components: Vec<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_media_binding: Option<WaTemplateDefaultMediaBinding>,
     pub body_placeholders: u32,
     pub status: WaTemplateStatus,
     #[serde(skip_serializing_if = "Option::is_none")]

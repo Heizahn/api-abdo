@@ -10,7 +10,10 @@ use mongodb::bson::{oid::ObjectId, DateTime};
 use crate::{
     auth::user_jwt::UserProfileClaims,
     crypto::aes::decrypt_payload,
-    db::{WaTemplateListFilter, WaTemplateRepository, WaTemplateUpdatePatch, WhatsAppRepository},
+    db::{
+        WaTemplateListFilter, WaTemplateMediaRef, WaTemplateMediaRepository, WaTemplateRepository,
+        WaTemplateUpdatePatch, WhatsAppRepository,
+    },
     error::ApiError,
     models::whatsapp::*,
     state::AppState,
@@ -353,13 +356,137 @@ pub async fn list_templates_handler(
         })
     };
 
-    let data: Vec<WaTemplateItem> = templates.into_iter().map(to_template_item).collect();
+    let mut data = Vec::with_capacity(templates.len());
+    for template in templates {
+        data.push(to_template_item_with_default_media_binding(&state, template).await?);
+    }
 
     Ok(Json(WaTemplatesListResponse {
         ok: true,
         data,
         next_cursor,
     }))
+}
+
+async fn to_template_item_with_default_media_binding(
+    state: &Arc<AppState>,
+    template: WaTemplate,
+) -> Result<WaTemplateItem, ApiError> {
+    let default_media_binding = load_default_media_binding(state, &template).await?;
+    let mut item = to_template_item(template);
+    item.default_media_binding = default_media_binding;
+    Ok(item)
+}
+
+async fn load_default_media_binding(
+    state: &Arc<AppState>,
+    template: &WaTemplate,
+) -> Result<Option<WaTemplateDefaultMediaBinding>, ApiError> {
+    let Some((media_type, media_id)) = template_header_media_ref(&template.components) else {
+        return Ok(None);
+    };
+    let Ok(oid) = ObjectId::parse_str(&media_id) else {
+        return Ok(None);
+    };
+
+    let Some(media) = state
+        .db
+        .find_template_media_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some(template_default_media_binding(media_type, media)))
+}
+
+fn template_header_media_ref(components: &[serde_json::Value]) -> Option<(String, String)> {
+    let header = components.iter().find(|component| {
+        component
+            .get("type")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("HEADER"))
+    })?;
+    let media_type = match header
+        .get("format")?
+        .as_str()?
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "IMAGE" => "image",
+        "VIDEO" => "video",
+        "DOCUMENT" => "document",
+        _ => return None,
+    };
+    let media_id = header.pointer("/example/header_handle/0")?.as_str()?.trim();
+    if media_id.is_empty() {
+        return None;
+    }
+    Some((media_type.to_string(), media_id.to_string()))
+}
+
+fn template_default_media_binding(
+    media_type: String,
+    media: WaTemplateMediaRef,
+) -> WaTemplateDefaultMediaBinding {
+    WaTemplateDefaultMediaBinding {
+        component: "header".to_string(),
+        media_type,
+        source: "template_media_id".to_string(),
+        value: media.id.to_hex(),
+        mime_type: media.mime_type,
+        file_size: media.file_size,
+        sha256: media.sha256,
+        display_name: "Media guardada en plantilla".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_image_object_id_can_derive_default_media_binding() {
+        let media_id = ObjectId::parse_str("665f00000000000000000001").unwrap();
+        let components = vec![serde_json::json!({
+            "type": "HEADER",
+            "format": "IMAGE",
+            "example": { "header_handle": [media_id.to_hex()] }
+        })];
+        let media = WaTemplateMediaRef {
+            id: media_id,
+            phone_number_id: "123".to_string(),
+            format: "IMAGE".to_string(),
+            mime_type: "image/jpeg".to_string(),
+            sha256: "abc".to_string(),
+            file_size: 12345,
+        };
+
+        let (media_type, value) = template_header_media_ref(&components).unwrap();
+        let binding = template_default_media_binding(media_type, media);
+
+        assert_eq!(value, "665f00000000000000000001");
+        assert_eq!(binding.component, "header");
+        assert_eq!(binding.media_type, "image");
+        assert_eq!(binding.source, "template_media_id");
+        assert_eq!(binding.value, "665f00000000000000000001");
+        assert_eq!(binding.mime_type, "image/jpeg");
+        assert_eq!(binding.file_size, 12345);
+        assert_eq!(binding.sha256, "abc");
+    }
+
+    #[test]
+    fn header_handle_non_object_id_is_not_local_media() {
+        let components = vec![serde_json::json!({
+            "type": "HEADER",
+            "format": "IMAGE",
+            "example": { "header_handle": ["4::meta-header-handle"] }
+        })];
+
+        let (_, value) = template_header_media_ref(&components).unwrap();
+        assert!(ObjectId::parse_str(value).is_err());
+    }
 }
 
 #[utoipa::path(
@@ -393,7 +520,7 @@ pub async fn get_template_handler(
 
     Ok(Json(WaTemplateResponse {
         ok: true,
-        data: to_template_item(doc),
+        data: to_template_item_with_default_media_binding(&state, doc).await?,
     }))
 }
 

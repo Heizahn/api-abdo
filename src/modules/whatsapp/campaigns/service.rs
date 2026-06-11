@@ -15,12 +15,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     crypto::aes::decrypt_payload,
-    db::{WaTemplateRepository, WhatsAppRepository},
+    db::{WaTemplateMediaRef, WaTemplateMediaRepository, WaTemplateRepository, WhatsAppRepository},
     error::ApiError,
     models::whatsapp::{WaSettings, WaTemplate},
     modules::whatsapp::{
-        service::{MetaApiError, WhatsAppService},
-        shared::{apply_media_relay, settings_secret, time::iso8601},
+        service::{MediaRelay, MetaApiError, WhatsAppService},
+        shared::{settings_secret, time::iso8601},
     },
     state::AppState,
 };
@@ -32,10 +32,10 @@ use super::{
         CampaignPreviewTotals, CampaignProgress, CampaignRecipientItem, CampaignRecipientsQuery,
         CampaignRecipientsResponse, CampaignSummary, CampaignSummaryResponse, ClientStateFilter,
         CreateCampaignRequest, DerivedClientState, PhoneStatus, TemplateClientField,
-        TemplateMediaBinding, TemplateMediaComponent, TemplateMediaType, TemplateVariableBinding,
-        TemplateVariableComponent, TemplateVariableSource, UpdateCampaignRecipientExclusionsData,
-        UpdateCampaignRecipientExclusionsRequest, UpdateCampaignRecipientExclusionsResponse,
-        UpdateCampaignRequest, UpdateCampaignResponse,
+        TemplateMediaBinding, TemplateMediaComponent, TemplateMediaSource, TemplateMediaType,
+        TemplateVariableBinding, TemplateVariableComponent, TemplateVariableSource,
+        UpdateCampaignRecipientExclusionsData, UpdateCampaignRecipientExclusionsRequest,
+        UpdateCampaignRecipientExclusionsResponse, UpdateCampaignRequest, UpdateCampaignResponse,
     },
     phone::normalize_phone_to_whatsapp,
     template_resolver::{
@@ -562,7 +562,7 @@ fn fake_campaign_send_result(
 }
 
 async fn resolve_campaign_whatsapp_service(
-    state: &Arc<AppState>,
+    state: &AppState,
     campaign: &WaCampaignDoc,
 ) -> Result<WhatsAppService, CampaignSendError> {
     let phone_number_id = campaign
@@ -614,7 +614,102 @@ async fn resolve_campaign_whatsapp_service(
         settings.phone_number_id.clone(),
         token,
     );
-    Ok(apply_media_relay(state, service))
+    Ok(apply_media_relay_for_campaign_send(state, service))
+}
+
+fn apply_media_relay_for_campaign_send(
+    state: &AppState,
+    service: WhatsAppService,
+) -> WhatsAppService {
+    match (
+        state.config.relay_url.as_ref(),
+        state.config.relay_secret.as_ref(),
+    ) {
+        (Some(url), Some(secret)) => service.with_media_relay(MediaRelay {
+            url: url.clone(),
+            secret: secret.clone(),
+        }),
+        _ => service,
+    }
+}
+
+async fn resolve_template_media_bindings_for_send(
+    state: &AppState,
+    campaign: &WaCampaignDoc,
+) -> Result<Option<Vec<TemplateMediaBinding>>, CampaignSendError> {
+    let Some(bindings) = campaign.template_media_bindings.as_deref() else {
+        return Ok(None);
+    };
+    if !bindings
+        .iter()
+        .any(|binding| matches!(binding.source, TemplateMediaSource::TemplateMediaId))
+    {
+        return Ok(Some(bindings.to_vec()));
+    }
+
+    let service = resolve_campaign_whatsapp_service(state, campaign).await?;
+    let mut resolved = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        if !matches!(binding.source, TemplateMediaSource::TemplateMediaId) {
+            resolved.push(binding.clone());
+            continue;
+        }
+
+        let oid = ObjectId::parse_str(binding.value.trim()).map_err(|_| CampaignSendError {
+            code: "invalid_template_media_binding".to_string(),
+            message: "Template media binding value is not a valid local media id.".to_string(),
+            meta_error_code: None,
+            meta_error_subcode: None,
+            meta_error_user_msg: None,
+        })?;
+        let (bytes, mime_type) = state
+            .db
+            .read_template_media_bytes(&oid)
+            .await
+            .map_err(|err| CampaignSendError {
+                code: "template_media_lookup_failed".to_string(),
+                message: err,
+                meta_error_code: None,
+                meta_error_subcode: None,
+                meta_error_user_msg: None,
+            })?
+            .ok_or_else(|| CampaignSendError {
+                code: "invalid_template_media_binding".to_string(),
+                message: "Template media binding points to a missing local media file.".to_string(),
+                meta_error_code: None,
+                meta_error_subcode: None,
+                meta_error_user_msg: None,
+            })?;
+
+        let meta_media_id = service
+            .upload_media(bytes, &mime_type, None)
+            .await
+            .map_err(|err| CampaignSendError {
+                code: "template_media_upload_failed".to_string(),
+                message: err.to_string(),
+                meta_error_code: None,
+                meta_error_subcode: None,
+                meta_error_user_msg: None,
+            })?;
+
+        resolved.push(template_media_binding_with_meta_media_id(
+            binding,
+            meta_media_id,
+        ));
+    }
+
+    Ok(Some(resolved))
+}
+
+fn template_media_binding_with_meta_media_id(
+    binding: &TemplateMediaBinding,
+    meta_media_id: String,
+) -> TemplateMediaBinding {
+    TemplateMediaBinding {
+        source: TemplateMediaSource::MediaId,
+        value: meta_media_id,
+        ..binding.clone()
+    }
 }
 
 fn validate_wa_settings_for_campaign_send(settings: &WaSettings) -> Result<(), CampaignSendError> {
@@ -722,6 +817,12 @@ pub async fn create_campaign(
     let phone_number_id = normalize_optional_phone_number_id(request.phone_number_id.as_deref())?;
     validate_create_template_variable_bindings(request.template_variable_bindings.as_deref())?;
     validate_template_media_bindings(request.template_media_bindings.as_deref())?;
+    validate_template_media_bindings_against_gridfs(
+        state,
+        phone_number_id.as_deref(),
+        request.template_media_bindings.as_deref(),
+    )
+    .await?;
 
     let (totals, recipients) = build_recipients_snapshot(state, &request.filters).await?;
     let now = DateTime::now();
@@ -841,6 +942,19 @@ pub async fn update_campaign(
         .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients");
     let campaign = claim_campaign_for_editing(&campaigns, &campaign_id).await?;
     let original_status = campaign.status.clone();
+    let next_phone_number_id =
+        normalize_optional_phone_number_id(request.phone_number_id.as_deref())?
+            .or_else(|| campaign.phone_number_id.clone());
+    if let Err(err) = validate_template_media_bindings_against_gridfs(
+        state,
+        next_phone_number_id.as_deref(),
+        request.template_media_bindings.as_deref(),
+    )
+    .await
+    {
+        let _ = restore_campaign_after_failed_edit(&campaigns, &campaign_id, &campaign).await;
+        return Err(err);
+    }
     let filters_changed = campaign_snapshot_filters_changed(&campaign.filters, &request.filters);
 
     if !filters_changed {
@@ -1479,6 +1593,8 @@ where
     );
 
     let mut claimed = 0usize;
+    let mut resolved_media_bindings: Option<Vec<TemplateMediaBinding>> = None;
+    let mut media_resolution_error: Option<CampaignSendError> = None;
     while claimed < batch_size {
         let Some(recipient) =
             claim_next_validated_recipient_for_send(&recipients, campaign_id).await?
@@ -1486,7 +1602,26 @@ where
             break;
         };
         claimed += 1;
-        send_claimed_campaign_recipient(&recipients, sender, campaign, recipient).await?;
+
+        if resolved_media_bindings.is_none() && media_resolution_error.is_none() {
+            match resolve_template_media_bindings_for_send(state, campaign).await {
+                Ok(bindings) => resolved_media_bindings = bindings,
+                Err(err) => media_resolution_error = Some(err),
+            }
+        }
+
+        if let Some(err) = media_resolution_error.clone() {
+            mark_campaign_recipient_send_failed(&recipients, campaign, &recipient, err).await?;
+        } else {
+            send_claimed_campaign_recipient(
+                &recipients,
+                sender,
+                campaign,
+                resolved_media_bindings.as_deref(),
+                recipient,
+            )
+            .await?;
+        }
         if claimed < batch_size {
             tokio::time::sleep(Duration::from_millis(CAMPAIGN_SEND_DELAY_MS)).await;
         }
@@ -1596,6 +1731,7 @@ async fn send_claimed_campaign_recipient<S>(
     recipients: &mongodb::Collection<WaCampaignRecipientDoc>,
     sender: &S,
     campaign: &WaCampaignDoc,
+    resolved_media_bindings: Option<&[TemplateMediaBinding]>,
     recipient: WaCampaignRecipientDoc,
 ) -> Result<(), ApiError>
 where
@@ -1625,10 +1761,11 @@ where
     );
 
     let now = DateTime::now();
+    let media_bindings = resolved_media_bindings.or(campaign.template_media_bindings.as_deref());
     let components = match build_campaign_template_send_components(
         campaign.template_components.as_deref(),
         campaign.template_variable_bindings.as_deref(),
-        campaign.template_media_bindings.as_deref(),
+        media_bindings,
         &snapshot,
     ) {
         Ok(components) => components,
@@ -1751,6 +1888,45 @@ async fn resolve_claimed_dry_run_recipient(
             );
         }
     }
+
+    Ok(())
+}
+
+async fn mark_campaign_recipient_send_failed(
+    recipients: &mongodb::Collection<WaCampaignRecipientDoc>,
+    campaign: &WaCampaignDoc,
+    recipient: &WaCampaignRecipientDoc,
+    err: CampaignSendError,
+) -> Result<(), ApiError> {
+    let Some(recipient_id) = recipient.id else {
+        return Ok(());
+    };
+    let Some(campaign_id) = campaign.id else {
+        return Ok(());
+    };
+
+    let code = err.code;
+    recipients
+        .update_one(
+            doc! { "_id": recipient_id, "campaign_id": campaign_id, "status": "sending" },
+            send_recipient_failed_update(
+                &code,
+                err.message,
+                err.meta_error_code,
+                err.meta_error_subcode,
+                err.meta_error_user_msg,
+                DateTime::now(),
+            ),
+        )
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    tracing::warn!(
+        campaign_id = %campaign_id,
+        recipient_id = %recipient_id,
+        error_code = %code,
+        "WhatsApp campaign recipient send failed before Meta send"
+    );
 
     Ok(())
 }
@@ -2661,7 +2837,8 @@ fn validate_template_media_bindings(
     };
 
     for binding in bindings {
-        if binding.value.trim().is_empty() {
+        let value = binding.value.trim();
+        if value.is_empty() {
             return Err(ApiError::domain_with_field(
                 StatusCode::BAD_REQUEST,
                 "template_media_value_required",
@@ -2669,9 +2846,85 @@ fn validate_template_media_bindings(
                 "Template media binding value is required.",
             ));
         }
+        match binding.source {
+            TemplateMediaSource::Link => {
+                if !value.starts_with("https://") {
+                    return Err(invalid_template_media_binding_error());
+                }
+            }
+            TemplateMediaSource::MediaId => {}
+            TemplateMediaSource::TemplateMediaId => {
+                if ObjectId::parse_str(value).is_err() {
+                    return Err(invalid_template_media_binding_error());
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+async fn validate_template_media_bindings_against_gridfs(
+    state: &AppState,
+    campaign_phone_number_id: Option<&str>,
+    bindings: Option<&[TemplateMediaBinding]>,
+) -> Result<(), ApiError> {
+    let Some(bindings) = bindings else {
+        return Ok(());
+    };
+
+    for binding in bindings
+        .iter()
+        .filter(|binding| matches!(binding.source, TemplateMediaSource::TemplateMediaId))
+    {
+        let oid = ObjectId::parse_str(binding.value.trim())
+            .map_err(|_| invalid_template_media_binding_error())?;
+        let media = state
+            .db
+            .find_template_media_by_id(&oid)
+            .await
+            .map_err(ApiError::DatabaseError)?
+            .ok_or_else(invalid_template_media_binding_error)?;
+        validate_template_media_ref_matches_binding(campaign_phone_number_id, binding, &media)?;
+    }
+
+    Ok(())
+}
+
+fn validate_template_media_ref_matches_binding(
+    campaign_phone_number_id: Option<&str>,
+    binding: &TemplateMediaBinding,
+    media: &WaTemplateMediaRef,
+) -> Result<(), ApiError> {
+    let expected_format = template_media_type_format(&binding.media_type);
+    if !media.format.trim().is_empty() && !media.format.eq_ignore_ascii_case(expected_format) {
+        return Err(invalid_template_media_binding_error());
+    }
+
+    if let Some(phone_number_id) = campaign_phone_number_id {
+        if !media.phone_number_id.trim().is_empty() && media.phone_number_id != phone_number_id {
+            return Err(invalid_template_media_binding_error());
+        }
+    }
+
+    Ok(())
+}
+
+fn invalid_template_media_binding_error() -> ApiError {
+    ApiError::domain_with_field(
+        StatusCode::BAD_REQUEST,
+        "invalid_template_media_binding",
+        "template_media_bindings.value",
+        "Template media binding is invalid.",
+    )
+}
+
+fn template_media_type_format(media_type: &TemplateMediaType) -> &'static str {
+    match media_type {
+        TemplateMediaType::Image => "IMAGE",
+        TemplateMediaType::Video => "VIDEO",
+        TemplateMediaType::Document => "DOCUMENT",
+    }
 }
 
 #[allow(dead_code)]
@@ -3047,14 +3300,47 @@ fn validate_campaign_send_components_for_recipient(
     recipient: &WaCampaignRecipientDoc,
 ) -> Result<(), ApiError> {
     let snapshot = recipient_to_template_snapshot(recipient);
+    let media_bindings =
+        template_media_bindings_for_validation(campaign.template_media_bindings.as_deref());
     build_campaign_template_send_components(
         campaign.template_components.as_deref(),
         campaign.template_variable_bindings.as_deref(),
-        campaign.template_media_bindings.as_deref(),
+        media_bindings
+            .as_deref()
+            .or(campaign.template_media_bindings.as_deref()),
         &snapshot,
     )
     .map(|_| ())
     .map_err(campaign_send_build_error_to_api_error)
+}
+
+fn template_media_bindings_for_validation(
+    bindings: Option<&[TemplateMediaBinding]>,
+) -> Option<Vec<TemplateMediaBinding>> {
+    let bindings = bindings?;
+    if !bindings
+        .iter()
+        .any(|binding| matches!(binding.source, TemplateMediaSource::TemplateMediaId))
+    {
+        return None;
+    }
+
+    Some(
+        bindings
+            .iter()
+            .map(|binding| {
+                if matches!(binding.source, TemplateMediaSource::TemplateMediaId) {
+                    TemplateMediaBinding {
+                        source: TemplateMediaSource::MediaId,
+                        value: "template-media-validation-placeholder".to_string(),
+                        ..binding.clone()
+                    }
+                } else {
+                    binding.clone()
+                }
+            })
+            .collect(),
+    )
 }
 
 fn campaign_send_build_error_to_api_error(error: CampaignTemplateSendBuildError) -> ApiError {
@@ -4158,6 +4444,15 @@ mod tests {
         }
     }
 
+    fn header_image_template_media_id_binding(value: &str) -> TemplateMediaBinding {
+        TemplateMediaBinding {
+            component: TemplateMediaComponent::Header,
+            media_type: TemplateMediaType::Image,
+            source: crate::modules::whatsapp::campaigns::dto::TemplateMediaSource::TemplateMediaId,
+            value: value.to_string(),
+        }
+    }
+
     fn legacy_provider_name_body_binding(index: i32) -> StoredTemplateVariableBinding {
         StoredTemplateVariableBinding {
             component: TemplateVariableComponent::Body,
@@ -4279,6 +4574,64 @@ mod tests {
     }
 
     #[test]
+    fn template_media_binding_accepts_template_media_id_source() {
+        let payload = serde_json::json!({
+            "component": "header",
+            "media_type": "image",
+            "source": "template_media_id",
+            "value": "665f00000000000000000001"
+        });
+
+        let binding = serde_json::from_value::<TemplateMediaBinding>(payload).unwrap();
+        assert!(matches!(
+            binding.source,
+            TemplateMediaSource::TemplateMediaId
+        ));
+        assert!(validate_template_media_bindings(Some(&[binding])).is_ok());
+    }
+
+    #[test]
+    fn template_media_binding_rejects_invalid_template_media_id() {
+        let err =
+            validate_template_media_bindings(Some(&[header_image_template_media_id_binding(
+                "not-an-object-id",
+            )]))
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, ref field, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && code == "invalid_template_media_binding"
+                    && field.as_deref() == Some("template_media_bindings.value")
+        ));
+    }
+
+    #[test]
+    fn template_media_ref_validation_rejects_format_and_phone_mismatch() {
+        let binding = header_image_template_media_id_binding("665f00000000000000000001");
+        let mut media = WaTemplateMediaRef {
+            id: ObjectId::parse_str("665f00000000000000000001").unwrap(),
+            phone_number_id: "phone-1".to_string(),
+            format: "VIDEO".to_string(),
+            mime_type: "video/mp4".to_string(),
+            sha256: "abc".to_string(),
+            file_size: 42,
+        };
+
+        assert!(
+            validate_template_media_ref_matches_binding(Some("phone-1"), &binding, &media).is_err()
+        );
+        media.format = "IMAGE".to_string();
+        assert!(
+            validate_template_media_ref_matches_binding(Some("phone-2"), &binding, &media).is_err()
+        );
+        assert!(
+            validate_template_media_ref_matches_binding(Some("phone-1"), &binding, &media).is_ok()
+        );
+    }
+
+    #[test]
     fn template_media_binding_rejects_invalid_source_and_media_type() {
         let invalid_source = serde_json::json!({
             "component": "header",
@@ -4323,6 +4676,38 @@ mod tests {
             ])),
             None
         );
+    }
+
+    #[test]
+    fn resolve_for_send_rewrites_template_media_id_to_meta_media_id() {
+        let binding = header_image_template_media_id_binding("665f00000000000000000001");
+
+        let resolved =
+            template_media_binding_with_meta_media_id(&binding, "meta-media-123".to_string());
+
+        assert!(matches!(resolved.source, TemplateMediaSource::MediaId));
+        assert_eq!(resolved.value, "meta-media-123");
+        assert_eq!(resolved.component, TemplateMediaComponent::Header);
+        assert_eq!(resolved.media_type, TemplateMediaType::Image);
+    }
+
+    #[test]
+    fn real_send_validation_accepts_template_media_id_without_passing_it_to_builder() {
+        let mut campaign = base_campaign("queued");
+        campaign.template_components = Some(vec![
+            serde_json::json!({ "type": "HEADER", "format": "IMAGE" }),
+        ]);
+        campaign.template_media_bindings = Some(vec![header_image_template_media_id_binding(
+            "665f00000000000000000001",
+        )]);
+        let recipient = base_recipient("validated");
+
+        assert!(validate_campaign_send_components_for_recipient(&campaign, &recipient).is_ok());
+        let resolved =
+            template_media_bindings_for_validation(campaign.template_media_bindings.as_deref())
+                .unwrap();
+        assert!(matches!(resolved[0].source, TemplateMediaSource::MediaId));
+        assert_eq!(resolved[0].value, "template-media-validation-placeholder");
     }
 
     #[test]

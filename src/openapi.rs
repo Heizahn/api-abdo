@@ -65,10 +65,10 @@ use crate::models::whatsapp::{
     TransferableAgentItem, TransferableAgentsResponse, TrivialResponse, UpdateQuickReplyRequest,
     UpdateResponse, UpdateSettingsRequest, UpdateTicketStatusRequest, UpdateWaTemplateRequest,
     UrlPreview, WaPurposeConfig, WaPurposeUsage, WaPurposes, WaPurposesPatch,
-    WaTemplateButtonInput, WaTemplateCategory, WaTemplateHeaderInput, WaTemplateItem,
-    WaTemplateResponse, WaTemplateStatus, WaTemplatesListResponse, WaTestConnectionData,
-    WaTestConnectionRequest, WaTestConnectionResponse, WaTestConnectionSource,
-    WaTicketTimelineEntry,
+    WaTemplateButtonInput, WaTemplateCategory, WaTemplateDefaultMediaBinding,
+    WaTemplateHeaderInput, WaTemplateItem, WaTemplateResponse, WaTemplateStatus,
+    WaTemplatesListResponse, WaTestConnectionData, WaTestConnectionRequest,
+    WaTestConnectionResponse, WaTestConnectionSource, WaTicketTimelineEntry,
 };
 use crate::models::zabbix::{MonthlyTraffic, ZabbixTrafficResponse};
 use crate::modules::ai_agent::business_data::{AiToolMetaItem, AiToolsListResponse};
@@ -100,7 +100,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.80",
+        version = "0.3.81",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
@@ -321,7 +321,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
             SettingsListResponse, SettingsResponse,
             QuickRepliesListResponse, QuickReplyResponse,
             // WhatsApp — Templates CRUD
-            WaTemplateItem, WaTemplateCategory, WaTemplateStatus,
+            WaTemplateItem, WaTemplateDefaultMediaBinding, WaTemplateCategory, WaTemplateStatus,
             WaTemplateHeaderInput, WaTemplateButtonInput,
             CreateWaTemplateRequest, UpdateWaTemplateRequest,
             WaTemplateResponse, WaTemplatesListResponse,
