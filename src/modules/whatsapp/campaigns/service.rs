@@ -14,10 +14,14 @@ use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument, UpdateModificati
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    crypto::aes::decrypt_payload,
     db::{WaTemplateRepository, WhatsAppRepository},
     error::ApiError,
     models::whatsapp::{WaSettings, WaTemplate},
-    modules::whatsapp::shared::time::iso8601,
+    modules::whatsapp::{
+        service::{MetaApiError, WhatsAppService},
+        shared::{apply_media_relay, settings_secret, time::iso8601},
+    },
     state::AppState,
 };
 
@@ -51,7 +55,8 @@ const RETIRED_CLIENT_STATE: &str = "Retirado";
 const CAMPAIGN_WORKER_INTERVAL_SECS: u64 = 5;
 const CAMPAIGN_WORKER_BATCH_SIZE: usize = 50;
 const CAMPAIGN_SEND_WORKER_INTERVAL_SECS: u64 = 5;
-const CAMPAIGN_SEND_WORKER_BATCH_SIZE: usize = 10;
+const CAMPAIGN_SEND_WORKER_BATCH_SIZE: usize = 1;
+const CAMPAIGN_SEND_DELAY_MS: u64 = 1_500;
 const CAMPAIGN_SENDING_STALE_SECS: i64 = 300;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -372,6 +377,12 @@ struct WaCampaignRecipientDoc {
     send_error_message: Option<String>,
     #[serde(default)]
     meta_message_id: Option<String>,
+    #[serde(default)]
+    meta_error_code: Option<String>,
+    #[serde(default)]
+    meta_error_subcode: Option<String>,
+    #[serde(default)]
+    meta_error_user_msg: Option<String>,
     created_at: DateTime,
     updated_at: DateTime,
 }
@@ -404,6 +415,9 @@ struct CampaignSendResult {
 struct CampaignSendError {
     code: String,
     message: String,
+    meta_error_code: Option<String>,
+    meta_error_subcode: Option<String>,
+    meta_error_user_msg: Option<String>,
 }
 
 impl CampaignSendError {
@@ -412,6 +426,9 @@ impl CampaignSendError {
         Self {
             code: code.into(),
             message: message.into(),
+            meta_error_code: None,
+            meta_error_subcode: None,
+            meta_error_user_msg: None,
         }
     }
 }
@@ -424,6 +441,28 @@ impl fmt::Display for CampaignSendError {
 
 impl std::error::Error for CampaignSendError {}
 
+impl From<&anyhow::Error> for CampaignSendError {
+    fn from(err: &anyhow::Error) -> Self {
+        if let Some(meta) = err.downcast_ref::<MetaApiError>() {
+            return Self {
+                code: "meta_rejected".to_string(),
+                message: meta.message.clone(),
+                meta_error_code: Some(meta.code.to_string()),
+                meta_error_subcode: meta.error_subcode.map(|value| value.to_string()),
+                meta_error_user_msg: meta.error_user_msg.clone(),
+            };
+        }
+
+        Self {
+            code: "send_template_failed".to_string(),
+            message: err.to_string(),
+            meta_error_code: None,
+            meta_error_subcode: None,
+            meta_error_user_msg: None,
+        }
+    }
+}
+
 #[async_trait]
 trait CampaignMessageSender: Send + Sync {
     async fn send_template(
@@ -434,9 +473,62 @@ trait CampaignMessageSender: Send + Sync {
     ) -> Result<CampaignSendResult, CampaignSendError>;
 }
 
+struct CampaignMetaMessageSender {
+    state: Arc<AppState>,
+}
+
+impl CampaignMetaMessageSender {
+    fn new(state: Arc<AppState>) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait]
+impl CampaignMessageSender for CampaignMetaMessageSender {
+    async fn send_template(
+        &self,
+        campaign: &WaCampaignDoc,
+        recipient: &WaCampaignRecipientDoc,
+        components: Vec<serde_json::Value>,
+    ) -> Result<CampaignSendResult, CampaignSendError> {
+        let service = resolve_campaign_whatsapp_service(&self.state, campaign).await?;
+        let to = recipient
+            .phone_normalized
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| CampaignSendError {
+                code: "missing_recipient_phone".to_string(),
+                message: "Campaign recipient does not have a normalized WhatsApp phone."
+                    .to_string(),
+                meta_error_code: None,
+                meta_error_subcode: None,
+                meta_error_user_msg: None,
+            })?;
+        let components_value = if components.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Array(components))
+        };
+
+        service
+            .send_template(
+                to,
+                campaign.template_name.as_str(),
+                campaign.template_language.as_str(),
+                components_value.as_ref(),
+            )
+            .await
+            .map(|meta_message_id| CampaignSendResult { meta_message_id })
+            .map_err(|err| CampaignSendError::from(&err))
+    }
+}
+
+#[cfg(test)]
 #[derive(Debug, Default)]
 struct FakeCampaignMessageSender;
 
+#[cfg(test)]
 #[async_trait]
 impl CampaignMessageSender for FakeCampaignMessageSender {
     async fn send_template(
@@ -449,6 +541,7 @@ impl CampaignMessageSender for FakeCampaignMessageSender {
     }
 }
 
+#[cfg(test)]
 fn fake_campaign_send_result(
     campaign: &WaCampaignDoc,
     recipient: &WaCampaignRecipientDoc,
@@ -466,6 +559,93 @@ fn fake_campaign_send_result(
     Ok(CampaignSendResult {
         meta_message_id: format!("fake:{campaign_id}:{recipient_id}"),
     })
+}
+
+async fn resolve_campaign_whatsapp_service(
+    state: &Arc<AppState>,
+    campaign: &WaCampaignDoc,
+) -> Result<WhatsAppService, CampaignSendError> {
+    let phone_number_id = campaign
+        .phone_number_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| CampaignSendError {
+            code: "whatsapp_account_missing_phone_number_id".to_string(),
+            message: "Campaign does not have a phone_number_id configured.".to_string(),
+            meta_error_code: None,
+            meta_error_subcode: None,
+            meta_error_user_msg: None,
+        })?;
+
+    let settings = state
+        .db
+        .find_wa_settings_by_phone_number_id(phone_number_id)
+        .await
+        .map_err(|err| CampaignSendError {
+            code: "whatsapp_account_lookup_failed".to_string(),
+            message: err,
+            meta_error_code: None,
+            meta_error_subcode: None,
+            meta_error_user_msg: None,
+        })?
+        .ok_or_else(|| CampaignSendError {
+            code: "whatsapp_account_not_found".to_string(),
+            message: "Selected WhatsApp account was not found.".to_string(),
+            meta_error_code: None,
+            meta_error_subcode: None,
+            meta_error_user_msg: None,
+        })?;
+
+    validate_wa_settings_for_campaign_send(&settings)?;
+
+    let token = decrypt_payload(&settings_secret(), &settings.access_token).ok_or_else(|| {
+        CampaignSendError {
+            code: "whatsapp_account_token_decrypt_failed".to_string(),
+            message: "Could not decrypt WhatsApp account access token.".to_string(),
+            meta_error_code: None,
+            meta_error_subcode: None,
+            meta_error_user_msg: None,
+        }
+    })?;
+
+    let service = WhatsAppService::new(
+        state.reqwest_client.clone(),
+        settings.phone_number_id.clone(),
+        token,
+    );
+    Ok(apply_media_relay(state, service))
+}
+
+fn validate_wa_settings_for_campaign_send(settings: &WaSettings) -> Result<(), CampaignSendError> {
+    if !settings.active {
+        return Err(CampaignSendError {
+            code: "whatsapp_account_inactive".to_string(),
+            message: "The selected WhatsApp account is inactive.".to_string(),
+            meta_error_code: None,
+            meta_error_subcode: None,
+            meta_error_user_msg: None,
+        });
+    }
+    if settings.phone_number_id.trim().is_empty() {
+        return Err(CampaignSendError {
+            code: "whatsapp_account_missing_phone_number_id".to_string(),
+            message: "Selected WhatsApp account is missing phone_number_id.".to_string(),
+            meta_error_code: None,
+            meta_error_subcode: None,
+            meta_error_user_msg: None,
+        });
+    }
+    if settings.access_token.trim().is_empty() {
+        return Err(CampaignSendError {
+            code: "whatsapp_account_missing_token".to_string(),
+            message: "Selected WhatsApp account is missing access_token.".to_string(),
+            meta_error_code: None,
+            meta_error_subcode: None,
+            meta_error_user_msg: None,
+        });
+    }
+    Ok(())
 }
 
 struct CandidateClient {
@@ -1227,10 +1407,10 @@ pub async fn run_campaign_send_worker(state: Arc<AppState>) {
     tracing::info!(
         interval_secs = CAMPAIGN_SEND_WORKER_INTERVAL_SECS,
         batch_size = CAMPAIGN_SEND_WORKER_BATCH_SIZE,
-        "WhatsApp campaign real-send fake worker started"
+        "WhatsApp campaign real-send worker started"
     );
 
-    let sender = FakeCampaignMessageSender;
+    let sender = CampaignMetaMessageSender::new(state.clone());
     let mut interval =
         tokio::time::interval(Duration::from_secs(CAMPAIGN_SEND_WORKER_INTERVAL_SECS));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1292,6 +1472,12 @@ where
         .db
         .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients");
 
+    tracing::info!(
+        campaign_id = %campaign_id,
+        batch_size,
+        "WhatsApp campaign real-send batch started"
+    );
+
     let mut claimed = 0usize;
     while claimed < batch_size {
         let Some(recipient) =
@@ -1301,6 +1487,9 @@ where
         };
         claimed += 1;
         send_claimed_campaign_recipient(&recipients, sender, campaign, recipient).await?;
+        if claimed < batch_size {
+            tokio::time::sleep(Duration::from_millis(CAMPAIGN_SEND_DELAY_MS)).await;
+        }
     }
 
     finalize_campaign_send_if_done(state, campaign_id).await?;
@@ -1433,7 +1622,7 @@ where
             recipients
                 .update_one(
                     doc! { "_id": recipient_id, "campaign_id": campaign_id, "status": "sending" },
-                    send_recipient_failed_update(code, code.to_string(), now),
+                    send_recipient_failed_update(code, code.to_string(), None, None, None, now),
                 )
                 .await
                 .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
@@ -1443,22 +1632,42 @@ where
 
     match sender.send_template(campaign, &recipient, components).await {
         Ok(result) => {
+            let meta_message_id = result.meta_message_id;
             recipients
                 .update_one(
                     doc! { "_id": recipient_id, "campaign_id": campaign_id, "status": "sending" },
-                    send_recipient_sent_update(result.meta_message_id, now),
+                    send_recipient_sent_update(meta_message_id.clone(), now),
                 )
                 .await
                 .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+            tracing::info!(
+                campaign_id = %campaign_id,
+                recipient_id = %recipient_id,
+                meta_message_id = %safe_meta_message_id(&meta_message_id),
+                "WhatsApp campaign recipient sent"
+            );
         }
         Err(err) => {
             recipients
                 .update_one(
                     doc! { "_id": recipient_id, "campaign_id": campaign_id, "status": "sending" },
-                    send_recipient_failed_update(&err.code, err.message, now),
+                    send_recipient_failed_update(
+                        &err.code,
+                        err.message.clone(),
+                        err.meta_error_code.clone(),
+                        err.meta_error_subcode.clone(),
+                        err.meta_error_user_msg.clone(),
+                        now,
+                    ),
                 )
                 .await
                 .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+            tracing::warn!(
+                campaign_id = %campaign_id,
+                recipient_id = %recipient_id,
+                error_code = %err.code,
+                "WhatsApp campaign recipient send failed"
+            );
         }
     }
 
@@ -1565,7 +1774,7 @@ async fn finalize_campaign_send_if_done(
             status,
             sent = progress.sent,
             send_failed = progress.send_failed,
-            "WhatsApp campaign real-send completed"
+                "WhatsApp campaign real-send completed"
         );
     }
 
@@ -1851,6 +2060,9 @@ fn send_recipient_sent_update(meta_message_id: String, now: DateTime) -> Documen
         "$unset": {
             "send_error_code": "",
             "send_error_message": "",
+            "meta_error_code": "",
+            "meta_error_subcode": "",
+            "meta_error_user_msg": "",
         }
     }
 }
@@ -1858,15 +2070,36 @@ fn send_recipient_sent_update(meta_message_id: String, now: DateTime) -> Documen
 fn send_recipient_failed_update(
     error_code: &str,
     error_message: String,
+    meta_error_code: Option<String>,
+    meta_error_subcode: Option<String>,
+    meta_error_user_msg: Option<String>,
     now: DateTime,
 ) -> Document {
-    doc! {
-        "$set": {
-            "status": "send_failed",
-            "send_error_code": error_code,
-            "send_error_message": error_message,
-            "updated_at": now,
-        }
+    let mut set = doc! {
+        "status": "send_failed",
+        "send_error_code": error_code,
+        "send_error_message": error_message,
+        "updated_at": now,
+    };
+    if let Some(value) = meta_error_code {
+        set.insert("meta_error_code", value);
+    }
+    if let Some(value) = meta_error_subcode {
+        set.insert("meta_error_subcode", value);
+    }
+    if let Some(value) = meta_error_user_msg {
+        set.insert("meta_error_user_msg", value);
+    }
+
+    doc! { "$set": set }
+}
+
+fn safe_meta_message_id(meta_message_id: &str) -> String {
+    const MAX_LEN: usize = 32;
+    if meta_message_id.len() <= MAX_LEN {
+        meta_message_id.to_string()
+    } else {
+        format!("{}…", &meta_message_id[..MAX_LEN])
     }
 }
 
@@ -2762,8 +2995,19 @@ fn validate_wa_settings_for_real_send(settings: &WaSettings) -> Result<(), ApiEr
             "The selected WhatsApp account is inactive.",
         ));
     }
-    if settings.phone_number_id.trim().is_empty() || settings.access_token.trim().is_empty() {
-        return Err(whatsapp_account_not_found_error());
+    if settings.phone_number_id.trim().is_empty() {
+        return Err(ApiError::domain_simple(
+            StatusCode::BAD_REQUEST,
+            "whatsapp_account_missing_phone_number_id",
+            "Selected WhatsApp account is missing phone_number_id.",
+        ));
+    }
+    if settings.access_token.trim().is_empty() {
+        return Err(ApiError::domain_simple(
+            StatusCode::BAD_REQUEST,
+            "whatsapp_account_missing_token",
+            "Selected WhatsApp account is missing access_token.",
+        ));
     }
     Ok(())
 }
@@ -3103,6 +3347,9 @@ fn preview_to_snapshot_recipient(
         send_error_code: None,
         send_error_message: None,
         meta_message_id: None,
+        meta_error_code: None,
+        meta_error_subcode: None,
+        meta_error_user_msg: None,
         created_at: now,
         updated_at: now,
     }
@@ -3322,6 +3569,9 @@ fn recipient_to_item(recipient: WaCampaignRecipientDoc) -> CampaignRecipientItem
         send_error_code: recipient.send_error_code,
         send_error_message: recipient.send_error_message,
         meta_message_id: recipient.meta_message_id,
+        meta_error_code: recipient.meta_error_code,
+        meta_error_subcode: recipient.meta_error_subcode,
+        meta_error_user_msg: recipient.meta_error_user_msg,
         created_at: iso8601(recipient.created_at),
         updated_at: iso8601(recipient.updated_at),
     }
@@ -3812,6 +4062,9 @@ mod tests {
             send_error_code: None,
             send_error_message: None,
             meta_message_id: None,
+            meta_error_code: None,
+            meta_error_subcode: None,
+            meta_error_user_msg: None,
             created_at: now,
             updated_at: now,
         }
@@ -4911,6 +5164,9 @@ mod tests {
             send_error_code: None,
             send_error_message: None,
             meta_message_id: None,
+            meta_error_code: None,
+            meta_error_subcode: None,
+            meta_error_user_msg: None,
             created_at: now,
             updated_at: now,
         });
@@ -5771,17 +6027,21 @@ mod tests {
                 if status == StatusCode::BAD_REQUEST && code == "whatsapp_account_inactive"
         ));
 
-        for settings in [
-            wa_settings(true, "", "cipher"),
-            wa_settings(true, "123", ""),
-        ] {
-            let err = validate_wa_settings_for_real_send(&settings).unwrap_err();
-            assert!(matches!(
-                err,
-                ApiError::Domain { status, ref code, .. }
-                    if status == StatusCode::BAD_REQUEST && code == "whatsapp_account_not_found"
-            ));
-        }
+        let missing_phone =
+            validate_wa_settings_for_real_send(&wa_settings(true, "", "cipher")).unwrap_err();
+        assert!(matches!(
+            missing_phone,
+            ApiError::Domain { status, ref code, .. }
+                if status == StatusCode::BAD_REQUEST && code == "whatsapp_account_missing_phone_number_id"
+        ));
+
+        let missing_token =
+            validate_wa_settings_for_real_send(&wa_settings(true, "123", "")).unwrap_err();
+        assert!(matches!(
+            missing_token,
+            ApiError::Domain { status, ref code, .. }
+                if status == StatusCode::BAD_REQUEST && code == "whatsapp_account_missing_token"
+        ));
     }
 
     #[test]
@@ -5851,6 +6111,7 @@ mod tests {
 
     #[test]
     fn fake_sender_success_uses_fake_message_id() {
+        let _sender = FakeCampaignMessageSender;
         let campaign = base_campaign("sending");
         let recipient = base_recipient("sending");
         let result = fake_campaign_send_result(&campaign, &recipient, &[]).unwrap();
@@ -5876,6 +6137,9 @@ mod tests {
                 "$unset": {
                     "send_error_code": "",
                     "send_error_message": "",
+                    "meta_error_code": "",
+                    "meta_error_subcode": "",
+                    "meta_error_user_msg": "",
                 }
             }
         );
@@ -5887,12 +6151,50 @@ mod tests {
         let error = CampaignSendError::new("fake_error", "Simulated fake sender error");
 
         assert_eq!(
-            send_recipient_failed_update(&error.code, error.message, now),
+            send_recipient_failed_update(&error.code, error.message, None, None, None, now),
             doc! {
                 "$set": {
                     "status": "send_failed",
                     "send_error_code": "fake_error",
                     "send_error_message": "Simulated fake sender error",
+                    "updated_at": now,
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn meta_api_error_maps_to_send_failed_meta_fields() {
+        let now = DateTime::from_millis(1_800_000_000_650);
+        let anyhow_error = anyhow::Error::new(MetaApiError {
+            code: 131_049,
+            message: "Temporarily throttled by Meta".to_string(),
+            error_subcode: Some(2_000),
+            error_user_msg: Some("Try later".to_string()),
+        });
+        let error = CampaignSendError::from(&anyhow_error);
+
+        assert_eq!(error.code, "meta_rejected");
+        assert_eq!(error.meta_error_code.as_deref(), Some("131049"));
+        assert_eq!(error.meta_error_subcode.as_deref(), Some("2000"));
+        assert_eq!(error.meta_error_user_msg.as_deref(), Some("Try later"));
+        assert_eq!(
+            send_recipient_failed_update(
+                &error.code,
+                error.message,
+                error.meta_error_code,
+                error.meta_error_subcode,
+                error.meta_error_user_msg,
+                now,
+            ),
+            doc! {
+                "$set": {
+                    "status": "send_failed",
+                    "send_error_code": "meta_rejected",
+                    "send_error_message": "Temporarily throttled by Meta",
+                    "meta_error_code": "131049",
+                    "meta_error_subcode": "2000",
+                    "meta_error_user_msg": "Try later",
                     "updated_at": now,
                 }
             }
@@ -6034,7 +6336,7 @@ mod tests {
 
         assert_eq!(err.code(), "missing_recipient_field");
         assert_eq!(
-            send_recipient_failed_update(err.code(), err.code().to_string(), now),
+            send_recipient_failed_update(err.code(), err.code().to_string(), None, None, None, now),
             doc! {
                 "$set": {
                     "status": "send_failed",

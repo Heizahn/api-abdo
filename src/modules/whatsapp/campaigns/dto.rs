@@ -405,6 +405,9 @@ pub struct CampaignRecipientItem {
     pub send_error_code: Option<String>,
     pub send_error_message: Option<String>,
     pub meta_message_id: Option<String>,
+    pub meta_error_code: Option<String>,
+    pub meta_error_subcode: Option<String>,
+    pub meta_error_user_msg: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
