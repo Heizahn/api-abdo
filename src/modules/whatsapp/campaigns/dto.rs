@@ -83,6 +83,7 @@ pub enum DerivedClientState {
     Moroso,
     Solvente,
     Suspended,
+    Retired,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -101,6 +102,8 @@ pub struct CampaignPreviewRecipient {
     pub sector_name: Option<String>,
     pub client_state_raw: String,
     pub client_state_derived: DerivedClientState,
+    pub customer_status_raw: String,
+    pub customer_status_derived: DerivedClientState,
     pub balance: f64,
     pub payment_due_day: Option<i32>,
 }
@@ -335,6 +338,8 @@ pub struct CampaignRecipientItem {
     pub sector_name: Option<String>,
     pub customer_status_raw: String,
     pub customer_status_derived: DerivedClientState,
+    pub client_state_raw: String,
+    pub client_state_derived: DerivedClientState,
     pub balance: f64,
     pub payment_due_day: Option<i32>,
     pub phone_original: String,

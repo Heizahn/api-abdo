@@ -249,6 +249,7 @@ fn resolve_client_field_text(
             DerivedClientState::Moroso => "moroso",
             DerivedClientState::Solvente => "solvente",
             DerivedClientState::Suspended => "suspended",
+            DerivedClientState::Retired => "retired",
         }
         .to_string()),
         TemplateClientField::PhoneNormalized => {
