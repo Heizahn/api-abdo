@@ -120,6 +120,8 @@ pub struct CreateCampaignRequest {
     pub template_components: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     pub template_variable_bindings: Option<Vec<TemplateVariableBinding>>,
+    #[serde(default)]
+    pub template_media_bindings: Option<Vec<TemplateMediaBinding>>,
     pub filters: CampaignPreviewRequest,
 }
 
@@ -135,6 +137,8 @@ pub struct UpdateCampaignRequest {
     pub template_components: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     pub template_variable_bindings: Option<Vec<TemplateVariableBinding>>,
+    #[serde(default)]
+    pub template_media_bindings: Option<Vec<TemplateMediaBinding>>,
     pub filters: CampaignPreviewRequest,
 }
 
@@ -185,6 +189,35 @@ pub struct TemplateVariableBinding {
     pub button_index: Option<i32>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateMediaComponent {
+    Header,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateMediaType {
+    Image,
+    Video,
+    Document,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TemplateMediaSource {
+    Link,
+    MediaId,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+pub struct TemplateMediaBinding {
+    pub component: TemplateMediaComponent,
+    pub media_type: TemplateMediaType,
+    pub source: TemplateMediaSource,
+    pub value: String,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CampaignRecipientsQuery {
     #[serde(default)]
@@ -230,6 +263,8 @@ pub struct CampaignListItem {
     pub template_language: String,
     pub has_template_variables: bool,
     pub template_variables_count: usize,
+    pub has_template_media: bool,
+    pub template_media_count: usize,
     pub status: String,
     pub run_mode: Option<String>,
     pub dry_run_completed_at: Option<String>,
@@ -282,6 +317,7 @@ pub struct CampaignSummary {
     #[schema(value_type = Option<Vec<Object>>)]
     pub template_components: Option<Vec<serde_json::Value>>,
     pub template_variable_bindings: Option<Vec<TemplateVariableBinding>>,
+    pub template_media_bindings: Option<Vec<TemplateMediaBinding>>,
     pub filters: CampaignPreviewRequest,
     pub status: String,
     pub started_by: Option<String>,

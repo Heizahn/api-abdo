@@ -22,9 +22,10 @@ use super::{
         CampaignPreviewTotals, CampaignProgress, CampaignRecipientItem, CampaignRecipientsQuery,
         CampaignRecipientsResponse, CampaignSummary, CampaignSummaryResponse, ClientStateFilter,
         CreateCampaignRequest, DerivedClientState, PhoneStatus, TemplateClientField,
-        TemplateVariableBinding, TemplateVariableComponent, TemplateVariableSource,
-        UpdateCampaignRecipientExclusionsData, UpdateCampaignRecipientExclusionsRequest,
-        UpdateCampaignRecipientExclusionsResponse, UpdateCampaignRequest, UpdateCampaignResponse,
+        TemplateMediaBinding, TemplateMediaComponent, TemplateMediaType, TemplateVariableBinding,
+        TemplateVariableComponent, TemplateVariableSource, UpdateCampaignRecipientExclusionsData,
+        UpdateCampaignRecipientExclusionsRequest, UpdateCampaignRecipientExclusionsResponse,
+        UpdateCampaignRequest, UpdateCampaignResponse,
     },
     phone::normalize_phone_to_whatsapp,
     template_resolver::{
@@ -57,6 +58,8 @@ struct WaCampaignDoc {
     template_components: Option<Vec<serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     template_variable_bindings: Option<Vec<StoredTemplateVariableBinding>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    template_media_bindings: Option<Vec<TemplateMediaBinding>>,
     filters: CampaignPreviewRequest,
     status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -433,6 +436,7 @@ pub async fn create_campaign(
     }
     let phone_number_id = normalize_optional_phone_number_id(request.phone_number_id.as_deref())?;
     validate_create_template_variable_bindings(request.template_variable_bindings.as_deref())?;
+    validate_template_media_bindings(request.template_media_bindings.as_deref())?;
 
     let (totals, recipients) = build_recipients_snapshot(state, &request.filters).await?;
     let now = DateTime::now();
@@ -447,6 +451,7 @@ pub async fn create_campaign(
         template_variable_bindings: request
             .template_variable_bindings
             .map(|bindings| bindings.into_iter().map(Into::into).collect()),
+        template_media_bindings: request.template_media_bindings,
         filters: request.filters,
         status: "draft".to_string(),
         confirming_from: None,
@@ -1708,6 +1713,7 @@ fn validate_update_campaign_request(request: &UpdateCampaignRequest) -> Result<(
     }
     normalize_optional_phone_number_id(request.phone_number_id.as_deref())?;
     validate_create_template_variable_bindings(request.template_variable_bindings.as_deref())?;
+    validate_template_media_bindings(request.template_media_bindings.as_deref())?;
     Ok(())
 }
 
@@ -1743,6 +1749,7 @@ fn apply_campaign_edit(
     campaign.template_variable_bindings = request
         .template_variable_bindings
         .map(|bindings| bindings.into_iter().map(Into::into).collect());
+    campaign.template_media_bindings = request.template_media_bindings;
     campaign.filters = request.filters;
     campaign.status = if is_editable_campaign_status(&campaign.status) {
         campaign.status
@@ -1882,6 +1889,83 @@ fn validate_create_template_variable_bindings<T: TemplateVariableBindingLike>(
         validate_binding_basics(bindings)?;
     }
     Ok(())
+}
+
+fn validate_template_media_bindings(
+    bindings: Option<&[TemplateMediaBinding]>,
+) -> Result<(), ApiError> {
+    let Some(bindings) = bindings else {
+        return Ok(());
+    };
+
+    for binding in bindings {
+        if binding.value.trim().is_empty() {
+            return Err(ApiError::domain_with_field(
+                StatusCode::BAD_REQUEST,
+                "template_media_value_required",
+                "template_media_bindings.value",
+                "Template media binding value is required.",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn validate_template_media_for_real_send(campaign: &WaCampaignDoc) -> Result<(), ApiError> {
+    let Some(required_media_type) =
+        required_header_media_type(campaign.template_components.as_deref())
+    else {
+        return Ok(());
+    };
+
+    let has_binding = campaign
+        .template_media_bindings
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .any(|binding| {
+            matches!(binding.component, TemplateMediaComponent::Header)
+                && binding.media_type == required_media_type
+                && !binding.value.trim().is_empty()
+        });
+
+    if has_binding {
+        return Ok(());
+    }
+
+    Err(ApiError::domain_with_field(
+        StatusCode::BAD_REQUEST,
+        "missing_template_media_binding",
+        "template_media_bindings",
+        "Template has a media HEADER and requires a matching template_media_bindings entry before real send.",
+    ))
+}
+
+fn required_header_media_type(
+    components: Option<&[serde_json::Value]>,
+) -> Option<TemplateMediaType> {
+    components?.iter().find_map(header_media_type)
+}
+
+fn header_media_type(component: &serde_json::Value) -> Option<TemplateMediaType> {
+    let component_type = component.get("type")?.as_str()?;
+    if !component_type.eq_ignore_ascii_case("HEADER") {
+        return None;
+    }
+
+    match component
+        .get("format")?
+        .as_str()?
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "IMAGE" => Some(TemplateMediaType::Image),
+        "VIDEO" => Some(TemplateMediaType::Video),
+        "DOCUMENT" => Some(TemplateMediaType::Document),
+        _ => None,
+    }
 }
 
 fn validate_binding_basics<T: TemplateVariableBindingLike>(bindings: &[T]) -> Result<(), ApiError> {
@@ -2474,6 +2558,7 @@ fn campaign_to_summary_with_progress(
                 Some(bindings)
             }
         }),
+        template_media_bindings: campaign.template_media_bindings,
         filters: campaign.filters,
         status: campaign.status,
         started_by: campaign.started_by,
@@ -2535,6 +2620,15 @@ fn campaign_to_list_item(campaign: WaCampaignDoc) -> CampaignListItem {
             .is_some_and(|bindings| !bindings.is_empty()),
         template_variables_count: campaign
             .template_variable_bindings
+            .as_ref()
+            .map(Vec::len)
+            .unwrap_or(0),
+        has_template_media: campaign
+            .template_media_bindings
+            .as_ref()
+            .is_some_and(|bindings| !bindings.is_empty()),
+        template_media_count: campaign
+            .template_media_bindings
             .as_ref()
             .map(Vec::len)
             .unwrap_or(0),
@@ -2989,6 +3083,7 @@ mod tests {
             template_language: "es".to_string(),
             template_components: None,
             template_variable_bindings: None,
+            template_media_bindings: None,
             filters: CampaignPreviewRequest {
                 provider_ids: None,
                 sector_ids: None,
@@ -3089,6 +3184,24 @@ mod tests {
         }
     }
 
+    fn header_image_link_binding(value: &str) -> TemplateMediaBinding {
+        TemplateMediaBinding {
+            component: TemplateMediaComponent::Header,
+            media_type: TemplateMediaType::Image,
+            source: crate::modules::whatsapp::campaigns::dto::TemplateMediaSource::Link,
+            value: value.to_string(),
+        }
+    }
+
+    fn header_image_media_id_binding(value: &str) -> TemplateMediaBinding {
+        TemplateMediaBinding {
+            component: TemplateMediaComponent::Header,
+            media_type: TemplateMediaType::Image,
+            source: crate::modules::whatsapp::campaigns::dto::TemplateMediaSource::MediaId,
+            value: value.to_string(),
+        }
+    }
+
     fn legacy_provider_name_body_binding(index: i32) -> StoredTemplateVariableBinding {
         StoredTemplateVariableBinding {
             component: TemplateVariableComponent::Body,
@@ -3109,6 +3222,7 @@ mod tests {
             template_language: "es".to_string(),
             template_components: None,
             template_variable_bindings: None,
+            template_media_bindings: None,
             filters: CampaignPreviewRequest {
                 provider_ids: None,
                 sector_ids: None,
@@ -3148,6 +3262,133 @@ mod tests {
         let summary = campaign_to_summary(campaign);
 
         assert_eq!(summary.template_variable_bindings.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn create_with_template_media_bindings_persists_to_summary_and_list() {
+        let mut campaign = base_campaign("draft");
+        campaign.template_media_bindings = Some(vec![header_image_link_binding(
+            "https://example.com/header.jpg",
+        )]);
+
+        let summary = campaign_to_summary(campaign.clone());
+        let list_item = campaign_to_list_item(campaign);
+
+        let media_bindings = summary.template_media_bindings.unwrap();
+        assert_eq!(media_bindings.len(), 1);
+        assert!(matches!(
+            media_bindings[0].component,
+            TemplateMediaComponent::Header
+        ));
+        assert!(matches!(
+            media_bindings[0].media_type,
+            TemplateMediaType::Image
+        ));
+        assert_eq!(media_bindings[0].value, "https://example.com/header.jpg");
+        assert!(list_item.has_template_media);
+        assert_eq!(list_item.template_media_count, 1);
+    }
+
+    #[test]
+    fn edit_template_media_bindings_saves_and_preserves_totals() {
+        let campaign = base_campaign("previewed");
+        let mut request = update_request("June Promo");
+        request.template_media_bindings =
+            Some(vec![header_image_media_id_binding("meta-media-123")]);
+
+        let updated =
+            apply_campaign_edit(campaign, request, "admin-1", None, DateTime::now()).unwrap();
+
+        let bindings = updated.template_media_bindings.unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert!(matches!(
+            bindings[0].source,
+            crate::modules::whatsapp::campaigns::dto::TemplateMediaSource::MediaId
+        ));
+        assert_eq!(updated.total_recipients, 5);
+    }
+
+    #[test]
+    fn template_media_binding_empty_value_fails_validation() {
+        let err =
+            validate_template_media_bindings(Some(&[header_image_link_binding(" ")])).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, ref field, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && code == "template_media_value_required"
+                    && field.as_deref() == Some("template_media_bindings.value")
+        ));
+    }
+
+    #[test]
+    fn template_media_binding_rejects_invalid_source_and_media_type() {
+        let invalid_source = serde_json::json!({
+            "component": "header",
+            "media_type": "image",
+            "source": "upload",
+            "value": "https://example.com/header.jpg"
+        });
+        let invalid_media_type = serde_json::json!({
+            "component": "header",
+            "media_type": "audio",
+            "source": "link",
+            "value": "https://example.com/header.mp3"
+        });
+
+        assert!(serde_json::from_value::<TemplateMediaBinding>(invalid_source).is_err());
+        assert!(serde_json::from_value::<TemplateMediaBinding>(invalid_media_type).is_err());
+    }
+
+    #[test]
+    fn detects_template_header_media_components() {
+        assert_eq!(
+            required_header_media_type(Some(&[
+                serde_json::json!({ "type": "HEADER", "format": "IMAGE" })
+            ])),
+            Some(TemplateMediaType::Image)
+        );
+        assert_eq!(
+            required_header_media_type(Some(&[
+                serde_json::json!({ "type": "HEADER", "format": "VIDEO" })
+            ])),
+            Some(TemplateMediaType::Video)
+        );
+        assert_eq!(
+            required_header_media_type(Some(&[
+                serde_json::json!({ "type": "HEADER", "format": "DOCUMENT" })
+            ])),
+            Some(TemplateMediaType::Document)
+        );
+        assert_eq!(
+            required_header_media_type(Some(&[
+                serde_json::json!({ "type": "HEADER", "format": "TEXT" })
+            ])),
+            None
+        );
+    }
+
+    #[test]
+    fn real_send_media_validation_requires_matching_header_binding() {
+        let mut campaign = base_campaign("queued");
+        campaign.template_components = Some(vec![
+            serde_json::json!({ "type": "HEADER", "format": "IMAGE" }),
+        ]);
+
+        let err = validate_template_media_for_real_send(&campaign).unwrap_err();
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, ref field, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && code == "missing_template_media_binding"
+                    && field.as_deref() == Some("template_media_bindings")
+        ));
+
+        campaign.template_media_bindings = Some(vec![header_image_link_binding(
+            "https://example.com/header.jpg",
+        )]);
+        assert!(validate_template_media_for_real_send(&campaign).is_ok());
     }
 
     #[test]

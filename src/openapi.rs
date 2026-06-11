@@ -87,6 +87,7 @@ use crate::modules::whatsapp::campaigns::dto::{
     CampaignPreviewTotals, CampaignProgress, CampaignRecipientItem, CampaignRecipientsQuery,
     CampaignRecipientsResponse, CampaignSummary, CampaignSummaryResponse, ClientStateFilter,
     CreateCampaignRequest, DerivedClientState, PhoneStatus, TemplateClientField,
+    TemplateMediaBinding, TemplateMediaComponent, TemplateMediaSource, TemplateMediaType,
     TemplateVariableBinding, TemplateVariableComponent, TemplateVariableSource,
     UpdateCampaignRecipientExclusionsData, UpdateCampaignRecipientExclusionsRequest,
     UpdateCampaignRecipientExclusionsResponse, UpdateCampaignRequest, UpdateCampaignResponse,
@@ -99,7 +100,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.74",
+        version = "0.3.75",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
@@ -337,7 +338,8 @@ use crate::modules::whatsapp::conversations::lifecycle::{
             CampaignPreviewRequest, BalanceFilter, BalanceRange, ClientStateFilter,
             CampaignPreviewResponse, CampaignPreviewTotals, CampaignPreviewRecipient,
             PhoneStatus, DerivedClientState, TemplateVariableComponent, TemplateVariableSource,
-            TemplateClientField, TemplateVariableBinding, CreateCampaignRequest, CampaignRecipientsQuery,
+            TemplateClientField, TemplateVariableBinding, TemplateMediaComponent, TemplateMediaType,
+            TemplateMediaSource, TemplateMediaBinding, CreateCampaignRequest, CampaignRecipientsQuery,
             CampaignListQuery, CampaignListResponse, CampaignListItem,
             CampaignSummaryResponse, CampaignSummary, CampaignProgress, CampaignRecipientsResponse, CampaignRecipientItem,
             UpdateCampaignRequest, UpdateCampaignResponse,
