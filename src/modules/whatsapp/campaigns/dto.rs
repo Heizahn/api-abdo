@@ -188,6 +188,8 @@ pub struct CampaignRecipientsQuery {
     pub page: Option<u32>,
     #[serde(default)]
     pub per_page: Option<u32>,
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -283,6 +285,8 @@ pub struct CampaignSummary {
     pub started_at: Option<String>,
     pub run_mode: Option<String>,
     pub dry_run_completed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<CampaignProgress>,
     pub total_recipients: u64,
     pub total_can_send: u64,
     pub total_invalid_phone: u64,
@@ -294,6 +298,20 @@ pub struct CampaignSummary {
     pub confirmed_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema, PartialEq)]
+pub struct CampaignProgress {
+    pub pending: u64,
+    pub sending: u64,
+    pub validated: u64,
+    pub failed: u64,
+    pub invalid_phone: u64,
+    pub duplicated_phone: u64,
+    pub excluded: u64,
+    pub total_effective: u64,
+    pub processed: u64,
+    pub progress_percent: f64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

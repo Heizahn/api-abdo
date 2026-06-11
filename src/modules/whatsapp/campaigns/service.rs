@@ -19,7 +19,7 @@ use super::{
     dto::{
         BalanceFilter, CampaignListItem, CampaignListQuery, CampaignListResponse,
         CampaignPreviewRecipient, CampaignPreviewRequest, CampaignPreviewResponse,
-        CampaignPreviewTotals, CampaignRecipientItem, CampaignRecipientsQuery,
+        CampaignPreviewTotals, CampaignProgress, CampaignRecipientItem, CampaignRecipientsQuery,
         CampaignRecipientsResponse, CampaignSummary, CampaignSummaryResponse, ClientStateFilter,
         CreateCampaignRequest, DerivedClientState, PhoneStatus, TemplateClientField,
         TemplateVariableBinding, TemplateVariableComponent, TemplateVariableSource,
@@ -40,6 +40,7 @@ const MAX_CAMPAIGN_LIST_LIMIT: u32 = 100;
 const RETIRED_CLIENT_STATE: &str = "Retirado";
 const CAMPAIGN_WORKER_INTERVAL_SECS: u64 = 5;
 const CAMPAIGN_WORKER_BATCH_SIZE: usize = 50;
+const CAMPAIGN_SENDING_STALE_SECS: i64 = 300;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WaCampaignDoc {
@@ -338,12 +339,16 @@ struct WaCampaignRecipientDoc {
     updated_at: DateTime,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct CampaignDryRunProgress {
     pending: u64,
     sending: u64,
     validated: u64,
     failed: u64,
+    invalid_phone: u64,
+    duplicated_phone: u64,
+    excluded: u64,
+    total_effective: u64,
 }
 
 struct CandidateClient {
@@ -506,10 +511,15 @@ pub async fn get_campaign(
         .await
         .map_err(|e| ApiError::DatabaseError(e.to_string()))?
         .ok_or(ApiError::NotFound)?;
+    let recipients = state
+        .db
+        .db
+        .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients");
+    let progress = load_campaign_progress(&recipients, campaign_id).await?;
 
     Ok(CampaignSummaryResponse {
         ok: true,
-        data: campaign_to_summary(campaign),
+        data: campaign_to_summary_with_progress(campaign, Some(progress)),
     })
 }
 
@@ -841,7 +851,7 @@ pub async fn get_campaign_recipients(
         .db
         .db
         .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients");
-    let filter = doc! { "campaign_id": campaign_id };
+    let filter = build_campaign_recipients_filter(campaign_id, query.status.as_deref());
     let total = collection
         .count_documents(filter.clone())
         .await
@@ -1143,6 +1153,7 @@ async fn finalize_campaign_dry_run_if_done(
         .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients");
     let campaigns = state.db.db.collection::<WaCampaignDoc>("WaCampaigns");
 
+    recover_stale_sending_recipients(&recipients, campaign_id, DateTime::now()).await?;
     let progress = load_dry_run_progress(&recipients, campaign_id).await?;
     let Some(status) = dry_run_completion_status(&progress) else {
         return Ok(());
@@ -1186,24 +1197,62 @@ async fn load_dry_run_progress(
     recipients: &mongodb::Collection<WaCampaignRecipientDoc>,
     campaign_id: ObjectId,
 ) -> Result<CampaignDryRunProgress, ApiError> {
+    load_campaign_progress(recipients, campaign_id).await
+}
+
+async fn load_campaign_progress(
+    recipients: &mongodb::Collection<WaCampaignRecipientDoc>,
+    campaign_id: ObjectId,
+) -> Result<CampaignDryRunProgress, ApiError> {
     Ok(CampaignDryRunProgress {
-        pending: recipients
-            .count_documents(dry_run_status_count_filter(campaign_id, "pending"))
-            .await
-            .map_err(|e| ApiError::DatabaseError(e.to_string()))?,
-        sending: recipients
-            .count_documents(dry_run_status_count_filter(campaign_id, "sending"))
-            .await
-            .map_err(|e| ApiError::DatabaseError(e.to_string()))?,
-        validated: recipients
-            .count_documents(dry_run_status_count_filter(campaign_id, "validated"))
-            .await
-            .map_err(|e| ApiError::DatabaseError(e.to_string()))?,
-        failed: recipients
-            .count_documents(dry_run_status_count_filter(campaign_id, "failed"))
-            .await
-            .map_err(|e| ApiError::DatabaseError(e.to_string()))?,
+        pending: count_campaign_recipients(
+            recipients,
+            effective_status_count_filter(campaign_id, "pending"),
+        )
+        .await?,
+        sending: count_campaign_recipients(
+            recipients,
+            effective_status_count_filter(campaign_id, "sending"),
+        )
+        .await?,
+        validated: count_campaign_recipients(
+            recipients,
+            effective_status_count_filter(campaign_id, "validated"),
+        )
+        .await?,
+        failed: count_campaign_recipients(
+            recipients,
+            effective_status_count_filter(campaign_id, "failed"),
+        )
+        .await?,
+        invalid_phone: count_campaign_recipients(
+            recipients,
+            status_count_filter(campaign_id, "invalid_phone"),
+        )
+        .await?,
+        duplicated_phone: count_campaign_recipients(
+            recipients,
+            status_count_filter(campaign_id, "duplicated_phone"),
+        )
+        .await?,
+        excluded: count_campaign_recipients(
+            recipients,
+            doc! { "campaign_id": campaign_id, "excluded": true },
+        )
+        .await?,
+        total_effective: count_campaign_recipients(recipients, total_effective_filter(campaign_id))
+            .await?,
     })
+}
+
+async fn count_campaign_recipients(
+    recipients: &mongodb::Collection<WaCampaignRecipientDoc>,
+    filter: Document,
+) -> Result<u64, ApiError> {
+    recipients
+        .count_documents(filter)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))
 }
 
 async fn count_effectively_excluded_recipients(
@@ -1238,6 +1287,22 @@ fn effective_recipient_filter(campaign_id: ObjectId) -> Document {
         "excluded": false,
         "status": "pending",
     }
+}
+
+fn total_effective_filter(campaign_id: ObjectId) -> Document {
+    doc! {
+        "campaign_id": campaign_id,
+        "can_send": true,
+        "excluded": false,
+    }
+}
+
+fn build_campaign_recipients_filter(campaign_id: ObjectId, status: Option<&str>) -> Document {
+    let mut filter = doc! { "campaign_id": campaign_id };
+    if let Some(status) = status.map(str::trim).filter(|value| !value.is_empty()) {
+        filter.insert("status", status);
+    }
+    filter
 }
 
 fn running_dry_run_campaign_filter() -> Document {
@@ -1302,12 +1367,92 @@ fn dry_run_recipient_failed_update(
     }
 }
 
-fn dry_run_status_count_filter(campaign_id: ObjectId, status: &str) -> Document {
+fn status_count_filter(campaign_id: ObjectId, status: &str) -> Document {
+    doc! {
+        "campaign_id": campaign_id,
+        "status": status,
+    }
+}
+
+fn effective_status_count_filter(campaign_id: ObjectId, status: &str) -> Document {
     doc! {
         "campaign_id": campaign_id,
         "can_send": true,
         "excluded": false,
         "status": status,
+    }
+}
+
+fn stale_sending_cutoff(now: DateTime) -> DateTime {
+    DateTime::from_millis(now.timestamp_millis() - CAMPAIGN_SENDING_STALE_SECS * 1000)
+}
+
+fn stale_sending_recovery_filter(campaign_id: ObjectId, now: DateTime) -> Document {
+    doc! {
+        "campaign_id": campaign_id,
+        "can_send": true,
+        "excluded": false,
+        "status": "sending",
+        "last_attempt_at": { "$lt": stale_sending_cutoff(now) },
+    }
+}
+
+fn stale_sending_recovery_update(now: DateTime) -> Document {
+    doc! {
+        "$set": {
+            "status": "pending",
+            "updated_at": now,
+            "error_code": "stale_sending_recovered",
+            "error_message": "Recipient returned to pending after stale sending timeout.",
+        }
+    }
+}
+
+async fn recover_stale_sending_recipients(
+    recipients: &mongodb::Collection<WaCampaignRecipientDoc>,
+    campaign_id: ObjectId,
+    now: DateTime,
+) -> Result<(), ApiError> {
+    let result = recipients
+        .update_many(
+            stale_sending_recovery_filter(campaign_id, now),
+            stale_sending_recovery_update(now),
+        )
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    if result.modified_count > 0 {
+        tracing::warn!(
+            campaign_id = %campaign_id,
+            recovered = result.modified_count,
+            "Recovered stale WhatsApp campaign dry-run recipients"
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+fn stale_sending_recipient_is_recoverable(
+    recipient: &WaCampaignRecipientDoc,
+    now: DateTime,
+) -> bool {
+    recipient.can_send
+        && !recipient.excluded
+        && recipient.status == "sending"
+        && recipient
+            .last_attempt_at
+            .is_some_and(|last_attempt_at| last_attempt_at < stale_sending_cutoff(now))
+}
+
+#[cfg(test)]
+fn recover_stale_sending_recipient_state(recipient: &mut WaCampaignRecipientDoc, now: DateTime) {
+    if stale_sending_recipient_is_recoverable(recipient, now) {
+        recipient.status = "pending".to_string();
+        recipient.updated_at = now;
+        recipient.error_code = Some("stale_sending_recovered".to_string());
+        recipient.error_message =
+            Some("Recipient returned to pending after stale sending timeout.".to_string());
     }
 }
 
@@ -2272,6 +2417,13 @@ fn calculate_recipient_exclusion_counters<'a>(
 }
 
 fn campaign_to_summary(campaign: WaCampaignDoc) -> CampaignSummary {
+    campaign_to_summary_with_progress(campaign, None)
+}
+
+fn campaign_to_summary_with_progress(
+    campaign: WaCampaignDoc,
+    progress: Option<CampaignDryRunProgress>,
+) -> CampaignSummary {
     CampaignSummary {
         id: campaign.id.map(|id| id.to_hex()).unwrap_or_default(),
         name: campaign.name,
@@ -2296,6 +2448,7 @@ fn campaign_to_summary(campaign: WaCampaignDoc) -> CampaignSummary {
         started_at: campaign.started_at.map(iso8601),
         run_mode: campaign.run_mode,
         dry_run_completed_at: campaign.dry_run_completed_at.map(iso8601),
+        progress: progress.map(campaign_progress_to_dto),
         total_recipients: campaign.total_recipients,
         total_can_send: campaign.total_can_send,
         total_invalid_phone: campaign.total_invalid_phone,
@@ -2310,6 +2463,30 @@ fn campaign_to_summary(campaign: WaCampaignDoc) -> CampaignSummary {
         confirmed_at: campaign.confirmed_at.map(iso8601),
         created_at: iso8601(campaign.created_at),
         updated_at: iso8601(campaign.updated_at),
+    }
+}
+
+fn campaign_progress_to_dto(progress: CampaignDryRunProgress) -> CampaignProgress {
+    let processed = progress.validated + progress.failed;
+    CampaignProgress {
+        pending: progress.pending,
+        sending: progress.sending,
+        validated: progress.validated,
+        failed: progress.failed,
+        invalid_phone: progress.invalid_phone,
+        duplicated_phone: progress.duplicated_phone,
+        excluded: progress.excluded,
+        total_effective: progress.total_effective,
+        processed,
+        progress_percent: calculate_progress_percent(processed, progress.total_effective),
+    }
+}
+
+fn calculate_progress_percent(processed: u64, total_effective: u64) -> f64 {
+    if total_effective == 0 {
+        0.0
+    } else {
+        (processed as f64 / total_effective as f64) * 100.0
     }
 }
 
@@ -3666,6 +3843,38 @@ mod tests {
     }
 
     #[test]
+    fn recipient_item_includes_dry_run_status_fields() {
+        let now = DateTime::from_millis(1_800_000_000_000);
+        let last_attempt_at = DateTime::from_millis(1_800_000_000_100);
+        let validated_at = DateTime::from_millis(1_800_000_000_200);
+        let mut recipient = base_recipient("validated");
+        recipient.attempts = 2;
+        recipient.last_attempt_at = Some(last_attempt_at);
+        recipient.error_code = Some("previous_error".to_string());
+        recipient.error_message = Some("Previous error".to_string());
+        recipient.validated_at = Some(validated_at);
+        recipient.updated_at = now;
+
+        let item = recipient_to_item(recipient);
+        let expected_last_attempt_at = iso8601(last_attempt_at);
+        let expected_validated_at = iso8601(validated_at);
+
+        assert_eq!(item.status, "validated");
+        assert_eq!(item.attempts, 2);
+        assert_eq!(
+            item.last_attempt_at.as_deref(),
+            Some(expected_last_attempt_at.as_str())
+        );
+        assert_eq!(item.error_code.as_deref(), Some("previous_error"));
+        assert_eq!(item.error_message.as_deref(), Some("Previous error"));
+        assert_eq!(
+            item.validated_at.as_deref(),
+            Some(expected_validated_at.as_str())
+        );
+        assert_eq!(item.updated_at, iso8601(now));
+    }
+
+    #[test]
     fn payment_due_day_accepts_only_valid_client_payment_days() {
         assert_eq!(
             get_payment_due_day(&doc! { "nPayment": 1 }, "nPayment"),
@@ -3732,6 +3941,20 @@ mod tests {
                 "excluded": false,
                 "status": "pending",
             }
+        );
+    }
+
+    #[test]
+    fn campaign_recipients_filter_allows_optional_status_exact_match() {
+        let campaign_id = ObjectId::parse_str("64f000000000000000000001").unwrap();
+
+        assert_eq!(
+            build_campaign_recipients_filter(campaign_id, Some(" validated ")),
+            doc! { "campaign_id": campaign_id, "status": "validated" }
+        );
+        assert_eq!(
+            build_campaign_recipients_filter(campaign_id, Some(" ")),
+            doc! { "campaign_id": campaign_id }
         );
     }
 
@@ -3865,6 +4088,7 @@ mod tests {
             sending: 0,
             validated: 3,
             failed: 0,
+            ..Default::default()
         };
 
         assert_eq!(
@@ -3880,6 +4104,7 @@ mod tests {
             sending: 0,
             validated: 2,
             failed: 1,
+            ..Default::default()
         };
 
         assert_eq!(
@@ -3896,6 +4121,7 @@ mod tests {
                 sending: 0,
                 validated: 0,
                 failed: 0,
+                ..Default::default()
             }),
             None
         );
@@ -3905,8 +4131,138 @@ mod tests {
                 sending: 1,
                 validated: 0,
                 failed: 0,
+                ..Default::default()
             }),
             None
+        );
+    }
+
+    #[test]
+    fn campaign_progress_counts_statuses_and_calculates_processed_percentage() {
+        let dto = campaign_progress_to_dto(CampaignDryRunProgress {
+            pending: 2,
+            sending: 1,
+            validated: 3,
+            failed: 1,
+            invalid_phone: 4,
+            duplicated_phone: 5,
+            excluded: 6,
+            total_effective: 7,
+        });
+
+        assert_eq!(dto.pending, 2);
+        assert_eq!(dto.sending, 1);
+        assert_eq!(dto.validated, 3);
+        assert_eq!(dto.failed, 1);
+        assert_eq!(dto.invalid_phone, 4);
+        assert_eq!(dto.duplicated_phone, 5);
+        assert_eq!(dto.excluded, 6);
+        assert_eq!(dto.total_effective, 7);
+        assert_eq!(dto.processed, 4);
+        assert!((dto.progress_percent - 57.14285714285714).abs() < 1e-9);
+    }
+
+    #[test]
+    fn campaign_progress_percent_handles_zero_effective_total() {
+        assert_eq!(calculate_progress_percent(0, 0), 0.0);
+        assert_eq!(
+            campaign_progress_to_dto(CampaignDryRunProgress::default()).progress_percent,
+            0.0
+        );
+    }
+
+    #[test]
+    fn campaign_detail_summary_includes_progress_when_loaded_for_detail() {
+        let summary = campaign_to_summary_with_progress(
+            base_campaign("running"),
+            Some(CampaignDryRunProgress {
+                pending: 0,
+                sending: 0,
+                validated: 2,
+                failed: 0,
+                invalid_phone: 1,
+                duplicated_phone: 1,
+                excluded: 1,
+                total_effective: 2,
+            }),
+        );
+
+        let progress = summary.progress.unwrap();
+        assert_eq!(progress.validated, 2);
+        assert_eq!(progress.processed, 2);
+        assert_eq!(progress.progress_percent, 100.0);
+    }
+
+    #[test]
+    fn campaign_summary_omits_progress_by_default_for_non_detail_flows() {
+        let summary = campaign_to_summary(base_campaign("queued"));
+
+        assert!(summary.progress.is_none());
+    }
+
+    #[test]
+    fn dry_run_recovery_returns_stale_sending_recipient_to_pending() {
+        let now = DateTime::from_millis(1_800_000_600_000);
+        let mut stale = base_recipient("sending");
+        stale.last_attempt_at = Some(DateTime::from_millis(
+            now.timestamp_millis() - (CAMPAIGN_SENDING_STALE_SECS + 1) * 1000,
+        ));
+
+        assert!(stale_sending_recipient_is_recoverable(&stale, now));
+        recover_stale_sending_recipient_state(&mut stale, now);
+
+        assert_eq!(stale.status, "pending");
+        assert_eq!(stale.updated_at, now);
+        assert_eq!(stale.error_code.as_deref(), Some("stale_sending_recovered"));
+        assert_eq!(
+            stale.error_message.as_deref(),
+            Some("Recipient returned to pending after stale sending timeout.")
+        );
+    }
+
+    #[test]
+    fn dry_run_recovery_keeps_recent_sending_recipient_unchanged() {
+        let now = DateTime::from_millis(1_800_000_600_000);
+        let mut recent = base_recipient("sending");
+        let original_updated_at = recent.updated_at;
+        recent.last_attempt_at = Some(DateTime::from_millis(
+            now.timestamp_millis() - (CAMPAIGN_SENDING_STALE_SECS - 1) * 1000,
+        ));
+
+        assert!(!stale_sending_recipient_is_recoverable(&recent, now));
+        recover_stale_sending_recipient_state(&mut recent, now);
+
+        assert_eq!(recent.status, "sending");
+        assert_eq!(recent.updated_at, original_updated_at);
+        assert!(recent.error_code.is_none());
+        assert!(recent.error_message.is_none());
+    }
+
+    #[test]
+    fn dry_run_recovery_builds_stale_filter_and_pending_update() {
+        let campaign_id = ObjectId::parse_str("64f000000000000000000001").unwrap();
+        let now = DateTime::from_millis(1_800_000_600_000);
+
+        assert_eq!(
+            stale_sending_recovery_filter(campaign_id, now),
+            doc! {
+                "campaign_id": campaign_id,
+                "can_send": true,
+                "excluded": false,
+                "status": "sending",
+                "last_attempt_at": { "$lt": DateTime::from_millis(1_800_000_300_000) },
+            }
+        );
+        assert_eq!(
+            stale_sending_recovery_update(now),
+            doc! {
+                "$set": {
+                    "status": "pending",
+                    "updated_at": now,
+                    "error_code": "stale_sending_recovered",
+                    "error_message": "Recipient returned to pending after stale sending timeout.",
+                }
+            }
         );
     }
 

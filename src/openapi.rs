@@ -84,7 +84,7 @@ use crate::modules::payments::handler::RejectReportRequest;
 use crate::modules::whatsapp::campaigns::dto::{
     BalanceFilter, BalanceRange, CampaignListItem, CampaignListQuery, CampaignListResponse,
     CampaignPreviewRecipient, CampaignPreviewRequest, CampaignPreviewResponse,
-    CampaignPreviewTotals, CampaignRecipientItem, CampaignRecipientsQuery,
+    CampaignPreviewTotals, CampaignProgress, CampaignRecipientItem, CampaignRecipientsQuery,
     CampaignRecipientsResponse, CampaignSummary, CampaignSummaryResponse, ClientStateFilter,
     CreateCampaignRequest, DerivedClientState, PhoneStatus, TemplateClientField,
     TemplateVariableBinding, TemplateVariableComponent, TemplateVariableSource,
@@ -99,7 +99,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.72",
+        version = "0.3.73",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
@@ -339,7 +339,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
             PhoneStatus, DerivedClientState, TemplateVariableComponent, TemplateVariableSource,
             TemplateClientField, TemplateVariableBinding, CreateCampaignRequest, CampaignRecipientsQuery,
             CampaignListQuery, CampaignListResponse, CampaignListItem,
-            CampaignSummaryResponse, CampaignSummary, CampaignRecipientsResponse, CampaignRecipientItem,
+            CampaignSummaryResponse, CampaignSummary, CampaignProgress, CampaignRecipientsResponse, CampaignRecipientItem,
             UpdateCampaignRequest, UpdateCampaignResponse,
             UpdateCampaignRecipientExclusionsRequest, UpdateCampaignRecipientExclusionsResponse,
             UpdateCampaignRecipientExclusionsData,

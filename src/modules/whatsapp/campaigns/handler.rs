@@ -204,6 +204,7 @@ pub async fn update_campaign_handler(
         ("id" = String, Path, description = "Campaign ObjectId"),
         ("page" = Option<u32>, Query, description = "Page number, starting at 1"),
         ("per_page" = Option<u32>, Query, description = "Page size, max 500"),
+        ("status" = Option<String>, Query, description = "Recipient status exact match"),
     ),
     responses(
         (status = 200, description = "List frozen recipient snapshot rows for a campaign", body = CampaignRecipientsResponse),
