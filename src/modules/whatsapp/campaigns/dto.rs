@@ -24,6 +24,7 @@ pub struct CampaignPreviewRequest {
 pub enum ClientStateFilter {
     Active,
     Suspended,
+    Retired,
     Moroso,
     Solvente,
     Any,
@@ -101,6 +102,7 @@ pub struct CampaignPreviewRecipient {
     pub client_state_raw: String,
     pub client_state_derived: DerivedClientState,
     pub balance: f64,
+    pub payment_due_day: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -160,6 +162,7 @@ pub enum TemplateVariableSource {
 pub enum TemplateClientField {
     ClientName,
     Balance,
+    PaymentDueDay,
     ProviderName,
     SectorName,
     CustomerStatusDerived,
@@ -310,6 +313,7 @@ pub struct CampaignRecipientItem {
     pub customer_status_raw: String,
     pub customer_status_derived: DerivedClientState,
     pub balance: f64,
+    pub payment_due_day: Option<i32>,
     pub phone_original: String,
     pub phone_normalized: Option<String>,
     pub phone_status: PhoneStatus,

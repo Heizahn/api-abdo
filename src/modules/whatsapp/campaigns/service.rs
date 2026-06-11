@@ -31,6 +31,7 @@ const DEFAULT_PER_PAGE: u32 = 100;
 const MAX_PER_PAGE: u32 = 500;
 const DEFAULT_CAMPAIGN_LIST_LIMIT: u32 = 20;
 const MAX_CAMPAIGN_LIST_LIMIT: u32 = 100;
+const RETIRED_CLIENT_STATE: &str = "Retirado";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WaCampaignDoc {
@@ -77,6 +78,8 @@ struct WaCampaignRecipientDoc {
     customer_status_raw: String,
     customer_status_derived: DerivedClientState,
     balance: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    payment_due_day: Option<i32>,
     phone_original: String,
     phone_normalized: Option<String>,
     phone_status: PhoneStatus,
@@ -99,6 +102,7 @@ struct CandidateClient {
     sector_name: Option<String>,
     state: String,
     balance: f64,
+    payment_due_day: Option<i32>,
 }
 
 pub async fn preview_recipients(
@@ -1507,6 +1511,7 @@ async fn build_recipients_snapshot(
         "idSector": 1,
         "sState": 1,
         "nBalance": 1,
+        "nPayment": 1,
     };
 
     let mut cursor = state
@@ -1549,6 +1554,7 @@ async fn build_recipients_snapshot(
             sector_name: None,
             state: doc.get_str("sState").unwrap_or_default().to_string(),
             balance: get_bson_amount(&doc, "nBalance"),
+            payment_due_day: get_payment_due_day(&doc, "nPayment"),
         });
     }
 
@@ -1580,6 +1586,7 @@ fn preview_to_snapshot_recipient(
         customer_status_raw: recipient.client_state_raw,
         customer_status_derived: recipient.client_state_derived,
         balance: recipient.balance,
+        payment_due_day: recipient.payment_due_day,
         phone_original: recipient.phone_original,
         phone_normalized: recipient.phone_normalized,
         phone_status: recipient.phone_status,
@@ -1710,6 +1717,7 @@ fn recipient_to_item(recipient: WaCampaignRecipientDoc) -> CampaignRecipientItem
         customer_status_raw: recipient.customer_status_raw,
         customer_status_derived: recipient.customer_status_derived,
         balance: recipient.balance,
+        payment_due_day: recipient.payment_due_day,
         phone_original: recipient.phone_original,
         phone_normalized: recipient.phone_normalized,
         phone_status: recipient.phone_status,
@@ -1788,6 +1796,7 @@ fn build_preview_recipients(
             client_state_raw: candidate.state,
             client_state_derived: derived,
             balance: candidate.balance,
+            payment_due_day: candidate.payment_due_day,
         });
     }
 
@@ -1804,6 +1813,7 @@ fn has_allowed_filter(request: &CampaignPreviewRequest) -> bool {
             request.client_state,
             Some(
                 ClientStateFilter::Suspended
+                    | ClientStateFilter::Retired
                     | ClientStateFilter::Moroso
                     | ClientStateFilter::Solvente
             )
@@ -1834,6 +1844,9 @@ fn build_client_filter(request: &CampaignPreviewRequest) -> Result<Document, Api
     match request.client_state.as_ref() {
         Some(ClientStateFilter::Active) => clauses.push(doc! { "sState": "Activo" }),
         Some(ClientStateFilter::Suspended) => clauses.push(doc! { "sState": "Suspendido" }),
+        Some(ClientStateFilter::Retired) => {
+            clauses.push(doc! { "sState": { "$in": vec![RETIRED_CLIENT_STATE] } })
+        }
         Some(ClientStateFilter::Moroso) => {
             clauses.push(doc! { "sState": "Activo", "nBalance": { "$lt": 0.0 } })
         }
@@ -2018,6 +2031,26 @@ fn get_bson_amount(doc: &Document, key: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
+fn get_payment_due_day(doc: &Document, key: &str) -> Option<i32> {
+    if let Ok(day) = doc.get_i32(key) {
+        return (1..=31).contains(&day).then_some(day);
+    }
+
+    if let Ok(day) = doc.get_i64(key) {
+        return i32::try_from(day).ok().filter(|day| (1..=31).contains(day));
+    }
+
+    if let Ok(day) = doc.get_f64(key) {
+        return day
+            .is_finite()
+            .then_some(day)
+            .filter(|day| day.fract() == 0.0 && (1.0..=31.0).contains(day))
+            .map(|day| day as i32);
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2034,6 +2067,7 @@ mod tests {
             sector_name: None,
             state: "Activo".to_string(),
             balance: 0.0,
+            payment_due_day: None,
         }
     }
 
@@ -2092,6 +2126,20 @@ mod tests {
             value: None,
             client_field: Some(
                 crate::modules::whatsapp::campaigns::dto::TemplateClientField::ClientName,
+            ),
+            button_index: None,
+        }
+    }
+
+    fn payment_due_day_body_binding(index: i32) -> TemplateVariableBinding {
+        TemplateVariableBinding {
+            component: TemplateVariableComponent::Body,
+            index,
+            placeholder: format!("{{{{{index}}}}}"),
+            source: TemplateVariableSource::ClientField,
+            value: None,
+            client_field: Some(
+                crate::modules::whatsapp::campaigns::dto::TemplateClientField::PaymentDueDay,
             ),
             button_index: None,
         }
@@ -2171,6 +2219,13 @@ mod tests {
         });
 
         assert!(serde_json::from_value::<TemplateVariableBinding>(payload).is_err());
+    }
+
+    #[test]
+    fn create_with_payment_due_day_client_field_passes_validation() {
+        let bindings = vec![payment_due_day_body_binding(1)];
+
+        assert!(validate_create_template_variable_bindings(Some(&bindings)).is_ok());
     }
 
     #[test]
@@ -2256,6 +2311,42 @@ mod tests {
         assert_eq!(updated.total_can_send, 2);
         assert_eq!(updated.total_invalid_phone, 1);
         assert_eq!(updated.total_duplicated_phone, 0);
+        assert_eq!(updated.total_excluded, 0);
+    }
+
+    #[test]
+    fn edit_filters_to_retired_regenerates_snapshot_totals_and_resets_exclusions() {
+        let campaign = base_campaign("draft");
+        let mut request = update_request("June Promo");
+        request.filters = CampaignPreviewRequest {
+            provider_ids: None,
+            sector_ids: None,
+            balance_filter: None,
+            client_state: Some(ClientStateFilter::Retired),
+            include_all_active: None,
+            page: None,
+            per_page: None,
+        };
+
+        assert!(campaign_snapshot_filters_changed(
+            &campaign.filters,
+            &request.filters
+        ));
+
+        let updated = apply_campaign_edit(
+            campaign,
+            request,
+            "admin-1",
+            Some(&regenerated_totals()),
+            DateTime::now(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            updated.filters.client_state,
+            Some(ClientStateFilter::Retired)
+        );
+        assert_eq!(updated.total_recipients, 3);
         assert_eq!(updated.total_excluded, 0);
     }
 
@@ -2427,6 +2518,16 @@ mod tests {
     }
 
     #[test]
+    fn confirm_template_with_payment_due_day_variable_passes() {
+        let components = vec![serde_json::json!({ "type": "BODY", "text": "Due day {{1}}" })];
+        let bindings = vec![payment_due_day_body_binding(1)];
+
+        assert!(
+            validate_bindings_against_template_components(&components, Some(&bindings)).is_ok()
+        );
+    }
+
+    #[test]
     fn confirm_template_without_variables_passes() {
         let components = vec![serde_json::json!({ "type": "BODY", "text": "Hello" })];
 
@@ -2449,6 +2550,39 @@ mod tests {
             build_client_filter(&request).unwrap(),
             doc! { "sState": "Suspendido" }
         );
+    }
+
+    #[test]
+    fn retired_filter_matches_retired_state() {
+        let request = CampaignPreviewRequest {
+            provider_ids: None,
+            sector_ids: None,
+            balance_filter: None,
+            client_state: Some(ClientStateFilter::Retired),
+            include_all_active: None,
+            page: None,
+            per_page: None,
+        };
+
+        assert_eq!(
+            build_client_filter(&request).unwrap(),
+            doc! { "sState": { "$in": vec![RETIRED_CLIENT_STATE] } }
+        );
+    }
+
+    #[test]
+    fn retired_filter_is_allowed_as_standalone_audience_filter() {
+        let request = CampaignPreviewRequest {
+            provider_ids: None,
+            sector_ids: None,
+            balance_filter: None,
+            client_state: Some(ClientStateFilter::Retired),
+            include_all_active: None,
+            page: None,
+            per_page: None,
+        };
+
+        assert!(has_allowed_filter(&request));
     }
 
     #[test]
@@ -2501,9 +2635,11 @@ mod tests {
 
     #[test]
     fn duplicate_detection_is_global_and_keeps_first_valid_occurrence() {
+        let mut first = candidate("1", "First", "0412 123 4567");
+        first.payment_due_day = Some(15);
         let (totals, recipients) = build_preview_recipients(
             vec![
-                candidate("1", "First", "0412 123 4567"),
+                first,
                 candidate("2", "Second", "4121234567"),
                 candidate("3", "Third", "0414 111 1111"),
             ],
@@ -2517,6 +2653,7 @@ mod tests {
         assert_eq!(totals.invalid_phone, 0);
 
         assert!(recipients[0].can_send);
+        assert_eq!(recipients[0].payment_due_day, Some(15));
         assert!(matches!(recipients[0].phone_status, PhoneStatus::Valid));
         assert!(!recipients[1].can_send);
         assert!(matches!(
@@ -2584,6 +2721,7 @@ mod tests {
             client_state_raw: "Activo".to_string(),
             client_state_derived: DerivedClientState::Solvente,
             balance: 0.0,
+            payment_due_day: Some(10),
         };
 
         let snapshot = preview_to_snapshot_recipient(campaign_id, recipient, now);
@@ -2591,6 +2729,7 @@ mod tests {
         assert!(!snapshot.can_send);
         assert!(!snapshot.excluded);
         assert_eq!(snapshot.status, "invalid_phone");
+        assert_eq!(snapshot.payment_due_day, Some(10));
         assert!(matches!(snapshot.phone_status, PhoneStatus::Invalid));
     }
 
@@ -2614,6 +2753,7 @@ mod tests {
             client_state_raw: "Activo".to_string(),
             client_state_derived: DerivedClientState::Solvente,
             balance: 0.0,
+            payment_due_day: None,
         };
 
         let snapshot = preview_to_snapshot_recipient(campaign_id, recipient, now);
@@ -2622,6 +2762,69 @@ mod tests {
         assert!(!snapshot.excluded);
         assert_eq!(snapshot.status, "duplicated_phone");
         assert!(matches!(snapshot.phone_status, PhoneStatus::Duplicated));
+    }
+
+    #[test]
+    fn recipient_item_includes_payment_due_day() {
+        let now = DateTime::now();
+        let item = recipient_to_item(WaCampaignRecipientDoc {
+            id: Some(ObjectId::new()),
+            campaign_id: ObjectId::new(),
+            client_id: "client-1".to_string(),
+            client_name: "Client One".to_string(),
+            provider_id: None,
+            provider_name: None,
+            sector_id: None,
+            sector_name: None,
+            customer_status_raw: "Activo".to_string(),
+            customer_status_derived: DerivedClientState::Solvente,
+            balance: 0.0,
+            payment_due_day: Some(20),
+            phone_original: "0412 123 4567".to_string(),
+            phone_normalized: Some("584121234567".to_string()),
+            phone_status: PhoneStatus::Valid,
+            can_send: true,
+            reason: None,
+            excluded: false,
+            status: "pending".to_string(),
+            created_at: now,
+            updated_at: now,
+        });
+
+        assert_eq!(item.payment_due_day, Some(20));
+    }
+
+    #[test]
+    fn payment_due_day_accepts_only_valid_client_payment_days() {
+        assert_eq!(
+            get_payment_due_day(&doc! { "nPayment": 1 }, "nPayment"),
+            Some(1)
+        );
+        assert_eq!(
+            get_payment_due_day(&doc! { "nPayment": 15.0 }, "nPayment"),
+            Some(15)
+        );
+        assert_eq!(
+            get_payment_due_day(&doc! { "nPayment": 15.5 }, "nPayment"),
+            None
+        );
+        assert_eq!(
+            get_payment_due_day(&doc! { "nPayment": 31_i64 }, "nPayment"),
+            Some(31)
+        );
+        assert_eq!(
+            get_payment_due_day(&doc! { "nPayment": 0 }, "nPayment"),
+            None
+        );
+        assert_eq!(
+            get_payment_due_day(&doc! { "nPayment": 32 }, "nPayment"),
+            None
+        );
+        assert_eq!(
+            get_payment_due_day(&doc! { "nPayment": 32.0 }, "nPayment"),
+            None
+        );
+        assert_eq!(get_payment_due_day(&doc! {}, "nPayment"), None);
     }
 
     #[test]
