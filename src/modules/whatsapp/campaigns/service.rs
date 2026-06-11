@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
+
+use async_trait::async_trait;
 
 use axum::http::StatusCode;
 use futures::stream::StreamExt;
@@ -47,6 +50,8 @@ const MAX_CAMPAIGN_LIST_LIMIT: u32 = 100;
 const RETIRED_CLIENT_STATE: &str = "Retirado";
 const CAMPAIGN_WORKER_INTERVAL_SECS: u64 = 5;
 const CAMPAIGN_WORKER_BATCH_SIZE: usize = 50;
+const CAMPAIGN_SEND_WORKER_INTERVAL_SECS: u64 = 5;
+const CAMPAIGN_SEND_WORKER_BATCH_SIZE: usize = 10;
 const CAMPAIGN_SENDING_STALE_SECS: i64 = 300;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -355,6 +360,18 @@ struct WaCampaignRecipientDoc {
     error_message: Option<String>,
     #[serde(default)]
     validated_at: Option<DateTime>,
+    #[serde(default)]
+    send_attempts: i64,
+    #[serde(default)]
+    send_started_at: Option<DateTime>,
+    #[serde(default)]
+    sent_at: Option<DateTime>,
+    #[serde(default)]
+    send_error_code: Option<String>,
+    #[serde(default)]
+    send_error_message: Option<String>,
+    #[serde(default)]
+    meta_message_id: Option<String>,
     created_at: DateTime,
     updated_at: DateTime,
 }
@@ -373,6 +390,82 @@ struct CampaignDryRunProgress {
     duplicated_phone: u64,
     excluded: u64,
     total_effective: u64,
+    sent: u64,
+    send_failed: u64,
+    send_unknown: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CampaignSendResult {
+    meta_message_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CampaignSendError {
+    code: String,
+    message: String,
+}
+
+impl CampaignSendError {
+    #[cfg(test)]
+    fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for CampaignSendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for CampaignSendError {}
+
+#[async_trait]
+trait CampaignMessageSender: Send + Sync {
+    async fn send_template(
+        &self,
+        campaign: &WaCampaignDoc,
+        recipient: &WaCampaignRecipientDoc,
+        components: Vec<serde_json::Value>,
+    ) -> Result<CampaignSendResult, CampaignSendError>;
+}
+
+#[derive(Debug, Default)]
+struct FakeCampaignMessageSender;
+
+#[async_trait]
+impl CampaignMessageSender for FakeCampaignMessageSender {
+    async fn send_template(
+        &self,
+        campaign: &WaCampaignDoc,
+        recipient: &WaCampaignRecipientDoc,
+        components: Vec<serde_json::Value>,
+    ) -> Result<CampaignSendResult, CampaignSendError> {
+        fake_campaign_send_result(campaign, recipient, &components)
+    }
+}
+
+fn fake_campaign_send_result(
+    campaign: &WaCampaignDoc,
+    recipient: &WaCampaignRecipientDoc,
+    _components: &[serde_json::Value],
+) -> Result<CampaignSendResult, CampaignSendError> {
+    let campaign_id = campaign
+        .id
+        .map(|id| id.to_hex())
+        .unwrap_or_else(|| "unknown_campaign".to_string());
+    let recipient_id = recipient
+        .id
+        .map(|id| id.to_hex())
+        .unwrap_or_else(|| "unknown_recipient".to_string());
+
+    Ok(CampaignSendResult {
+        meta_message_id: format!("fake:{campaign_id}:{recipient_id}"),
+    })
 }
 
 struct CandidateClient {
@@ -1130,6 +1223,90 @@ pub async fn run_campaign_dry_run_worker(state: Arc<AppState>) {
     }
 }
 
+pub async fn run_campaign_send_worker(state: Arc<AppState>) {
+    tracing::info!(
+        interval_secs = CAMPAIGN_SEND_WORKER_INTERVAL_SECS,
+        batch_size = CAMPAIGN_SEND_WORKER_BATCH_SIZE,
+        "WhatsApp campaign real-send fake worker started"
+    );
+
+    let sender = FakeCampaignMessageSender;
+    let mut interval =
+        tokio::time::interval(Duration::from_secs(CAMPAIGN_SEND_WORKER_INTERVAL_SECS));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        interval.tick().await;
+        if let Err(err) =
+            process_sending_real_campaigns(&state, &sender, CAMPAIGN_SEND_WORKER_BATCH_SIZE).await
+        {
+            tracing::error!(error = %err, "WhatsApp campaign real-send worker tick failed");
+        }
+    }
+}
+
+async fn process_sending_real_campaigns<S>(
+    state: &AppState,
+    sender: &S,
+    batch_size: usize,
+) -> Result<(), ApiError>
+where
+    S: CampaignMessageSender,
+{
+    let campaigns = state.db.db.collection::<WaCampaignDoc>("WaCampaigns");
+    let sending = campaigns
+        .find(sending_real_campaign_filter())
+        .sort(doc! { "send_started_at": 1, "_id": 1 })
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+        .try_collect::<Vec<_>>()
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    for campaign in sending {
+        process_campaign_send_batch(state, sender, &campaign, batch_size).await?;
+    }
+
+    Ok(())
+}
+
+async fn process_campaign_send_batch<S>(
+    state: &AppState,
+    sender: &S,
+    campaign: &WaCampaignDoc,
+    batch_size: usize,
+) -> Result<(), ApiError>
+where
+    S: CampaignMessageSender,
+{
+    if !should_process_campaign_send(campaign) {
+        return Ok(());
+    }
+
+    let Some(campaign_id) = campaign.id else {
+        return Ok(());
+    };
+
+    let recipients = state
+        .db
+        .db
+        .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients");
+
+    let mut claimed = 0usize;
+    while claimed < batch_size {
+        let Some(recipient) =
+            claim_next_validated_recipient_for_send(&recipients, campaign_id).await?
+        else {
+            break;
+        };
+        claimed += 1;
+        send_claimed_campaign_recipient(&recipients, sender, campaign, recipient).await?;
+    }
+
+    finalize_campaign_send_if_done(state, campaign_id).await?;
+    Ok(())
+}
+
 async fn process_running_dry_run_campaigns(
     state: &AppState,
     batch_size: usize,
@@ -1207,6 +1384,87 @@ async fn claim_next_dry_run_recipient(
         .map_err(|e| ApiError::DatabaseError(e.to_string()))
 }
 
+async fn claim_next_validated_recipient_for_send(
+    recipients: &mongodb::Collection<WaCampaignRecipientDoc>,
+    campaign_id: ObjectId,
+) -> Result<Option<WaCampaignRecipientDoc>, ApiError> {
+    let opts = FindOneAndUpdateOptions::builder()
+        .return_document(ReturnDocument::After)
+        .build();
+
+    recipients
+        .find_one_and_update(
+            send_recipient_claim_filter(campaign_id),
+            send_recipient_claim_update(DateTime::now()),
+        )
+        .sort(doc! { "created_at": 1, "_id": 1 })
+        .with_options(opts)
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))
+}
+
+async fn send_claimed_campaign_recipient<S>(
+    recipients: &mongodb::Collection<WaCampaignRecipientDoc>,
+    sender: &S,
+    campaign: &WaCampaignDoc,
+    recipient: WaCampaignRecipientDoc,
+) -> Result<(), ApiError>
+where
+    S: CampaignMessageSender,
+{
+    let Some(recipient_id) = recipient.id else {
+        return Ok(());
+    };
+    let Some(campaign_id) = campaign.id else {
+        return Ok(());
+    };
+
+    let snapshot = recipient_to_template_snapshot(&recipient);
+    let now = DateTime::now();
+    let components = match build_campaign_template_send_components(
+        campaign.template_components.as_deref(),
+        campaign.template_variable_bindings.as_deref(),
+        campaign.template_media_bindings.as_deref(),
+        &snapshot,
+    ) {
+        Ok(components) => components,
+        Err(err) => {
+            let code = err.code();
+            recipients
+                .update_one(
+                    doc! { "_id": recipient_id, "campaign_id": campaign_id, "status": "sending" },
+                    send_recipient_failed_update(code, code.to_string(), now),
+                )
+                .await
+                .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+            return Ok(());
+        }
+    };
+
+    match sender.send_template(campaign, &recipient, components).await {
+        Ok(result) => {
+            recipients
+                .update_one(
+                    doc! { "_id": recipient_id, "campaign_id": campaign_id, "status": "sending" },
+                    send_recipient_sent_update(result.meta_message_id, now),
+                )
+                .await
+                .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+        }
+        Err(err) => {
+            recipients
+                .update_one(
+                    doc! { "_id": recipient_id, "campaign_id": campaign_id, "status": "sending" },
+                    send_recipient_failed_update(&err.code, err.message, now),
+                )
+                .await
+                .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+        }
+    }
+
+    Ok(())
+}
+
 async fn resolve_claimed_dry_run_recipient(
     recipients: &mongodb::Collection<WaCampaignRecipientDoc>,
     campaign: &WaCampaignDoc,
@@ -1262,6 +1520,53 @@ async fn resolve_claimed_dry_run_recipient(
                 "WhatsApp campaign dry-run recipient failed"
             );
         }
+    }
+
+    Ok(())
+}
+
+async fn finalize_campaign_send_if_done(
+    state: &AppState,
+    campaign_id: ObjectId,
+) -> Result<(), ApiError> {
+    let recipients = state
+        .db
+        .db
+        .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients");
+    let campaigns = state.db.db.collection::<WaCampaignDoc>("WaCampaigns");
+
+    let progress = load_campaign_progress(&recipients, campaign_id).await?;
+    let Some(status) = send_completion_status(&progress) else {
+        return Ok(());
+    };
+
+    let now = DateTime::now();
+    let result = campaigns
+        .update_one(
+            doc! {
+                "_id": campaign_id,
+                "status": "sending",
+                "run_mode": "real",
+            },
+            doc! {
+                "$set": {
+                    "status": status,
+                    "send_completed_at": now,
+                    "updated_at": now,
+                }
+            },
+        )
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    if result.modified_count > 0 {
+        tracing::info!(
+            campaign_id = %campaign_id,
+            status,
+            sent = progress.sent,
+            send_failed = progress.send_failed,
+            "WhatsApp campaign real-send completed"
+        );
     }
 
     Ok(())
@@ -1349,6 +1654,21 @@ async fn load_campaign_progress(
             effective_status_count_filter(campaign_id, "failed"),
         )
         .await?,
+        sent: count_campaign_recipients(
+            recipients,
+            effective_status_count_filter(campaign_id, "sent"),
+        )
+        .await?,
+        send_failed: count_campaign_recipients(
+            recipients,
+            effective_status_count_filter(campaign_id, "send_failed"),
+        )
+        .await?,
+        send_unknown: count_campaign_recipients(
+            recipients,
+            effective_status_count_filter(campaign_id, "send_unknown"),
+        )
+        .await?,
         invalid_phone: count_campaign_recipients(
             recipients,
             status_count_filter(campaign_id, "invalid_phone"),
@@ -1433,8 +1753,16 @@ fn running_dry_run_campaign_filter() -> Document {
     doc! { "status": "running", "run_mode": "dry_run" }
 }
 
+fn sending_real_campaign_filter() -> Document {
+    doc! { "status": "sending", "run_mode": "real" }
+}
+
 fn should_process_campaign_dry_run(campaign: &WaCampaignDoc) -> bool {
     campaign.status == "running" && campaign.run_mode.as_deref() == Some("dry_run")
+}
+
+fn should_process_campaign_send(campaign: &WaCampaignDoc) -> bool {
+    campaign.status == "sending" && campaign.run_mode.as_deref() == Some("real")
 }
 
 fn dry_run_recipient_claim_filter(campaign_id: ObjectId) -> Document {
@@ -1449,6 +1777,15 @@ fn dry_run_recipient_claim_filter(campaign_id: ObjectId) -> Document {
 #[cfg(test)]
 fn dry_run_recipient_is_claimable(recipient: &WaCampaignRecipientDoc) -> bool {
     recipient.can_send && !recipient.excluded && recipient.status == "pending"
+}
+
+fn send_recipient_claim_filter(campaign_id: ObjectId) -> Document {
+    validated_real_send_recipient_filter(campaign_id)
+}
+
+#[cfg(test)]
+fn send_recipient_is_claimable(recipient: &WaCampaignRecipientDoc) -> bool {
+    recipient.can_send && !recipient.excluded && recipient.status == "validated"
 }
 
 fn dry_run_recipient_claim_update(now: DateTime) -> Document {
@@ -1486,6 +1823,48 @@ fn dry_run_recipient_failed_update(
             "status": "failed",
             "error_code": error_code,
             "error_message": error_message,
+            "updated_at": now,
+        }
+    }
+}
+
+fn send_recipient_claim_update(now: DateTime) -> Document {
+    doc! {
+        "$set": {
+            "status": "sending",
+            "send_started_at": now,
+            "last_attempt_at": now,
+            "updated_at": now,
+        },
+        "$inc": { "send_attempts": 1i64 }
+    }
+}
+
+fn send_recipient_sent_update(meta_message_id: String, now: DateTime) -> Document {
+    doc! {
+        "$set": {
+            "status": "sent",
+            "meta_message_id": meta_message_id,
+            "sent_at": now,
+            "updated_at": now,
+        },
+        "$unset": {
+            "send_error_code": "",
+            "send_error_message": "",
+        }
+    }
+}
+
+fn send_recipient_failed_update(
+    error_code: &str,
+    error_message: String,
+    now: DateTime,
+) -> Document {
+    doc! {
+        "$set": {
+            "status": "send_failed",
+            "send_error_code": error_code,
+            "send_error_message": error_message,
             "updated_at": now,
         }
     }
@@ -1587,6 +1966,16 @@ fn dry_run_completion_status(progress: &CampaignDryRunProgress) -> Option<&'stat
         Some("dry_run_completed")
     } else {
         Some("dry_run_completed_with_errors")
+    }
+}
+
+fn send_completion_status(progress: &CampaignDryRunProgress) -> Option<&'static str> {
+    if progress.validated > 0 || progress.sending > 0 {
+        None
+    } else if progress.send_failed == 0 {
+        Some("completed")
+    } else {
+        Some("completed_with_errors")
     }
 }
 
@@ -2708,6 +3097,12 @@ fn preview_to_snapshot_recipient(
         error_code: None,
         error_message: None,
         validated_at: None,
+        send_attempts: 0,
+        send_started_at: None,
+        sent_at: None,
+        send_error_code: None,
+        send_error_message: None,
+        meta_message_id: None,
         created_at: now,
         updated_at: now,
     }
@@ -2814,6 +3209,12 @@ fn campaign_to_summary_with_progress(
 
 fn campaign_progress_to_dto(progress: CampaignDryRunProgress) -> CampaignProgress {
     let processed = progress.validated + progress.failed;
+    let total_to_send = progress.validated
+        + progress.sending
+        + progress.sent
+        + progress.send_failed
+        + progress.send_unknown;
+    let processed_send = progress.sent + progress.send_failed + progress.send_unknown;
     CampaignProgress {
         pending: progress.pending,
         sending: progress.sending,
@@ -2825,6 +3226,12 @@ fn campaign_progress_to_dto(progress: CampaignDryRunProgress) -> CampaignProgres
         total_effective: progress.total_effective,
         processed,
         progress_percent: calculate_progress_percent(processed, progress.total_effective),
+        sent: progress.sent,
+        send_failed: progress.send_failed,
+        send_unknown: progress.send_unknown,
+        total_to_send,
+        processed_send,
+        send_progress_percent: calculate_progress_percent(processed_send, total_to_send),
     }
 }
 
@@ -2909,6 +3316,12 @@ fn recipient_to_item(recipient: WaCampaignRecipientDoc) -> CampaignRecipientItem
         error_code: recipient.error_code,
         error_message: recipient.error_message,
         validated_at: recipient.validated_at.map(iso8601),
+        send_attempts: recipient.send_attempts,
+        send_started_at: recipient.send_started_at.map(iso8601),
+        sent_at: recipient.sent_at.map(iso8601),
+        send_error_code: recipient.send_error_code,
+        send_error_message: recipient.send_error_message,
+        meta_message_id: recipient.meta_message_id,
         created_at: iso8601(recipient.created_at),
         updated_at: iso8601(recipient.updated_at),
     }
@@ -3393,6 +3806,12 @@ mod tests {
             error_code: None,
             error_message: None,
             validated_at: None,
+            send_attempts: 0,
+            send_started_at: None,
+            sent_at: None,
+            send_error_code: None,
+            send_error_message: None,
+            meta_message_id: None,
             created_at: now,
             updated_at: now,
         }
@@ -4486,6 +4905,12 @@ mod tests {
             error_code: None,
             error_message: None,
             validated_at: None,
+            send_attempts: 0,
+            send_started_at: None,
+            sent_at: None,
+            send_error_code: None,
+            send_error_message: None,
+            meta_message_id: None,
             created_at: now,
             updated_at: now,
         });
@@ -4898,6 +5323,9 @@ mod tests {
             duplicated_phone: 5,
             excluded: 6,
             total_effective: 7,
+            sent: 2,
+            send_failed: 1,
+            send_unknown: 0,
         });
 
         assert_eq!(dto.pending, 2);
@@ -4910,6 +5338,12 @@ mod tests {
         assert_eq!(dto.total_effective, 7);
         assert_eq!(dto.processed, 4);
         assert!((dto.progress_percent - 57.14285714285714).abs() < 1e-9);
+        assert_eq!(dto.sent, 2);
+        assert_eq!(dto.send_failed, 1);
+        assert_eq!(dto.send_unknown, 0);
+        assert_eq!(dto.total_to_send, 7);
+        assert_eq!(dto.processed_send, 3);
+        assert!((dto.send_progress_percent - 42.857142857142854).abs() < 1e-9);
     }
 
     #[test]
@@ -4934,6 +5368,9 @@ mod tests {
                 duplicated_phone: 1,
                 excluded: 1,
                 total_effective: 2,
+                sent: 0,
+                send_failed: 0,
+                send_unknown: 0,
             }),
         );
 
@@ -5358,6 +5795,253 @@ mod tests {
                 "can_send": true,
                 "excluded": false,
                 "status": "validated",
+            }
+        );
+    }
+
+    #[test]
+    fn send_claim_validated_recipient_builds_atomic_sending_update() {
+        let campaign_id = ObjectId::parse_str("64f000000000000000000001").unwrap();
+        let now = DateTime::from_millis(1_800_000_000_400);
+        let recipient = base_recipient("validated");
+
+        assert!(send_recipient_is_claimable(&recipient));
+        assert_eq!(
+            send_recipient_claim_filter(campaign_id),
+            validated_real_send_recipient_filter(campaign_id)
+        );
+        assert_eq!(
+            send_recipient_claim_update(now),
+            doc! {
+                "$set": {
+                    "status": "sending",
+                    "send_started_at": now,
+                    "last_attempt_at": now,
+                    "updated_at": now,
+                },
+                "$inc": { "send_attempts": 1i64 }
+            }
+        );
+    }
+
+    #[test]
+    fn send_claim_does_not_take_noneligible_recipients() {
+        for status in [
+            "pending",
+            "sending",
+            "sent",
+            "failed",
+            "validation_failed",
+            "send_failed",
+            "send_unknown",
+            "invalid_phone",
+            "duplicated_phone",
+        ] {
+            assert!(!send_recipient_is_claimable(&base_recipient(status)));
+        }
+
+        let mut excluded = base_recipient("validated");
+        excluded.excluded = true;
+        assert!(!send_recipient_is_claimable(&excluded));
+
+        let mut non_sendable = base_recipient("validated");
+        non_sendable.can_send = false;
+        assert!(!send_recipient_is_claimable(&non_sendable));
+    }
+
+    #[test]
+    fn fake_sender_success_uses_fake_message_id() {
+        let campaign = base_campaign("sending");
+        let recipient = base_recipient("sending");
+        let result = fake_campaign_send_result(&campaign, &recipient, &[]).unwrap();
+
+        assert!(result.meta_message_id.starts_with("fake:"));
+        assert!(result.meta_message_id.contains("64f000000000000000000001"));
+        assert!(result.meta_message_id.contains("64f000000000000000000101"));
+    }
+
+    #[test]
+    fn send_success_update_marks_sent_and_clears_send_error() {
+        let now = DateTime::from_millis(1_800_000_000_500);
+
+        assert_eq!(
+            send_recipient_sent_update("fake:campaign:recipient".to_string(), now),
+            doc! {
+                "$set": {
+                    "status": "sent",
+                    "meta_message_id": "fake:campaign:recipient",
+                    "sent_at": now,
+                    "updated_at": now,
+                },
+                "$unset": {
+                    "send_error_code": "",
+                    "send_error_message": "",
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn send_error_update_marks_send_failed_with_error_fields() {
+        let now = DateTime::from_millis(1_800_000_000_600);
+        let error = CampaignSendError::new("fake_error", "Simulated fake sender error");
+
+        assert_eq!(
+            send_recipient_failed_update(&error.code, error.message, now),
+            doc! {
+                "$set": {
+                    "status": "send_failed",
+                    "send_error_code": "fake_error",
+                    "send_error_message": "Simulated fake sender error",
+                    "updated_at": now,
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn real_send_worker_selection_only_processes_sending_real_campaigns() {
+        let mut campaign = base_campaign("sending");
+        campaign.run_mode = Some("real".to_string());
+
+        assert!(should_process_campaign_send(&campaign));
+        assert_eq!(
+            sending_real_campaign_filter(),
+            doc! { "status": "sending", "run_mode": "real" }
+        );
+    }
+
+    #[test]
+    fn real_send_worker_selection_rejects_non_real_send_campaigns() {
+        for status in ["dry_run_completed", "running", "queued"] {
+            let mut campaign = base_campaign(status);
+            campaign.run_mode = Some("real".to_string());
+            assert!(!should_process_campaign_send(&campaign));
+        }
+
+        let mut dry_run = base_campaign("sending");
+        dry_run.run_mode = Some("dry_run".to_string());
+        assert!(!should_process_campaign_send(&dry_run));
+
+        let missing_run_mode = base_campaign("sending");
+        assert!(!should_process_campaign_send(&missing_run_mode));
+    }
+
+    #[test]
+    fn real_send_finalization_without_failures_completes_successfully() {
+        let progress = CampaignDryRunProgress {
+            validated: 0,
+            sending: 0,
+            sent: 3,
+            send_failed: 0,
+            ..Default::default()
+        };
+
+        assert_eq!(send_completion_status(&progress), Some("completed"));
+    }
+
+    #[test]
+    fn real_send_finalization_with_failures_completes_with_errors() {
+        let progress = CampaignDryRunProgress {
+            validated: 0,
+            sending: 0,
+            sent: 2,
+            send_failed: 1,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            send_completion_status(&progress),
+            Some("completed_with_errors")
+        );
+    }
+
+    #[test]
+    fn real_send_finalization_waits_for_validated_or_sending_recipients() {
+        assert_eq!(
+            send_completion_status(&CampaignDryRunProgress {
+                validated: 1,
+                ..Default::default()
+            }),
+            None
+        );
+        assert_eq!(
+            send_completion_status(&CampaignDryRunProgress {
+                sending: 1,
+                ..Default::default()
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn real_send_progress_counts_sent_failed_and_percent() {
+        let dto = campaign_progress_to_dto(CampaignDryRunProgress {
+            validated: 2,
+            sending: 1,
+            sent: 5,
+            send_failed: 2,
+            send_unknown: 1,
+            ..Default::default()
+        });
+
+        assert_eq!(dto.total_to_send, 11);
+        assert_eq!(dto.processed_send, 8);
+        assert!((dto.send_progress_percent - 72.72727272727273).abs() < 1e-9);
+    }
+
+    #[test]
+    fn real_send_builds_components_before_fake_send() {
+        let mut campaign = base_campaign("sending");
+        campaign.run_mode = Some("real".to_string());
+        campaign.template_components = Some(vec![serde_json::json!({
+            "type": "BODY",
+            "text": "Hola {{1}}"
+        })]);
+        campaign.template_variable_bindings = Some(vec![client_field_body_binding(1).into()]);
+        let recipient = base_recipient("sending");
+        let components = build_campaign_template_send_components(
+            campaign.template_components.as_deref(),
+            campaign.template_variable_bindings.as_deref(),
+            campaign.template_media_bindings.as_deref(),
+            &recipient_to_template_snapshot(&recipient),
+        )
+        .unwrap();
+        let result = fake_campaign_send_result(&campaign, &recipient, &components).unwrap();
+
+        assert_eq!(components[0]["parameters"][0]["text"], "Client One");
+        assert!(result.meta_message_id.starts_with("fake:"));
+    }
+
+    #[test]
+    fn real_send_builder_failure_maps_to_send_failed_update() {
+        let now = DateTime::from_millis(1_800_000_000_700);
+        let mut campaign = base_campaign("sending");
+        campaign.template_components = Some(vec![serde_json::json!({
+            "type": "BODY",
+            "text": "Due {{1}}"
+        })]);
+        campaign.template_variable_bindings = Some(vec![payment_due_day_body_binding(1).into()]);
+        let mut recipient = base_recipient("sending");
+        recipient.payment_due_day = None;
+        let err = build_campaign_template_send_components(
+            campaign.template_components.as_deref(),
+            campaign.template_variable_bindings.as_deref(),
+            campaign.template_media_bindings.as_deref(),
+            &recipient_to_template_snapshot(&recipient),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code(), "missing_recipient_field");
+        assert_eq!(
+            send_recipient_failed_update(err.code(), err.code().to_string(), now),
+            doc! {
+                "$set": {
+                    "status": "send_failed",
+                    "send_error_code": "missing_recipient_field",
+                    "send_error_message": "missing_recipient_field",
+                    "updated_at": now,
+                }
             }
         );
     }

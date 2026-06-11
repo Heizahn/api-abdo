@@ -81,6 +81,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await;
     });
 
+    let state_for_campaign_sends = state.clone();
+    tokio::spawn(async move {
+        modules::whatsapp::campaigns::service::run_campaign_send_worker(state_for_campaign_sends)
+            .await;
+    });
+
     // Seed lazy de planes y zonas de cobertura para el AI Agent. Solo
     // inserta si las colecciones están vacías.
     let state_for_ai_seed = state.clone();

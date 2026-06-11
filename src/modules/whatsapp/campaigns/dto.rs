@@ -354,6 +354,12 @@ pub struct CampaignProgress {
     pub total_effective: u64,
     pub processed: u64,
     pub progress_percent: f64,
+    pub sent: u64,
+    pub send_failed: u64,
+    pub send_unknown: u64,
+    pub total_to_send: u64,
+    pub processed_send: u64,
+    pub send_progress_percent: f64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -393,6 +399,12 @@ pub struct CampaignRecipientItem {
     pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub validated_at: Option<String>,
+    pub send_attempts: i64,
+    pub send_started_at: Option<String>,
+    pub sent_at: Option<String>,
+    pub send_error_code: Option<String>,
+    pub send_error_message: Option<String>,
+    pub meta_message_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
