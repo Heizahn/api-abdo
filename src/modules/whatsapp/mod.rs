@@ -76,6 +76,10 @@ pub fn user_routes() -> Router<Arc<AppState>> {
             post(campaigns::handler::confirm_campaign_handler),
         )
         .route(
+            "/v1/admin/whatsapp-campaigns/:id/start",
+            post(campaigns::handler::start_campaign_handler),
+        )
+        .route(
             "/v1/admin/whatsapp-campaigns/:id",
             get(campaigns::handler::get_campaign_handler),
         )
@@ -401,6 +405,11 @@ mod tests {
         documented(
             "POST",
             "/v1/admin/whatsapp-campaigns/:id/confirm",
+            "WhatsApp — Campaigns",
+        ),
+        documented(
+            "POST",
+            "/v1/admin/whatsapp-campaigns/:id/start",
             "WhatsApp — Campaigns",
         ),
         documented(

@@ -19,7 +19,7 @@ use super::{
     },
     service::{
         confirm_campaign, create_campaign, get_campaign, get_campaign_recipients, list_campaigns,
-        preview_recipients, update_campaign, update_campaign_recipient_exclusions,
+        preview_recipients, start_campaign, update_campaign, update_campaign_recipient_exclusions,
     },
 };
 
@@ -89,6 +89,30 @@ pub async fn confirm_campaign_handler(
 ) -> Result<Json<CampaignSummaryResponse>, ApiError> {
     require_superadmin(&state, &claims.id).await?;
     confirm_campaign(&state, &id, &claims.id).await.map(Json)
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/admin/whatsapp-campaigns/{id}/start",
+    tag = "WhatsApp — Campaigns",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "Campaign ObjectId")),
+    responses(
+        (status = 200, description = "Start a queued WhatsApp campaign by moving it to running without processing recipients", body = CampaignSummaryResponse),
+        (status = 400, description = "Invalid campaign id, missing required campaign data, or no effective recipients"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "SUPERADMIN role required"),
+        (status = 404, description = "Campaign not found"),
+        (status = 409, description = "Campaign status is not startable"),
+    )
+)]
+pub async fn start_campaign_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+) -> Result<Json<CampaignSummaryResponse>, ApiError> {
+    require_superadmin(&state, &claims.id).await?;
+    start_campaign(&state, &id, &claims.id).await.map(Json)
 }
 
 #[utoipa::path(

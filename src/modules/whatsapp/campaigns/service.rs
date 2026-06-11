@@ -41,7 +41,9 @@ struct WaCampaignDoc {
     name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     phone_number_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_string_or_default")]
     template_name: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_default")]
     template_language: String,
     #[serde(default)]
     template_components: Option<Vec<serde_json::Value>>,
@@ -61,6 +63,12 @@ struct WaCampaignDoc {
     confirmed_by: Option<String>,
     #[serde(default)]
     confirmed_at: Option<DateTime>,
+    #[serde(default)]
+    started_by: Option<String>,
+    #[serde(default)]
+    started_at: Option<DateTime>,
+    #[serde(default)]
+    run_mode: Option<String>,
     created_at: DateTime,
     updated_at: DateTime,
 }
@@ -325,6 +333,13 @@ struct CandidateClient {
     payment_due_day: Option<i32>,
 }
 
+fn deserialize_string_or_default<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 pub async fn preview_recipients(
     state: &AppState,
     request: CampaignPreviewRequest,
@@ -402,6 +417,9 @@ pub async fn create_campaign(
         created_by: created_by.to_string(),
         confirmed_by: None,
         confirmed_at: None,
+        started_by: None,
+        started_at: None,
+        run_mode: None,
         created_at: now,
         updated_at: now,
     };
@@ -650,6 +668,71 @@ pub async fn confirm_campaign(
                 "campaign_not_confirmable",
                 "Only draft or previewed campaigns can be confirmed.",
             ));
+        }
+    }
+
+    let campaign = campaigns
+        .find_one(doc! { "_id": campaign_id })
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+        .ok_or(ApiError::NotFound)?;
+
+    Ok(CampaignSummaryResponse {
+        ok: true,
+        data: campaign_to_summary(campaign),
+    })
+}
+
+pub async fn start_campaign(
+    state: &AppState,
+    campaign_id: &str,
+    started_by: &str,
+) -> Result<CampaignSummaryResponse, ApiError> {
+    let campaign_id = parse_campaign_id(campaign_id)?;
+    let campaigns = state.db.db.collection::<WaCampaignDoc>("WaCampaigns");
+    let recipients = state
+        .db
+        .db
+        .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients");
+
+    let campaign = campaigns
+        .find_one(doc! { "_id": campaign_id })
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+        .ok_or(ApiError::NotFound)?;
+
+    validate_startable_campaign(&campaign)?;
+
+    let effective_recipients = recipients
+        .count_documents(effective_recipient_filter(campaign_id.clone()))
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+    if effective_recipients == 0 {
+        return Err(ApiError::domain_simple(
+            StatusCode::BAD_REQUEST,
+            "campaign_has_no_effective_recipients",
+            "Campaign must have at least one non-excluded pending recipient that can be sent.",
+        ));
+    }
+
+    let now = DateTime::now();
+    let result = campaigns
+        .update_one(
+            doc! { "_id": campaign_id, "status": "queued" },
+            start_campaign_update_doc(started_by, now),
+        )
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    if result.matched_count == 0 {
+        let campaign = campaigns
+            .find_one(doc! { "_id": campaign_id })
+            .await
+            .map_err(|e| ApiError::DatabaseError(e.to_string()))?
+            .ok_or(ApiError::NotFound)?;
+
+        if campaign.status != "queued" {
+            return Err(campaign_not_startable());
         }
     }
 
@@ -1530,6 +1613,56 @@ fn total_effective_can_send(total_can_send: u64, total_excluded: u64) -> u64 {
     total_can_send.saturating_sub(total_excluded)
 }
 
+fn validate_startable_campaign(campaign: &WaCampaignDoc) -> Result<(), ApiError> {
+    if campaign.status != "queued" {
+        return Err(campaign_not_startable());
+    }
+
+    campaign
+        .phone_number_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError::domain_simple(
+                StatusCode::BAD_REQUEST,
+                "missing_phone_number_id",
+                "Campaign must have a phone_number_id before starting.",
+            )
+        })?;
+
+    if campaign.template_name.trim().is_empty() {
+        return Err(ApiError::BadRequest("template_name_required".to_string()));
+    }
+    if campaign.template_language.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "template_language_required".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn campaign_not_startable() -> ApiError {
+    ApiError::domain_simple(
+        StatusCode::CONFLICT,
+        "campaign_not_startable",
+        "Only queued campaigns can be started.",
+    )
+}
+
+fn start_campaign_update_doc(started_by: &str, now: DateTime) -> Document {
+    doc! {
+        "$set": {
+            "status": "running",
+            "started_by": started_by,
+            "started_at": now,
+            "updated_at": now,
+            "run_mode": "dry_run",
+        }
+    }
+}
+
 fn build_campaign_list_filter(query: &CampaignListQuery) -> Result<Document, ApiError> {
     let mut filter = Document::new();
 
@@ -1798,6 +1931,9 @@ fn campaign_to_summary(campaign: WaCampaignDoc) -> CampaignSummary {
         }),
         filters: campaign.filters,
         status: campaign.status,
+        started_by: campaign.started_by,
+        started_at: campaign.started_at.map(iso8601),
+        run_mode: campaign.run_mode,
         total_recipients: campaign.total_recipients,
         total_can_send: campaign.total_can_send,
         total_invalid_phone: campaign.total_invalid_phone,
@@ -1832,6 +1968,7 @@ fn campaign_to_list_item(campaign: WaCampaignDoc) -> CampaignListItem {
             .map(Vec::len)
             .unwrap_or(0),
         status: campaign.status,
+        run_mode: campaign.run_mode,
         total_recipients: campaign.total_recipients,
         total_can_send: campaign.total_can_send,
         total_invalid_phone: campaign.total_invalid_phone,
@@ -2243,6 +2380,9 @@ mod tests {
             created_by: "creator-1".to_string(),
             confirmed_by: Some("admin-1".to_string()),
             confirmed_at: Some(now),
+            started_by: None,
+            started_at: None,
+            run_mode: None,
             created_at: now,
             updated_at: now,
         }
@@ -3210,6 +3350,153 @@ mod tests {
         assert_eq!(summary.total_effective_can_send, 3);
         assert_eq!(summary.confirmed_by.as_deref(), Some("admin-1"));
         assert!(summary.confirmed_at.is_some());
+    }
+
+    #[test]
+    fn start_queued_campaign_with_effective_recipients_builds_running_transition() {
+        let mut campaign = base_campaign("queued");
+        campaign.total_excluded = 0;
+
+        validate_startable_campaign(&campaign).unwrap();
+        let now = DateTime::from_millis(1_800_000_000_001);
+        let update = start_campaign_update_doc("admin-2", now);
+
+        assert_eq!(
+            update,
+            doc! {
+                "$set": {
+                    "status": "running",
+                    "started_by": "admin-2",
+                    "started_at": now,
+                    "updated_at": now,
+                    "run_mode": "dry_run",
+                }
+            }
+        );
+
+        campaign.status = "running".to_string();
+        campaign.started_by = Some("admin-2".to_string());
+        campaign.started_at = Some(now);
+        campaign.run_mode = Some("dry_run".to_string());
+        let summary = campaign_to_summary(campaign);
+
+        assert_eq!(summary.status, "running");
+        assert_eq!(summary.started_by.as_deref(), Some("admin-2"));
+        assert_eq!(summary.run_mode.as_deref(), Some("dry_run"));
+        assert!(summary.started_at.is_some());
+    }
+
+    #[test]
+    fn start_missing_campaign_maps_to_not_found_contract() {
+        let missing: Option<WaCampaignDoc> = None;
+
+        assert!(matches!(
+            missing.ok_or(ApiError::NotFound),
+            Err(ApiError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn start_draft_or_previewed_campaign_returns_conflict() {
+        for status_value in ["draft", "previewed"] {
+            let err = validate_startable_campaign(&base_campaign(status_value)).unwrap_err();
+
+            assert!(matches!(
+                err,
+                ApiError::Domain { status, ref code, .. }
+                    if status == StatusCode::CONFLICT && code == "campaign_not_startable"
+            ));
+        }
+    }
+
+    #[test]
+    fn start_running_campaign_returns_conflict() {
+        let err = validate_startable_campaign(&base_campaign("running")).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, .. }
+                if status == StatusCode::CONFLICT && code == "campaign_not_startable"
+        ));
+    }
+
+    #[test]
+    fn start_queued_with_no_effective_recipients_returns_validation_error_without_status_change() {
+        let campaign = base_campaign("queued");
+        let effective_recipients = 0_u64;
+
+        validate_startable_campaign(&campaign).unwrap();
+        let err = if effective_recipients == 0 {
+            Err(ApiError::domain_simple(
+                StatusCode::BAD_REQUEST,
+                "campaign_has_no_effective_recipients",
+                "Campaign must have at least one non-excluded pending recipient that can be sent.",
+            ))
+        } else {
+            Ok(())
+        }
+        .unwrap_err();
+
+        assert_eq!(campaign.status, "queued");
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, .. }
+                if status == StatusCode::BAD_REQUEST && code == "campaign_has_no_effective_recipients"
+        ));
+    }
+
+    #[test]
+    fn start_legacy_without_phone_number_id_returns_validation_error_without_status_change() {
+        let mut campaign = base_campaign("queued");
+        campaign.phone_number_id = None;
+
+        let err = validate_startable_campaign(&campaign).unwrap_err();
+
+        assert_eq!(campaign.status, "queued");
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, .. }
+                if status == StatusCode::BAD_REQUEST && code == "missing_phone_number_id"
+        ));
+    }
+
+    #[test]
+    fn start_legacy_without_template_name_returns_existing_validation_code() {
+        let mut campaign = base_campaign("queued");
+        campaign.template_name = " ".to_string();
+
+        let err = validate_startable_campaign(&campaign).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::BadRequest(ref code) if code == "template_name_required"
+        ));
+    }
+
+    #[test]
+    fn start_legacy_without_template_language_returns_existing_validation_code() {
+        let mut campaign = base_campaign("queued");
+        campaign.template_language = " ".to_string();
+
+        let err = validate_startable_campaign(&campaign).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::BadRequest(ref code) if code == "template_language_required"
+        ));
+    }
+
+    #[test]
+    fn double_start_first_transition_then_second_returns_conflict() {
+        let first = validate_startable_campaign(&base_campaign("queued"));
+        let second = validate_startable_campaign(&base_campaign("running"));
+
+        assert!(first.is_ok());
+        assert!(matches!(
+            second,
+            Err(ApiError::Domain { status, ref code, .. })
+                if status == StatusCode::CONFLICT && code == "campaign_not_startable"
+        ));
     }
 
     #[test]
