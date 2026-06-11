@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq)]
 pub struct CampaignPreviewRequest {
     #[serde(default)]
     pub provider_ids: Option<Vec<String>>,
@@ -19,7 +19,7 @@ pub struct CampaignPreviewRequest {
     pub per_page: Option<u32>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientStateFilter {
     Active,
@@ -29,13 +29,13 @@ pub enum ClientStateFilter {
     Any,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq)]
 pub struct BalanceRange {
     pub min: f64,
     pub max: f64,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq)]
 pub struct BalanceFilter {
     #[serde(default)]
     pub lt: Option<f64>,
@@ -116,6 +116,28 @@ pub struct CreateCampaignRequest {
     #[serde(default)]
     pub template_variable_bindings: Option<Vec<TemplateVariableBinding>>,
     pub filters: CampaignPreviewRequest,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateCampaignRequest {
+    pub name: String,
+    #[serde(default)]
+    pub phone_number_id: Option<String>,
+    pub template_name: String,
+    pub template_language: String,
+    #[serde(default)]
+    #[schema(value_type = Option<Vec<Object>>)]
+    pub template_components: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    pub template_variable_bindings: Option<Vec<TemplateVariableBinding>>,
+    pub filters: CampaignPreviewRequest,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UpdateCampaignResponse {
+    pub ok: bool,
+    pub data: CampaignSummary,
+    pub snapshot_regenerated: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq, Eq, Hash)]

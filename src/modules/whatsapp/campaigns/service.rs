@@ -22,6 +22,7 @@ use super::{
         CreateCampaignRequest, DerivedClientState, PhoneStatus, TemplateVariableBinding,
         TemplateVariableComponent, TemplateVariableSource, UpdateCampaignRecipientExclusionsData,
         UpdateCampaignRecipientExclusionsRequest, UpdateCampaignRecipientExclusionsResponse,
+        UpdateCampaignRequest, UpdateCampaignResponse,
     },
     phone::normalize_phone_to_whatsapp,
 };
@@ -237,6 +238,109 @@ pub async fn get_campaign(
     Ok(CampaignSummaryResponse {
         ok: true,
         data: campaign_to_summary(campaign),
+    })
+}
+
+pub async fn update_campaign(
+    state: &AppState,
+    campaign_id: &str,
+    updated_by: &str,
+    request: UpdateCampaignRequest,
+) -> Result<UpdateCampaignResponse, ApiError> {
+    validate_update_campaign_request(&request)?;
+
+    let campaign_id = parse_campaign_id(campaign_id)?;
+    let campaigns = state.db.db.collection::<WaCampaignDoc>("WaCampaigns");
+    let recipients = state
+        .db
+        .db
+        .collection::<WaCampaignRecipientDoc>("WaCampaignRecipients");
+    let campaign = claim_campaign_for_editing(&campaigns, &campaign_id).await?;
+    let original_status = campaign.status.clone();
+    let filters_changed = campaign_snapshot_filters_changed(&campaign.filters, &request.filters);
+
+    if !filters_changed {
+        let updated_campaign =
+            apply_campaign_edit(campaign.clone(), request, updated_by, None, DateTime::now())?;
+        if let Err(err) =
+            replace_campaign_after_edit(&campaigns, &campaign_id, &updated_campaign).await
+        {
+            let _ = restore_campaign_after_failed_edit(&campaigns, &campaign_id, &campaign).await;
+            return Err(err);
+        }
+        return Ok(UpdateCampaignResponse {
+            ok: true,
+            data: campaign_to_summary(updated_campaign),
+            snapshot_regenerated: false,
+        });
+    }
+
+    let (totals, preview_recipients) =
+        match build_recipients_snapshot(state, &request.filters).await {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                let _ = restore_campaign_after_failed_exclusion(
+                    &campaigns,
+                    &campaign_id,
+                    &original_status,
+                    None,
+                )
+                .await;
+                return Err(err);
+            }
+        };
+    let now = DateTime::now();
+    let new_recipient_docs = preview_recipients
+        .into_iter()
+        .map(|recipient| preview_to_snapshot_recipient(campaign_id.clone(), recipient, now))
+        .collect::<Vec<_>>();
+    let previous_recipient_docs = match recipients
+        .find(doc! { "campaign_id": campaign_id.clone() })
+        .await
+    {
+        Ok(cursor) => match cursor.try_collect::<Vec<_>>().await {
+            Ok(recipients) => recipients,
+            Err(e) => {
+                let _ =
+                    restore_campaign_after_failed_edit(&campaigns, &campaign_id, &campaign).await;
+                return Err(ApiError::DatabaseError(format!(
+                    "campaign snapshot backup collect failed: {e}"
+                )));
+            }
+        },
+        Err(e) => {
+            let _ = restore_campaign_after_failed_edit(&campaigns, &campaign_id, &campaign).await;
+            return Err(ApiError::DatabaseError(format!(
+                "campaign snapshot backup read failed: {e}"
+            )));
+        }
+    };
+    let updated_campaign = apply_campaign_edit(
+        campaign.clone(),
+        request,
+        updated_by,
+        Some(&totals),
+        DateTime::now(),
+    )?;
+
+    if let Err(err) = replace_campaign_snapshot(&recipients, &campaign_id, new_recipient_docs).await
+    {
+        let _ = restore_campaign_snapshot(&recipients, &campaign_id, previous_recipient_docs).await;
+        let _ = restore_campaign_after_failed_edit(&campaigns, &campaign_id, &campaign).await;
+        return Err(err);
+    }
+
+    if let Err(err) = replace_campaign_after_edit(&campaigns, &campaign_id, &updated_campaign).await
+    {
+        let _ = restore_campaign_snapshot(&recipients, &campaign_id, previous_recipient_docs).await;
+        let _ = restore_campaign_after_failed_edit(&campaigns, &campaign_id, &campaign).await;
+        return Err(err);
+    }
+
+    Ok(UpdateCampaignResponse {
+        ok: true,
+        data: campaign_to_summary(updated_campaign),
+        snapshot_regenerated: true,
     })
 }
 
@@ -694,7 +798,7 @@ async fn claim_campaign_for_editing(
         Some(_) => Err(ApiError::domain_simple(
             StatusCode::CONFLICT,
             "campaign_not_editable",
-            "Only draft or previewed campaigns can update recipient exclusions.",
+            "Only draft or previewed campaigns can be edited.",
         )),
     }
 }
@@ -766,6 +870,151 @@ async fn restore_campaign_after_failed_exclusion(
                 "Only draft or previewed campaigns can update recipient exclusions.",
             )),
         };
+    }
+
+    Ok(())
+}
+
+fn validate_update_campaign_request(request: &UpdateCampaignRequest) -> Result<(), ApiError> {
+    if request.name.trim().is_empty() {
+        return Err(ApiError::BadRequest("campaign_name_required".to_string()));
+    }
+    if request.template_name.trim().is_empty() {
+        return Err(ApiError::BadRequest("template_name_required".to_string()));
+    }
+    if request.template_language.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "template_language_required".to_string(),
+        ));
+    }
+    normalize_optional_phone_number_id(request.phone_number_id.as_deref())?;
+    validate_create_template_variable_bindings(request.template_variable_bindings.as_deref())?;
+    Ok(())
+}
+
+fn campaign_snapshot_filters_changed(
+    current: &CampaignPreviewRequest,
+    next: &CampaignPreviewRequest,
+) -> bool {
+    normalized_campaign_preview_request(current) != normalized_campaign_preview_request(next)
+}
+
+fn normalized_campaign_preview_request(request: &CampaignPreviewRequest) -> CampaignPreviewRequest {
+    let mut normalized = request.clone();
+    normalized.page = None;
+    normalized.per_page = None;
+    normalized
+}
+
+fn apply_campaign_edit(
+    mut campaign: WaCampaignDoc,
+    request: UpdateCampaignRequest,
+    _updated_by: &str,
+    regenerated_totals: Option<&CampaignPreviewTotals>,
+    updated_at: DateTime,
+) -> Result<WaCampaignDoc, ApiError> {
+    campaign.name = request.name.trim().to_string();
+    if request.phone_number_id.is_some() {
+        campaign.phone_number_id =
+            normalize_optional_phone_number_id(request.phone_number_id.as_deref())?;
+    }
+    campaign.template_name = request.template_name.trim().to_string();
+    campaign.template_language = request.template_language.trim().to_string();
+    campaign.template_components = request.template_components;
+    campaign.template_variable_bindings = request.template_variable_bindings;
+    campaign.filters = request.filters;
+    campaign.status = if is_editable_campaign_status(&campaign.status) {
+        campaign.status
+    } else {
+        "draft".to_string()
+    };
+    if let Some(totals) = regenerated_totals {
+        campaign.total_recipients = totals.matched as u64;
+        campaign.total_can_send = totals.can_send as u64;
+        campaign.total_invalid_phone = totals.invalid_phone as u64;
+        campaign.total_duplicated_phone = totals.duplicated_phone as u64;
+        campaign.total_excluded = 0;
+    }
+    campaign.updated_at = updated_at;
+    Ok(campaign)
+}
+
+async fn replace_campaign_after_edit(
+    campaigns: &mongodb::Collection<WaCampaignDoc>,
+    campaign_id: &ObjectId,
+    campaign: &WaCampaignDoc,
+) -> Result<(), ApiError> {
+    let result = campaigns
+        .replace_one(
+            doc! { "_id": campaign_id.clone(), "status": "editing" },
+            campaign,
+        )
+        .await
+        .map_err(|e| ApiError::DatabaseError(format!("campaign update failed: {e}")))?;
+
+    if result.matched_count == 0 {
+        return Err(ApiError::domain_simple(
+            StatusCode::CONFLICT,
+            "campaign_not_editable",
+            "Campaign is no longer locked for editing.",
+        ));
+    }
+
+    Ok(())
+}
+
+async fn restore_campaign_after_failed_edit(
+    campaigns: &mongodb::Collection<WaCampaignDoc>,
+    campaign_id: &ObjectId,
+    original: &WaCampaignDoc,
+) -> Result<(), ApiError> {
+    let mut restored = original.clone();
+    restored.updated_at = DateTime::now();
+    campaigns
+        .replace_one(doc! { "_id": campaign_id.clone() }, &restored)
+        .await
+        .map_err(|e| ApiError::DatabaseError(format!("campaign edit rollback failed: {e}")))?;
+    Ok(())
+}
+
+async fn replace_campaign_snapshot(
+    recipients: &mongodb::Collection<WaCampaignRecipientDoc>,
+    campaign_id: &ObjectId,
+    new_recipients: Vec<WaCampaignRecipientDoc>,
+) -> Result<(), ApiError> {
+    recipients
+        .delete_many(doc! { "campaign_id": campaign_id.clone() })
+        .await
+        .map_err(|e| ApiError::DatabaseError(format!("campaign snapshot delete failed: {e}")))?;
+
+    if !new_recipients.is_empty() {
+        recipients.insert_many(new_recipients).await.map_err(|e| {
+            ApiError::DatabaseError(format!("campaign snapshot insert failed: {e}"))
+        })?;
+    }
+
+    Ok(())
+}
+
+async fn restore_campaign_snapshot(
+    recipients: &mongodb::Collection<WaCampaignRecipientDoc>,
+    campaign_id: &ObjectId,
+    previous_recipients: Vec<WaCampaignRecipientDoc>,
+) -> Result<(), ApiError> {
+    recipients
+        .delete_many(doc! { "campaign_id": campaign_id.clone() })
+        .await
+        .map_err(|e| {
+            ApiError::DatabaseError(format!("campaign snapshot rollback delete failed: {e}"))
+        })?;
+
+    if !previous_recipients.is_empty() {
+        recipients
+            .insert_many(previous_recipients)
+            .await
+            .map_err(|e| {
+                ApiError::DatabaseError(format!("campaign snapshot rollback insert failed: {e}"))
+            })?;
     }
 
     Ok(())
@@ -1628,7 +1877,12 @@ fn build_balance_filter(filter: &BalanceFilter) -> Result<Document, ApiError> {
     }
 
     if doc.is_empty() {
-        return Err(ApiError::BadRequest("invalid_balance_filter".to_string()));
+        return Err(ApiError::domain_with_field(
+            StatusCode::BAD_REQUEST,
+            "invalid_balance_filter",
+            "balance_filter",
+            "Invalid balance_filter: expected one of lt,lte,gt,gte,eq,between.",
+        ));
     }
 
     Ok(doc)
@@ -1843,6 +2097,35 @@ mod tests {
         }
     }
 
+    fn update_request(name: &str) -> UpdateCampaignRequest {
+        UpdateCampaignRequest {
+            name: name.to_string(),
+            phone_number_id: None,
+            template_name: "promo_template".to_string(),
+            template_language: "es".to_string(),
+            template_components: None,
+            template_variable_bindings: None,
+            filters: CampaignPreviewRequest {
+                provider_ids: None,
+                sector_ids: None,
+                balance_filter: None,
+                client_state: Some(ClientStateFilter::Active),
+                include_all_active: None,
+                page: None,
+                per_page: None,
+            },
+        }
+    }
+
+    fn regenerated_totals() -> CampaignPreviewTotals {
+        CampaignPreviewTotals {
+            matched: 3,
+            can_send: 2,
+            invalid_phone: 1,
+            duplicated_phone: 0,
+        }
+    }
+
     #[test]
     fn create_with_phone_number_id_persists_to_summary() {
         let mut campaign = base_campaign("draft");
@@ -1888,6 +2171,191 @@ mod tests {
         });
 
         assert!(serde_json::from_value::<TemplateVariableBinding>(payload).is_err());
+    }
+
+    #[test]
+    fn edit_name_in_draft_changes_name_and_preserves_totals() {
+        let campaign = base_campaign("draft");
+        let original_total_excluded = campaign.total_excluded;
+
+        let updated = apply_campaign_edit(
+            campaign,
+            update_request("Updated Promo"),
+            "admin-1",
+            None,
+            DateTime::now(),
+        )
+        .unwrap();
+
+        assert_eq!(updated.name, "Updated Promo");
+        assert_eq!(updated.status, "draft");
+        assert_eq!(updated.total_recipients, 5);
+        assert_eq!(updated.total_excluded, original_total_excluded);
+    }
+
+    #[test]
+    fn edit_legacy_phone_number_id_saves_to_summary() {
+        let mut campaign = base_campaign("draft");
+        campaign.phone_number_id = None;
+        let mut request = update_request("June Promo");
+        request.phone_number_id = Some("987654321".to_string());
+
+        let summary = campaign_to_summary(
+            apply_campaign_edit(campaign, request, "admin-1", None, DateTime::now()).unwrap(),
+        );
+
+        assert_eq!(summary.phone_number_id.as_deref(), Some("987654321"));
+    }
+
+    #[test]
+    fn edit_template_variable_bindings_saves_and_preserves_totals() {
+        let campaign = base_campaign("previewed");
+        let mut request = update_request("June Promo");
+        request.template_variable_bindings = Some(vec![static_body_binding(1, "ABDO")]);
+
+        let updated =
+            apply_campaign_edit(campaign, request, "admin-1", None, DateTime::now()).unwrap();
+
+        assert_eq!(updated.status, "previewed");
+        assert_eq!(updated.template_variable_bindings.unwrap().len(), 1);
+        assert_eq!(updated.total_recipients, 5);
+        assert_eq!(updated.total_excluded, 1);
+    }
+
+    #[test]
+    fn edit_filters_regenerates_snapshot_totals_and_resets_exclusions() {
+        let campaign = base_campaign("draft");
+        let mut request = update_request("June Promo");
+        request.filters = CampaignPreviewRequest {
+            provider_ids: None,
+            sector_ids: None,
+            balance_filter: Some(BalanceFilter {
+                lt: Some(0.0),
+                lte: None,
+                gt: None,
+                gte: None,
+                eq: None,
+                between: None,
+            }),
+            client_state: None,
+            include_all_active: None,
+            page: None,
+            per_page: None,
+        };
+
+        let updated = apply_campaign_edit(
+            campaign,
+            request,
+            "admin-1",
+            Some(&regenerated_totals()),
+            DateTime::now(),
+        )
+        .unwrap();
+
+        assert_eq!(updated.total_recipients, 3);
+        assert_eq!(updated.total_can_send, 2);
+        assert_eq!(updated.total_invalid_phone, 1);
+        assert_eq!(updated.total_duplicated_phone, 0);
+        assert_eq!(updated.total_excluded, 0);
+    }
+
+    #[test]
+    fn snapshot_filter_comparison_ignores_pagination_only_changes() {
+        let current = CampaignPreviewRequest {
+            provider_ids: Some(vec!["provider-1".to_string()]),
+            sector_ids: None,
+            balance_filter: None,
+            client_state: Some(ClientStateFilter::Active),
+            include_all_active: None,
+            page: Some(1),
+            per_page: Some(25),
+        };
+        let next = CampaignPreviewRequest {
+            page: Some(3),
+            per_page: Some(100),
+            ..current.clone()
+        };
+
+        assert!(!campaign_snapshot_filters_changed(&current, &next));
+        assert_ne!(current, next);
+    }
+
+    #[test]
+    fn snapshot_filter_comparison_detects_audience_changes() {
+        let current = CampaignPreviewRequest {
+            provider_ids: Some(vec!["provider-1".to_string()]),
+            sector_ids: None,
+            balance_filter: None,
+            client_state: Some(ClientStateFilter::Active),
+            include_all_active: None,
+            page: Some(1),
+            per_page: Some(25),
+        };
+        let mut next = current.clone();
+        next.provider_ids = Some(vec!["provider-2".to_string()]);
+
+        assert!(campaign_snapshot_filters_changed(&current, &next));
+    }
+
+    #[test]
+    fn edit_queued_campaign_returns_not_editable_contract() {
+        assert!(!is_editable_campaign_status("queued"));
+        assert!(!is_editable_campaign_status("confirming"));
+        assert!(!is_editable_campaign_status("editing"));
+        assert!(!is_editable_campaign_status("running"));
+        assert!(!is_editable_campaign_status("completed"));
+        assert!(!is_editable_campaign_status("completed_with_errors"));
+        assert!(!is_editable_campaign_status("cancelled"));
+    }
+
+    #[test]
+    fn edit_with_empty_static_binding_fails() {
+        let mut request = update_request("June Promo");
+        request.template_variable_bindings = Some(vec![static_body_binding(1, "")]);
+
+        let err = validate_update_campaign_request(&request).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, ref field, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && code == "template_variable_static_value_required"
+                    && field.as_deref() == Some("template_variable_bindings.value")
+        ));
+    }
+
+    #[test]
+    fn edit_with_invalid_client_field_fails_deserialization() {
+        let payload = serde_json::json!({
+            "name": "June Promo",
+            "template_name": "promo_template",
+            "template_language": "es",
+            "template_variable_bindings": [{
+                "component": "body",
+                "index": 1,
+                "placeholder": "{{1}}",
+                "source": "client_field",
+                "client_field": "not_allowed"
+            }],
+            "filters": { "client_state": "active" }
+        });
+
+        assert!(serde_json::from_value::<UpdateCampaignRequest>(payload).is_err());
+    }
+
+    #[test]
+    fn edit_regeneration_failure_plan_preserves_existing_snapshot_until_snapshot_build_succeeds() {
+        let invalid_filter_request = CampaignPreviewRequest {
+            provider_ids: None,
+            sector_ids: None,
+            balance_filter: None,
+            client_state: None,
+            include_all_active: None,
+            page: None,
+            per_page: None,
+        };
+
+        assert!(!has_allowed_filter(&invalid_filter_request));
     }
 
     #[test]
@@ -1981,6 +2449,54 @@ mod tests {
             build_client_filter(&request).unwrap(),
             doc! { "sState": "Suspendido" }
         );
+    }
+
+    #[test]
+    fn balance_filter_eq_builds_eq_query() {
+        let filter = BalanceFilter {
+            lt: None,
+            lte: None,
+            gt: None,
+            gte: None,
+            eq: Some(0.0),
+            between: None,
+        };
+
+        assert_eq!(build_balance_filter(&filter).unwrap(), doc! { "$eq": 0.0 });
+    }
+
+    #[test]
+    fn balance_filter_lt_builds_lt_query() {
+        let filter = BalanceFilter {
+            lt: Some(0.0),
+            lte: None,
+            gt: None,
+            gte: None,
+            eq: None,
+            between: None,
+        };
+
+        assert_eq!(build_balance_filter(&filter).unwrap(), doc! { "$lt": 0.0 });
+    }
+
+    #[test]
+    fn balance_filter_operator_value_shape_reports_contract_error() {
+        let filter: BalanceFilter = serde_json::from_value(serde_json::json!({
+            "op": "eq",
+            "value": 0
+        }))
+        .unwrap();
+
+        let err = build_balance_filter(&filter).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, ref field, ref message, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && code == "invalid_balance_filter"
+                    && field.as_deref() == Some("balance_filter")
+                    && message.contains("lt,lte,gt,gte,eq,between")
+        ));
     }
 
     #[test]

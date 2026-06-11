@@ -15,11 +15,11 @@ use super::{
         CampaignListQuery, CampaignListResponse, CampaignPreviewRequest, CampaignPreviewResponse,
         CampaignRecipientsQuery, CampaignRecipientsResponse, CampaignSummaryResponse,
         CreateCampaignRequest, UpdateCampaignRecipientExclusionsRequest,
-        UpdateCampaignRecipientExclusionsResponse,
+        UpdateCampaignRecipientExclusionsResponse, UpdateCampaignRequest, UpdateCampaignResponse,
     },
     service::{
         confirm_campaign, create_campaign, get_campaign, get_campaign_recipients, list_campaigns,
-        preview_recipients, update_campaign_recipient_exclusions,
+        preview_recipients, update_campaign, update_campaign_recipient_exclusions,
     },
 };
 
@@ -141,6 +141,34 @@ pub async fn get_campaign_handler(
 ) -> Result<Json<CampaignSummaryResponse>, ApiError> {
     require_superadmin(&state, &claims.id).await?;
     get_campaign(&state, &id).await.map(Json)
+}
+
+#[utoipa::path(
+    patch,
+    path = "/v1/admin/whatsapp-campaigns/{id}",
+    tag = "WhatsApp — Campaigns",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "Campaign ObjectId")),
+    request_body = UpdateCampaignRequest,
+    responses(
+        (status = 200, description = "Edit a draft or previewed WhatsApp campaign", body = UpdateCampaignResponse),
+        (status = 400, description = "Invalid campaign id, fields, filters, or template variable bindings"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "SUPERADMIN role required"),
+        (status = 404, description = "Campaign not found"),
+        (status = 409, description = "Campaign status is not editable"),
+    )
+)]
+pub async fn update_campaign_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateCampaignRequest>,
+) -> Result<Json<UpdateCampaignResponse>, ApiError> {
+    require_superadmin(&state, &claims.id).await?;
+    update_campaign(&state, &id, &claims.id, request)
+        .await
+        .map(Json)
 }
 
 #[utoipa::path(

@@ -80,6 +80,10 @@ pub fn user_routes() -> Router<Arc<AppState>> {
             get(campaigns::handler::get_campaign_handler),
         )
         .route(
+            "/v1/admin/whatsapp-campaigns/:id",
+            patch(campaigns::handler::update_campaign_handler),
+        )
+        .route(
             "/v1/auth-user/whatsapp/conversations/stats",
             get(conversations::handlers::conversations_stats_handler),
         )
@@ -401,6 +405,11 @@ mod tests {
         ),
         documented(
             "GET",
+            "/v1/admin/whatsapp-campaigns/:id",
+            "WhatsApp — Campaigns",
+        ),
+        documented(
+            "PATCH",
             "/v1/admin/whatsapp-campaigns/:id",
             "WhatsApp — Campaigns",
         ),
