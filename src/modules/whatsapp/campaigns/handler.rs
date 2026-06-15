@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     Extension, Json,
 };
 
@@ -12,9 +13,9 @@ use crate::{
 
 use super::{
     dto::{
-        CampaignListQuery, CampaignListResponse, CampaignPreviewRequest, CampaignPreviewResponse,
-        CampaignRecipientsQuery, CampaignRecipientsResponse, CampaignSummaryResponse,
-        CreateCampaignRequest, UpdateCampaignRecipientExclusionsRequest,
+        CampaignListQuery, CampaignListResponse, CampaignPreviewEnvelope, CampaignPreviewRequest,
+        CampaignPreviewResponse, CampaignRecipientsQuery, CampaignRecipientsResponse,
+        CampaignSummaryResponse, CreateCampaignRequest, UpdateCampaignRecipientExclusionsRequest,
         UpdateCampaignRecipientExclusionsResponse, UpdateCampaignRequest, UpdateCampaignResponse,
     },
     service::{
@@ -29,7 +30,7 @@ use super::{
     path = "/v1/admin/whatsapp-campaigns/preview",
     tag = "WhatsApp — Campaigns",
     security(("bearerAuth" = [])),
-    request_body = CampaignPreviewRequest,
+    request_body = CampaignPreviewEnvelope,
     responses(
         (status = 200, description = "Preview WhatsApp campaign recipients without sending messages", body = CampaignPreviewResponse),
         (status = 400, description = "At least one filter is required unless all active clients are explicitly requested"),
@@ -40,10 +41,36 @@ use super::{
 pub async fn preview_campaign_recipients_handler(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<UserProfileClaims>,
-    Json(request): Json<CampaignPreviewRequest>,
+    Json(payload): Json<serde_json::Value>,
 ) -> Result<Json<CampaignPreviewResponse>, ApiError> {
     require_superadmin(&state, &claims.id).await?;
+    let request = parse_preview_request_payload(payload)?;
     preview_recipients(&state, request).await.map(Json)
+}
+
+fn parse_preview_request_payload(
+    payload: serde_json::Value,
+) -> Result<CampaignPreviewRequest, ApiError> {
+    if payload.get("filters").is_some() {
+        return serde_json::from_value::<CampaignPreviewEnvelope>(payload)
+            .map(|envelope| envelope.filters)
+            .map_err(|e| {
+                ApiError::domain_with_field(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_campaign_preview_payload",
+                    "filters",
+                    format!("Payload de preview inválido: {e}"),
+                )
+            });
+    }
+
+    serde_json::from_value::<CampaignPreviewRequest>(payload).map_err(|e| {
+        ApiError::domain_simple(
+            StatusCode::BAD_REQUEST,
+            "invalid_campaign_preview_payload",
+            format!("Payload de preview inválido: {e}"),
+        )
+    })
 }
 
 #[utoipa::path(
