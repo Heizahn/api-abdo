@@ -54,6 +54,13 @@ db.Clients.createIndex(
 );
 print("  ✅ Clients.sState + idOwner");
 
+// Campañas WhatsApp: filtro por día límite de pago
+db.Clients.createIndex(
+  { "nPayment": 1 },
+  { name: "idx_clients_payment_due_day", background: true }
+);
+print("  ✅ Clients.nPayment");
+
 print("");
 
 // ============================================
@@ -159,6 +166,13 @@ db.Debts.createIndex(
   { name: "idx_debts_client", background: true }
 );
 print("  ✅ Debts.idClient");
+
+// Campañas WhatsApp: filtro por deudas activas cuyo concepto empieza por un prefijo
+db.Debts.createIndex(
+  { "sState": 1, "sReason": 1, "idClient": 1 },
+  { name: "idx_debts_state_reason_client", background: true }
+);
+print("  ✅ Debts.sState + sReason + idClient");
 
 print("");
 

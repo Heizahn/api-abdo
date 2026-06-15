@@ -82,11 +82,13 @@ use crate::modules::calculations::handler::{
 use crate::modules::dashboard::handler::{MonthlyClosingData, MonthlyClosingResponse};
 use crate::modules::payments::handler::RejectReportRequest;
 use crate::modules::whatsapp::campaigns::dto::{
-    BalanceFilter, BalanceRange, CampaignAutoPrepareResult, CampaignListItem, CampaignListQuery,
-    CampaignListResponse, CampaignPreviewRecipient, CampaignPreviewRequest,
-    CampaignPreviewResponse, CampaignPreviewTotals, CampaignProgress, CampaignRecipientItem,
-    CampaignRecipientsQuery, CampaignRecipientsResponse, CampaignSummary, CampaignSummaryResponse,
-    ClientStateFilter, CreateCampaignRequest, DerivedClientState, PhoneStatus, TemplateClientField,
+    BalanceFilter, BalanceRange, CampaignAppliedFilters, CampaignAutoPrepareResult,
+    CampaignListItem, CampaignListQuery, CampaignListResponse, CampaignPreviewEnvelope,
+    CampaignPreviewRecipient, CampaignPreviewRequest, CampaignPreviewResponse,
+    CampaignPreviewTotals, CampaignProgress, CampaignRecipientItem, CampaignRecipientsQuery,
+    CampaignRecipientsResponse, CampaignSummary, CampaignSummaryResponse, ClientStateFilter,
+    CreateCampaignRequest, DebtReasonFilter, DebtReasonOperator, DerivedClientState,
+    PaymentDueDayFilter, PaymentDueDayOperator, PhoneStatus, TemplateClientField,
     TemplateMediaBinding, TemplateMediaComponent, TemplateMediaSource, TemplateMediaType,
     TemplateVariableBinding, TemplateVariableComponent, TemplateVariableSource,
     UpdateCampaignRecipientExclusionsData, UpdateCampaignRecipientExclusionsRequest,
@@ -100,7 +102,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.83",
+        version = "0.3.85",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
@@ -336,7 +338,9 @@ use crate::modules::whatsapp::conversations::lifecycle::{
             AuditMetricsSummary, AuditMetricsByDay, AuditMetricsByAgent, AuditMetricsByType,
             AuditMetricsData, AuditMetricsResponse,
             // WhatsApp — Campaigns
-            CampaignPreviewRequest, BalanceFilter, BalanceRange, ClientStateFilter,
+            CampaignPreviewRequest, CampaignPreviewEnvelope, CampaignAppliedFilters,
+            BalanceFilter, BalanceRange, PaymentDueDayFilter, PaymentDueDayOperator,
+            DebtReasonFilter, DebtReasonOperator, ClientStateFilter,
             CampaignPreviewResponse, CampaignPreviewTotals, CampaignPreviewRecipient,
             PhoneStatus, DerivedClientState, TemplateVariableComponent, TemplateVariableSource,
             TemplateClientField, TemplateVariableBinding, TemplateMediaComponent, TemplateMediaType,

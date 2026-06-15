@@ -28,11 +28,12 @@ use crate::{
 
 use super::{
     dto::{
-        BalanceFilter, CampaignAutoPrepareResult, CampaignListItem, CampaignListQuery,
-        CampaignListResponse, CampaignPreviewRecipient, CampaignPreviewRequest,
+        BalanceFilter, CampaignAppliedFilters, CampaignAutoPrepareResult, CampaignListItem,
+        CampaignListQuery, CampaignListResponse, CampaignPreviewRecipient, CampaignPreviewRequest,
         CampaignPreviewResponse, CampaignPreviewTotals, CampaignProgress, CampaignRecipientItem,
         CampaignRecipientsQuery, CampaignRecipientsResponse, CampaignSummary,
-        CampaignSummaryResponse, ClientStateFilter, CreateCampaignRequest, DerivedClientState,
+        CampaignSummaryResponse, ClientStateFilter, CreateCampaignRequest, DebtReasonFilter,
+        DebtReasonOperator, DerivedClientState, PaymentDueDayFilter, PaymentDueDayOperator,
         PhoneStatus, TemplateClientField, TemplateMediaBinding, TemplateMediaComponent,
         TemplateMediaSource, TemplateMediaType, TemplateVariableBinding, TemplateVariableComponent,
         TemplateVariableSource, UpdateCampaignRecipientExclusionsData,
@@ -770,6 +771,7 @@ pub async fn preview_recipients(
     state: &AppState,
     request: CampaignPreviewRequest,
 ) -> Result<CampaignPreviewResponse, ApiError> {
+    validate_campaign_filters(&request)?;
     if !has_allowed_filter(&request) {
         return Err(ApiError::domain_simple(
             StatusCode::BAD_REQUEST,
@@ -797,6 +799,7 @@ pub async fn preview_recipients(
         recipients,
         page,
         per_page,
+        applied_filters: CampaignAppliedFilters::from_request(&request),
     })
 }
 
@@ -3900,6 +3903,7 @@ async fn build_recipients_snapshot(
     state: &AppState,
     request: &CampaignPreviewRequest,
 ) -> Result<(CampaignPreviewTotals, Vec<CampaignPreviewRecipient>), ApiError> {
+    validate_campaign_filters(request)?;
     if !has_allowed_filter(request) {
         return Err(ApiError::domain_simple(
             StatusCode::BAD_REQUEST,
@@ -3908,7 +3912,9 @@ async fn build_recipients_snapshot(
         ));
     }
 
-    let filter = build_client_filter(request)?;
+    let debt_reason_client_ids =
+        load_debt_reason_client_ids(state, request.debt_reason.as_ref()).await?;
+    let filter = build_client_filter(request, debt_reason_client_ids.as_ref())?;
     let projection = doc! {
         "_id": 1,
         "sName": 1,
@@ -4343,6 +4349,8 @@ fn has_allowed_filter(request: &CampaignPreviewRequest) -> bool {
     has_values(&request.provider_ids)
         || has_values(&request.sector_ids)
         || request.balance_filter.is_some()
+        || request.payment_due_day.is_some()
+        || request.debt_reason.is_some()
         || matches!(request.client_state, Some(ClientStateFilter::Active))
         || request.include_all_active.unwrap_or(false)
         || matches!(
@@ -4362,7 +4370,10 @@ fn has_values(values: &Option<Vec<String>>) -> bool {
         .is_some_and(|items| items.iter().any(|item| !item.trim().is_empty()))
 }
 
-fn build_client_filter(request: &CampaignPreviewRequest) -> Result<Document, ApiError> {
+fn build_client_filter(
+    request: &CampaignPreviewRequest,
+    debt_reason_client_ids: Option<&Vec<ObjectId>>,
+) -> Result<Document, ApiError> {
     let mut clauses: Vec<Document> = Vec::new();
 
     if let Some(provider_ids) = non_empty_ids(&request.provider_ids) {
@@ -4375,6 +4386,14 @@ fn build_client_filter(request: &CampaignPreviewRequest) -> Result<Document, Api
 
     if let Some(balance_filter) = &request.balance_filter {
         clauses.push(doc! { "nBalance": build_balance_filter(balance_filter)? });
+    }
+
+    if let Some(payment_due_day) = &request.payment_due_day {
+        clauses.push(build_payment_due_day_clause(payment_due_day)?);
+    }
+
+    if let Some(client_ids) = debt_reason_client_ids {
+        clauses.push(doc! { "_id": { "$in": client_ids } });
     }
 
     match request.client_state.as_ref() {
@@ -4401,6 +4420,115 @@ fn build_client_filter(request: &CampaignPreviewRequest) -> Result<Document, Api
     } else {
         doc! { "$and": clauses }
     })
+}
+
+fn validate_campaign_filters(request: &CampaignPreviewRequest) -> Result<(), ApiError> {
+    if let Some(filter) = &request.payment_due_day {
+        validate_payment_due_day_filter(filter)?;
+    }
+    if let Some(filter) = &request.debt_reason {
+        validate_debt_reason_filter(filter)?;
+    }
+    Ok(())
+}
+
+fn validate_payment_due_day_filter(filter: &PaymentDueDayFilter) -> Result<(), ApiError> {
+    match filter.operator {
+        PaymentDueDayOperator::LessThan
+        | PaymentDueDayOperator::GreaterThan
+        | PaymentDueDayOperator::Equal => {
+            let value = filter.value.ok_or_else(|| {
+                payment_due_day_error(
+                    "payment_due_day.value",
+                    "payment_due_day.value es obligatorio para este operador",
+                )
+            })?;
+            validate_payment_due_day_value("payment_due_day.value", value)?;
+        }
+        PaymentDueDayOperator::Between => {
+            let (from, to) = match (filter.from, filter.to) {
+                (Some(from), Some(to)) => (from, to),
+                _ => {
+                    return Err(payment_due_day_error(
+                        "payment_due_day",
+                        "payment_due_day.from y payment_due_day.to son obligatorios para el operador between",
+                    ));
+                }
+            };
+            validate_payment_due_day_value("payment_due_day.from", from)?;
+            validate_payment_due_day_value("payment_due_day.to", to)?;
+            if from > to {
+                return Err(payment_due_day_error(
+                    "payment_due_day.from",
+                    "payment_due_day.from no puede ser mayor que payment_due_day.to",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_payment_due_day_value(field: &str, value: u8) -> Result<(), ApiError> {
+    if (1..=31).contains(&value) {
+        Ok(())
+    } else {
+        Err(payment_due_day_error(
+            field,
+            format!("{field} debe estar entre 1 y 31"),
+        ))
+    }
+}
+
+fn payment_due_day_error(field: impl Into<String>, message: impl Into<String>) -> ApiError {
+    ApiError::domain_with_field(
+        StatusCode::BAD_REQUEST,
+        "invalid_payment_due_day_filter",
+        field,
+        message,
+    )
+}
+
+fn validate_debt_reason_filter(filter: &DebtReasonFilter) -> Result<(), ApiError> {
+    match filter.operator {
+        DebtReasonOperator::StartsWith => {
+            if filter
+                .value
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                return Err(ApiError::domain_with_field(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_debt_reason_filter",
+                    "debt_reason.value",
+                    "debt_reason.value es obligatorio para este operador",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_payment_due_day_clause(filter: &PaymentDueDayFilter) -> Result<Document, ApiError> {
+    validate_payment_due_day_filter(filter)?;
+    match filter.operator {
+        PaymentDueDayOperator::LessThan => Ok(doc! {
+            "nPayment": { "$lt": i32::from(filter.value.expect("validated value")) }
+        }),
+        PaymentDueDayOperator::GreaterThan => Ok(doc! {
+            "nPayment": { "$gt": i32::from(filter.value.expect("validated value")) }
+        }),
+        PaymentDueDayOperator::Equal => Ok(doc! {
+            "nPayment": i32::from(filter.value.expect("validated value"))
+        }),
+        PaymentDueDayOperator::Between => Ok(doc! {
+            "nPayment": {
+                "$gte": i32::from(filter.from.expect("validated from")),
+                "$lte": i32::from(filter.to.expect("validated to")),
+            }
+        }),
+    }
 }
 
 fn build_balance_filter(filter: &BalanceFilter) -> Result<Document, ApiError> {
@@ -4435,6 +4563,45 @@ fn build_balance_filter(filter: &BalanceFilter) -> Result<Document, ApiError> {
     }
 
     Ok(doc)
+}
+
+async fn load_debt_reason_client_ids(
+    state: &AppState,
+    filter: Option<&DebtReasonFilter>,
+) -> Result<Option<Vec<ObjectId>>, ApiError> {
+    let Some(filter) = filter else {
+        return Ok(None);
+    };
+
+    validate_debt_reason_filter(filter)?;
+    let prefix = filter
+        .value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
+    let escaped_prefix = regex_escape(prefix);
+    let mut cursor = state
+        .db
+        .db
+        .collection::<Document>("Debts")
+        .find(doc! {
+            "sState": "Activo",
+            "sReason": { "$regex": format!("^{escaped_prefix}"), "$options": "i" },
+        })
+        .projection(doc! { "idClient": 1 })
+        .await
+        .map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+
+    let mut client_ids = HashSet::new();
+    while let Some(result) = cursor.next().await {
+        let doc = result.map_err(|e| ApiError::DatabaseError(e.to_string()))?;
+        if let Ok(client_id) = doc.get_object_id("idClient") {
+            client_ids.insert(client_id);
+        }
+    }
+
+    Ok(Some(client_ids.into_iter().collect()))
 }
 
 fn non_empty_ids(ids: &Option<Vec<String>>) -> Option<Vec<String>> {
@@ -4667,6 +4834,8 @@ mod tests {
                 provider_ids: None,
                 sector_ids: None,
                 balance_filter: None,
+                payment_due_day: None,
+                debt_reason: None,
                 client_state: Some(ClientStateFilter::Active),
                 include_all_active: None,
                 page: None,
@@ -4931,6 +5100,8 @@ mod tests {
                 provider_ids: None,
                 sector_ids: None,
                 balance_filter: None,
+                payment_due_day: None,
+                debt_reason: None,
                 client_state: Some(ClientStateFilter::Active),
                 include_all_active: None,
                 page: None,
@@ -5430,6 +5601,8 @@ mod tests {
                 eq: None,
                 between: None,
             }),
+            payment_due_day: None,
+            debt_reason: None,
             client_state: None,
             include_all_active: None,
             page: None,
@@ -5460,6 +5633,8 @@ mod tests {
             provider_ids: None,
             sector_ids: None,
             balance_filter: None,
+            payment_due_day: None,
+            debt_reason: None,
             client_state: Some(ClientStateFilter::Retired),
             include_all_active: None,
             page: None,
@@ -5494,6 +5669,8 @@ mod tests {
             provider_ids: Some(vec!["provider-1".to_string()]),
             sector_ids: None,
             balance_filter: None,
+            payment_due_day: None,
+            debt_reason: None,
             client_state: Some(ClientStateFilter::Active),
             include_all_active: None,
             page: Some(1),
@@ -5515,6 +5692,8 @@ mod tests {
             provider_ids: Some(vec!["provider-1".to_string()]),
             sector_ids: None,
             balance_filter: None,
+            payment_due_day: None,
+            debt_reason: None,
             client_state: Some(ClientStateFilter::Active),
             include_all_active: None,
             page: Some(1),
@@ -5597,6 +5776,8 @@ mod tests {
             provider_ids: None,
             sector_ids: None,
             balance_filter: None,
+            payment_due_day: None,
+            debt_reason: None,
             client_state: None,
             include_all_active: None,
             page: None,
@@ -5759,6 +5940,8 @@ mod tests {
             provider_ids: None,
             sector_ids: None,
             balance_filter: None,
+            payment_due_day: None,
+            debt_reason: None,
             client_state: Some(ClientStateFilter::Suspended),
             include_all_active: None,
             page: None,
@@ -5766,7 +5949,7 @@ mod tests {
         };
 
         assert_eq!(
-            build_client_filter(&request).unwrap(),
+            build_client_filter(&request, None).unwrap(),
             doc! { "sState": "Suspendido" }
         );
     }
@@ -5777,6 +5960,8 @@ mod tests {
             provider_ids: None,
             sector_ids: None,
             balance_filter: None,
+            payment_due_day: None,
+            debt_reason: None,
             client_state: Some(ClientStateFilter::Retired),
             include_all_active: None,
             page: None,
@@ -5784,7 +5969,7 @@ mod tests {
         };
 
         assert_eq!(
-            build_client_filter(&request).unwrap(),
+            build_client_filter(&request, None).unwrap(),
             doc! { "sState": { "$in": vec![RETIRED_CLIENT_STATE] } }
         );
     }
@@ -5795,6 +5980,8 @@ mod tests {
             provider_ids: None,
             sector_ids: None,
             balance_filter: None,
+            payment_due_day: None,
+            debt_reason: None,
             client_state: Some(ClientStateFilter::Retired),
             include_all_active: None,
             page: None,
@@ -5802,6 +5989,207 @@ mod tests {
         };
 
         assert!(has_allowed_filter(&request));
+    }
+
+    fn payment_due_day_filter(
+        operator: PaymentDueDayOperator,
+        value: Option<u8>,
+        from: Option<u8>,
+        to: Option<u8>,
+    ) -> PaymentDueDayFilter {
+        PaymentDueDayFilter {
+            operator,
+            value,
+            from,
+            to,
+        }
+    }
+
+    #[test]
+    fn payment_due_day_absent_does_not_filter_npayment() {
+        let request = CampaignPreviewRequest {
+            client_state: Some(ClientStateFilter::Active),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            build_client_filter(&request, None).unwrap(),
+            doc! { "sState": "Activo" }
+        );
+    }
+
+    #[test]
+    fn payment_due_day_lt_builds_npayment_lt_query() {
+        let filter = payment_due_day_filter(PaymentDueDayOperator::LessThan, Some(10), None, None);
+
+        assert_eq!(
+            build_payment_due_day_clause(&filter).unwrap(),
+            doc! { "nPayment": { "$lt": 10 } }
+        );
+    }
+
+    #[test]
+    fn payment_due_day_gt_builds_npayment_gt_query() {
+        let filter =
+            payment_due_day_filter(PaymentDueDayOperator::GreaterThan, Some(10), None, None);
+
+        assert_eq!(
+            build_payment_due_day_clause(&filter).unwrap(),
+            doc! { "nPayment": { "$gt": 10 } }
+        );
+    }
+
+    #[test]
+    fn payment_due_day_eq_builds_npayment_eq_query() {
+        let filter = payment_due_day_filter(PaymentDueDayOperator::Equal, Some(15), None, None);
+
+        assert_eq!(
+            build_payment_due_day_clause(&filter).unwrap(),
+            doc! { "nPayment": 15 }
+        );
+    }
+
+    #[test]
+    fn payment_due_day_between_builds_npayment_range_query() {
+        let filter =
+            payment_due_day_filter(PaymentDueDayOperator::Between, None, Some(5), Some(15));
+
+        assert_eq!(
+            build_payment_due_day_clause(&filter).unwrap(),
+            doc! { "nPayment": { "$gte": 5, "$lte": 15 } }
+        );
+    }
+
+    #[test]
+    fn payment_due_day_rejects_zero() {
+        let filter = payment_due_day_filter(PaymentDueDayOperator::Equal, Some(0), None, None);
+        let err = validate_payment_due_day_filter(&filter).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref field, ref message, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && field.as_deref() == Some("payment_due_day.value")
+                    && message == "payment_due_day.value debe estar entre 1 y 31"
+        ));
+    }
+
+    #[test]
+    fn payment_due_day_rejects_32() {
+        let filter = payment_due_day_filter(PaymentDueDayOperator::Equal, Some(32), None, None);
+        let err = validate_payment_due_day_filter(&filter).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref field, ref message, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && field.as_deref() == Some("payment_due_day.value")
+                    && message == "payment_due_day.value debe estar entre 1 y 31"
+        ));
+    }
+
+    #[test]
+    fn payment_due_day_rejects_between_from_greater_than_to() {
+        let filter =
+            payment_due_day_filter(PaymentDueDayOperator::Between, None, Some(20), Some(10));
+        let err = validate_payment_due_day_filter(&filter).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref field, ref message, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && field.as_deref() == Some("payment_due_day.from")
+                    && message == "payment_due_day.from no puede ser mayor que payment_due_day.to"
+        ));
+    }
+
+    #[test]
+    fn payment_due_day_rejects_between_missing_bounds() {
+        let filter = payment_due_day_filter(PaymentDueDayOperator::Between, None, Some(5), None);
+        let err = validate_payment_due_day_filter(&filter).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref field, ref message, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && field.as_deref() == Some("payment_due_day")
+                    && message == "payment_due_day.from y payment_due_day.to son obligatorios para el operador between"
+        ));
+    }
+
+    #[test]
+    fn payment_due_day_filter_is_allowed_as_standalone_audience_filter() {
+        let request = CampaignPreviewRequest {
+            payment_due_day: Some(payment_due_day_filter(
+                PaymentDueDayOperator::Equal,
+                Some(15),
+                None,
+                None,
+            )),
+            ..Default::default()
+        };
+
+        assert!(has_allowed_filter(&request));
+    }
+
+    #[test]
+    fn debt_reason_filter_adds_matching_client_ids_clause() {
+        let first = ObjectId::parse_str("64f000000000000000000101").unwrap();
+        let second = ObjectId::parse_str("64f000000000000000000102").unwrap();
+        let request = CampaignPreviewRequest {
+            debt_reason: Some(DebtReasonFilter {
+                operator: DebtReasonOperator::StartsWith,
+                value: Some("plan".to_string()),
+            }),
+            ..Default::default()
+        };
+        let ids = vec![first, second];
+
+        assert_eq!(
+            build_client_filter(&request, Some(&ids)).unwrap(),
+            doc! { "_id": { "$in": ids } }
+        );
+    }
+
+    #[test]
+    fn debt_reason_rejects_missing_value() {
+        let filter = DebtReasonFilter {
+            operator: DebtReasonOperator::StartsWith,
+            value: None,
+        };
+        let err = validate_debt_reason_filter(&filter).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ApiError::Domain { status, ref code, ref field, .. }
+                if status == StatusCode::BAD_REQUEST
+                    && code == "invalid_debt_reason_filter"
+                    && field.as_deref() == Some("debt_reason.value")
+        ));
+    }
+
+    #[test]
+    fn applied_filters_include_payment_due_day_and_debt_reason_without_pagination() {
+        let request = CampaignPreviewRequest {
+            payment_due_day: Some(payment_due_day_filter(
+                PaymentDueDayOperator::Between,
+                None,
+                Some(5),
+                Some(15),
+            )),
+            debt_reason: Some(DebtReasonFilter {
+                operator: DebtReasonOperator::StartsWith,
+                value: Some("plan".to_string()),
+            }),
+            page: Some(2),
+            per_page: Some(50),
+            ..Default::default()
+        };
+
+        let applied = CampaignAppliedFilters::from_request(&request);
+
+        assert!(applied.payment_due_day.is_some());
+        assert!(applied.debt_reason.is_some());
     }
 
     #[test]

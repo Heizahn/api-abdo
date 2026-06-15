@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq, Default)]
 pub struct CampaignPreviewRequest {
     #[serde(default)]
     pub provider_ids: Option<Vec<String>>,
@@ -9,6 +9,10 @@ pub struct CampaignPreviewRequest {
     pub sector_ids: Option<Vec<String>>,
     #[serde(default)]
     pub balance_filter: Option<BalanceFilter>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payment_due_day: Option<PaymentDueDayFilter>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debt_reason: Option<DebtReasonFilter>,
     #[serde(default)]
     pub client_state: Option<ClientStateFilter>,
     #[serde(default)]
@@ -17,6 +21,11 @@ pub struct CampaignPreviewRequest {
     pub page: Option<u32>,
     #[serde(default)]
     pub per_page: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CampaignPreviewEnvelope {
+    pub filters: CampaignPreviewRequest,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq)]
@@ -52,6 +61,83 @@ pub struct BalanceFilter {
     pub between: Option<BalanceRange>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq)]
+pub struct PaymentDueDayFilter {
+    pub operator: PaymentDueDayOperator,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<u8>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PaymentDueDayOperator {
+    #[serde(rename = "lt")]
+    LessThan,
+    #[serde(rename = "gt")]
+    GreaterThan,
+    #[serde(rename = "eq")]
+    Equal,
+    #[serde(rename = "between")]
+    Between,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq)]
+pub struct DebtReasonFilter {
+    pub operator: DebtReasonOperator,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum DebtReasonOperator {
+    StartsWith,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema, PartialEq, Default)]
+pub struct CampaignAppliedFilters {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sector_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance_filter: Option<BalanceFilter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payment_due_day: Option<PaymentDueDayFilter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debt_reason: Option<DebtReasonFilter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_state: Option<ClientStateFilter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_all_active: Option<bool>,
+}
+
+impl CampaignAppliedFilters {
+    pub fn from_request(request: &CampaignPreviewRequest) -> Self {
+        Self {
+            provider_ids: request
+                .provider_ids
+                .as_ref()
+                .filter(|ids| ids.iter().any(|id| !id.trim().is_empty()))
+                .cloned(),
+            sector_ids: request
+                .sector_ids
+                .as_ref()
+                .filter(|ids| ids.iter().any(|id| !id.trim().is_empty()))
+                .cloned(),
+            balance_filter: request.balance_filter.clone(),
+            payment_due_day: request.payment_due_day.clone(),
+            debt_reason: request.debt_reason.clone(),
+            client_state: request.client_state.clone(),
+            include_all_active: request.include_all_active.filter(|value| *value),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CampaignPreviewResponse {
     pub ok: bool,
@@ -59,6 +145,7 @@ pub struct CampaignPreviewResponse {
     pub recipients: Vec<CampaignPreviewRecipient>,
     pub page: u32,
     pub per_page: u32,
+    pub applied_filters: CampaignAppliedFilters,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema, Default)]
