@@ -417,6 +417,11 @@ mod tests {
             "WhatsApp — Campaigns",
         ),
         documented(
+            "POST",
+            "/v1/admin/whatsapp-campaigns/:id/send",
+            "WhatsApp — Campaigns",
+        ),
+        documented(
             "GET",
             "/v1/admin/whatsapp-campaigns/:id",
             "WhatsApp — Campaigns",
