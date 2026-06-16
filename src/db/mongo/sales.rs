@@ -36,20 +36,47 @@ fn bson_date_string(doc: &Document, field: &str) -> Option<String> {
 
 async fn find_client_ids_by_owner(db: &MongoDB, owner: &str) -> Result<Vec<ObjectId>, String> {
     let clients_col = db.db.collection::<Document>("Clients");
-    let mut cursor = clients_col
-        .find(doc! { "idOwner": owner })
-        .projection(doc! { "_id": 1 })
-        .await
-        .map_err(|e| e.to_string())?;
+    find_object_ids(
+        clients_col,
+        doc! { "idOwner": owner },
+        Some(doc! { "_id": 1 }),
+    )
+    .await
+}
 
-    let mut client_ids = Vec::new();
-    while let Some(Ok(doc)) = cursor.next().await {
+async fn find_ids_by_name(
+    db: &MongoDB,
+    collection_name: &str,
+    name: &str,
+) -> Result<Vec<ObjectId>, String> {
+    let collection = db.db.collection::<Document>(collection_name);
+    find_object_ids(
+        collection,
+        doc! { "sName": regex_contains_filter(name) },
+        Some(doc! { "_id": 1 }),
+    )
+    .await
+}
+
+async fn find_object_ids(
+    collection: Collection<Document>,
+    filter: Document,
+    projection: Option<Document>,
+) -> Result<Vec<ObjectId>, String> {
+    let mut find = collection.find(filter);
+    if let Some(projection) = projection {
+        find = find.projection(projection);
+    }
+
+    let mut cursor = find.await.map_err(|e| e.to_string())?;
+    let mut ids = Vec::new();
+    while let Some(doc) = cursor.try_next().await.map_err(|e| e.to_string())? {
         if let Ok(id) = doc.get_object_id("_id") {
-            client_ids.push(id);
+            ids.push(id);
         }
     }
 
-    Ok(client_ids)
+    Ok(ids)
 }
 
 fn payment_history_item_from_doc(doc: Document) -> PaymentHistoryItem {
@@ -133,8 +160,6 @@ fn payment_history_complete_pipeline(
     if joins_before_pagination {
         push_payment_history_lookups(&mut pipeline);
         push_payment_history_name_fields(&mut pipeline);
-        push_payment_history_join_filters(&mut pipeline, filters);
-        push_payment_history_search(&mut pipeline, filters);
     }
 
     push_payment_history_sort(&mut pipeline, filters);
@@ -221,16 +246,10 @@ fn push_payment_history_project(pipeline: &mut Vec<Document>) {
 }
 
 fn payment_history_needs_joins_before_pagination(filters: &PaymentHistoryFilters) -> bool {
-    filters.search.is_some()
-        || filters.client.is_some()
-        || filters.creator.is_some()
-        || filters.editor.is_some()
-        || matches!(
-            filters.sort_by,
-            PaymentHistorySortBy::Client
-                | PaymentHistorySortBy::Creator
-                | PaymentHistorySortBy::Editor
-        )
+    matches!(
+        filters.sort_by,
+        PaymentHistorySortBy::Client | PaymentHistorySortBy::Creator | PaymentHistorySortBy::Editor
+    )
 }
 
 fn payment_history_date_match(filters: &PaymentHistoryFilters) -> Option<Document> {
@@ -247,43 +266,6 @@ fn payment_history_date_match(filters: &PaymentHistoryFilters) -> Option<Documen
     } else {
         Some(doc! { "_sortDate": range })
     }
-}
-
-fn push_payment_history_join_filters(
-    pipeline: &mut Vec<Document>,
-    filters: &PaymentHistoryFilters,
-) {
-    if let Some(client) = &filters.client {
-        pipeline.push(doc! { "$match": field_regex_match("client_name", client) });
-    }
-    if let Some(creator) = &filters.creator {
-        pipeline.push(doc! { "$match": field_regex_match("creator_name", creator) });
-    }
-    if let Some(editor) = &filters.editor {
-        pipeline.push(doc! { "$match": field_regex_match("editor_name", editor) });
-    }
-}
-
-fn push_payment_history_search(pipeline: &mut Vec<Document>, filters: &PaymentHistoryFilters) {
-    let Some(search) = &filters.search else {
-        return;
-    };
-
-    let fields = [
-        "sReference",
-        "sReason",
-        "sCommentary",
-        "sState",
-        "client_name",
-        "creator_name",
-        "editor_name",
-    ];
-    let or_filters = fields
-        .iter()
-        .map(|field| Bson::Document(field_regex_match(field, search)))
-        .collect::<Vec<_>>();
-
-    pipeline.push(doc! { "$match": { "$or": or_filters } });
 }
 
 fn push_payment_history_sort(pipeline: &mut Vec<Document>, filters: &PaymentHistoryFilters) {
@@ -317,6 +299,39 @@ fn field_regex_match(field: &str, value: &str) -> Document {
     let mut match_doc = Document::new();
     match_doc.insert(field, regex_contains_filter(value));
     match_doc
+}
+
+fn id_in_condition(field: &str, ids: Vec<ObjectId>) -> Document {
+    let mut in_doc = Document::new();
+    in_doc.insert("$in", ids);
+
+    let mut condition = Document::new();
+    condition.insert(field, in_doc);
+    condition
+}
+
+fn append_and_condition(match_doc: &mut Document, condition: Document) {
+    if condition.is_empty() {
+        return;
+    }
+
+    let mut conditions = match match_doc.remove("$and") {
+        Some(Bson::Array(items)) => items,
+        _ => Vec::new(),
+    };
+    conditions.push(Bson::Document(condition));
+    match_doc.insert("$and", conditions);
+}
+
+fn append_or_condition(match_doc: &mut Document, conditions: Vec<Document>) {
+    if conditions.is_empty() {
+        return;
+    }
+
+    append_and_condition(
+        match_doc,
+        doc! { "$or": conditions.into_iter().map(Bson::Document).collect::<Vec<_>>() },
+    );
 }
 
 fn insert_number_range(match_doc: &mut Document, field: &str, min: Option<f64>, max: Option<f64>) {
@@ -369,6 +384,67 @@ fn apply_payment_history_filters(match_doc: &mut Document, filters: &PaymentHist
         filters.amount_bs_min,
         filters.amount_bs_max,
     );
+}
+
+async fn apply_payment_history_name_filters(
+    db: &MongoDB,
+    match_doc: &mut Document,
+    filters: &PaymentHistoryFilters,
+) -> Result<bool, String> {
+    if let Some(client) = &filters.client {
+        let client_ids = find_ids_by_name(db, "Clients", client).await?;
+        if client_ids.is_empty() {
+            return Ok(false);
+        }
+        append_and_condition(match_doc, id_in_condition("idClient", client_ids));
+    }
+
+    if let Some(creator) = &filters.creator {
+        let creator_ids = find_ids_by_name(db, "Users", creator).await?;
+        if creator_ids.is_empty() {
+            return Ok(false);
+        }
+        append_and_condition(match_doc, id_in_condition("idCreator", creator_ids));
+    }
+
+    if let Some(editor) = &filters.editor {
+        let editor_ids = find_ids_by_name(db, "Users", editor).await?;
+        if editor_ids.is_empty() {
+            return Ok(false);
+        }
+        append_and_condition(match_doc, id_in_condition("idEditor", editor_ids));
+    }
+
+    if let Some(search) = &filters.search {
+        let mut identity_conditions = Vec::new();
+
+        let client_ids = find_ids_by_name(db, "Clients", search).await?;
+        if !client_ids.is_empty() {
+            identity_conditions.push(id_in_condition("idClient", client_ids));
+        }
+
+        let user_ids = find_ids_by_name(db, "Users", search).await?;
+        if !user_ids.is_empty() {
+            identity_conditions.push(id_in_condition("idCreator", user_ids.clone()));
+            identity_conditions.push(id_in_condition("idEditor", user_ids));
+        }
+
+        if identity_conditions.is_empty() {
+            append_or_condition(
+                match_doc,
+                vec![
+                    field_regex_match("sReference", search),
+                    field_regex_match("sReason", search),
+                    field_regex_match("sCommentary", search),
+                    field_regex_match("sState", search),
+                ],
+            );
+        } else {
+            append_or_condition(match_doc, identity_conditions);
+        }
+    }
+
+    Ok(true)
 }
 
 #[async_trait]
@@ -825,6 +901,14 @@ impl SalesRepository for MongoDB {
         }
 
         apply_payment_history_filters(&mut match_doc, &filters);
+        if !apply_payment_history_name_filters(self, &mut match_doc, &filters).await? {
+            return Ok(PaymentHistoryPage {
+                items: Vec::new(),
+                page,
+                per_page,
+                has_next_page: false,
+            });
+        }
 
         let skip = ((page - 1) as u64) * (per_page as u64);
         let pipeline =

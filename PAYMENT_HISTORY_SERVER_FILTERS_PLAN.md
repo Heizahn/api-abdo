@@ -9,7 +9,9 @@ El front nuevo debe dejar de filtrar localmente sobre páginas ya cargadas y deb
 ## Estado
 
 - Backend fase 1 completado en `develop`.
-- Commit backend: `8c04d6d Add server-side payment history filters`.
+- Commit backend inicial: `8c04d6d Add server-side payment history filters`.
+- Corrección de performance: `search`, `client`, `creator` y `editor` ahora resuelven nombres a IDs antes de consultar `Payments`, evitando `$lookup` masivo antes de paginar salvo cuando se ordena por nombre. Para mantener búsquedas por nombre rápidas, `search` usa un fast-path: si el término coincide con `Clients.sName` o `Users.sName`, filtra por IDs; si no hay coincidencias de nombres, cae al search textual sobre campos propios de `Payments`.
+- Índices nuevos requeridos: ejecutar `mongosh <MONGO_URI> scripts/migrations/2026-06-16-payment-history-indexes.js` en producción/staging.
 - Validación backend ejecutada: `cargo fmt`, `cargo check`, diagnósticos del editor y `git diff --check`.
 - Pendiente: integración frontend y validación end-to-end del comportamiento visible de la tabla.
 
@@ -503,7 +505,7 @@ Si hay extra, truncar a `per_page`.
 
 ### Search global
 
-`search` es el filtro más costoso porque puede requerir `$lookup` contra `Clients` y `Users` antes de paginar.
+`search` es el filtro más costoso. En backend se optimizó para resolver coincidencias de `Clients.sName` / `Users.sName` a IDs antes de consultar `Payments`. Para evitar búsquedas de 40s+ por operador/cliente, si el término coincide con nombres se usa ese fast-path por IDs; si no coincide con nombres, se aplica el search textual sobre campos propios del pago (`sReference`, `sReason`, `sCommentary`, `sState`), que puede seguir siendo más costoso porque esos filtros son `contains` case-insensitive.
 
 Si en producción se vuelve lento, considerar:
 
