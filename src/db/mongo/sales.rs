@@ -144,8 +144,8 @@ fn payment_history_pipeline(match_doc: Document, skip: Option<u64>, limit: i64) 
 fn payment_history_complete_pipeline(
     match_doc: Document,
     filters: &PaymentHistoryFilters,
-    skip: u64,
-    limit: i64,
+    skip: Option<u64>,
+    limit: Option<i64>,
 ) -> Vec<Document> {
     let mut pipeline = vec![
         doc! { "$match": match_doc },
@@ -163,8 +163,12 @@ fn payment_history_complete_pipeline(
     }
 
     push_payment_history_sort(&mut pipeline, filters);
-    pipeline.push(doc! { "$skip": skip as i64 });
-    pipeline.push(doc! { "$limit": limit });
+    if let Some(skip) = skip {
+        pipeline.push(doc! { "$skip": skip as i64 });
+    }
+    if let Some(limit) = limit {
+        pipeline.push(doc! { "$limit": limit });
+    }
 
     if !joins_before_pagination {
         push_payment_history_lookups(&mut pipeline);
@@ -910,9 +914,16 @@ impl SalesRepository for MongoDB {
             });
         }
 
-        let skip = ((page - 1) as u64) * (per_page as u64);
-        let pipeline =
-            payment_history_complete_pipeline(match_doc, &filters, skip, per_page as i64 + 1);
+        let date_range_unpaginated = filters.created_from.is_some() || filters.created_to.is_some();
+        let (skip, limit) = if date_range_unpaginated {
+            (None, None)
+        } else {
+            (
+                Some(((page - 1) as u64) * (per_page as u64)),
+                Some(per_page as i64 + 1),
+            )
+        };
+        let pipeline = payment_history_complete_pipeline(match_doc, &filters, skip, limit);
         let collection = self.db.collection::<Document>("Payments");
         let mut cursor = collection
             .aggregate(pipeline)
@@ -924,7 +935,7 @@ impl SalesRepository for MongoDB {
             payments.push(payment_history_item_from_doc(doc));
         }
 
-        let has_next_page = payments.len() > per_page as usize;
+        let has_next_page = !date_range_unpaginated && payments.len() > per_page as usize;
         if has_next_page {
             payments.truncate(per_page as usize);
         }
