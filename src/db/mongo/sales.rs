@@ -10,11 +10,156 @@ use super::MongoDB;
 use crate::db::SalesRepository;
 use crate::models::db::{
     DailyPaymentChartPoint, Debt, LatestPayment, PartPayment, PartPaymentWithPaymentState, Payment,
-    PaymentForMatch, PaymentReportFull, PaymentReportListItem,
+    PaymentForMatch, PaymentHistoryItem, PaymentHistoryPage, PaymentReportFull,
+    PaymentReportListItem,
 };
 use crate::models::payment::{
     Bank, ClientOwner, PaymentMethod, PaymentReport, ReferenceMatchInfo, UserPaymentInfo,
 };
+
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
+fn bson_date_string(doc: &Document, field: &str) -> Option<String> {
+    if let Ok(dt) = doc.get_datetime(field) {
+        return Some(VenezuelaDateTime::from(*dt).datetime_string_venezuela());
+    }
+
+    doc.get_str(field)
+        .ok()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+async fn find_client_ids_by_owner(db: &MongoDB, owner: &str) -> Result<Vec<ObjectId>, String> {
+    let clients_col = db.db.collection::<Document>("Clients");
+    let mut cursor = clients_col
+        .find(doc! { "idOwner": owner })
+        .projection(doc! { "_id": 1 })
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut client_ids = Vec::new();
+    while let Some(Ok(doc)) = cursor.next().await {
+        if let Ok(id) = doc.get_object_id("_id") {
+            client_ids.push(id);
+        }
+    }
+
+    Ok(client_ids)
+}
+
+fn payment_history_item_from_doc(doc: Document) -> PaymentHistoryItem {
+    PaymentHistoryItem {
+        id: doc
+            .get_object_id("_id")
+            .map(|id| id.to_hex())
+            .unwrap_or_default(),
+        id_client: doc
+            .get_object_id("idClient")
+            .map(|id| id.to_hex())
+            .unwrap_or_default(),
+        client: doc.get_str("client_name").unwrap_or_default().to_string(),
+        amount: round2(get_bson_amount(&doc, "nAmount")),
+        amount_bs: round2(get_bson_amount(&doc, "nBs")),
+        commentary: doc.get_str("sCommentary").ok().map(str::to_string),
+        state: doc.get_str("sState").unwrap_or_default().to_string(),
+        creator: doc
+            .get_str("creator_name")
+            .ok()
+            .map(str::to_string)
+            .filter(|s| !s.is_empty()),
+        editor: doc
+            .get_str("editor_name")
+            .ok()
+            .map(str::to_string)
+            .filter(|s| !s.is_empty()),
+        reason: doc
+            .get_str("sReason")
+            .ok()
+            .map(str::to_string)
+            .filter(|s| !s.is_empty()),
+        created_at: bson_date_string(&doc, "dCreation"),
+        updated_at: bson_date_string(&doc, "dEdition"),
+        is_usd: doc.get_bool("bUSD").unwrap_or(false),
+        is_cash: doc.get_bool("bCash").unwrap_or(false),
+        reference: doc
+            .get_str("sReference")
+            .ok()
+            .map(str::to_string)
+            .filter(|s| !s.is_empty()),
+    }
+}
+
+fn payment_history_pipeline(match_doc: Document, skip: Option<u64>, limit: i64) -> Vec<Document> {
+    let mut pipeline = vec![doc! { "$match": match_doc }];
+
+    pipeline.push(doc! { "$addFields": {
+        "_sortDate": {
+            "$convert": {
+                "input": "$dCreation",
+                "to": "date",
+                "onError": mongodb::bson::DateTime::from_millis(0),
+                "onNull": mongodb::bson::DateTime::from_millis(0)
+            }
+        }
+    }});
+    pipeline.push(doc! { "$sort": { "_sortDate": -1, "_id": -1 } });
+
+    if let Some(skip) = skip {
+        pipeline.push(doc! { "$skip": skip as i64 });
+    }
+    pipeline.push(doc! { "$limit": limit });
+
+    pipeline.push(doc! { "$lookup": {
+        "from": "Clients",
+        "localField": "idClient",
+        "foreignField": "_id",
+        "as": "client",
+        "pipeline": [{ "$project": { "_id": 0, "sName": 1 } }]
+    }});
+    pipeline.push(doc! { "$unwind": { "path": "$client", "preserveNullAndEmptyArrays": true } });
+
+    pipeline.push(doc! { "$lookup": {
+        "from": "Users",
+        "localField": "idCreator",
+        "foreignField": "_id",
+        "as": "creator",
+        "pipeline": [{ "$project": { "_id": 0, "sName": 1 } }]
+    }});
+    pipeline.push(doc! { "$unwind": { "path": "$creator", "preserveNullAndEmptyArrays": true } });
+
+    pipeline.push(doc! { "$lookup": {
+        "from": "Users",
+        "localField": "idEditor",
+        "foreignField": "_id",
+        "as": "editor",
+        "pipeline": [{ "$project": { "_id": 0, "sName": 1 } }]
+    }});
+    pipeline.push(doc! { "$unwind": { "path": "$editor", "preserveNullAndEmptyArrays": true } });
+
+    pipeline.push(doc! { "$project": {
+        "_id": 1,
+        "idClient": 1,
+        "nAmount": 1,
+        "nBs": 1,
+        "sCommentary": 1,
+        "sState": 1,
+        "sReason": 1,
+        "dCreation": 1,
+        "dEdition": 1,
+        "bUSD": 1,
+        "bCash": 1,
+        "sReference": 1,
+        "client_name": { "$ifNull": ["$client.sName", ""] },
+        "creator_name": { "$ifNull": ["$creator.sName", ""] },
+        "editor_name": { "$ifNull": ["$editor.sName", ""] },
+    }});
+
+    pipeline
+}
 
 #[async_trait]
 impl SalesRepository for MongoDB {
@@ -411,6 +556,94 @@ impl SalesRepository for MongoDB {
         }
 
         Ok(payments)
+    }
+
+    async fn list_payments_simple(
+        &self,
+        owner_id: Option<&str>,
+        reference: Option<&str>,
+    ) -> Result<Vec<PaymentHistoryItem>, String> {
+        let mut match_doc = doc! {};
+
+        if let Some(owner) = owner_id {
+            let client_ids = find_client_ids_by_owner(self, owner).await?;
+            if client_ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            match_doc.insert("idClient", doc! { "$in": client_ids });
+        }
+
+        if let Some(reference) = reference.map(str::trim).filter(|s| !s.is_empty()) {
+            match_doc.insert("sReference", reference);
+        }
+
+        let pipeline = payment_history_pipeline(match_doc, None, 500);
+        let collection = self.db.collection::<Document>("Payments");
+        let mut cursor = collection
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut payments = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            payments.push(payment_history_item_from_doc(doc));
+        }
+
+        Ok(payments)
+    }
+
+    async fn list_payments_complete(
+        &self,
+        owner_id: Option<&str>,
+        reference: Option<&str>,
+        page: u32,
+        per_page: u32,
+    ) -> Result<PaymentHistoryPage, String> {
+        let page = page.max(1);
+        let per_page = per_page.clamp(1, 500);
+        let mut match_doc = doc! {};
+
+        if let Some(owner) = owner_id {
+            let client_ids = find_client_ids_by_owner(self, owner).await?;
+            if client_ids.is_empty() {
+                return Ok(PaymentHistoryPage {
+                    items: Vec::new(),
+                    page,
+                    per_page,
+                    has_next_page: false,
+                });
+            }
+            match_doc.insert("idClient", doc! { "$in": client_ids });
+        }
+
+        if let Some(reference) = reference.map(str::trim).filter(|s| !s.is_empty()) {
+            match_doc.insert("sReference", reference);
+        }
+
+        let skip = ((page - 1) as u64) * (per_page as u64);
+        let pipeline = payment_history_pipeline(match_doc, Some(skip), per_page as i64 + 1);
+        let collection = self.db.collection::<Document>("Payments");
+        let mut cursor = collection
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut payments = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            payments.push(payment_history_item_from_doc(doc));
+        }
+
+        let has_next_page = payments.len() > per_page as usize;
+        if has_next_page {
+            payments.truncate(per_page as usize);
+        }
+
+        Ok(PaymentHistoryPage {
+            items: payments,
+            page,
+            per_page,
+            has_next_page,
+        })
     }
 
     async fn get_daily_payments_chart(

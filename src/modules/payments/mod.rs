@@ -29,6 +29,30 @@ pub fn client_routes() -> Router<Arc<AppState>> {
 pub fn user_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route(
+            "/v1/auth-user/payments/list/simple",
+            get(handler::list_payments_simple_handler),
+        )
+        .route(
+            "/v1/auth-user/payments/list/complete",
+            get(handler::list_payments_complete_handler),
+        )
+        .route(
+            "/v1/payments/list/simple",
+            get(handler::list_payments_simple_handler),
+        )
+        .route(
+            "/v1/payments/list/complete",
+            get(handler::list_payments_complete_handler),
+        )
+        .route(
+            "/v1/auth-user/payments/iva/list",
+            get(handler::list_payment_iva_handler),
+        )
+        .route(
+            "/v1/payments/iva/list",
+            get(handler::list_payment_iva_handler),
+        )
+        .route(
             "/v1/auth-user/payments/report",
             post(handler::report_payment_user_handler),
         )

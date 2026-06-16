@@ -4,10 +4,10 @@ use crate::models::ai_agent::{
     AiInstallationConfig, AiInteraction, AiPlan, AiPromotion, ConnectionType,
 };
 use crate::models::db::{
-    ActiveClientBalance, ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem,
-    DailyPaymentChartPoint, LatestPayment, LatestVersion, OnuForUpdateIp, OnuIdentity, OnuIpUpdate,
-    PartPaymentWithPaymentState, PaymentForMatch, PaymentReportFull, PaymentReportListItem,
-    SolvencyCounts, Tax,
+    ActiveClientBalance, ClientDetail, ClientListItem, ClientStats, ClientStatusHistoryItem,
+    CustomerInfoItem, DailyPaymentChartPoint, LatestPayment, LatestVersion, OnuForUpdateIp,
+    OnuIdentity, OnuIpUpdate, PartPaymentWithPaymentState, PaymentForMatch, PaymentHistoryItem,
+    PaymentHistoryPage, PaymentReportFull, PaymentReportListItem, SolvencyCounts, Tax, TaxListItem,
 };
 use crate::models::whatsapp::{
     ConversationStats, QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyList,
@@ -153,6 +153,7 @@ pub trait ProfileRepository {
         phones: &[String],
     ) -> Result<HashMap<String, String>, String>;
     async fn find_tax_by_id(&self, id: Option<ObjectId>) -> Result<Option<Tax>, String>;
+    async fn list_taxes(&self) -> Result<Vec<TaxListItem>, String>;
 
     async fn get_clients_by_phone_group(&self, phone: String) -> Result<Vec<Document>, MongoError>;
     async fn get_last_payments_by_id_client(
@@ -168,6 +169,7 @@ pub trait ProfileRepository {
     ) -> Result<Vec<ActiveClientBalance>, String>;
 
     async fn get_solvency_counts(&self, owner_id: Option<&str>) -> Result<SolvencyCounts, String>;
+    async fn get_client_stats(&self, owner_id: Option<&str>) -> Result<ClientStats, String>;
 
     async fn get_all_clients(&self, owner_id: Option<&str>) -> Result<Vec<ClientListItem>, String>;
 
@@ -255,6 +257,20 @@ pub trait SalesRepository {
         limit: u32,
         owner_id: Option<&str>,
     ) -> Result<Vec<LatestPayment>, String>;
+
+    async fn list_payments_simple(
+        &self,
+        owner_id: Option<&str>,
+        reference: Option<&str>,
+    ) -> Result<Vec<PaymentHistoryItem>, String>;
+
+    async fn list_payments_complete(
+        &self,
+        owner_id: Option<&str>,
+        reference: Option<&str>,
+        page: u32,
+        per_page: u32,
+    ) -> Result<PaymentHistoryPage, String>;
 
     async fn get_daily_payments_chart(
         &self,

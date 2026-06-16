@@ -28,7 +28,7 @@ pub struct ActiveClientBalance {
     pub n_balance: f64,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Clone, ToSchema)]
 pub struct LatestPayment {
     pub id: String,
     pub created_at: String,
@@ -38,6 +38,45 @@ pub struct LatestPayment {
     pub amount_bs: f64,
     pub client_name: String,
     pub creator_name: String,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct PaymentHistoryItem {
+    pub id: String,
+    pub id_client: String,
+    pub client: String,
+    pub amount: f64,
+    pub amount_bs: f64,
+    pub commentary: Option<String>,
+    pub state: String,
+    pub creator: Option<String>,
+    pub editor: Option<String>,
+    pub reason: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub is_usd: bool,
+    pub is_cash: bool,
+    pub reference: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct PaymentHistoryPage {
+    pub items: Vec<PaymentHistoryItem>,
+    pub page: u32,
+    pub per_page: u32,
+    pub has_next_page: bool,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct PaymentHistoryListResponse {
+    pub ok: bool,
+    pub data: Vec<PaymentHistoryItem>,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct PaymentHistoryPageResponse {
+    pub ok: bool,
+    pub data: PaymentHistoryPage,
 }
 
 #[derive(Debug, Serialize, ToSchema, Clone)]
@@ -52,6 +91,22 @@ pub struct SolvencyCounts {
     pub solventes: u32,
     pub morosos: u32,
     pub suspendidos: u32,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct ClientStats {
+    pub todos: u32,
+    pub solventes: u32,
+    pub morosos: u32,
+    pub suspendidos: u32,
+    pub retirados: u32,
+    pub nuevos: u32,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct ClientStatsResponse {
+    pub ok: bool,
+    pub data: ClientStats,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -122,6 +177,19 @@ pub struct Tax {
     pub target: String,
     #[serde(rename = "IVA")]
     pub iva: f64,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct TaxListItem {
+    pub id: String,
+    pub target: String,
+    pub iva: f64,
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct TaxListResponse {
+    pub ok: bool,
+    pub data: Vec<TaxListItem>,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema)]

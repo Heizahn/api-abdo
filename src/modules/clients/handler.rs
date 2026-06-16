@@ -9,7 +9,10 @@ use crate::{
     auth::user_jwt::UserProfileClaims,
     db::{ProfileRepository, UserRepository},
     error::ApiError,
-    models::db::{ClientDetail, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem},
+    models::db::{
+        ClientDetail, ClientListItem, ClientStatsResponse, ClientStatusHistoryItem,
+        CustomerInfoItem,
+    },
     modules::network::mikrotik::ip_pppoe::get_ip_pppoe_mk,
     state::AppState,
 };
@@ -17,6 +20,18 @@ use crate::{
 #[derive(Deserialize)]
 pub struct ClientsQuery {
     pub owner: Option<String>,
+    #[serde(rename = "idOwner")]
+    pub id_owner: Option<String>,
+}
+
+impl ClientsQuery {
+    fn owner_filter(&self) -> Option<&str> {
+        self.owner
+            .as_deref()
+            .or(self.id_owner.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
 }
 
 async fn resolve_owner_scope(
@@ -190,7 +205,7 @@ pub async fn get_all_clients_handler(
     Extension(claims): Extension<UserProfileClaims>,
     Query(params): Query<ClientsQuery>,
 ) -> Result<Json<Vec<ClientListItem>>, ApiError> {
-    let owner_id = resolve_owner_scope(&state, &claims, params.owner.as_deref()).await?;
+    let owner_id = resolve_owner_scope(&state, &claims, params.owner_filter()).await?;
 
     state
         .db
@@ -198,4 +213,37 @@ pub async fn get_all_clients_handler(
         .await
         .map(Json)
         .map_err(ApiError::DatabaseError)
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/clients/stats",
+    tag = "Clients — Staff",
+    security(("bearerAuth" = [])),
+    params(
+        ("owner" = Option<String>, Query, description = "Filtrar por owner permitido para el caller"),
+        ("idOwner" = Option<String>, Query, description = "Alias legacy de owner"),
+    ),
+    responses(
+        (status = 200, description = "Estadísticas de clientes por estado y solvencia", body = ClientStatsResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Owner no permitido para este usuario"),
+    )
+)]
+pub async fn get_client_stats_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<UserProfileClaims>,
+    Query(params): Query<ClientsQuery>,
+) -> Result<Json<ClientStatsResponse>, ApiError> {
+    let owner_id = resolve_owner_scope(&state, &claims, params.owner_filter()).await?;
+    let stats = state
+        .db
+        .get_client_stats(owner_id.as_deref())
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    Ok(Json(ClientStatsResponse {
+        ok: true,
+        data: stats,
+    }))
 }

@@ -24,9 +24,11 @@ use crate::models::auth::{
     VerifyNumberResponse,
 };
 use crate::models::db::{
-    BcvResponse, ClientDetail, ClientListItem, ClientOnu, ClientStatusHistoryItem,
-    CustomerInfoItem, DailyPaymentChartPoint, LatestPayment, LatestVersion, LatestVersionResponse,
-    PaymentReportListItem, PingResponse, SolvencyCounts,
+    BcvResponse, ClientDetail, ClientListItem, ClientOnu, ClientStats, ClientStatsResponse,
+    ClientStatusHistoryItem, CustomerInfoItem, DailyPaymentChartPoint, LatestPayment,
+    LatestVersion, LatestVersionResponse, PaymentHistoryItem, PaymentHistoryListResponse,
+    PaymentHistoryPage, PaymentHistoryPageResponse, PaymentReportListItem, PingResponse,
+    SolvencyCounts, TaxListItem, TaxListResponse,
 };
 use crate::models::payment::{
     Bank, BankListResponse, CheckReferenceData, CheckReferenceRequest, CheckReferenceResponse,
@@ -102,7 +104,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.85",
+        version = "0.3.87",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
@@ -130,6 +132,9 @@ use crate::modules::whatsapp::conversations::lifecycle::{
         crate::modules::payments::handler::get_pago_movil_data_by_client_user_handler,
         crate::modules::payments::handler::report_payment_handler,
         crate::modules::payments::handler::report_payment_user_handler,
+        crate::modules::payments::handler::list_payments_simple_handler,
+        crate::modules::payments::handler::list_payments_complete_handler,
+        crate::modules::payments::handler::list_payment_iva_handler,
         crate::modules::payments::handler::list_payment_reports_handler,
         crate::modules::payments::handler::approve_payment_report_handler,
         crate::modules::payments::handler::reject_payment_report_handler,
@@ -142,6 +147,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
         crate::modules::dashboard::handler::payments_chart_handler,
         // Clients — Staff
         crate::modules::clients::handler::get_all_clients_handler,
+        crate::modules::clients::handler::get_client_stats_handler,
         crate::modules::clients::handler::get_client_by_id_handler,
         crate::modules::clients::handler::get_customers_info_handler,
         crate::modules::clients::handler::get_status_history_handler,
@@ -284,13 +290,17 @@ use crate::modules::whatsapp::conversations::lifecycle::{
             RejectedPayment, RejectedPaymentsResponse,
             // Payments
             PaymentMethodResponse, PagoMovilData,
+            PaymentHistoryItem, PaymentHistoryPage,
+            PaymentHistoryListResponse, PaymentHistoryPageResponse,
+            TaxListItem, TaxListResponse,
             PaymentReportListItem, RejectReportRequest,
             CheckReferenceRequest, CheckReferenceResponse, CheckReferenceData, ReferenceDetails,
             // Dashboard
             LatestPayment, SolvencyCounts, MonthlyClosingResponse, MonthlyClosingData,
             DailyPaymentChartPoint,
             // Clients — Staff
-            ClientDetail, ClientOnu, ClientListItem, ClientStatusHistoryItem, CustomerInfoItem,
+            ClientDetail, ClientOnu, ClientListItem, ClientStats, ClientStatsResponse,
+            ClientStatusHistoryItem, CustomerInfoItem,
             // Calculations
             CalculationRequest, CalculationResponse, CalculationRequestV2, CalculationResponseV2,
             Currency,

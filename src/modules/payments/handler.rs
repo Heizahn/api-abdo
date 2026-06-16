@@ -1,8 +1,9 @@
 use axum::{
-    extract::{Multipart, Path as AxumPath, State},
+    extract::{Multipart, Path as AxumPath, Query, State},
     response::IntoResponse,
     Extension, Json,
 };
+use serde::Deserialize;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -14,9 +15,11 @@ use uuid::Uuid;
 use crate::{
     auth::claims::AccessClaims,
     auth::user_jwt::UserProfileClaims,
-    db::{ProfileRepository, SalesRepository},
+    db::{ProfileRepository, SalesRepository, UserRepository},
     error::ApiError,
-    models::db::PaymentReportFull,
+    models::db::{
+        PaymentHistoryListResponse, PaymentHistoryPageResponse, PaymentReportFull, TaxListResponse,
+    },
     models::payment::{PagoMovilData, PaymentMethodResponse, PaymentReport},
     modules::payments::service::{PaymentInput, PaymentsService},
     modules::whatsapp::ws::{broadcast_to_roles, ReportePagoPendienteData, WsServerEvent},
@@ -36,6 +39,81 @@ fn has_report_access(role: Option<f32>) -> bool {
         Some(r) => REPORT_ROLES.contains(&r),
         None => false,
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PaymentHistoryQuery {
+    pub owner: Option<String>,
+    #[serde(rename = "idOwner")]
+    pub id_owner: Option<String>,
+    pub reference: Option<String>,
+    pub search: Option<String>,
+    pub q: Option<String>,
+    pub page: Option<u32>,
+    pub per_page: Option<u32>,
+}
+
+impl PaymentHistoryQuery {
+    fn owner_filter(&self) -> Option<&str> {
+        self.owner
+            .as_deref()
+            .or(self.id_owner.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+
+    fn reference_filter(&self) -> Option<&str> {
+        self.reference
+            .as_deref()
+            .or(self.search.as_deref())
+            .or(self.q.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+}
+
+async fn resolve_payments_owner_scope(
+    state: &Arc<AppState>,
+    claims: &UserProfileClaims,
+    owner_param: Option<&str>,
+) -> Result<Option<String>, ApiError> {
+    let caller = state
+        .db
+        .find_user_by_id(&claims.id)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(|| ApiError::Unauthorized("Usuario no encontrado".to_string()))?;
+
+    if (caller.role + 1.0_f32).abs() < 0.01 {
+        return Err(ApiError::Forbidden);
+    }
+
+    let caller_is_provider = (caller.role - 3.0_f32).abs() < 0.01;
+    if caller_is_provider {
+        if let Some(requested_owner) = owner_param {
+            if requested_owner != claims.id {
+                return Err(ApiError::Forbidden);
+            }
+        }
+        return Ok(Some(claims.id.clone()));
+    }
+
+    let Some(requested_owner) = owner_param else {
+        return Ok(None);
+    };
+
+    let owner_user = state
+        .db
+        .find_user_by_id(requested_owner)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or(ApiError::Forbidden)?;
+
+    if (owner_user.role - 3.0_f32).abs() >= 0.01 {
+        return Err(ApiError::Forbidden);
+    }
+
+    Ok(Some(requested_owner.to_string()))
 }
 
 #[inline]
@@ -723,6 +801,116 @@ pub async fn report_payment_user_handler(
             "is_advance": id_debt_oid.is_none()
         }
     })))
+}
+
+// ============================================================================
+// Payment history — list/simple + list/complete
+// ============================================================================
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/payments/list/simple",
+    tag = "Payments",
+    security(("bearerAuth" = [])),
+    params(
+        ("owner" = Option<String>, Query, description = "Filtrar por provider/owner permitido"),
+        ("idOwner" = Option<String>, Query, description = "Alias legacy de owner"),
+        ("reference" = Option<String>, Query, description = "Referencia exacta del pago"),
+        ("search" = Option<String>, Query, description = "Alias de reference para búsqueda rápida por referencia"),
+    ),
+    responses(
+        (status = 200, description = "Últimos pagos para historial simple", body = PaymentHistoryListResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Owner no permitido para este usuario"),
+    )
+)]
+pub async fn list_payments_simple_handler(
+    Extension(claims): Extension<UserProfileClaims>,
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<PaymentHistoryQuery>,
+) -> Result<Json<PaymentHistoryListResponse>, ApiError> {
+    let owner_id = resolve_payments_owner_scope(&state, &claims, params.owner_filter()).await?;
+    let payments = state
+        .db
+        .list_payments_simple(owner_id.as_deref(), params.reference_filter())
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    Ok(Json(PaymentHistoryListResponse {
+        ok: true,
+        data: payments,
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/payments/list/complete",
+    tag = "Payments",
+    security(("bearerAuth" = [])),
+    params(
+        ("owner" = Option<String>, Query, description = "Filtrar por provider/owner permitido"),
+        ("idOwner" = Option<String>, Query, description = "Alias legacy de owner"),
+        ("reference" = Option<String>, Query, description = "Referencia exacta del pago"),
+        ("search" = Option<String>, Query, description = "Alias de reference para búsqueda rápida por referencia"),
+        ("page" = Option<u32>, Query, description = "Página, inicia en 1. Default 1"),
+        ("per_page" = Option<u32>, Query, description = "Tamaño de página. Default 500, máximo 500"),
+    ),
+    responses(
+        (status = 200, description = "Historial completo paginado de pagos", body = PaymentHistoryPageResponse),
+        (status = 401, description = "No autorizado"),
+        (status = 403, description = "Owner no permitido para este usuario"),
+    )
+)]
+pub async fn list_payments_complete_handler(
+    Extension(claims): Extension<UserProfileClaims>,
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<PaymentHistoryQuery>,
+) -> Result<Json<PaymentHistoryPageResponse>, ApiError> {
+    let owner_id = resolve_payments_owner_scope(&state, &claims, params.owner_filter()).await?;
+    let page = params.page.unwrap_or(1).max(1);
+    let per_page = params.per_page.unwrap_or(500).clamp(1, 500);
+
+    let payments = state
+        .db
+        .list_payments_complete(
+            owner_id.as_deref(),
+            params.reference_filter(),
+            page,
+            per_page,
+        )
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    Ok(Json(PaymentHistoryPageResponse {
+        ok: true,
+        data: payments,
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/payments/iva/list",
+    tag = "Payments",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Lista de tasas IVA configuradas", body = TaxListResponse),
+        (status = 401, description = "No autorizado"),
+    )
+)]
+pub async fn list_payment_iva_handler(
+    Extension(_claims): Extension<UserProfileClaims>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<TaxListResponse>, ApiError> {
+    let taxes = state
+        .db
+        .list_taxes()
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    Ok(Json(TaxListResponse {
+        ok: true,
+        data: taxes,
+    }))
 }
 
 // ============================================================================

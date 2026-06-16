@@ -4,8 +4,8 @@ use crate::db::ProfileRepository;
 use crate::domain::customer::{Customer, CustomerView};
 use crate::models::ai_agent::AiClientLookup;
 use crate::models::db::{
-    ActiveClientBalance, Client, ClientDetail, ClientListItem, ClientOnu, ClientStatusHistoryItem,
-    CustomerInfoItem, SolvencyCounts, Tax,
+    ActiveClientBalance, Client, ClientDetail, ClientListItem, ClientOnu, ClientStats,
+    ClientStatusHistoryItem, CustomerInfoItem, SolvencyCounts, Tax, TaxListItem,
 };
 use crate::utils::get_bson_amount::get_bson_amount;
 use crate::utils::timezone::VenezuelaDateTime;
@@ -291,6 +291,27 @@ impl ProfileRepository for MongoDB {
         Ok(tax_doc)
     }
 
+    async fn list_taxes(&self) -> Result<Vec<TaxListItem>, String> {
+        let db_bcv = self.client.database("BCV");
+        let collection: Collection<Tax> = db_bcv.collection("IVA");
+        let mut cursor = collection
+            .find(doc! {})
+            .sort(doc! { "sTarget": 1 })
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut taxes = Vec::new();
+        while let Some(tax) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            taxes.push(TaxListItem {
+                id: tax.id.to_hex(),
+                target: tax.target,
+                iva: tax.iva,
+            });
+        }
+
+        Ok(taxes)
+    }
+
     async fn get_clients_by_phone_group(&self, id: String) -> Result<Vec<Document>, MongoError> {
         let collection: Collection<Document> = self.db.collection("Clients");
         let obj_id = ObjectId::parse_str(id)
@@ -476,6 +497,72 @@ impl ProfileRepository for MongoDB {
             solventes: 0,
             morosos: 0,
             suspendidos: 0,
+        })
+    }
+
+    async fn get_client_stats(&self, owner_id: Option<&str>) -> Result<ClientStats, String> {
+        let mut match_doc = doc! {};
+        if let Some(owner) = owner_id {
+            match_doc.insert("idOwner", owner);
+        }
+
+        let pipeline = vec![
+            doc! { "$match": match_doc },
+            doc! {
+                "$group": {
+                    "_id": null,
+                    "todos": { "$sum": {
+                        "$cond": [{ "$in": ["$sState", ["Activo", "Suspendido", "Nuevo"]] }, 1, 0]
+                    }},
+                    "solventes": { "$sum": {
+                        "$cond": [{ "$and": [
+                            { "$eq": ["$sState", "Activo"] },
+                            { "$gte": ["$nBalance", 0.0] }
+                        ]}, 1, 0]
+                    }},
+                    "morosos": { "$sum": {
+                        "$cond": [{ "$and": [
+                            { "$eq": ["$sState", "Activo"] },
+                            { "$lt": ["$nBalance", 0.0] }
+                        ]}, 1, 0]
+                    }},
+                    "suspendidos": { "$sum": {
+                        "$cond": [{ "$eq": ["$sState", "Suspendido"] }, 1, 0]
+                    }},
+                    "retirados": { "$sum": {
+                        "$cond": [{ "$eq": ["$sState", "Retirado"] }, 1, 0]
+                    }},
+                    "nuevos": { "$sum": {
+                        "$cond": [{ "$eq": ["$sState", "Nuevo"] }, 1, 0]
+                    }},
+                }
+            },
+        ];
+
+        let collection: Collection<Document> = self.db.collection("Clients");
+        let mut cursor = collection
+            .aggregate(pipeline)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if let Some(doc) = cursor.try_next().await.map_err(|e| e.to_string())? {
+            return Ok(ClientStats {
+                todos: doc.get_i32("todos").unwrap_or(0) as u32,
+                solventes: doc.get_i32("solventes").unwrap_or(0) as u32,
+                morosos: doc.get_i32("morosos").unwrap_or(0) as u32,
+                suspendidos: doc.get_i32("suspendidos").unwrap_or(0) as u32,
+                retirados: doc.get_i32("retirados").unwrap_or(0) as u32,
+                nuevos: doc.get_i32("nuevos").unwrap_or(0) as u32,
+            });
+        }
+
+        Ok(ClientStats {
+            todos: 0,
+            solventes: 0,
+            morosos: 0,
+            suspendidos: 0,
+            retirados: 0,
+            nuevos: 0,
         })
     }
 
