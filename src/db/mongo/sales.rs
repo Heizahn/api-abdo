@@ -1568,9 +1568,9 @@ impl SalesRepository for MongoDB {
         id: ObjectId,
         lock_token: &str,
         editor_id: &str,
+        approved_at: DateTime,
     ) -> Result<bool, String> {
         let collection = self.db.collection::<Document>("PaymentReports");
-        let now = DateTime::now();
         let res = collection
             .update_one(
                 doc! {
@@ -1582,7 +1582,7 @@ impl SalesRepository for MongoDB {
                     "$set": {
                         "sState": "Verificado",
                         "idEditor": editor_id,
-                        "dEdition": now
+                        "dEdition": approved_at
                     },
                     "$unset": {
                         "approval_lock": "",

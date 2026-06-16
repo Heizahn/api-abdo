@@ -1217,6 +1217,10 @@ pub async fn approve_payment_report_handler(
     }
 
     let previous_state = report.state.clone();
+    let approved_at = BsonDateTime::now();
+    let approved_at_iso = approved_at
+        .try_to_rfc3339_string()
+        .unwrap_or_else(|_| approved_at.to_string());
 
     // 4. Require id_client
     let client_id = report.id_client.ok_or_else(|| {
@@ -1256,17 +1260,9 @@ pub async fn approve_payment_report_handler(
         }
         Ok("Reporte marcado como verificado (el pago ya existía en sistema)")
     } else {
-        // NO MATCH — create a new payment
-        let now_iso = BsonDateTime::now().to_string();
-        let d_creation = {
-            let pd = report.payment_date.trim().to_string();
-            if pd.is_empty() {
-                now_iso
-            } else {
-                pd
-            }
-        };
-
+        // NO MATCH — create a new payment with the real approval timestamp.
+        // `dPaymentDate` is the user-reported bank date and may be date-only;
+        // it must not become `Payments.dCreation` because that breaks history sorting.
         let commentary = format!(
             "Reporte aprobado. Banco: {}, Tel: {}",
             if report.bank_origin.is_empty() {
@@ -1291,7 +1287,7 @@ pub async fn approve_payment_report_handler(
             id_payment_method: report.id_payment_method,
             id_payment_report: Some(report_oid),
             id_creator: claims.id.clone(),
-            d_creation: Some(d_creation),
+            d_creation: Some(approved_at_iso.clone()),
             s_commentary: Some(commentary),
         };
 
@@ -1315,7 +1311,7 @@ pub async fn approve_payment_report_handler(
     // 6. Transition report → Verificado (validando ownership del lock)
     let changed = state
         .db
-        .finalize_report_approval(report_oid, &lock_token, &claims.id)
+        .finalize_report_approval(report_oid, &lock_token, &claims.id, approved_at)
         .await
         .map_err(ApiError::DatabaseError)?;
     if !changed {

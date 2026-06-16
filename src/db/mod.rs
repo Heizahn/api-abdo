@@ -358,6 +358,7 @@ pub trait SalesRepository {
         id: ObjectId,
         lock_token: &str,
         editor_id: &str,
+        approved_at: mongodb::bson::DateTime,
     ) -> Result<bool, String>;
 
     /// Actualiza el estado de un `PaymentReport`. Además setea `idEditor`, `dEdition`,

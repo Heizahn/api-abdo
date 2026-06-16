@@ -14,6 +14,8 @@ El front nuevo debe dejar de filtrar localmente sobre páginas ya cargadas y deb
 - Índices nuevos requeridos: ejecutar `mongosh <MONGO_URI> scripts/migrations/2026-06-16-payment-history-indexes.js` en producción/staging.
 - Ajuste de rango de fechas: cuando viene `created_from` o `created_to`, el endpoint devuelve todos los pagos coincidentes del rango en una sola respuesta (`has_next_page=false`), sin aplicar `$skip/$limit` por paginación.
 - Corrección de `creator`/`editor`: `Users._id` es UUID string, mientras `Clients._id` es ObjectId. Los filtros por operador/editor ahora resuelven `_id` como BSON genérico para que `Payments.idCreator` / `Payments.idEditor` filtren correctamente por strings.
+- Corrección de aprobación de reportes: los `Payments` nuevos creados desde un `PaymentReport` aprobado ahora usan la hora real de aprobación como `dCreation`; esa misma hora se guarda en `PaymentReports.dEdition`. No se usa `dPaymentDate` porque puede venir solo con fecha y romper la hora del historial.
+- Migración de reparación: ejecutar `mongosh <MONGO_URI> scripts/migrations/2026-06-16-fix-approved-payment-creation-dates.js` para actualizar pagos auto-creados por aprobación cuyo `dCreation` difiera de `PaymentReports.dEdition`. El script salta pagos anulados y pagos que ya existían antes de aprobar el reporte.
 - Validación backend ejecutada: `cargo fmt`, `cargo check`, diagnósticos del editor y `git diff --check`.
 - Pendiente: integración frontend y validación end-to-end del comportamiento visible de la tabla.
 
