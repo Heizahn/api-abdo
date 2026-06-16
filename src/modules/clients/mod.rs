@@ -15,6 +15,11 @@ pub fn routes() -> Router<Arc<AppState>> {
             get(handler::get_all_clients_handler),
         )
         .route(
+            "/v1/auth-user/clients/stats",
+            get(handler::get_client_stats_handler),
+        )
+        .route("/v1/clients/stats", get(handler::get_client_stats_handler))
+        .route(
             "/v1/auth-user/clients/:id",
             get(handler::get_client_by_id_handler),
         )
