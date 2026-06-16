@@ -18,7 +18,9 @@ use crate::{
     db::{ProfileRepository, SalesRepository, UserRepository},
     error::ApiError,
     models::db::{
-        PaymentHistoryListResponse, PaymentHistoryPageResponse, PaymentReportFull, TaxListResponse,
+        PaymentHistoryFilters, PaymentHistoryListResponse, PaymentHistoryPageResponse,
+        PaymentHistoryPaymentType, PaymentHistorySortBy, PaymentHistorySortDir, PaymentReportFull,
+        TaxListResponse,
     },
     models::payment::{PagoMovilData, PaymentMethodResponse, PaymentReport},
     modules::payments::service::{PaymentInput, PaymentsService},
@@ -49,6 +51,22 @@ pub struct PaymentHistoryQuery {
     pub reference: Option<String>,
     pub search: Option<String>,
     pub q: Option<String>,
+    pub client: Option<String>,
+    pub reason: Option<String>,
+    pub commentary: Option<String>,
+    pub state: Option<String>,
+    pub creator: Option<String>,
+    pub editor: Option<String>,
+    #[serde(rename = "type")]
+    pub payment_type: Option<String>,
+    pub created_from: Option<String>,
+    pub created_to: Option<String>,
+    pub amount_min: Option<String>,
+    pub amount_max: Option<String>,
+    pub amount_bs_min: Option<String>,
+    pub amount_bs_max: Option<String>,
+    pub sort_by: Option<String>,
+    pub sort_dir: Option<String>,
     pub page: Option<u32>,
     pub per_page: Option<u32>,
 }
@@ -69,6 +87,183 @@ impl PaymentHistoryQuery {
             .or(self.q.as_deref())
             .map(str::trim)
             .filter(|s| !s.is_empty())
+    }
+
+    fn complete_filters(&self) -> Result<PaymentHistoryFilters, ApiError> {
+        let page = self.page.unwrap_or(1).max(1);
+        let per_page = self.per_page.unwrap_or(500).clamp(1, 500);
+        let amount_min = parse_optional_amount(&self.amount_min, "amount_min")?;
+        let amount_max = parse_optional_amount(&self.amount_max, "amount_max")?;
+        let amount_bs_min = parse_optional_amount(&self.amount_bs_min, "amount_bs_min")?;
+        let amount_bs_max = parse_optional_amount(&self.amount_bs_max, "amount_bs_max")?;
+        let created_from = parse_optional_datetime(&self.created_from, "created_from")?;
+        let created_to = parse_optional_datetime(&self.created_to, "created_to")?;
+
+        validate_range(amount_min, amount_max, "amount")?;
+        validate_range(amount_bs_min, amount_bs_max, "amount_bs")?;
+        validate_datetime_range(created_from, created_to)?;
+
+        Ok(PaymentHistoryFilters {
+            reference: trimmed_owned(&self.reference),
+            search: trimmed_owned(&self.search),
+            client: trimmed_owned(&self.client),
+            reason: trimmed_owned(&self.reason),
+            commentary: trimmed_owned(&self.commentary),
+            state: trimmed_owned(&self.state).map(|state| normalize_payment_state(&state)),
+            creator: trimmed_owned(&self.creator),
+            editor: trimmed_owned(&self.editor),
+            payment_type: parse_payment_type(&self.payment_type)?,
+            created_from,
+            created_to,
+            amount_min,
+            amount_max,
+            amount_bs_min,
+            amount_bs_max,
+            sort_by: parse_sort_by(&self.sort_by)?,
+            sort_dir: parse_sort_dir(&self.sort_dir)?,
+            page,
+            per_page,
+        })
+    }
+}
+
+fn trimmed_owned(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn bad_payment_history_query(field: &str, message: &str) -> ApiError {
+    ApiError::BadRequest(format!("{}: {}", field, message))
+}
+
+fn parse_payment_type(
+    value: &Option<String>,
+) -> Result<Option<PaymentHistoryPaymentType>, ApiError> {
+    let Some(value) = trimmed_owned(value) else {
+        return Ok(None);
+    };
+
+    match value.to_ascii_lowercase().as_str() {
+        "cash" => Ok(Some(PaymentHistoryPaymentType::Cash)),
+        "usd" => Ok(Some(PaymentHistoryPaymentType::Usd)),
+        "mobile" => Ok(Some(PaymentHistoryPaymentType::Mobile)),
+        _ => Err(bad_payment_history_query(
+            "type",
+            "valor inválido, use cash, usd o mobile",
+        )),
+    }
+}
+
+fn parse_sort_by(value: &Option<String>) -> Result<PaymentHistorySortBy, ApiError> {
+    let Some(value) = trimmed_owned(value) else {
+        return Ok(PaymentHistorySortBy::CreatedAt);
+    };
+
+    match value.to_ascii_lowercase().as_str() {
+        "created_at" => Ok(PaymentHistorySortBy::CreatedAt),
+        "client" => Ok(PaymentHistorySortBy::Client),
+        "reason" => Ok(PaymentHistorySortBy::Reason),
+        "state" => Ok(PaymentHistorySortBy::State),
+        "creator" => Ok(PaymentHistorySortBy::Creator),
+        "editor" => Ok(PaymentHistorySortBy::Editor),
+        "amount" => Ok(PaymentHistorySortBy::Amount),
+        "amount_bs" => Ok(PaymentHistorySortBy::AmountBs),
+        "reference" => Ok(PaymentHistorySortBy::Reference),
+        _ => Err(bad_payment_history_query(
+            "sort_by",
+            "valor inválido para ordenamiento",
+        )),
+    }
+}
+
+fn parse_sort_dir(value: &Option<String>) -> Result<PaymentHistorySortDir, ApiError> {
+    let Some(value) = trimmed_owned(value) else {
+        return Ok(PaymentHistorySortDir::Desc);
+    };
+
+    match value.to_ascii_lowercase().as_str() {
+        "asc" => Ok(PaymentHistorySortDir::Asc),
+        "desc" => Ok(PaymentHistorySortDir::Desc),
+        _ => Err(bad_payment_history_query(
+            "sort_dir",
+            "valor inválido, use asc o desc",
+        )),
+    }
+}
+
+fn parse_optional_datetime(
+    value: &Option<String>,
+    field: &str,
+) -> Result<Option<DateTime<Utc>>, ApiError> {
+    let Some(value) = trimmed_owned(value) else {
+        return Ok(None);
+    };
+
+    DateTime::parse_from_rfc3339(&value)
+        .map(|dt| Some(dt.with_timezone(&Utc)))
+        .map_err(|_| bad_payment_history_query(field, "fecha ISO inválida"))
+}
+
+fn parse_optional_amount(value: &Option<String>, field: &str) -> Result<Option<f64>, ApiError> {
+    let Some(value) = trimmed_owned(value) else {
+        return Ok(None);
+    };
+
+    let amount = value
+        .parse::<f64>()
+        .map_err(|_| bad_payment_history_query(field, "monto inválido"))?;
+    if !amount.is_finite() {
+        return Err(bad_payment_history_query(field, "monto inválido"));
+    }
+
+    Ok(Some(amount))
+}
+
+fn validate_range(min: Option<f64>, max: Option<f64>, field: &str) -> Result<(), ApiError> {
+    if let (Some(min), Some(max)) = (min, max) {
+        if min > max {
+            return Err(bad_payment_history_query(
+                field,
+                "el mínimo no puede ser mayor que el máximo",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_datetime_range(
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> Result<(), ApiError> {
+    if let (Some(from), Some(to)) = (from, to) {
+        if from > to {
+            return Err(bad_payment_history_query(
+                "created_at",
+                "created_from no puede ser mayor que created_to",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_payment_state(state: &str) -> String {
+    match state.trim().to_lowercase().as_str() {
+        "activo" => "Activo".to_string(),
+        "anulado" => "Anulado".to_string(),
+        "pendiente" => "Pendiente".to_string(),
+        "rechazado" => "Rechazado".to_string(),
+        normalized => {
+            let mut chars = normalized.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        }
     }
 }
 
@@ -850,8 +1045,23 @@ pub async fn list_payments_simple_handler(
     params(
         ("owner" = Option<String>, Query, description = "Filtrar por provider/owner permitido"),
         ("idOwner" = Option<String>, Query, description = "Alias legacy de owner"),
-        ("reference" = Option<String>, Query, description = "Referencia exacta del pago"),
-        ("search" = Option<String>, Query, description = "Alias de reference para búsqueda rápida por referencia"),
+        ("reference" = Option<String>, Query, description = "Referencia parcial case-insensitive"),
+        ("search" = Option<String>, Query, description = "Búsqueda global parcial case-insensitive"),
+        ("client" = Option<String>, Query, description = "Cliente parcial case-insensitive"),
+        ("reason" = Option<String>, Query, description = "Motivo parcial case-insensitive"),
+        ("commentary" = Option<String>, Query, description = "Comentario parcial case-insensitive"),
+        ("state" = Option<String>, Query, description = "Estado exacto normalizado"),
+        ("creator" = Option<String>, Query, description = "Operador parcial case-insensitive"),
+        ("editor" = Option<String>, Query, description = "Editor parcial case-insensitive"),
+        ("type" = Option<String>, Query, description = "Tipo de pago: cash, usd o mobile"),
+        ("created_from" = Option<String>, Query, description = "Fecha inicial ISO inclusiva"),
+        ("created_to" = Option<String>, Query, description = "Fecha final ISO inclusiva"),
+        ("amount_min" = Option<String>, Query, description = "Monto USD mínimo"),
+        ("amount_max" = Option<String>, Query, description = "Monto USD máximo"),
+        ("amount_bs_min" = Option<String>, Query, description = "Monto VES mínimo"),
+        ("amount_bs_max" = Option<String>, Query, description = "Monto VES máximo"),
+        ("sort_by" = Option<String>, Query, description = "created_at, client, reason, state, creator, editor, amount, amount_bs o reference"),
+        ("sort_dir" = Option<String>, Query, description = "asc o desc"),
         ("page" = Option<u32>, Query, description = "Página, inicia en 1. Default 1"),
         ("per_page" = Option<u32>, Query, description = "Tamaño de página. Default 500, máximo 500"),
     ),
@@ -867,17 +1077,11 @@ pub async fn list_payments_complete_handler(
     Query(params): Query<PaymentHistoryQuery>,
 ) -> Result<Json<PaymentHistoryPageResponse>, ApiError> {
     let owner_id = resolve_payments_owner_scope(&state, &claims, params.owner_filter()).await?;
-    let page = params.page.unwrap_or(1).max(1);
-    let per_page = params.per_page.unwrap_or(500).clamp(1, 500);
+    let filters = params.complete_filters()?;
 
     let payments = state
         .db
-        .list_payments_complete(
-            owner_id.as_deref(),
-            params.reference_filter(),
-            page,
-            per_page,
-        )
+        .list_payments_complete(owner_id.as_deref(), filters)
         .await
         .map_err(ApiError::DatabaseError)?;
 
@@ -1013,6 +1217,10 @@ pub async fn approve_payment_report_handler(
     }
 
     let previous_state = report.state.clone();
+    let approved_at = BsonDateTime::now();
+    let approved_at_iso = approved_at
+        .try_to_rfc3339_string()
+        .unwrap_or_else(|_| approved_at.to_string());
 
     // 4. Require id_client
     let client_id = report.id_client.ok_or_else(|| {
@@ -1052,17 +1260,9 @@ pub async fn approve_payment_report_handler(
         }
         Ok("Reporte marcado como verificado (el pago ya existía en sistema)")
     } else {
-        // NO MATCH — create a new payment
-        let now_iso = BsonDateTime::now().to_string();
-        let d_creation = {
-            let pd = report.payment_date.trim().to_string();
-            if pd.is_empty() {
-                now_iso
-            } else {
-                pd
-            }
-        };
-
+        // NO MATCH — create a new payment with the real approval timestamp.
+        // `dPaymentDate` is the user-reported bank date and may be date-only;
+        // it must not become `Payments.dCreation` because that breaks history sorting.
         let commentary = format!(
             "Reporte aprobado. Banco: {}, Tel: {}",
             if report.bank_origin.is_empty() {
@@ -1087,7 +1287,7 @@ pub async fn approve_payment_report_handler(
             id_payment_method: report.id_payment_method,
             id_payment_report: Some(report_oid),
             id_creator: claims.id.clone(),
-            d_creation: Some(d_creation),
+            d_creation: Some(approved_at_iso.clone()),
             s_commentary: Some(commentary),
         };
 
@@ -1111,7 +1311,7 @@ pub async fn approve_payment_report_handler(
     // 6. Transition report → Verificado (validando ownership del lock)
     let changed = state
         .db
-        .finalize_report_approval(report_oid, &lock_token, &claims.id)
+        .finalize_report_approval(report_oid, &lock_token, &claims.id, approved_at)
         .await
         .map_err(ApiError::DatabaseError)?;
     if !changed {

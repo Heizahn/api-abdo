@@ -1,3 +1,4 @@
+use chrono::{DateTime as ChronoDateTime, Utc};
 use mongodb::bson::{oid::ObjectId, DateTime};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -57,6 +58,55 @@ pub struct PaymentHistoryItem {
     pub is_usd: bool,
     pub is_cash: bool,
     pub reference: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaymentHistoryPaymentType {
+    Cash,
+    Usd,
+    Mobile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaymentHistorySortBy {
+    CreatedAt,
+    Client,
+    Reason,
+    State,
+    Creator,
+    Editor,
+    Amount,
+    AmountBs,
+    Reference,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaymentHistorySortDir {
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaymentHistoryFilters {
+    pub reference: Option<String>,
+    pub search: Option<String>,
+    pub client: Option<String>,
+    pub reason: Option<String>,
+    pub commentary: Option<String>,
+    pub state: Option<String>,
+    pub creator: Option<String>,
+    pub editor: Option<String>,
+    pub payment_type: Option<PaymentHistoryPaymentType>,
+    pub created_from: Option<ChronoDateTime<Utc>>,
+    pub created_to: Option<ChronoDateTime<Utc>>,
+    pub amount_min: Option<f64>,
+    pub amount_max: Option<f64>,
+    pub amount_bs_min: Option<f64>,
+    pub amount_bs_max: Option<f64>,
+    pub sort_by: PaymentHistorySortBy,
+    pub sort_dir: PaymentHistorySortDir,
+    pub page: u32,
+    pub per_page: u32,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema)]
