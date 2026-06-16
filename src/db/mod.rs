@@ -6,8 +6,9 @@ use crate::models::ai_agent::{
 use crate::models::db::{
     ActiveClientBalance, ClientDetail, ClientListItem, ClientStats, ClientStatusHistoryItem,
     CustomerInfoItem, DailyPaymentChartPoint, LatestPayment, LatestVersion, OnuForUpdateIp,
-    OnuIdentity, OnuIpUpdate, PartPaymentWithPaymentState, PaymentForMatch, PaymentHistoryItem,
-    PaymentHistoryPage, PaymentReportFull, PaymentReportListItem, SolvencyCounts, Tax, TaxListItem,
+    OnuIdentity, OnuIpUpdate, PartPaymentWithPaymentState, PaymentForMatch, PaymentHistoryFilters,
+    PaymentHistoryItem, PaymentHistoryPage, PaymentReportFull, PaymentReportListItem,
+    SolvencyCounts, Tax, TaxListItem,
 };
 use crate::models::whatsapp::{
     ConversationStats, QuickReplyButton, QuickReplyCtaUrl, QuickReplyHeader, QuickReplyList,
@@ -267,9 +268,7 @@ pub trait SalesRepository {
     async fn list_payments_complete(
         &self,
         owner_id: Option<&str>,
-        reference: Option<&str>,
-        page: u32,
-        per_page: u32,
+        filters: PaymentHistoryFilters,
     ) -> Result<PaymentHistoryPage, String>;
 
     async fn get_daily_payments_chart(

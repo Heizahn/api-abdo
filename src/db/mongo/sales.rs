@@ -2,7 +2,7 @@ use crate::utils::get_bson_amount::get_bson_amount;
 use crate::utils::timezone::{utils as tz_utils, VenezuelaDateTime};
 use async_trait::async_trait;
 use futures::stream::{StreamExt, TryStreamExt};
-use mongodb::bson::{doc, oid::ObjectId, DateTime, Document};
+use mongodb::bson::{doc, oid::ObjectId, Bson, DateTime, Document};
 use mongodb::results::InsertOneResult;
 use mongodb::{error::Error as MongoError, Collection};
 
@@ -10,7 +10,8 @@ use super::MongoDB;
 use crate::db::SalesRepository;
 use crate::models::db::{
     DailyPaymentChartPoint, Debt, LatestPayment, PartPayment, PartPaymentWithPaymentState, Payment,
-    PaymentForMatch, PaymentHistoryItem, PaymentHistoryPage, PaymentReportFull,
+    PaymentForMatch, PaymentHistoryFilters, PaymentHistoryItem, PaymentHistoryPage,
+    PaymentHistoryPaymentType, PaymentHistorySortBy, PaymentHistorySortDir, PaymentReportFull,
     PaymentReportListItem,
 };
 use crate::models::payment::{
@@ -94,18 +95,11 @@ fn payment_history_item_from_doc(doc: Document) -> PaymentHistoryItem {
 }
 
 fn payment_history_pipeline(match_doc: Document, skip: Option<u64>, limit: i64) -> Vec<Document> {
-    let mut pipeline = vec![doc! { "$match": match_doc }];
+    let mut pipeline = vec![
+        doc! { "$match": match_doc },
+        payment_history_sort_date_stage(),
+    ];
 
-    pipeline.push(doc! { "$addFields": {
-        "_sortDate": {
-            "$convert": {
-                "input": "$dCreation",
-                "to": "date",
-                "onError": mongodb::bson::DateTime::from_millis(0),
-                "onNull": mongodb::bson::DateTime::from_millis(0)
-            }
-        }
-    }});
     pipeline.push(doc! { "$sort": { "_sortDate": -1, "_id": -1 } });
 
     if let Some(skip) = skip {
@@ -113,6 +107,63 @@ fn payment_history_pipeline(match_doc: Document, skip: Option<u64>, limit: i64) 
     }
     pipeline.push(doc! { "$limit": limit });
 
+    push_payment_history_lookups(&mut pipeline);
+    push_payment_history_name_fields(&mut pipeline);
+    push_payment_history_project(&mut pipeline);
+
+    pipeline
+}
+
+fn payment_history_complete_pipeline(
+    match_doc: Document,
+    filters: &PaymentHistoryFilters,
+    skip: u64,
+    limit: i64,
+) -> Vec<Document> {
+    let mut pipeline = vec![
+        doc! { "$match": match_doc },
+        payment_history_sort_date_stage(),
+    ];
+
+    if let Some(date_match) = payment_history_date_match(filters) {
+        pipeline.push(doc! { "$match": date_match });
+    }
+
+    let joins_before_pagination = payment_history_needs_joins_before_pagination(filters);
+    if joins_before_pagination {
+        push_payment_history_lookups(&mut pipeline);
+        push_payment_history_name_fields(&mut pipeline);
+        push_payment_history_join_filters(&mut pipeline, filters);
+        push_payment_history_search(&mut pipeline, filters);
+    }
+
+    push_payment_history_sort(&mut pipeline, filters);
+    pipeline.push(doc! { "$skip": skip as i64 });
+    pipeline.push(doc! { "$limit": limit });
+
+    if !joins_before_pagination {
+        push_payment_history_lookups(&mut pipeline);
+        push_payment_history_name_fields(&mut pipeline);
+    }
+
+    push_payment_history_project(&mut pipeline);
+    pipeline
+}
+
+fn payment_history_sort_date_stage() -> Document {
+    doc! { "$addFields": {
+        "_sortDate": {
+            "$convert": {
+                "input": "$dCreation",
+                "to": "date",
+                "onError": DateTime::from_millis(0),
+                "onNull": DateTime::from_millis(0)
+            }
+        }
+    }}
+}
+
+fn push_payment_history_lookups(pipeline: &mut Vec<Document>) {
     pipeline.push(doc! { "$lookup": {
         "from": "Clients",
         "localField": "idClient",
@@ -139,7 +190,17 @@ fn payment_history_pipeline(match_doc: Document, skip: Option<u64>, limit: i64) 
         "pipeline": [{ "$project": { "_id": 0, "sName": 1 } }]
     }});
     pipeline.push(doc! { "$unwind": { "path": "$editor", "preserveNullAndEmptyArrays": true } });
+}
 
+fn push_payment_history_name_fields(pipeline: &mut Vec<Document>) {
+    pipeline.push(doc! { "$addFields": {
+        "client_name": { "$ifNull": ["$client.sName", ""] },
+        "creator_name": { "$ifNull": ["$creator.sName", ""] },
+        "editor_name": { "$ifNull": ["$editor.sName", ""] },
+    }});
+}
+
+fn push_payment_history_project(pipeline: &mut Vec<Document>) {
     pipeline.push(doc! { "$project": {
         "_id": 1,
         "idClient": 1,
@@ -153,12 +214,161 @@ fn payment_history_pipeline(match_doc: Document, skip: Option<u64>, limit: i64) 
         "bUSD": 1,
         "bCash": 1,
         "sReference": 1,
-        "client_name": { "$ifNull": ["$client.sName", ""] },
-        "creator_name": { "$ifNull": ["$creator.sName", ""] },
-        "editor_name": { "$ifNull": ["$editor.sName", ""] },
+        "client_name": 1,
+        "creator_name": 1,
+        "editor_name": 1,
     }});
+}
 
-    pipeline
+fn payment_history_needs_joins_before_pagination(filters: &PaymentHistoryFilters) -> bool {
+    filters.search.is_some()
+        || filters.client.is_some()
+        || filters.creator.is_some()
+        || filters.editor.is_some()
+        || matches!(
+            filters.sort_by,
+            PaymentHistorySortBy::Client
+                | PaymentHistorySortBy::Creator
+                | PaymentHistorySortBy::Editor
+        )
+}
+
+fn payment_history_date_match(filters: &PaymentHistoryFilters) -> Option<Document> {
+    let mut range = Document::new();
+    if let Some(from) = filters.created_from {
+        range.insert("$gte", DateTime::from_millis(from.timestamp_millis()));
+    }
+    if let Some(to) = filters.created_to {
+        range.insert("$lte", DateTime::from_millis(to.timestamp_millis()));
+    }
+
+    if range.is_empty() {
+        None
+    } else {
+        Some(doc! { "_sortDate": range })
+    }
+}
+
+fn push_payment_history_join_filters(
+    pipeline: &mut Vec<Document>,
+    filters: &PaymentHistoryFilters,
+) {
+    if let Some(client) = &filters.client {
+        pipeline.push(doc! { "$match": field_regex_match("client_name", client) });
+    }
+    if let Some(creator) = &filters.creator {
+        pipeline.push(doc! { "$match": field_regex_match("creator_name", creator) });
+    }
+    if let Some(editor) = &filters.editor {
+        pipeline.push(doc! { "$match": field_regex_match("editor_name", editor) });
+    }
+}
+
+fn push_payment_history_search(pipeline: &mut Vec<Document>, filters: &PaymentHistoryFilters) {
+    let Some(search) = &filters.search else {
+        return;
+    };
+
+    let fields = [
+        "sReference",
+        "sReason",
+        "sCommentary",
+        "sState",
+        "client_name",
+        "creator_name",
+        "editor_name",
+    ];
+    let or_filters = fields
+        .iter()
+        .map(|field| Bson::Document(field_regex_match(field, search)))
+        .collect::<Vec<_>>();
+
+    pipeline.push(doc! { "$match": { "$or": or_filters } });
+}
+
+fn push_payment_history_sort(pipeline: &mut Vec<Document>, filters: &PaymentHistoryFilters) {
+    let sort_field = match filters.sort_by {
+        PaymentHistorySortBy::CreatedAt => "_sortDate",
+        PaymentHistorySortBy::Client => "client_name",
+        PaymentHistorySortBy::Reason => "sReason",
+        PaymentHistorySortBy::State => "sState",
+        PaymentHistorySortBy::Creator => "creator_name",
+        PaymentHistorySortBy::Editor => "editor_name",
+        PaymentHistorySortBy::Amount => "nAmount",
+        PaymentHistorySortBy::AmountBs => "nBs",
+        PaymentHistorySortBy::Reference => "sReference",
+    };
+    let direction = match filters.sort_dir {
+        PaymentHistorySortDir::Asc => 1,
+        PaymentHistorySortDir::Desc => -1,
+    };
+
+    let mut sort_doc = Document::new();
+    sort_doc.insert(sort_field, direction);
+    sort_doc.insert("_id", direction);
+    pipeline.push(doc! { "$sort": sort_doc });
+}
+
+fn regex_contains_filter(value: &str) -> Document {
+    doc! { "$regex": regex::escape(value), "$options": "i" }
+}
+
+fn field_regex_match(field: &str, value: &str) -> Document {
+    let mut match_doc = Document::new();
+    match_doc.insert(field, regex_contains_filter(value));
+    match_doc
+}
+
+fn insert_number_range(match_doc: &mut Document, field: &str, min: Option<f64>, max: Option<f64>) {
+    let mut range = Document::new();
+    if let Some(min) = min {
+        range.insert("$gte", min);
+    }
+    if let Some(max) = max {
+        range.insert("$lte", max);
+    }
+
+    if !range.is_empty() {
+        match_doc.insert(field, range);
+    }
+}
+
+fn apply_payment_history_filters(match_doc: &mut Document, filters: &PaymentHistoryFilters) {
+    if let Some(reference) = &filters.reference {
+        match_doc.insert("sReference", regex_contains_filter(reference));
+    }
+    if let Some(reason) = &filters.reason {
+        match_doc.insert("sReason", regex_contains_filter(reason));
+    }
+    if let Some(commentary) = &filters.commentary {
+        match_doc.insert("sCommentary", regex_contains_filter(commentary));
+    }
+    if let Some(state) = &filters.state {
+        match_doc.insert("sState", state);
+    }
+
+    match filters.payment_type {
+        Some(PaymentHistoryPaymentType::Cash) => {
+            match_doc.insert("bCash", true);
+        }
+        Some(PaymentHistoryPaymentType::Usd) => {
+            match_doc.insert("bCash", false);
+            match_doc.insert("bUSD", true);
+        }
+        Some(PaymentHistoryPaymentType::Mobile) => {
+            match_doc.insert("bCash", false);
+            match_doc.insert("bUSD", false);
+        }
+        None => {}
+    }
+
+    insert_number_range(match_doc, "nAmount", filters.amount_min, filters.amount_max);
+    insert_number_range(
+        match_doc,
+        "nBs",
+        filters.amount_bs_min,
+        filters.amount_bs_max,
+    );
 }
 
 #[async_trait]
@@ -595,12 +805,10 @@ impl SalesRepository for MongoDB {
     async fn list_payments_complete(
         &self,
         owner_id: Option<&str>,
-        reference: Option<&str>,
-        page: u32,
-        per_page: u32,
+        filters: PaymentHistoryFilters,
     ) -> Result<PaymentHistoryPage, String> {
-        let page = page.max(1);
-        let per_page = per_page.clamp(1, 500);
+        let page = filters.page.max(1);
+        let per_page = filters.per_page.clamp(1, 500);
         let mut match_doc = doc! {};
 
         if let Some(owner) = owner_id {
@@ -616,12 +824,11 @@ impl SalesRepository for MongoDB {
             match_doc.insert("idClient", doc! { "$in": client_ids });
         }
 
-        if let Some(reference) = reference.map(str::trim).filter(|s| !s.is_empty()) {
-            match_doc.insert("sReference", reference);
-        }
+        apply_payment_history_filters(&mut match_doc, &filters);
 
         let skip = ((page - 1) as u64) * (per_page as u64);
-        let pipeline = payment_history_pipeline(match_doc, Some(skip), per_page as i64 + 1);
+        let pipeline =
+            payment_history_complete_pipeline(match_doc, &filters, skip, per_page as i64 + 1);
         let collection = self.db.collection::<Document>("Payments");
         let mut cursor = collection
             .aggregate(pipeline)
