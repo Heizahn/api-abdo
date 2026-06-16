@@ -48,9 +48,9 @@ async fn find_ids_by_name(
     db: &MongoDB,
     collection_name: &str,
     name: &str,
-) -> Result<Vec<ObjectId>, String> {
+) -> Result<Vec<Bson>, String> {
     let collection = db.db.collection::<Document>(collection_name);
-    find_object_ids(
+    find_bson_ids(
         collection,
         doc! { "sName": regex_contains_filter(name) },
         Some(doc! { "_id": 1 }),
@@ -305,7 +305,28 @@ fn field_regex_match(field: &str, value: &str) -> Document {
     match_doc
 }
 
-fn id_in_condition(field: &str, ids: Vec<ObjectId>) -> Document {
+async fn find_bson_ids(
+    collection: Collection<Document>,
+    filter: Document,
+    projection: Option<Document>,
+) -> Result<Vec<Bson>, String> {
+    let mut find = collection.find(filter);
+    if let Some(projection) = projection {
+        find = find.projection(projection);
+    }
+
+    let mut cursor = find.await.map_err(|e| e.to_string())?;
+    let mut ids = Vec::new();
+    while let Some(doc) = cursor.try_next().await.map_err(|e| e.to_string())? {
+        if let Some(id) = doc.get("_id") {
+            ids.push(id.clone());
+        }
+    }
+
+    Ok(ids)
+}
+
+fn id_in_condition(field: &str, ids: Vec<Bson>) -> Document {
     let mut in_doc = Document::new();
     in_doc.insert("$in", ids);
 

@@ -13,6 +13,7 @@ El front nuevo debe dejar de filtrar localmente sobre páginas ya cargadas y deb
 - Corrección de performance: `search`, `client`, `creator` y `editor` ahora resuelven nombres a IDs antes de consultar `Payments`, evitando `$lookup` masivo antes de paginar salvo cuando se ordena por nombre. Para mantener búsquedas por nombre rápidas, `search` usa un fast-path: si el término coincide con `Clients.sName` o `Users.sName`, filtra por IDs; si no hay coincidencias de nombres, cae al search textual sobre campos propios de `Payments`.
 - Índices nuevos requeridos: ejecutar `mongosh <MONGO_URI> scripts/migrations/2026-06-16-payment-history-indexes.js` en producción/staging.
 - Ajuste de rango de fechas: cuando viene `created_from` o `created_to`, el endpoint devuelve todos los pagos coincidentes del rango en una sola respuesta (`has_next_page=false`), sin aplicar `$skip/$limit` por paginación.
+- Corrección de `creator`/`editor`: `Users._id` es UUID string, mientras `Clients._id` es ObjectId. Los filtros por operador/editor ahora resuelven `_id` como BSON genérico para que `Payments.idCreator` / `Payments.idEditor` filtren correctamente por strings.
 - Validación backend ejecutada: `cargo fmt`, `cargo check`, diagnósticos del editor y `git diff --check`.
 - Pendiente: integración frontend y validación end-to-end del comportamiento visible de la tabla.
 
