@@ -1,209 +1,516 @@
-# Plan: agentes IA — enrutamiento y flujo de pagos
+# Plan backend: agentes IA — routing, pagos y configuración portable
+
+## Estado del documento
+
+- Rama de trabajo: `develop`.
+- Entorno de prueba: VM de desarrollo con número WhatsApp de pruebas, aislado de producción.
+- Producción: todavía no tiene agentes IA configurados.
+- Alcance actual: backend primero. Frontend queda separado y se coordina cuando el contrato API esté definido.
+- Regla de trabajo: este documento es planificación; no implica cambios funcionales hasta aprobación explícita.
 
 ## Objetivo
 
-Lograr que el flujo de WhatsApp con agentes IA maneje pagos de forma transparente y auditable:
+Corregir y endurecer el módulo de agentes IA para que:
 
-1. La recepcionista detecta intención de pago, saldo, deuda, factura, transferencia, referencia o comprobante.
-2. Si corresponde, deriva al agente especialista de pagos.
-3. El agente de pagos identifica al cliente, consulta saldo/deudas si aplica, pide o procesa comprobante, llama `report_payment` solo con datos suficientes y responde sin prometer aprobaciones automáticas.
+1. Sofía (recepcionista) clasifique y enrute correctamente.
+2. Andrea (pagos) atienda saldo, métodos de pago y comprobantes sin confirmar falsamente pagos no aprobados.
+3. La configuración de agentes sea explícita, editable y portable.
+4. La IA se pause/reactive por conversación, no globalmente.
+5. Al final exista import/export JSON para copiar configuración probada de desarrollo a producción.
 
-> Alcance de esta etapa: plan y diagnóstico. No se implementa código todavía.
+---
 
-## Archivos revisados
+## Configuración actual recibida
 
-- `src/modules/ai_agent/mod.rs`
-- `src/models/ai_agent.rs`
-- `src/modules/ai_agent/dispatch.rs`
-- `src/modules/ai_agent/pre_classifier.rs`
-- `src/modules/ai_agent/runner.rs`
-- `src/modules/ai_agent/tools.rs`
-- `src/modules/ai_agent/guardrails.rs`
-- `src/modules/ai_agent/state.rs`
-- `src/db/mongo/ai_agent.rs`
-- `src/models/payment.rs`
-- `openspec/specs/ai-agent/spec.md`
+### Agentes actuales en desarrollo
 
-## Estado actual observado
+| Agente | Estado | Rol actual visible | Observación |
+|---|---:|---|---|
+| Sofía — Recepcionista | enabled + live | Recepcionista | `is_receptionist=true`, tiene `transfer_to_agent` a Carla y Andrea |
+| Andrea — Pagos | enabled + live | Pagos/cobranzas | Atiende saldo, métodos y comprobantes; no tiene `list_banks` activo |
+| Carla — Ventas | enabled + live | Ventas | Tiene `transfer_to_agent` a Andrea |
+| Gabriel — Soporte | disabled + live | Soporte | No está activo actualmente |
 
-### Lo que ya existe y sirve para pagos
+### UI actual observada
 
-- `AiAgentPurpose` ya tiene `recepcionista`, `ventas`, `pagos`, `soporte`.
-- `select_agent` ya prioriza:
-  1. `ai_active_agent_id`,
-  2. agente `is_receptionist=true`,
-  3. agente activo más viejo del workspace.
-- El pre-clasificador ya clasifica `ClearPagos` para pago/factura/deuda/comprobante.
-- Si el pre-clasificador devuelve `ClearPagos`, `dispatch.rs` intenta buscar un agente activo del workspace con `purpose = pagos`.
-- `transfer_to_agent` ya permite handoff silencioso al especialista del mismo workspace.
-- `report_payment` ya existe como tool `Action` y registra `PaymentReport` en estado `Pendiente`.
-- El runner ya tiene defensas para no confirmar falsamente si `report_payment` falla.
-- El guardrail de `report_payment` valida que el `media_id` pertenezca a la conversación.
-- El HUD `[turn_state]` ya expone `available_media_ids` al LLM.
+La pantalla de detalle de agente tiene:
 
-## Hallazgos / riesgos antes de tocar código
+- Identidad: nombre, descripción, números WhatsApp, `is_receptionist`.
+- Estado: activo + shadow/live.
+- Horario.
+- Modelo.
+- Límites.
+- Personalidad.
+- System prompt.
+- Transferencias.
+- Tools.
+- Reglas de escalación.
+- FAQs.
 
-### P0 — El propósito del agente existe en modelo/DB, pero no está expuesto en la API
+No se ve campo editable para `purpose`.
 
-`AiAgent` tiene `purpose: Option<AiAgentPurpose>`, y `find_active_agent_by_workspace_and_purpose` depende de ese campo.
+---
 
-Pero en los DTO/API actuales:
+## Hallazgos confirmados en backend
 
-- `CreateAiAgentRequest` no expone `purpose`.
-- `UpdateAiAgentRequest` no expone `purpose`.
-- `AiAgentItem` no devuelve `purpose`.
-- `default_agent` setea `purpose: None`.
+### P0 — `purpose` existe en modelo/DB pero falta en API/DTO
 
-Impacto: aunque el código de routing ya busca `purpose=pagos`, el front/admin no puede configurarlo por API normal. En producción esto puede obligar a editar Mongo manualmente; si no se hace, `ClearPagos` cae al agente original.
+En `src/models/ai_agent.rs`:
 
-### P0 — Documentación interna vieja genera confusión
+- `AiAgent` ya tiene:
+  - `purpose: Option<AiAgentPurpose>`
+- `AiAgentPurpose` ya existe con valores:
+  - `recepcionista`
+  - `ventas`
+  - `pagos`
+  - `soporte`
 
-Hay comentarios/docstrings desactualizados:
+Pero falta exponerlo en:
 
-- `src/modules/ai_agent/mod.rs` dice: “Sin recepcionista todavía”. Hoy ya hay recepcionista/pre-clasificador/transfer.
-- `src/modules/ai_agent/tools.rs` dice “PR 2 — 4 tools”, pero el catálogo actual tiene muchas más, incluyendo pagos.
+- `AiAgentItem`
+- `CreateAiAgentRequest`
+- `UpdateAiAgentRequest`
+- `agent_to_item`
+- `create_ai_agent_handler`
+- `update_ai_agent_handler`
+- OpenAPI contract visible al frontend
 
-Impacto: alto riesgo operativo al trabajar este módulo, porque el código ya evolucionó y la documentación local guía mal.
+Impacto: el backend ya sabe enrutar por propósito, pero la UI/API no pueden configurarlo. En la práctica, Andrea se llama “Andrea — Pagos”, pero el backend no tiene por qué verla como `purpose=pagos` salvo edición manual en Mongo.
 
-### P1 — Imagen de comprobante sin texto puede no disparar `ClearPagos`
+### P0 — Routing semántico depende de `purpose`
 
-El pre-clasificador solo corre si `user_text` no está vacío. Si el cliente manda únicamente una foto del comprobante:
+En `dispatch.rs`, si el preclasificador detecta `ClearPagos`, busca:
 
-- No corre `ClearPagos`.
-- El turno cae al agente seleccionado inicialmente, normalmente la recepcionista.
-- Si la recepcionista no tiene prompt/tooling claro para derivar fotos de comprobante, puede responder mal o pedir datos de más.
+```txt
+find_active_agent_by_workspace_and_purpose(workspace_id, pagos)
+```
 
-Hay visión en el runner si hay imagen, pero el routing semántico rápido depende de texto.
+Si Andrea no tiene `purpose=pagos`, ese camino no puede activarse correctamente.
 
-### P1 — `report_payment` no activa saldo automáticamente
+### P0 — Prompts con IDs técnicos hardcodeados
 
-La tool crea `PaymentReport` en estado `Pendiente`. La aprobación y ajuste real de saldo/deuda siguen siendo humanos desde panel.
+El prompt de Sofía contiene IDs de agentes:
 
-Esto es correcto para seguridad, pero el prompt del agente de pagos debe decir explícitamente:
+- Andrea/Pagos: `69f240ef9b22d9461824ca71`
+- Carla/Ventas: `69f2277f9b22d9461824ca70`
 
-- “Recibí tu comprobante y queda en revisión”.
-- No decir “tu servicio/saldo quedó activo/aprobado” hasta que un pago real esté aprobado.
+Esto funciona en desarrollo, pero no es portable a producción porque los ObjectIds cambiarán.
 
-### P1 — El flujo de pagos requiere configuración exacta de tools por agente
+El backend ya inyecta el enum de `allowed_targets` al schema de `transfer_to_agent`; por tanto, el prompt debería hablar por rol/área, no por ObjectId.
 
-Para el agente de pagos, el set mínimo recomendado es:
+### P1 — Andrea no tiene `list_banks` activo
+
+Andrea tiene:
 
 - `lookup_customer`
 - `get_invoices`
-- `get_payment_methods`
-- `list_banks`
-- `report_payment`
 - `request_human`
-
-Opcionales según política:
-
 - `create_ticket`
 - `calculate_amount_bs`
+- `report_payment`
+- `get_payment_methods`
 
-Si falta `list_banks`, el LLM puede fallar más al llenar `issuing_bank_id`. Si falta `lookup_customer`, `report_payment` no debe usarse de forma segura.
+Pero no tiene `list_banks` activo.
 
-### P1 — `payment_date` es requerido por schema de `report_payment`
+`report_payment` tiene un campo `issuing_bank_id` y el prompt/tooling recomienda resolver banco emisor con `list_banks`. Sin esa tool, Andrea puede fallar más al procesar comprobantes.
 
-`report_payment` requiere `payment_date`; si el comprobante no lo muestra o el modelo no la extrae en RFC3339, la tool falla con `payment_date_required`.
+### P1 — Imagen-only de comprobante puede quedar débil
 
-Esto es seguro, pero el prompt de pagos debe tener un flujo claro para pedir la fecha sin confirmar registro.
+El preclasificador corre solo si hay `user_text` no vacío. Si el cliente envía solo imagen, la detección rápida `ClearPagos` puede no ejecutarse. La recepcionista sí recibe media/visión, pero hay que probar si deriva correctamente.
 
-### P2 — Spec/documentación vs código no están 100% alineados
+### P1 — Revisión humana de pagos es comportamiento correcto
 
-Ejemplos detectados:
+`report_payment` crea `PaymentReport` en estado `Pendiente`. No aprueba ni activa saldo automáticamente. Esto es correcto por seguridad.
 
-- `openspec/specs/ai-agent/spec.md` tiene contratos de `calculate_amount_bs` con shape/IVA que no coinciden totalmente con la implementación actual bidireccional.
-- La spec de estado persistido habla de evictar llave vieja en `collected_data`, pero `state.rs` preserva las viejas y descarta la nueva.
+El prompt debe mantenerlo claro:
 
-No bloquea el objetivo de pagos, pero conviene registrar deuda técnica para evitar regresiones.
+- “Pago registrado / reporte recibido” sí, solo si `report_payment` devuelve OK.
+- “Pendiente de aprobación/revisión” siempre.
+- Nunca “aprobado”, “acreditado”, “ya quedó saldado”, “ya se activó”.
 
-## Plan propuesto
+### P2 — Documentación/copy viejo
 
-### Fase 1 — Alinear contrato de agentes con routing por propósito
+Detectado:
 
-1. Exponer `purpose` en:
-   - request de creación,
-   - request de actualización,
-   - response/listado,
-   - OpenAPI.
-2. Validar valores permitidos: `recepcionista`, `ventas`, `pagos`, `soporte`.
-3. Definir regla operacional:
-   - solo un `is_receptionist=true` recomendado por workspace,
-   - al menos un agente `purpose=pagos` por workspace para activar routing de pagos.
-4. Documentar configuración mínima del agente de pagos.
+- `src/modules/ai_agent/mod.rs` dice “Sin recepcionista todavía”. Ya no es cierto.
+- `src/modules/ai_agent/tools.rs` dice “PR 2 — 4 tools”. Ya no es cierto.
+- UI de FAQs menciona `search_faq`, pero en backend actual las FAQs se inyectan como bloque `[faqs]`; no se vio tool `search_faq`.
+- OpenAPI info version quedó desfasada respecto al último bump hecho previamente (`src/openapi.rs` muestra `0.3.92`; `Cargo.toml` quedó en `0.3.93`). Debe sincronizarse en el próximo cambio funcional/versionado.
 
-### Fase 2 — Endurecer routing de pagos
+---
 
-1. Confirmar flujo actual `ClearPagos -> find_active_agent_by_workspace_and_purpose(pagos)` con pruebas.
-2. Añadir pruebas para mensajes:
-   - “quiero pagar”,
-   - “te paso comprobante”,
-   - “cuánto debo”,
-   - “saldo”,
-   - referencia + monto.
-3. Diseñar comportamiento para imagen-only:
-   - opción A: prompt fuerte de recepcionista para derivar cualquier imagen sospechosa de comprobante a pagos,
-   - opción B: pre-routing server-side por `msg_type=image` + contexto reciente con intención `pago`,
-   - opción C: dejarlo al agente de pagos si la conversación ya tiene `current_intent=pago`.
+## Concepto clave: `purpose`
 
-### Fase 3 — Prompt/contrato del agente de pagos
+`purpose` es el rol técnico estable del agente. No reemplaza el nombre visible.
 
-Crear guía operativa para el agente de pagos:
+Ejemplo:
 
-1. Identificar cliente con `lookup_customer`.
-2. Si pregunta saldo/deuda: llamar `get_invoices` antes de responder monto.
-3. Si pide datos para pagar: llamar `get_payment_methods`.
-4. Si envía comprobante:
-   - leer imagen,
-   - extraer referencia, monto, banco origen, fecha,
-   - llamar `list_banks` si falta resolver banco,
-   - llamar `report_payment` solo si tiene datos requeridos.
-5. Si `report_payment` OK:
-   - decir que el reporte quedó pendiente/en revisión,
-   - no decir que el pago fue aprobado.
-6. Si `already_registered=true`:
-   - seguir `_hint` y distinguir duplicado/aprobado/pendiente.
-7. Si falta dato:
-   - pedir solo el dato faltante.
-8. Si hay mismatch de destino o referencia usada por otro cliente:
-   - escalar a humano.
+| Label visible | purpose |
+|---|---|
+| Sofía — Recepcionista | `recepcionista` |
+| Andrea — Pagos | `pagos` |
+| Carla — Ventas | `ventas` |
+| Gabriel — Soporte | `soporte` |
 
-### Fase 4 — Pruebas de seguridad y no-regresión
+### Por qué debe ser editable
 
-Casos mínimos:
+Debe ser editable porque es configuración de negocio, no lógica fija del backend. Permite que el admin defina qué agente cubre cada área sin depender del nombre.
 
-- Recepcionista deriva a pagos cuando texto contiene intención pago.
-- Recepcionista deriva a pagos para saldo/deuda/factura.
-- Agente de pagos no confirma registro si `report_payment` falla.
-- `report_payment` rechaza `media_id` inventado.
-- `report_payment` no duplica referencia ya existente.
-- Referencia ya aprobada responde como “ya registrada”, no “nuevo reporte”.
-- Comprobante sin fecha pide fecha.
-- Comprobante con banco destino equivocado devuelve mismatch y no registra.
+### Relación con `is_receptionist`
 
-### Fase 5 — Limpieza documental
+- `is_receptionist=true` sigue marcando quién recibe primero en un workspace.
+- `purpose=recepcionista` describe semánticamente el rol.
+- Ambos pueden convivir.
+- Para Sofía, lo normal es tener ambos:
+  - `is_receptionist=true`
+  - `purpose=recepcionista`
 
-1. Actualizar comentarios viejos del módulo IA.
-2. Crear documentación corta de arquitectura actual:
-   - recepcionista,
-   - pre-clasificador,
-   - propósito de agentes,
-   - transfer same-workspace/cross-workspace,
-   - flujo de pagos.
-3. Alinear `openspec/specs/ai-agent/spec.md` con implementación real o abrir cambio formal si se decide modificar comportamiento.
+---
 
-## Orden recomendado de implementación futura
+## Plan backend por fases
 
-1. `purpose` en API/OpenAPI + tests.
-2. Documentación de configuración mínima.
-3. Pruebas de routing `ClearPagos`.
-4. Prompt/seed recomendado para agente de pagos.
-5. Endurecimiento de imagen-only.
-6. Limpieza de specs viejas.
+## Fase 1 — Contrato API para `purpose` editable
 
-## Decisiones pendientes
+### Archivos backend a modificar
 
-- ¿Queremos que una imagen-only vaya a pagos automáticamente si la conversación no tiene texto?
-- ¿El agente de pagos debe crear ticket además del `PaymentReport`, o basta con el badge/evento de reporte pendiente?
-- ¿Se mantiene siempre revisión humana, o se evaluará auto-aprobación para referencias verificables? Recomendación actual: mantener revisión humana.
-- ¿El front debe permitir configurar `purpose` y mostrar alertas cuando no exista agente `pagos` para un workspace?
+- `src/models/ai_agent.rs`
+- `src/modules/ai_agent/handler.rs`
+- `src/openapi.rs`
+- `Cargo.toml`
+- `Cargo.lock`
+
+### Cambios específicos
+
+#### Modelo/DTO
+
+- [ ] Agregar `purpose: Option<AiAgentPurpose>` a `AiAgentItem`.
+- [ ] Agregar `purpose: Option<AiAgentPurpose>` a `CreateAiAgentRequest`.
+- [ ] Agregar `purpose: Option<AiAgentPurpose>` a `UpdateAiAgentRequest`.
+- [ ] Usar `#[serde(default, skip_serializing_if = "Option::is_none")]` donde aplique para compatibilidad.
+- [ ] Confirmar que `AiAgentPurpose` tiene `ToSchema` y `serde(rename_all = "snake_case")`; ya existe.
+
+#### Handler create/update
+
+- [ ] En `agent_to_item`, devolver `a.purpose`.
+- [ ] En create, después de `default_agent`, aplicar `body.purpose` si viene.
+- [ ] En update, aplicar `body.purpose` si viene.
+- [ ] Mantener legacy: si no viene `purpose`, queda `None`.
+
+#### OpenAPI/versionado
+
+- [ ] Registrar el campo en schemas generados.
+- [ ] Sincronizar `src/openapi.rs` info version con `Cargo.toml`.
+- [ ] Bump SemVer pre-1.0 para cambio funcional.
+
+### Tests/validación
+
+- [ ] `cargo check`.
+- [ ] Crear agente con `purpose=pagos`.
+- [ ] Actualizar agente existente a `purpose=pagos`.
+- [ ] GET detalle devuelve `purpose`.
+- [ ] Listado devuelve `purpose`.
+- [ ] Agentes sin `purpose` siguen funcionando.
+
+### Resultado esperado
+
+El frontend podrá mostrar un selector editable:
+
+```txt
+Propósito: Recepcionista / Pagos / Ventas / Soporte
+```
+
+---
+
+## Fase 2 — Configuración inicial correcta de agentes en desarrollo
+
+Después de tener API para `purpose`, ajustar en desarrollo:
+
+- [ ] Sofía:
+  - `purpose=recepcionista`
+  - `is_receptionist=true`
+- [ ] Andrea:
+  - `purpose=pagos`
+- [ ] Carla:
+  - `purpose=ventas`
+- [ ] Gabriel:
+  - `purpose=soporte`
+  - puede seguir disabled
+
+### Andrea tools
+
+- [ ] Activar `list_banks` para Andrea.
+- [ ] Mantener `report_payment=true`.
+- [ ] Mantener `get_payment_methods=true`.
+- [ ] Mantener `get_invoices=true`.
+
+### Pregunta a validar antes de cambiar config
+
+- [ ] Confirmar si `create_ticket` debe seguir activo para Andrea o si se prefiere que Andrea solo use `request_human` en casos complejos.
+
+---
+
+## Fase 3 — Limpieza de prompts sin IDs hardcodeados
+
+### Sofía
+
+- [ ] Quitar tabla con ObjectIds técnicos.
+- [ ] Mantener reglas conceptuales:
+  - Pagos → Andrea/Pagos vía `transfer_to_agent`.
+  - Ventas → Carla/Ventas vía `transfer_to_agent`.
+  - Soporte técnico → ticket + humano por ahora.
+- [ ] No escribir texto previo al transfer cuando sea handoff silencioso.
+- [ ] En `reason`, incluir:
+  - cliente si se conoce,
+  - estado si se conoce,
+  - mensaje literal,
+  - si hay media adjunta.
+
+### Andrea
+
+- [ ] Ajustar prompt para incluir `list_banks` como herramienta real activa.
+- [ ] Reforzar que `report_payment` devuelve reporte pendiente, no aprobación.
+- [ ] Reforzar manejo de errores de:
+  - `payment_date_required`
+  - `media_id_not_in_conversation`
+  - `destination_*_mismatch`
+  - `already_registered=true`
+- [ ] Revisar menciones de “fechas de vencimiento”, porque `get_invoices` devuelve saldo/monto, no necesariamente vencimiento operativo confiable.
+
+### Criterio
+
+Primero se corrige backend/API. Luego se corrigen prompts en UI/config dev. No hardcodear prompts en código.
+
+---
+
+## Fase 4 — Verificación de pausa por conversación
+
+Objetivo: confirmar que la IA se pausa solo por chat/conversación, no global.
+
+### Revisar/validar
+
+- [ ] `ai_disabled=true` evita dispatch IA.
+- [ ] `status=in_progress` evita dispatch IA.
+- [ ] `request_human` pausa la IA en esa conversación.
+- [ ] `create_ticket` + `request_human` no dejan a la IA respondiendo luego.
+- [ ] Humano tomando un chat no afecta otros chats.
+- [ ] Reabrir conversación limpia/rehabilita IA según flujo esperado.
+- [ ] `ai_active_agent_id` no revive IA si humano ya tomó el chat.
+
+### Pruebas manuales VM
+
+- [ ] Chat A: pedir humano → IA se pausa.
+- [ ] Chat B: IA sigue funcionando.
+- [ ] Chat A: humano responde → IA no interrumpe.
+- [ ] Reabrir Chat A → verificar comportamiento esperado.
+
+---
+
+## Fase 5 — Routing pagos y pruebas funcionales
+
+### Rutas a probar con Sofía activa
+
+- [ ] “saldo”
+- [ ] “factura”
+- [ ] “cuánto debo”
+- [ ] “datos de pago”
+- [ ] “pago móvil”
+- [ ] “quiero pagar”
+- [ ] “pagué”
+- [ ] “te paso comprobante”
+- [ ] texto + imagen de comprobante
+- [ ] solo imagen de comprobante
+- [ ] imagen no comprobante
+
+### Esperado
+
+- [ ] Casos de pagos llegan a Andrea.
+- [ ] Andrea hace `lookup_customer`.
+- [ ] Si saldo/deuda: Andrea llama `get_invoices` antes de responder.
+- [ ] Si métodos: Andrea llama `get_payment_methods`.
+- [ ] Si comprobante: Andrea analiza imagen, usa `list_banks` si hace falta y llama `report_payment` solo con datos suficientes.
+- [ ] Si `report_payment` falla, Andrea no confirma registro.
+- [ ] Si `report_payment` OK, Andrea dice pendiente de aprobación.
+
+---
+
+## Fase 6 — Imagen-only de comprobante
+
+Riesgo: cliente manda solo foto sin texto.
+
+### Primero: probar sin cambios extra
+
+- [ ] Enviar solo imagen de comprobante al número de prueba.
+- [ ] Observar si Sofía transfiere a Andrea.
+- [ ] Observar si Andrea puede procesar en el mismo turno.
+
+### Si falla, alternativas backend
+
+#### Opción A — Prompt/config
+
+- [ ] Reforzar Sofía: imagen de comprobante o media con contexto de pago → transfer a Pagos.
+
+#### Opción B — Routing por estado conversacional
+
+- [ ] Si `ai_conv_state.current_intent=pago` y llega imagen, preferir agente `purpose=pagos`.
+
+#### Opción C — Pre-routing server-side por media
+
+- [ ] Si `msg_type=image` y recent intents contienen pago/comprobante, enrutar a pagos.
+
+### Decisión pendiente
+
+No implementar B/C hasta probar A y recopilar evidencia.
+
+---
+
+## Fase 7 — Hardening de `report_payment`
+
+### Confirmar comportamiento actual
+
+- [ ] Rechaza `media_id` vacío.
+- [ ] Rechaza `media_id` fuera de la conversación.
+- [ ] Rechaza monto vacío.
+- [ ] Rechaza `amount_bs` y `amount_usd` simultáneos.
+- [ ] Rechaza monto inválido.
+- [ ] Rechaza cliente no asociado al teléfono.
+- [ ] No duplica referencia ya existente.
+- [ ] Referencia existente en otro cliente no confirma pago.
+- [ ] Pago rechazado permite nuevo reporte.
+- [ ] Guarda `idCreator=ai_user_id`.
+- [ ] Emite badge/evento de reporte pendiente.
+
+### Posibles ajustes posteriores
+
+- [ ] Normalizar error de referencia vacía (`reference_not_found_in_input` vs `reference_required`) si afecta al prompt.
+- [ ] Evaluar si `payment_date_required` es demasiado estricto para comprobantes reales.
+- [ ] Mejorar mensajes de error para que el LLM pida solo el dato faltante.
+
+---
+
+## Fase 8 — Limpieza técnica/documental backend
+
+- [ ] Actualizar docstring de `src/modules/ai_agent/mod.rs`.
+- [ ] Actualizar docstring de `src/modules/ai_agent/tools.rs`.
+- [ ] Actualizar textos que digan que recepcionista/routing “llega en próxima vuelta”.
+- [ ] Documentar arquitectura real:
+  - recepcionista,
+  - `purpose`,
+  - preclassifier,
+  - transfer same-workspace,
+  - pausa por conversación,
+  - flujo pagos.
+- [ ] Revisar divergencias con `openspec/specs/ai-agent/spec.md`.
+
+---
+
+## Fase 9 — Import/export JSON de agentes (último)
+
+### Requisito de producto
+
+Desde la UI de detalle de agente:
+
+- Botón exportar → API devuelve JSON completo del agente.
+- Botón importar → se pega JSON exportado y se importa.
+- Debe incluir absolutamente todo:
+  - identidad,
+  - purpose,
+  - workspaces,
+  - enabled,
+  - mode live/shadow,
+  - schedule,
+  - model config visible,
+  - personality,
+  - prompt,
+  - tools,
+  - escalation,
+  - limits,
+  - debounce,
+  - FAQs.
+
+### Problema producción
+
+Producción todavía no tiene agentes. Por eso no basta importar sobre agente existente; se necesita crear desde JSON.
+
+### Diseño recomendado backend
+
+#### Export individual
+
+- [ ] `GET /v1/auth-user/whatsapp/ai-agent/agents/:id/export`
+- [ ] Incluye FAQs.
+- [ ] Incluye metadata de transfer targets:
+  - id actual,
+  - label,
+  - purpose.
+
+#### Import individual
+
+- [ ] `POST /v1/auth-user/whatsapp/ai-agent/agents/import`
+- [ ] Crea agente nuevo desde JSON.
+- [ ] Crea FAQs.
+- [ ] Asigna/genera `ai_user_id` según regla backend.
+- [ ] Permite indicar `workspace_id` destino.
+
+#### Resolver transfer targets
+
+Como los ObjectIds de desarrollo no existen en producción:
+
+- [ ] Resolver primero por `purpose`.
+- [ ] Si no hay purpose, resolver por `label`.
+- [ ] Si no encuentra target, devolver error claro y no importar parcialmente.
+
+#### Export/import paquete completo
+
+Recomendado para producción sin agentes:
+
+- [ ] Exportar paquete con Sofía, Andrea, Carla y Gabriel.
+- [ ] Importar paquete completo.
+- [ ] Crear todos los agentes.
+- [ ] Reconstruir `allowed_targets` después de crear todos.
+
+---
+
+## Plan frontend separado
+
+No se trabaja en este repo ahora, pero queda el contrato esperado.
+
+- [ ] Mostrar selector `purpose` en Identidad.
+- [ ] Permitir editar `purpose`.
+- [ ] Mostrar warnings por workspace:
+  - recepcionista sin agente pagos,
+  - recepcionista sin agente ventas,
+  - transfer targets vacíos.
+- [ ] Quitar copy viejo de “routing llega en próxima vuelta”.
+- [ ] Corregir copy de FAQs que menciona `search_faq` si no existe.
+- [ ] Agregar botón Exportar.
+- [ ] Agregar botón Importar.
+- [ ] Más adelante, import/export paquete completo.
+
+---
+
+## Orden de implementación recomendado
+
+1. Fase 1 — `purpose` editable en API/OpenAPI.
+2. Fase 2 — Configurar purposes reales en dev y activar `list_banks` para Andrea.
+3. Fase 3 — Limpiar prompts sin ObjectIds hardcodeados.
+4. Fase 4 — Verificar pausa por conversación.
+5. Fase 5 — Probar routing pagos en VM desarrollo.
+6. Fase 6 — Resolver imagen-only solo si falla en pruebas.
+7. Fase 7 — Hardening puntual de `report_payment` según errores observados.
+8. Fase 8 — Limpieza documental.
+9. Fase 9 — Import/export JSON.
+
+---
+
+## Checklist de primera tarea funcional: `purpose` API
+
+Cuando se autorice codear, la primera tarea concreta será:
+
+- [ ] Bump versión en `Cargo.toml` / `Cargo.lock`.
+- [ ] Sincronizar versión en `src/openapi.rs`.
+- [ ] Agregar `purpose` a `AiAgentItem`.
+- [ ] Agregar `purpose` a create/update request.
+- [ ] Persistir `purpose` en create/update.
+- [ ] Devolver `purpose` en list/detail.
+- [ ] `cargo check`.
+- [ ] Commit + push a `develop`.
+- [ ] Probar en VM desarrollo desde UI/API.
