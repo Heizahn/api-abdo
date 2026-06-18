@@ -256,6 +256,14 @@ components(schemas(MiRequest, MiResponse, ...))
 > administra vía `POST/PUT /v1/auth-user/whatsapp/settings`.
 
 
+## Flujo de despliegue / pruebas
+- El trabajo normal se sube a `develop` para probar en la VM de desarrollo.
+- La VM de desarrollo usa un número de WhatsApp de prueba simulando producción, aislado de producción real.
+- Producción atiende ~8000 clientes; desarrollo debe probarse solo contra los clientes de prueba disponibles.
+- Antes de tocar lógica de IA/WhatsApp/pagos, confirmar el plan de prueba esperado en la VM de desarrollo y qué conversación/número de prueba se usará.
+
 ## Regla obligatoria de entrega
-- En cada cambio: subir versionado (Cargo.toml + openapi + log de arranque si aplica), hacer commit y push a la rama en que se este trabajando.
+- No editar archivos ni versionar solo por preparar un plan/análisis, salvo autorización explícita del usuario.
+- Para cambios funcionales del sistema Rust/API/IA/WhatsApp/pagos: subir versionado siguiendo SemVer pre-1.0 (`Cargo.toml` + `Cargo.lock`; OpenAPI/log de arranque si aplica), hacer commit y push a la rama en que se esté trabajando.
+- Cambios solo documentales, planes o instrucciones internas no requieren bump de versión, salvo que el usuario lo pida explícitamente.
 - No terminar una tarea con cambios locales sin push, salvo que el usuario lo prohíba explícitamente.
