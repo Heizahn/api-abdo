@@ -32,6 +32,12 @@ impl AiConfigRepository for MongoDB {
         &self,
         api_key_cipher: Option<String>,
         default_model: Option<String>,
+        audio_transcription_enabled: Option<bool>,
+        stt_model: Option<String>,
+        stt_language: Option<String>,
+        show_audio_transcription: Option<bool>,
+        ai_uses_audio_transcription: Option<bool>,
+        max_audio_transcription_seconds: Option<u32>,
         editor_id: &str,
     ) -> Result<AiConfig, String> {
         let mut set_doc = doc! {
@@ -45,6 +51,24 @@ impl AiConfigRepository for MongoDB {
         }
         if let Some(m) = default_model {
             set_doc.insert("default_model", m);
+        }
+        if let Some(v) = audio_transcription_enabled {
+            set_doc.insert("audio_transcription_enabled", v);
+        }
+        if let Some(v) = stt_model {
+            set_doc.insert("stt_model", v);
+        }
+        if let Some(v) = stt_language {
+            set_doc.insert("stt_language", v);
+        }
+        if let Some(v) = show_audio_transcription {
+            set_doc.insert("show_audio_transcription", v);
+        }
+        if let Some(v) = ai_uses_audio_transcription {
+            set_doc.insert("ai_uses_audio_transcription", v);
+        }
+        if let Some(v) = max_audio_transcription_seconds {
+            set_doc.insert("max_audio_transcription_seconds", v);
         }
 
         // $setOnInsert: fields that seed the doc on first-ever insert.

@@ -31,6 +31,19 @@ pub struct AiConfig {
     /// Slug del modelo default pre-rellenado al crear un nuevo AiAgent.
     #[serde(default)]
     pub default_model: String,
+    /// Configuración global de transcripción de audios. `None` = usar settings legacy del número WA.
+    #[serde(default)]
+    pub audio_transcription_enabled: Option<bool>,
+    #[serde(default)]
+    pub stt_model: Option<String>,
+    #[serde(default)]
+    pub stt_language: Option<String>,
+    #[serde(default)]
+    pub show_audio_transcription: Option<bool>,
+    #[serde(default)]
+    pub ai_uses_audio_transcription: Option<bool>,
+    #[serde(default)]
+    pub max_audio_transcription_seconds: Option<u32>,
     pub updated_at: DateTime,
     /// UUID del staff user que persistió este doc por última vez.
     #[serde(default)]
@@ -43,6 +56,12 @@ impl AiConfig {
         AiConfigDto {
             has_api_key: !self.openrouter_api_key.is_empty(),
             default_model: self.default_model.clone(),
+            audio_transcription_enabled: self.audio_transcription_enabled,
+            stt_model: self.stt_model.clone(),
+            stt_language: self.stt_language.clone(),
+            show_audio_transcription: self.show_audio_transcription,
+            ai_uses_audio_transcription: self.ai_uses_audio_transcription,
+            max_audio_transcription_seconds: self.max_audio_transcription_seconds,
             updated_at: Some(self.updated_at.try_to_rfc3339_string().unwrap_or_default()),
             editor_id: if self.editor_id.is_empty() {
                 None
@@ -60,6 +79,13 @@ pub struct AiConfigDto {
     pub has_api_key: bool,
     /// Slug del modelo default para nuevos agentes. Vacío = sin configurar.
     pub default_model: String,
+    /// Configuración global de transcripción. `null` = no configurada; runtime usa settings legacy del número WA.
+    pub audio_transcription_enabled: Option<bool>,
+    pub stt_model: Option<String>,
+    pub stt_language: Option<String>,
+    pub show_audio_transcription: Option<bool>,
+    pub ai_uses_audio_transcription: Option<bool>,
+    pub max_audio_transcription_seconds: Option<u32>,
     /// ISO8601 de la última escritura. `null` cuando la colección está vacía.
     pub updated_at: Option<String>,
     /// UUID del editor. `null` cuando la colección está vacía.
@@ -72,6 +98,12 @@ impl Default for AiConfigDto {
         Self {
             has_api_key: false,
             default_model: String::new(),
+            audio_transcription_enabled: None,
+            stt_model: None,
+            stt_language: None,
+            show_audio_transcription: None,
+            ai_uses_audio_transcription: None,
+            max_audio_transcription_seconds: None,
             updated_at: None,
             editor_id: None,
         }
@@ -98,6 +130,18 @@ pub struct AiConfigPatchRequest {
         alias = "defaultModelId"
     )]
     pub default_model: Option<String>,
+    #[serde(default)]
+    pub audio_transcription_enabled: Option<bool>,
+    #[serde(default)]
+    pub stt_model: Option<String>,
+    #[serde(default)]
+    pub stt_language: Option<String>,
+    #[serde(default)]
+    pub show_audio_transcription: Option<bool>,
+    #[serde(default)]
+    pub ai_uses_audio_transcription: Option<bool>,
+    #[serde(default)]
+    pub max_audio_transcription_seconds: Option<u32>,
 }
 
 /// Envelope de respuesta para GET/PATCH /config.

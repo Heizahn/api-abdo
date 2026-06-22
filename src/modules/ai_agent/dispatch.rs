@@ -24,8 +24,8 @@ use crate::{
     cache::MEDIA_CACHE_MAX_BYTES,
     crypto::aes::decrypt_payload,
     db::{
-        AiAgentRepository, ConversationAiPatch, ConversationTouch, ProfileRepository,
-        WhatsAppRepository,
+        AiAgentRepository, AiConfigRepository, ConversationAiPatch, ConversationTouch,
+        ProfileRepository, WhatsAppRepository,
     },
     models::{
         ai_agent::{AiAgent, AiAgentMode, AiAgentPurpose, AiInteraction},
@@ -1880,22 +1880,63 @@ fn is_inline_supported(msg_type: &str, mime: Option<&str>) -> bool {
     }
 }
 
+struct EffectiveAudioTranscriptionConfig {
+    enabled: bool,
+    ai_uses_transcription: bool,
+    stt_model: String,
+    stt_language: String,
+}
+
+async fn resolve_audio_transcription_config(
+    state: &Arc<AppState>,
+    wa_settings: &crate::models::whatsapp::WaSettings,
+) -> EffectiveAudioTranscriptionConfig {
+    let global = state.db.get_ai_config().await.ok().flatten();
+    let stt_model = global
+        .as_ref()
+        .and_then(|cfg| cfg.stt_model.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| wa_settings.stt_model.trim())
+        .to_string();
+    let stt_language = global
+        .as_ref()
+        .and_then(|cfg| cfg.stt_language.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| wa_settings.stt_language.trim())
+        .to_string();
+
+    EffectiveAudioTranscriptionConfig {
+        enabled: global
+            .as_ref()
+            .and_then(|cfg| cfg.audio_transcription_enabled)
+            .unwrap_or(wa_settings.audio_transcription_enabled),
+        ai_uses_transcription: global
+            .as_ref()
+            .and_then(|cfg| cfg.ai_uses_audio_transcription)
+            .unwrap_or(wa_settings.ai_uses_audio_transcription),
+        stt_model,
+        stt_language,
+    }
+}
+
 async fn collect_burst_texts(
     state: &Arc<AppState>,
     wa_settings: &crate::models::whatsapp::WaSettings,
     api_key: &str,
     messages: &[&WaMessage],
 ) -> Vec<String> {
+    let audio_cfg = resolve_audio_transcription_config(state, wa_settings).await;
     let mut texts = Vec::new();
     for m in messages {
         if let Some(t) = m.body.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
             texts.push(t.to_string());
         }
-        if wa_settings.audio_transcription_enabled
-            && wa_settings.ai_uses_audio_transcription
-            && m.msg_type == "audio"
-        {
-            if let Some(text) = ensure_audio_transcription(state, wa_settings, api_key, m).await {
+        if audio_cfg.enabled && audio_cfg.ai_uses_transcription && m.msg_type == "audio" {
+            if let Some(text) =
+                ensure_audio_transcription(state, wa_settings, &audio_cfg, api_key, m).await
+            {
                 texts.push(format!("[audio transcrito]\n{}", text));
             }
         }
@@ -1906,6 +1947,7 @@ async fn collect_burst_texts(
 async fn ensure_audio_transcription(
     state: &Arc<AppState>,
     wa_settings: &crate::models::whatsapp::WaSettings,
+    audio_cfg: &EffectiveAudioTranscriptionConfig,
     api_key: &str,
     message: &WaMessage,
 ) -> Option<String> {
@@ -1922,12 +1964,12 @@ async fn ensure_audio_transcription(
         None => return None,
     };
     let format = audio_format_from_mime(&mime);
-    let model = if wa_settings.stt_model.trim().is_empty() {
-        "openai/whisper-large-v3"
-    } else {
-        wa_settings.stt_model.trim()
-    };
-    let language = match wa_settings.stt_language.trim() {
+    let model = audio_cfg.stt_model.trim();
+    if model.is_empty() {
+        tracing::warn!("[ai_agent.dispatch] audio transcription skipped: stt_model not configured");
+        return None;
+    }
+    let language = match audio_cfg.stt_language.trim() {
         "" | "auto" => None,
         lang => Some(lang.to_string()),
     };

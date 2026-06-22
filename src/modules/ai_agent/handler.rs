@@ -1536,12 +1536,26 @@ pub async fn patch_ai_config_handler(
     // Normalizar campos.
     let trimmed_key = body.api_key.as_ref().map(|s| s.trim().to_string());
     let trimmed_model = body.default_model.as_ref().map(|s| s.trim().to_string());
+    let trimmed_stt_model = body.stt_model.as_ref().map(|s| s.trim().to_string());
+    let trimmed_stt_language = body.stt_language.as_ref().map(|s| s.trim().to_string());
 
     let key_present = trimmed_key.as_deref().map_or(false, |s| !s.is_empty());
     let model_present = trimmed_model.as_deref().map_or(false, |s| !s.is_empty());
+    let stt_model_present = trimmed_stt_model
+        .as_deref()
+        .map_or(false, |s| !s.is_empty());
+    let stt_language_present = trimmed_stt_language
+        .as_deref()
+        .map_or(false, |s| !s.is_empty());
+    let transcription_field_present = body.audio_transcription_enabled.is_some()
+        || stt_model_present
+        || stt_language_present
+        || body.show_audio_transcription.is_some()
+        || body.ai_uses_audio_transcription.is_some()
+        || body.max_audio_transcription_seconds.is_some();
 
-    // Al menos un campo debe estar presente y no vacío.
-    if !key_present && !model_present {
+    // Al menos un campo reconocido debe estar presente y no vacío.
+    if !key_present && !model_present && !transcription_field_present {
         return Err(ApiError::ValidationError {
             code: "empty_patch".into(),
             field: "request_body".into(),
@@ -1568,6 +1582,15 @@ pub async fn patch_ai_config_handler(
             });
         }
     }
+    if let Some(ref m) = trimmed_stt_model {
+        if stt_model_present && m.len() > MAX_MODEL_LEN {
+            return Err(ApiError::ValidationError {
+                code: "field_too_long".into(),
+                field: "stt_model".into(),
+                message: format!("stt_model supera {} caracteres", MAX_MODEL_LEN),
+            });
+        }
+    }
 
     // Cifrar la api_key si viene.
     let api_key_cipher = if key_present {
@@ -1578,10 +1601,30 @@ pub async fn patch_ai_config_handler(
     };
 
     let model_to_set = if model_present { trimmed_model } else { None };
+    let stt_model_to_set = if stt_model_present {
+        trimmed_stt_model
+    } else {
+        None
+    };
+    let stt_language_to_set = if stt_language_present {
+        trimmed_stt_language
+    } else {
+        None
+    };
 
     let updated = state
         .db
-        .upsert_ai_config(api_key_cipher, model_to_set, &current_user.id)
+        .upsert_ai_config(
+            api_key_cipher,
+            model_to_set,
+            body.audio_transcription_enabled,
+            stt_model_to_set,
+            stt_language_to_set,
+            body.show_audio_transcription,
+            body.ai_uses_audio_transcription,
+            body.max_audio_transcription_seconds,
+            &current_user.id,
+        )
         .await
         .map_err(|_| {
             ApiError::domain_simple(

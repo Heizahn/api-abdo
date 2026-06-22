@@ -1701,6 +1701,12 @@ pub trait AiConfigRepository: Send + Sync {
         &self,
         api_key_cipher: Option<String>,
         default_model: Option<String>,
+        audio_transcription_enabled: Option<bool>,
+        stt_model: Option<String>,
+        stt_language: Option<String>,
+        show_audio_transcription: Option<bool>,
+        ai_uses_audio_transcription: Option<bool>,
+        max_audio_transcription_seconds: Option<u32>,
         editor_id: &str,
     ) -> Result<AiConfig, String>;
 }
