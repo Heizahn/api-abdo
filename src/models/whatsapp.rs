@@ -1604,7 +1604,7 @@ fn default_true() -> bool {
 }
 
 fn default_stt_model() -> String {
-    "openai/whisper-large-v3".to_string()
+    "openai/gpt-4o-mini-transcribe".to_string()
 }
 
 fn default_stt_language() -> String {

@@ -103,7 +103,7 @@ pub async fn create_settings_handler(
         stt_model: payload
             .stt_model
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "openai/whisper-large-v3".to_string()),
+            .unwrap_or_else(|| "openai/gpt-4o-mini-transcribe".to_string()),
         stt_language: payload
             .stt_language
             .filter(|s| !s.trim().is_empty())

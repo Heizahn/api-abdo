@@ -4965,7 +4965,7 @@ mod tests {
             pre_classifier_enabled: false,
             trivial_responses: vec![],
             audio_transcription_enabled: true,
-            stt_model: "openai/whisper-large-v3".to_string(),
+            stt_model: "openai/gpt-4o-mini-transcribe".to_string(),
             stt_language: "es".to_string(),
             show_audio_transcription: true,
             ai_uses_audio_transcription: true,
