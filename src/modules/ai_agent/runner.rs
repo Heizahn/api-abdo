@@ -177,6 +177,10 @@ const MAX_BRACKET_RETRIES: u32 = 1;
 /// `create_ticket` exitoso. Cap bajo para evitar loops y falsas promesas.
 const MAX_FALSE_TICKET_RETRIES: u32 = 1;
 
+/// Reintentos máximos cuando el LLM promete una transferencia interna
+/// (Andrea/Pagos/Soporte) como texto visible pero no invoca `transfer_to_agent`.
+const MAX_FALSE_TRANSFER_RETRIES: u32 = 1;
+
 /// Tool names que el detector busca como "tool-call-as-text". Mantener en
 /// sync con las constantes `T_*` en `tools.rs`.
 const KNOWN_TOOL_NAMES: &[&str] = &[
@@ -289,6 +293,45 @@ fn confirms_ticket_created_without_success(text: &str, tool_logs: &[AiToolCallLo
         "registrado",
     ];
     creation_markers.iter().any(|marker| lower.contains(marker))
+}
+
+/// Detecta cuando el agente promete una transferencia interna como texto
+/// visible, pero no llamó `transfer_to_agent`. Las transferencias entre IAs
+/// deben ser silenciosas: el cliente solo ve la respuesta del agente destino.
+fn promises_internal_transfer_without_success(text: &str, tool_logs: &[AiToolCallLog]) -> bool {
+    if has_successful_tool_call(tool_logs, "transfer_to_agent") {
+        return false;
+    }
+
+    let lower = text.to_lowercase();
+    let has_transfer_verb = [
+        "transferir",
+        "transfiero",
+        "transferirte",
+        "pasar con",
+        "pasarte con",
+        "te paso con",
+        "derivar",
+        "derivarte",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+
+    if !has_transfer_verb {
+        return false;
+    }
+
+    [
+        "andrea",
+        "pagos",
+        "cobranzas",
+        "soporte",
+        "asesor",
+        "agente",
+        "especialista",
+    ]
+    .iter()
+    .any(|target| lower.contains(target))
 }
 
 /// Una entrada del historial de conversación que llega al runner. El handler
@@ -734,6 +777,8 @@ pub async fn run_turn(
     let mut bracket_retries: u32 = 0;
     // Cuenta reintentos por falsa confirmación de ticket creado sin tool OK.
     let mut false_ticket_retries: u32 = 0;
+    // Cuenta reintentos por promesa de transferencia interna sin tool OK.
+    let mut false_transfer_retries: u32 = 0;
 
     'turn: for iter in 0..MAX_ITERATIONS {
         let req = ChatCompletionRequest {
@@ -826,6 +871,42 @@ pub async fn run_turn(
                     cleaned.len()
                 );
                 response_text = Some(cleaned);
+                break 'turn;
+            }
+
+            // ── Defensa anti-falsa-transferencia interna ──────────────────
+            // Caso real: Sofía dice "te voy a transferir con Andrea/Pagos"
+            // como texto visible, pero no llama `transfer_to_agent`; el chain
+            // silencioso nunca corre y Andrea no responde. Re-rollamos una
+            // vez obligando tool real o respuesta sin promesa de handoff.
+            if promises_internal_transfer_without_success(&text, &tool_call_logs) {
+                tracing::warn!(
+                    "[ai_agent.runner] falsa promesa de transfer sin transfer_to_agent OK (iter={}, retries={}): preview='{}'",
+                    iter,
+                    false_transfer_retries,
+                    text.chars().take(200).collect::<String>(),
+                );
+                if false_transfer_retries < MAX_FALSE_TRANSFER_RETRIES && iter + 1 < MAX_ITERATIONS
+                {
+                    false_transfer_retries += 1;
+                    messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: Some(MessageContent::Text(
+                            "IMPORTANTE: tu respuesta anterior prometió transferir/pasar/derivar al cliente con otro agente, \
+                             pero NO hubo una llamada exitosa a `transfer_to_agent`. Las transferencias entre IAs son internas \
+                             y silenciosas: el cliente NO debe ver que lo pasas con Andrea/Pagos/Soporte. Volvé a procesar \
+                             el último mensaje: si corresponde otro agente, llama `transfer_to_agent`; si corresponde soporte \
+                             técnico con ticket, llama `create_ticket`; si no, responde sin prometer transferencia."
+                                .to_string(),
+                        )),
+                        ..Default::default()
+                    });
+                    continue;
+                }
+
+                response_text = Some(
+                    "Dame un momento para revisar tu caso y ayudarte correctamente.".to_string(),
+                );
                 break 'turn;
             }
 
@@ -1252,7 +1333,7 @@ mod extract_message_text_tests {
 mod text_tool_invocation_tests {
     use super::{
         confirms_ticket_created_without_success, detect_text_tool_invocations,
-        strip_text_tool_invocations,
+        promises_internal_transfer_without_success, strip_text_tool_invocations,
     };
     use crate::models::ai_agent::AiToolCallLog;
 
@@ -1301,6 +1382,25 @@ mod text_tool_invocation_tests {
         let text = "Te voy a transferir.\n\n[transfer_to_agent → Pagos, reason=\"x\"]";
         let cleaned = strip_text_tool_invocations(text);
         assert_eq!(cleaned, "Te voy a transferir.");
+    }
+
+    #[test]
+    fn false_transfer_promise_detects_andrea_without_tool_success() {
+        let text = "Te voy a transferir con Andrea para registrar tu pago.";
+        assert!(promises_internal_transfer_without_success(text, &[]));
+    }
+
+    #[test]
+    fn false_transfer_promise_allows_transfer_after_tool_success() {
+        let text = "Te voy a transferir con Andrea para registrar tu pago.";
+        let logs = [tool_log("transfer_to_agent", true)];
+        assert!(!promises_internal_transfer_without_success(text, &logs));
+    }
+
+    #[test]
+    fn false_transfer_promise_ignores_non_transfer_text() {
+        let text = "Andrea revisa comprobantes de pago.";
+        assert!(!promises_internal_transfer_without_success(text, &[]));
     }
 
     #[test]
