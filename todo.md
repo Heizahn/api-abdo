@@ -113,3 +113,21 @@ Decisión:
 
 Pendiente propuesto para prompt Andrea:
 - Agregar regla: si `get_invoices` devuelve `items: []`, el cliente no tiene deuda pendiente; responder que está al día/solvente y no decir “Bs. 0 pendiente”.
+
+## Pendientes futuros documentados — Fase 4 / hardening WhatsApp
+
+Problema observado:
+- Al abrir un chat atendido por IA, la conversación puede pasar a `in_progress`, dejando de ser atendida por IA en próximos mensajes.
+
+Decisión de diseño pendiente:
+- Blindar backend para que `/take` no pueda tomar una conversación IA activa (`status=pending`, `ai_disabled=false`, `ai_active_agent_id` presente).
+- La toma manual de una conversación IA debe ser explícita con `/intervene`.
+- Confirmar que `GET /messages` no cambia `status` ni pausa IA.
+
+Problema media observado:
+- Meta puede devolver `GraphMethodException code=100 subcode=33` para media inexistente/sin permiso.
+- Ese caso no debe responder 500; debe mapearse a error estable tipo `404 media_unavailable` y, opcionalmente, cache negativo corto.
+
+Estado:
+- Documentado en `docs/agent-tasks/ai-agents-payments-routing-plan.md` dentro de Fase 4.
+- No codear esto hasta retomarlo explícitamente.
