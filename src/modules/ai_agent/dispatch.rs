@@ -179,6 +179,25 @@ pub fn dispatch_inbound_async(state: Arc<AppState>, inbound: WaMessage, workspac
             }
         }
 
+        if let Some(agent_oid) = agent.id {
+            let patch = ConversationAiPatch {
+                ai_active_agent_id: Some(Some(&agent_oid)),
+                ai_disabled: None,
+                ai_transfer_context: None,
+            };
+            if let Err(e) = state
+                .db
+                .update_conversation_ai_state(&inbound.conversation_id, patch)
+                .await
+            {
+                tracing::warn!(
+                    "[ai_agent.dispatch] no se pudo marcar ai_active_agent_id antes del debounce conv={}: {}",
+                    conv_hex,
+                    e
+                );
+            }
+        }
+
         let debounce_secs = if agent.debounce_seconds == 0 {
             DEBOUNCE_FALLBACK_SECONDS
         } else {

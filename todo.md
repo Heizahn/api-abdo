@@ -137,7 +137,21 @@ Plan Fase 4 aprobado por el usuario:
 2. [x] Mantener `/intervene` como única acción explícita para tomar una conversación atendida por IA.
 3. [x] Mapear media no disponible de Meta (`GraphMethodException`, `code=100`, `error_subcode=33`, `does not exist`, `missing permissions`) a error estable `404 media_unavailable`, no 500.
 4. [x] Bump versión a `0.3.96`, `cargo fmt` y `cargo check` OK.
-5. [ ] Commit y push.
+5. [x] Commit y push (`72c7c13`).
+
+## Fix Fase 4 — race antes del debounce
+
+Problema confirmado:
+- Si el cliente escribe y el operador abre/toma durante el debounce, `ai_active_agent_id` puede seguir vacío.
+- `/take` no detecta IA activa y permite pasar la conversación a `in_progress`.
+
+Plan aprobado:
+1. Al seleccionar agente IA en `dispatch_inbound_async`, persistir `ai_active_agent_id` inmediatamente antes del debounce.
+2. No cambiar `status`.
+3. Mantener `ai_disabled=false`.
+4. Así `/take` accidental queda bloqueado por el guard ya implementado.
+5. [x] Bump versión a `0.3.97`, `cargo fmt` y `cargo check` OK.
+6. [ ] Commit y push.
 
 ## Observación prueba pagos — comprobante repetido / imagen no usable
 

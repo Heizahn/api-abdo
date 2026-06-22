@@ -316,6 +316,7 @@ Objetivo: confirmar que la IA se pausa solo por chat/conversación, no global.
 - [ ] Reabrir conversación limpia/rehabilita IA según flujo esperado.
 - [ ] `ai_active_agent_id` no revive IA si humano ya tomó el chat.
 - [x] Blindar backend: `POST /take` no debe tomar/pausar una conversación atendida por IA (`status=pending`, `ai_disabled=false`, `ai_active_agent_id` presente). Debe devolver 409 y exigir acción explícita `/intervene`.
+- [x] Marcar `ai_active_agent_id` antes del debounce para cerrar la race donde `/take` podía entrar antes de que la IA respondiera.
 - [x] Confirmar por código que abrir/leer mensajes (`GET /messages`) no cambia `status` ni pausa IA.
 - [ ] El front debe usar `/intervene` para tomar manualmente una conversación con IA; no `/take` automático al abrir.
 
