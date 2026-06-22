@@ -238,14 +238,34 @@ Después de tener API para `purpose`, ajustar en desarrollo:
 
 ### Andrea tools
 
-- [ ] Activar `list_banks` para Andrea.
+- [x] Activar `list_banks` para Andrea.
 - [ ] Mantener `report_payment=true`.
 - [ ] Mantener `get_payment_methods=true`.
 - [ ] Mantener `get_invoices=true`.
+- [ ] Desactivar `create_ticket` para Andrea; tickets quedan para soporte. En casos complejos de pagos, usar `request_human`.
 
-### Pregunta a validar antes de cambiar config
+### IVA por `tax_id` del cliente
 
-- [ ] Confirmar si `create_ticket` debe seguir activo para Andrea o si se prefiere que Andrea solo use `request_human` en casos complejos.
+Cambio nuevo solicitado dentro de Fase 2: los montos en Bs deben calcularse con el IVA configurado en el cliente (`Customers.idTax` / `tax_id`), no con el IVA `DEFAULT` global.
+
+#### Alcance backend mínimo
+
+- [ ] `get_invoices` debe resolver el cliente por `client_id` y usar su `idTax` para convertir deuda USD → Bs.
+- [ ] `calculate_amount_bs` debe poder recibir `client_id` opcional para usar el `idTax` del cliente cuando la conversión pertenezca a cobranzas.
+- [ ] `report_payment` debe usar el `idTax` del cliente cuando reciba `amount_usd` y tenga que derivar `amount_bs`.
+- [ ] Mantener fallback a `DEFAULT` si el cliente no tiene `idTax`, salvo que negocio indique que debe fallar.
+- [ ] Actualizar descripciones de tools/prompts que digan IVA `DEFAULT`, global o empresarial fijo.
+
+#### Alcance prompt/config Andrea
+
+- [ ] Mantener regla: siempre mostrar precios/montos en Bs.
+- [ ] Cuando Andrea convierta un monto asociado a un cliente ya identificado, debe pasar `client_id` a `calculate_amount_bs`.
+- [ ] No pedir al cliente tipo de IVA; debe salir del cliente en DB.
+
+#### Dudas abiertas antes de implementar
+
+- [ ] Confirmar si este cambio aplica solo a cobranzas/clientes existentes o también a ventas/lista de planes.
+- [ ] Confirmar fallback definitivo cuando el cliente no tenga `idTax`: usar `DEFAULT` o derivar a humano.
 
 ---
 
