@@ -97,3 +97,19 @@ Plan mínimo aprobado para codear ahora:
 7. [x] No tocar ventas/lista de planes en este cambio.
 8. [x] Bump version a `0.3.95`, `cargo check` OK.
 9. [ ] Commit y push.
+
+## Corrección de proceso — saldo sin deudas
+
+Caso observado en logs:
+- Cliente pide saldo.
+- Andrea llama `get_invoices`.
+- Tool devuelve `{ "items": [] }`.
+- La respuesta debe decir que está solvente/al día, no “Bs. 0 pendiente”.
+
+Decisión:
+- No hardcodear este comportamiento en backend/runner.
+- Debe resolverse desde configuración/prompt de Andrea en la UI.
+- Se revirtió el commit `4aba528` porque violaba la regla de no codear sin confirmar y movía comportamiento configurable al código.
+
+Pendiente propuesto para prompt Andrea:
+- Agregar regla: si `get_invoices` devuelve `items: []`, el cliente no tiene deuda pendiente; responder que está al día/solvente y no decir “Bs. 0 pendiente”.
