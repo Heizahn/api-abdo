@@ -173,6 +173,10 @@ fn extract_message_text(content: Option<MessageContent>) -> String {
 /// texto limpio para evitar exponer metanotación al cliente.
 const MAX_BRACKET_RETRIES: u32 = 1;
 
+/// Reintentos máximos cuando el LLM afirma que creó un ticket pero no hubo
+/// `create_ticket` exitoso. Cap bajo para evitar loops y falsas promesas.
+const MAX_FALSE_TICKET_RETRIES: u32 = 1;
+
 /// Tool names que el detector busca como "tool-call-as-text". Mantener en
 /// sync con las constantes `T_*` en `tools.rs`.
 const KNOWN_TOOL_NAMES: &[&str] = &[
@@ -246,6 +250,45 @@ fn strip_text_tool_invocations(text: &str) -> String {
         }
     }
     out.trim().to_string()
+}
+
+fn has_successful_tool_call(tool_logs: &[AiToolCallLog], tool_name: &str) -> bool {
+    tool_logs
+        .iter()
+        .any(|t| t.tool_name == tool_name && t.success)
+}
+
+/// Detecta la falsa confirmación observada en prod: el modelo responde
+/// "te creé un ticket" como texto, pero nunca invocó `create_ticket`.
+fn confirms_ticket_created_without_success(text: &str, tool_logs: &[AiToolCallLog]) -> bool {
+    if has_successful_tool_call(tool_logs, "create_ticket") {
+        return false;
+    }
+
+    let lower = text.to_lowercase();
+    if !lower.contains("ticket") {
+        return false;
+    }
+
+    let creation_markers = [
+        "creé",
+        "cree",
+        "creado",
+        "creamos",
+        "generé",
+        "genere",
+        "generado",
+        "abrí",
+        "abri",
+        "abierto",
+        "levanté",
+        "levante",
+        "levantado",
+        "registré",
+        "registre",
+        "registrado",
+    ];
+    creation_markers.iter().any(|marker| lower.contains(marker))
 }
 
 /// Una entrada del historial de conversación que llega al runner. El handler
@@ -689,6 +732,8 @@ pub async fn run_turn(
     // Cuenta cuántas veces este turno re-rolleó por "tool-call-as-text"
     // (ver detect_text_tool_invocations). Cap en MAX_BRACKET_RETRIES.
     let mut bracket_retries: u32 = 0;
+    // Cuenta reintentos por falsa confirmación de ticket creado sin tool OK.
+    let mut false_ticket_retries: u32 = 0;
 
     'turn: for iter in 0..MAX_ITERATIONS {
         let req = ChatCompletionRequest {
@@ -781,6 +826,40 @@ pub async fn run_turn(
                     cleaned.len()
                 );
                 response_text = Some(cleaned);
+                break 'turn;
+            }
+
+            // ── Defensa anti-falsa-confirmación de tickets ────────────────
+            // Caso real: Sofía dijo "te creé un ticket" pero no llamó
+            // `create_ticket`; por lo tanto no existe ticket en DB. Re-rollamos
+            // una vez para que use la tool real o responda honestamente.
+            if confirms_ticket_created_without_success(&text, &tool_call_logs) {
+                tracing::warn!(
+                    "[ai_agent.runner] falsa confirmación de ticket sin create_ticket OK (iter={}, retries={}): preview='{}'",
+                    iter,
+                    false_ticket_retries,
+                    text.chars().take(200).collect::<String>(),
+                );
+                if false_ticket_retries < MAX_FALSE_TICKET_RETRIES && iter + 1 < MAX_ITERATIONS {
+                    false_ticket_retries += 1;
+                    messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: Some(MessageContent::Text(
+                            "IMPORTANTE: tu respuesta anterior afirmó que creaste/abriste/registraste un ticket, \
+                             pero NO hubo una llamada exitosa a `create_ticket`. No podés decir que existe un ticket \
+                             si la tool no fue exitosa. Volvé a procesar el último mensaje: si corresponde, llamá \
+                             `create_ticket` con categoría y motivo; si no podés, respondé sin prometer ticket creado."
+                                .to_string(),
+                        )),
+                        ..Default::default()
+                    });
+                    continue;
+                }
+
+                response_text = Some(
+                    "Disculpá, no pude confirmar la creación del ticket automáticamente. Contame un poco más del problema para ayudarte por aquí o derivarlo correctamente."
+                        .to_string(),
+                );
                 break 'turn;
             }
 
@@ -1043,6 +1122,22 @@ pub async fn run_turn(
         }
     }
 
+    // Defensa final: la síntesis forzada corre SIN tools; si ahí el modelo
+    // afirma que creó un ticket pero no existe `create_ticket` exitoso, no
+    // dejamos salir esa promesa falsa al cliente.
+    if response_text
+        .as_deref()
+        .is_some_and(|text| confirms_ticket_created_without_success(text, &tool_call_logs))
+    {
+        tracing::warn!(
+            "[ai_agent.runner] síntesis final afirmó ticket sin create_ticket OK — reemplazando por texto honesto"
+        );
+        response_text = Some(
+            "Disculpá, no pude confirmar la creación del ticket automáticamente. Contame un poco más del problema para ayudarte por aquí o derivarlo correctamente."
+                .to_string(),
+        );
+    }
+
     // Fallback honesto: solo si ni la síntesis pudo redactar. NO promete un
     // traspaso (este path no escala de verdad) — pide reformular.
     if response_text.is_none() {
@@ -1155,7 +1250,22 @@ mod extract_message_text_tests {
 
 #[cfg(test)]
 mod text_tool_invocation_tests {
-    use super::{detect_text_tool_invocations, strip_text_tool_invocations};
+    use super::{
+        confirms_ticket_created_without_success, detect_text_tool_invocations,
+        strip_text_tool_invocations,
+    };
+    use crate::models::ai_agent::AiToolCallLog;
+
+    fn tool_log(tool_name: &str, success: bool) -> AiToolCallLog {
+        AiToolCallLog {
+            tool_name: tool_name.to_string(),
+            args: serde_json::json!({}),
+            result_summary: "{}".to_string(),
+            success,
+            error: None,
+            duration_ms: 0,
+        }
+    }
 
     #[test]
     fn detects_sofia_bracket_transfer() {
@@ -1194,6 +1304,26 @@ mod text_tool_invocation_tests {
     }
 
     #[test]
+    fn false_ticket_confirmation_detects_created_ticket_without_tool_success() {
+        let text =
+            "Listo, te creé un ticket de soporte. Un técnico te contacta por este mismo chat.";
+        assert!(confirms_ticket_created_without_success(text, &[]));
+    }
+
+    #[test]
+    fn false_ticket_confirmation_allows_created_ticket_after_tool_success() {
+        let text = "Listo, te creé un ticket de soporte.";
+        let logs = [tool_log("create_ticket", true)];
+        assert!(!confirms_ticket_created_without_success(text, &logs));
+    }
+
+    #[test]
+    fn false_ticket_confirmation_ignores_non_creation_ticket_text() {
+        let text = "Puedo crear un ticket si necesitás que soporte revise el caso.";
+        assert!(!confirms_ticket_created_without_success(text, &[]));
+    }
+
+    #[test]
     fn strip_removes_andrea_metanotation() {
         let text = "Consulto tu saldo. <<TOOL_CALL: get_invoices(client_id=\"abc\")>> Listo.";
         let cleaned = strip_text_tool_invocations(text);
@@ -1219,7 +1349,7 @@ mod text_tool_invocation_tests {
 
 #[cfg(test)]
 mod pick_effective_model_tests {
-    use super::{pick_effective_model, AUDIO_CAPABLE_MODEL, TEXT_ONLY_MODEL, VISION_CAPABLE_MODEL};
+    use super::{pick_effective_model, TEXT_ONLY_MODEL, VISION_CAPABLE_MODEL};
 
     #[test]
     fn pick_effective_model_text_only_returns_hardcoded() {
@@ -1230,9 +1360,10 @@ mod pick_effective_model_tests {
     }
 
     #[test]
-    fn pick_effective_model_audio_only_overrides_to_audio_model() {
+    fn pick_effective_model_audio_only_stays_text_model() {
+        // El audio se transcribe antes del chat; no cambia el modelo conversacional.
         let result = pick_effective_model(true, false);
-        assert_eq!(result, AUDIO_CAPABLE_MODEL);
+        assert_eq!(result, TEXT_ONLY_MODEL);
     }
 
     #[test]
