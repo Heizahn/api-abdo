@@ -96,20 +96,4 @@ Plan mínimo aprobado para codear ahora:
 6. [x] Actualizar descripciones de tools donde dicen IVA default/global.
 7. [x] No tocar ventas/lista de planes en este cambio.
 8. [x] Bump version a `0.3.95`, `cargo check` OK.
-9. [x] Commit y push.
-
-## Fix Fase 2 — saldo sin deudas
-
-Caso observado en logs:
-- Cliente pide saldo.
-- Andrea llama `get_invoices`.
-- Tool devuelve `{"items":[]}`.
-- La respuesta no debe decir “Bs. 0 pendiente”; debe decir que está solvente/al día.
-
-Plan mínimo:
-1. Detectar en el guardrail del runner cuando `get_invoices` fue exitoso y `items` está vacío.
-2. Inyectar nota explícita al modelo: responder “estás al día/solvente”, no “Bs. 0 pendiente”.
-3. Mantener comportamiento actual cuando sí hay deudas.
-4. [x] Bump versión a `0.3.96`.
-5. [x] `cargo fmt` y `cargo check` OK.
-6. [ ] Commit y push.
+9. [ ] Commit y push.
