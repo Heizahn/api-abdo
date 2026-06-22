@@ -337,6 +337,42 @@ Objetivo: confirmar que la IA se pausa solo por chat/conversación, no global.
 
 ## Fase 5 — Routing pagos y pruebas funcionales
 
+### Estado 2026-06-22
+
+Cambios ya aplicados en backend dev:
+
+- `PATCH /v1/auth-user/whatsapp/ai-agent/config` ya acepta configuración global de transcripción:
+  - `audio_transcription_enabled`
+  - `stt_model`
+  - `stt_language`
+  - `show_audio_transcription`
+  - `ai_uses_audio_transcription`
+  - `max_audio_transcription_seconds`
+- Runtime de audio usa primero `AiConfig` global; si no existe, cae a `WaSettings` legacy.
+- Se agregó guardrail para evitar que Sofía muestre al cliente promesas de transferencia interna sin llamar `transfer_to_agent`.
+- Para turnos con imagen, el runner dejó de forzar siempre `openai/gpt-4o-mini` y puede usar el `model_id` configurado del agente.
+- Texto sin imagen sigue por `openai/gpt-oss-120b`.
+
+Problemas observados en dev:
+
+- Sofía respondió visible: “te voy a transferir con Andrea”, pero no ejecutó transferencia interna. Backend ya mitiga reintentando si no hubo `transfer_to_agent`.
+- Andrea pidió monto/referencia aunque el comprobante los mostraba claramente.
+- Andrea confundió banco origen/destino en comprobante BNC → Venezuela:
+  - Origen correcto: BNC `***3789` / cuenta debitada.
+  - Destino correcto: Banco de Venezuela / beneficiario.
+  - No debe registrar banco beneficiario como `issuing_bank_id`.
+- `openai/gpt-4o-mini` falló en lectura visual de comprobantes; se decidió probar `qwen/qwen3.7-plus` en desarrollo por su modalidad imagen+texto y costo bajo.
+
+Pendiente inmediato:
+
+- [ ] Ajustar prompt de Sofía: transferencias IA son internas/silenciosas; nunca decir “te transfiero con Andrea/Pagos”.
+- [ ] Ajustar prompt de Sofía: imagen sola con posible comprobante → `transfer_to_agent` a Pagos/Andrea sin mensaje visible.
+- [ ] Ajustar prompt de Andrea: extraer datos visibles del comprobante y pedir solo datos faltantes.
+- [ ] Ajustar prompt de Andrea: “Beneficiario/Banco destino” nunca es `issuing_bank_id`; si falta origen, preguntar solo “¿Desde qué banco pagaste?”.
+- [ ] Probar `qwen/qwen3.7-plus` con comprobantes reales en dev.
+- [ ] Decidir política final de modelos: si backend decide modelos, la UI no debe mostrar `model_id` como editable; mostrar solo temperatura/tokens/timeout o texto “modelo gestionado por backend”.
+- [ ] Si se mantiene modelo por agente, habilitar UI/API operativa para cambiar `model.model_id` sin confusión.
+
 ### Rutas a probar con Sofía activa
 
 - [ ] “saldo”
@@ -367,17 +403,42 @@ Objetivo: confirmar que la IA se pausa solo por chat/conversación, no global.
 
 Riesgo: cliente manda solo foto sin texto.
 
-### Primero: probar sin cambios extra
+### Primero: probar con cambios actuales
 
 - [ ] Enviar solo imagen de comprobante al número de prueba.
-- [ ] Observar si Sofía transfiere a Andrea.
-- [ ] Observar si Andrea puede procesar en el mismo turno.
+- [ ] Confirmar que Sofía NO envía texto visible de transferencia.
+- [ ] Confirmar que Sofía llama `transfer_to_agent` hacia Pagos/Andrea.
+- [ ] Confirmar que Andrea responde en el mismo turno.
+- [ ] Confirmar que Andrea conserva el `media_id` original.
+- [ ] Confirmar que Andrea extrae monto/referencia visibles sin pedirlos de nuevo.
+- [ ] Confirmar que Andrea distingue banco origen vs banco beneficiario/destino.
 
-### Si falla, alternativas backend
+### Caso de prueba actual: BNC → Venezuela
+
+Imagen usada en dev:
+
+- Cuenta debitada / origen: BNC `***3789`.
+- Beneficiario / destino: `0414-4271554`, `V-27605298`, `0102 - Venezuela`.
+- Monto base: `Bs. 12.248,46`.
+- Comisión: `Bs. 36,75`.
+- Total: `Bs. 12.285,21`.
+- Referencia: `803381270`.
+
+Esperado Andrea:
+
+- No pedir monto ni referencia.
+- No decir Banesco.
+- No usar Banco de Venezuela como `issuing_bank_id`.
+- Resolver origen con `list_banks(name="BNC")` o prefijo si está disponible.
+- Si falta fecha, pedir solo fecha.
+- Confirmar comprobante antes de `report_payment`.
+
+### Si sigue fallando
 
 #### Opción A — Prompt/config
 
 - [ ] Reforzar Sofía: imagen de comprobante o media con contexto de pago → transfer a Pagos.
+- [ ] Reforzar Andrea: lectura estructurada del comprobante antes de pedir datos.
 
 #### Opción B — Routing por estado conversacional
 
@@ -387,9 +448,22 @@ Riesgo: cliente manda solo foto sin texto.
 
 - [ ] Si `msg_type=image` y recent intents contienen pago/comprobante, enrutar a pagos.
 
+#### Opción D — Extracción estructurada server-side
+
+- [ ] Crear paso dedicado de extracción OCR/vision para comprobantes con salida JSON:
+  - `issuing_bank`
+  - `issuing_account_suffix`
+  - `destination_bank`
+  - `destination_phone`
+  - `destination_id`
+  - `amount_bs`
+  - `reference`
+  - `payment_date`
+- [ ] Andrea conversa usando ese JSON; no razona libremente sobre la imagen.
+
 ### Decisión pendiente
 
-No implementar B/C hasta probar A y recopilar evidencia.
+Probar primero prompt + `qwen/qwen3.7-plus` en dev. Si sigue confundiendo comprobantes, pasar a extracción estructurada server-side.
 
 ---
 
