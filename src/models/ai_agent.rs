@@ -86,7 +86,9 @@ pub struct AiConfigPatchRequest {
     #[serde(default)]
     pub api_key: Option<String>,
     /// Slug del modelo default (ej: `"openai/gpt-4o"`).
-    #[serde(default)]
+    /// Acepta aliases legacy de UI (`model`, `model_id`) para no exigir
+    /// reingresar la API key al cambiar solo el modelo.
+    #[serde(default, alias = "model", alias = "model_id")]
     pub default_model: Option<String>,
 }
 
