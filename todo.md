@@ -96,7 +96,7 @@ Plan mínimo aprobado para codear ahora:
 6. [x] Actualizar descripciones de tools donde dicen IVA default/global.
 7. [x] No tocar ventas/lista de planes en este cambio.
 8. [x] Bump version a `0.3.95`, `cargo check` OK.
-9. [ ] Commit y push.
+9. [x] Commit y push (`d3a93e3`).
 
 ## Corrección de proceso — saldo sin deudas
 
@@ -130,4 +130,26 @@ Problema media observado:
 
 Estado:
 - Documentado en `docs/agent-tasks/ai-agents-payments-routing-plan.md` dentro de Fase 4.
-- No codear esto hasta retomarlo explícitamente.
+- Retomado explícitamente por el usuario.
+
+Plan Fase 4 aprobado por el usuario:
+1. [x] Blindar `POST /take`: si la conversación está `pending`, `ai_disabled=false` y tiene `ai_active_agent_id`, devolver 409 `ai_active_use_intervene` sin cambiar estado.
+2. [x] Mantener `/intervene` como única acción explícita para tomar una conversación atendida por IA.
+3. [x] Mapear media no disponible de Meta (`GraphMethodException`, `code=100`, `error_subcode=33`, `does not exist`, `missing permissions`) a error estable `404 media_unavailable`, no 500.
+4. [x] Bump versión a `0.3.96`, `cargo fmt` y `cargo check` OK.
+5. [ ] Commit y push.
+
+## Observación prueba pagos — comprobante repetido / imagen no usable
+
+Caso observado:
+- Tras registrar correctamente un pago, se intentó enviar el mismo pago/comprobante otra vez.
+- Andrea no volvió a registrarlo, lo cual es seguro.
+- Respuesta actual: “Parece que hubo un problema con la imagen... envíame nuevamente la foto...”.
+
+Lectura:
+- No parece bloquear Fase 2 si el pago original se registró bien.
+- Pertenece a Fase 3/Fase 7: mejorar manejo de errores de `report_payment` y mensajes de Andrea cuando la imagen/media no está disponible o no pertenece al turno.
+
+Pendiente:
+- Revisar logs del segundo intento para saber si fue `media_id_not_in_conversation`, `image_download_failed`, `media_id_stale_turn` u otro error.
+- Ajustar prompt para ser más claro: si no puede usar esa imagen, pedir reenvío del comprobante sin ofrecer datos de pago salvo que el cliente los pida.

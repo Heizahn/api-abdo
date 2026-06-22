@@ -315,14 +315,14 @@ Objetivo: confirmar que la IA se pausa solo por chat/conversación, no global.
 - [ ] Humano tomando un chat no afecta otros chats.
 - [ ] Reabrir conversación limpia/rehabilita IA según flujo esperado.
 - [ ] `ai_active_agent_id` no revive IA si humano ya tomó el chat.
-- [ ] Blindar backend: `POST /take` no debe tomar/pausar una conversación atendida por IA (`status=pending`, `ai_disabled=false`, `ai_active_agent_id` presente). Debe devolver 409 y exigir acción explícita `/intervene`.
-- [ ] Confirmar que abrir/leer mensajes (`GET /messages`) no cambia `status` ni pausa IA.
+- [x] Blindar backend: `POST /take` no debe tomar/pausar una conversación atendida por IA (`status=pending`, `ai_disabled=false`, `ai_active_agent_id` presente). Debe devolver 409 y exigir acción explícita `/intervene`.
+- [x] Confirmar por código que abrir/leer mensajes (`GET /messages`) no cambia `status` ni pausa IA.
 - [ ] El front debe usar `/intervene` para tomar manualmente una conversación con IA; no `/take` automático al abrir.
 
 ### Media no disponible desde Meta
 
-- [ ] `GET /v1/auth-user/whatsapp/media/:media_id` no debe responder 500 cuando Meta devuelve `GraphMethodException code=100 subcode=33` (`Object does not exist / missing permissions`).
-- [ ] Mapear ese caso a error estable (`404 media_unavailable` recomendado) para que la UI muestre placeholder/reintentar sin ensuciar logs como internal error.
+- [x] `GET /v1/auth-user/whatsapp/media/:media_id` no debe responder 500 cuando Meta devuelve `GraphMethodException code=100 subcode=33` (`Object does not exist / missing permissions`).
+- [x] Mapear ese caso a error estable (`404 media_unavailable` recomendado) para que la UI muestre placeholder/reintentar sin ensuciar logs como internal error.
 - [ ] Evaluar cache negativo corto para no reintentar el mismo media inválido muchas veces.
 
 ### Pruebas manuales VM

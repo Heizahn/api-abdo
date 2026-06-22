@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Path, State},
+    http::StatusCode,
     Extension,
 };
 
@@ -171,7 +172,7 @@ pub async fn get_media_handler(
                     t_meta.elapsed().as_millis(),
                     e
                 );
-                ApiError::Internal(e)
+                media_download_api_error(&e)
             })?;
     tracing::debug!(
         "[media] MISS→FETCH {} ({} bytes, {}) meta={}ms",
@@ -203,6 +204,25 @@ pub async fn get_media_handler(
         .or(remote_filename)
         .unwrap_or_else(|| media_id.clone());
     Ok(build_media_response(bytes, &mime, &filename))
+}
+
+fn media_download_api_error(err: &str) -> ApiError {
+    if is_meta_media_unavailable(err) {
+        return ApiError::domain_simple(
+            StatusCode::NOT_FOUND,
+            "media_unavailable",
+            "El archivo ya no está disponible en WhatsApp o faltan permisos para descargarlo.",
+        );
+    }
+    ApiError::Internal(err.to_string())
+}
+
+fn is_meta_media_unavailable(err: &str) -> bool {
+    let e = err.to_lowercase();
+    e.contains("graphmethodexception")
+        && e.contains("code\":100")
+        && e.contains("error_subcode\":33")
+        && (e.contains("does not exist") || e.contains("missing permissions"))
 }
 
 /// Arma la respuesta HTTP con el binario y headers compartidos entre hit y miss.

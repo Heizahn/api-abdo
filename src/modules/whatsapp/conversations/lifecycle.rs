@@ -664,6 +664,16 @@ pub async fn take_conversation_handler(
     if previous_status != "pending" && previous_status != "closed" {
         return Err(ApiError::ConversationNotTakeable);
     }
+    if previous_status == "pending"
+        && !existing.ai_disabled
+        && existing.ai_active_agent_id.is_some()
+    {
+        return Err(ApiError::domain_simple(
+            StatusCode::CONFLICT,
+            "ai_active_use_intervene",
+            "Esta conversación está siendo atendida por IA. Usá la intervención manual para tomarla.",
+        ));
+    }
 
     // `take_conversation` acepta `pending` (toma/reasignación) y `closed`
     // (reopen+take). En ambos casos el resultado queda en `in_progress`.
