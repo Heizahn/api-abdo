@@ -866,6 +866,7 @@ mod tests {
             location: None,
             reactions: vec![],
             raw_payload: None,
+            audio_transcription: None,
             ai_processed_at: None,
             created_at: "2026-06-05T00:00:00Z".to_string(),
         }

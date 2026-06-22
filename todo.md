@@ -167,3 +167,26 @@ Lectura:
 Pendiente:
 - Revisar logs del segundo intento para saber si fue `media_id_not_in_conversation`, `image_download_failed`, `media_id_stale_turn` u otro error.
 - Ajustar prompt para ser más claro: si no puede usar esa imagen, pedir reenvío del comprobante sin ofrecer datos de pago salvo que el cliente los pida.
+
+## Fase 5 — Transcripción de audios WhatsApp/IA
+
+Caso observado:
+- Audio inbound descarga/cachea bien, pero el runner cambia a `openai/gpt-4o-audio-preview`.
+- OpenRouter responde 400 porque ese model ID no existe.
+- La IA queda muda aunque la conversación queda marcada como atendida por IA.
+
+Plan mínimo aprobado:
+1. [x] Agregar configuración STT editable en `WaSettings`/settings API:
+   - `audio_transcription_enabled`
+   - `stt_model` default `openai/whisper-large-v3`
+   - `stt_language` default `es`
+   - `show_audio_transcription`
+   - `ai_uses_audio_transcription`
+   - `max_audio_transcription_seconds`
+2. [x] Persistir transcripción en `WaMessage` para que el chat humano pueda mostrarla.
+3. [x] Agregar cliente OpenRouter `/audio/transcriptions` usando el modelo configurado.
+4. [x] En dispatch, transcribir audio antes del turno IA y usar el texto transcrito si está habilitado.
+5. [x] Quitar el override a `openai/gpt-4o-audio-preview`; audio sin transcripción no debe romper el turno.
+6. [x] Emitir evento WS con el mensaje actualizado cuando se guarde la transcripción.
+7. [x] Bump versión, `cargo fmt`, `cargo check` OK.
+8. [ ] Commit y push.

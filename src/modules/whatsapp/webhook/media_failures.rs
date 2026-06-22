@@ -220,6 +220,7 @@ async fn persist_inbound_media_failure_placeholder(
         location: None,
         reactions: vec![],
         raw_payload,
+        audio_transcription: None,
         ai_processed_at: None,
         timestamp: now,
     };

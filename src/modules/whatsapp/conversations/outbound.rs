@@ -380,6 +380,7 @@ pub async fn initiate_conversation_handler(
         location: None,
         reactions: vec![],
         raw_payload: None,
+        audio_transcription: None,
         ai_processed_at: None,
         timestamp: DateTime::now(),
     };

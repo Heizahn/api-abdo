@@ -59,10 +59,6 @@ fn substitute_prompt(text: &str, vars: &PromptVariables) -> String {
         .replace("{weekday}", &vars.weekday)
 }
 
-/// Modelo de OpenRouter que acepta `input_audio` content blocks.
-/// Se activa automáticamente cuando el burst incluye un mensaje de audio.
-const AUDIO_CAPABLE_MODEL: &str = "openai/gpt-4o-audio-preview";
-
 /// Modelo de OpenRouter que acepta `image_url` content blocks (confirmado multimodal).
 /// Se activa cuando el burst incluye imagen, con prioridad sobre audio (D1' defensive).
 const VISION_CAPABLE_MODEL: &str = "openai/gpt-4o-mini";
@@ -73,24 +69,10 @@ const VISION_CAPABLE_MODEL: &str = "openai/gpt-4o-mini";
 const TEXT_ONLY_MODEL: &str = "openai/gpt-oss-120b";
 
 /// Selector puro. Decide qué modelo de OpenRouter usar para este turno.
-///
-/// Prioridad: **vision-first cuando hay imagen** (defensive D1' amended).
-/// `gpt-4o-mini` está confirmado como multimodal (vision + text).
-/// `gpt-4o-audio-preview` aceptando `image_url` NO está API-verificado —
-/// por eso en mixed (audio + image) preferimos VISION sobre AUDIO.
-///
-/// Trade-off: en mixed bursts el audio se descarta (gpt-4o-mini no procesa
-/// audio nativo). Caso extremo-raro en WhatsApp (audio + image en la misma
-/// ráfaga); image es la señal más accionable.
-///
-/// - has_image (solo o mixed) → VISION_CAPABLE_MODEL
-/// - has_audio (sin image)   → AUDIO_CAPABLE_MODEL
-/// - sin media               → TEXT_ONLY_MODEL (hardcoded, D1)
-fn pick_effective_model(has_audio: bool, has_image: bool) -> String {
+/// El audio se transcribe antes del chat; nunca cambia el modelo conversacional.
+fn pick_effective_model(_has_audio: bool, has_image: bool) -> String {
     if has_image {
         VISION_CAPABLE_MODEL.to_string()
-    } else if has_audio {
-        AUDIO_CAPABLE_MODEL.to_string()
     } else {
         TEXT_ONLY_MODEL.to_string()
     }

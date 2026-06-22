@@ -866,6 +866,7 @@ pub async fn receive_webhook(
                         location: location_payload,
                         reactions: vec![],
                         raw_payload: inbound_raw_payload(&msg, &effective_msg_type),
+                        audio_transcription: None,
                         ai_processed_at: None,
                         timestamp: msg_ts,
                     };

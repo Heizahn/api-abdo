@@ -2092,6 +2092,7 @@ async fn record_campaign_send_in_chat(
         location: None,
         reactions: vec![],
         raw_payload: None,
+        audio_transcription: None,
         ai_processed_at: None,
         timestamp: sent_at,
     };
@@ -4934,6 +4935,7 @@ mod tests {
             location: None,
             reactions: vec![],
             raw_payload: None,
+            audio_transcription: None,
             ai_processed_at: None,
             timestamp: DateTime::from_millis(1_800_000_000_000),
         };
@@ -4962,6 +4964,12 @@ mod tests {
             enable_conversation_state: true,
             pre_classifier_enabled: false,
             trivial_responses: vec![],
+            audio_transcription_enabled: true,
+            stt_model: "openai/whisper-large-v3".to_string(),
+            stt_language: "es".to_string(),
+            show_audio_transcription: true,
+            ai_uses_audio_transcription: true,
+            max_audio_transcription_seconds: 120,
             created_at: now,
             updated_at: now,
         }

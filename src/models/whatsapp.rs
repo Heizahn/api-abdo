@@ -390,7 +390,26 @@ pub struct WaMessage {
     /// información mientras se agrega un renderer dedicado.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_payload: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_transcription: Option<AudioTranscription>,
     pub timestamp: DateTime,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
+pub struct AudioTranscription {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
 }
 
 /// Ubicación compartida vía WhatsApp. `latitude`/`longitude` son siempre no
@@ -982,6 +1001,8 @@ pub struct MessageItem {
     /// `referral`, `unsupported`, etc.). `null` para tipos ya modelados.
     #[schema(value_type = Option<Object>)]
     pub raw_payload: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_transcription: Option<AudioTranscriptionItem>,
     /// ISO-8601 (RFC 3339) UTC. Cuando está seteado, indica que la IA procesó
     /// este mensaje inbound (cualquier modo). El front lo renderiza con un
     /// indicador 🤖 sin alterar el `unread_count` del humano.
@@ -1185,6 +1206,18 @@ pub struct WaSettings {
     /// GreetingOnly falls through to Sofía.
     #[serde(default)]
     pub trivial_responses: Vec<TrivialResponse>,
+    #[serde(default = "default_true")]
+    pub audio_transcription_enabled: bool,
+    #[serde(default = "default_stt_model")]
+    pub stt_model: String,
+    #[serde(default = "default_stt_language")]
+    pub stt_language: String,
+    #[serde(default = "default_true")]
+    pub show_audio_transcription: bool,
+    #[serde(default = "default_true")]
+    pub ai_uses_audio_transcription: bool,
+    #[serde(default = "default_max_audio_transcription_seconds")]
+    pub max_audio_transcription_seconds: u32,
     pub created_at: DateTime,
     pub updated_at: DateTime,
 }
@@ -1252,6 +1285,18 @@ pub struct CreateSettingsRequest {
     /// Propósitos configurados. Si se omite, el número no se usará para ningún template.
     #[serde(default)]
     pub purposes: Option<WaPurposes>,
+    #[serde(default)]
+    pub audio_transcription_enabled: Option<bool>,
+    #[serde(default)]
+    pub stt_model: Option<String>,
+    #[serde(default)]
+    pub stt_language: Option<String>,
+    #[serde(default)]
+    pub show_audio_transcription: Option<bool>,
+    #[serde(default)]
+    pub ai_uses_audio_transcription: Option<bool>,
+    #[serde(default)]
+    pub max_audio_transcription_seconds: Option<u32>,
 }
 
 /// PATCH-style body. Para `purposes`, usar el sub-patch `WaPurposesPatch`:
@@ -1281,6 +1326,18 @@ pub struct UpdateSettingsRequest {
     /// Semántica intencional — la UI SUPERADMIN guarda el estado completo.
     #[serde(default)]
     pub trivial_responses: Option<Vec<TrivialResponse>>,
+    #[serde(default)]
+    pub audio_transcription_enabled: Option<bool>,
+    #[serde(default)]
+    pub stt_model: Option<String>,
+    #[serde(default)]
+    pub stt_language: Option<String>,
+    #[serde(default)]
+    pub show_audio_transcription: Option<bool>,
+    #[serde(default)]
+    pub ai_uses_audio_transcription: Option<bool>,
+    #[serde(default)]
+    pub max_audio_transcription_seconds: Option<u32>,
 }
 
 /// Patch per-purpose. Cada campo es tri-state:
@@ -1319,6 +1376,12 @@ pub struct SettingsItem {
     pub pre_classifier_enabled: bool,
     /// Phase 3a — plantillas de respuesta rápida (spam, greeting).
     pub trivial_responses: Vec<TrivialResponse>,
+    pub audio_transcription_enabled: bool,
+    pub stt_model: String,
+    pub stt_language: String,
+    pub show_audio_transcription: bool,
+    pub ai_uses_audio_transcription: bool,
+    pub max_audio_transcription_seconds: u32,
     /// ISO-8601 (RFC 3339) UTC. `None` si nunca se sincronizaron templates.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub templates_synced_at: Option<String>,
@@ -1538,6 +1601,35 @@ pub struct WaQuickReply {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_stt_model() -> String {
+    "openai/whisper-large-v3".to_string()
+}
+
+fn default_stt_language() -> String {
+    "es".to_string()
+}
+
+fn default_max_audio_transcription_seconds() -> u32 {
+    120
+}
+
+#[derive(Debug, Serialize, Clone, ToSchema)]
+pub struct AudioTranscriptionItem {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Clone, ToSchema)]

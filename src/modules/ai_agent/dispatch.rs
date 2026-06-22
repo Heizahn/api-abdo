@@ -29,7 +29,7 @@ use crate::{
     },
     models::{
         ai_agent::{AiAgent, AiAgentMode, AiAgentPurpose, AiInteraction},
-        whatsapp::{StatePatch, WaConversationAiState, WaMessage},
+        whatsapp::{AudioTranscription, StatePatch, WaConversationAiState, WaMessage},
     },
     modules::whatsapp::shared::build_message_item,
     state::AppState,
@@ -39,7 +39,9 @@ use super::{
     ai_agent_secret,
     config_resolver::resolve_ai_api_key,
     escalation, guardrails,
-    openrouter::{resolve_base_url, AiRelay},
+    openrouter::{
+        resolve_base_url, AiRelay, AudioTranscriptionRequest, InputAudioInner, OpenRouterClient,
+    },
     pre_classifier::{self, PreClassResult, PreClassResultFull},
     runner::{run_turn, ConvRole, ConvTurn, MediaInput, PromptVariables},
     state::{apply_state_patches, format_conversation_state},
@@ -311,6 +313,29 @@ async fn run_dispatch(
     let is_live = matches!(agent.mode, AiAgentMode::Live);
     let is_sandbox = !is_live;
 
+    let api_key = match resolve_ai_api_key(&state).await {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::warn!(
+                "[ai_agent.dispatch] global api_key indisponible (agent={}): {:?}",
+                agent_id.to_hex(),
+                e
+            );
+            if is_live {
+                escalation::auto_escalate(
+                    &state,
+                    &inbound.conversation_id,
+                    &agent,
+                    escalation::REASON_CRITICAL_TOOL_FAILURE,
+                    Some("Configuración global de IA no disponible"),
+                    false,
+                )
+                .await;
+            }
+            return Ok(());
+        }
+    };
+
     // ── Releer mensajes recientes y armar la "ráfaga" ───────────────────
     // `recent` viene ordenado por `_id` ascendente (orden de inserción real
     // en el back, no `timestamp` de Meta).
@@ -480,17 +505,13 @@ async fn run_dispatch(
 
     // Texto unificado de la ráfaga (4 mensajes seguidos del cliente se ven
     // como un solo input multilínea para la IA).
-    let burst_texts: Vec<String> = burst
-        .iter()
-        .filter_map(|m| {
-            let t = m.body.as_deref()?.trim().to_string();
-            if t.is_empty() {
-                None
-            } else {
-                Some(t)
-            }
-        })
-        .collect();
+    let burst_texts = collect_burst_texts(
+        &state,
+        &wa_settings,
+        &api_key,
+        &burst.iter().copied().collect::<Vec<_>>(),
+    )
+    .await;
 
     // Multimedia inline: descargamos el media de cada mensaje de la ráfaga
     // que tenga uno (el modelo multimodal acepta múltiples partes inline en un turno).
@@ -900,29 +921,6 @@ async fn run_dispatch(
     let prompt_vars =
         build_prompt_variables(&agent, &wa_settings, &conv, customer_first_name.as_deref());
 
-    let api_key = match resolve_ai_api_key(&state).await {
-        Ok(k) => k,
-        Err(e) => {
-            tracing::warn!(
-                "[ai_agent.dispatch] global api_key indisponible (agent={}): {:?}",
-                agent_id.to_hex(),
-                e
-            );
-            if is_live {
-                escalation::auto_escalate(
-                    &state,
-                    &inbound.conversation_id,
-                    &agent,
-                    escalation::REASON_CRITICAL_TOOL_FAILURE,
-                    Some("Configuración global de IA no disponible"),
-                    false,
-                )
-                .await;
-            }
-            return Ok(());
-        }
-    };
-
     // FAQs y faqs_inline se cargan dentro del loop por iteración (cada agente
     // tiene sus FAQs propias). No las pre-computamos acá.
 
@@ -1041,17 +1039,13 @@ async fn run_dispatch(
                             }
                         })
                         .collect();
-                    let new_burst_texts: Vec<String> = new_burst
-                        .iter()
-                        .filter_map(|m| {
-                            let t = m.body.as_deref()?.trim().to_string();
-                            if t.is_empty() {
-                                None
-                            } else {
-                                Some(t)
-                            }
-                        })
-                        .collect();
+                    let new_burst_texts = collect_burst_texts(
+                        &state,
+                        &wa_settings,
+                        &active_api_key,
+                        &new_burst.iter().copied().collect::<Vec<_>>(),
+                    )
+                    .await;
                     if !new_burst_texts.is_empty() {
                         let new_user_text = new_burst_texts.join("\n");
                         if new_user_text != effective_user_message {
@@ -1886,6 +1880,177 @@ fn is_inline_supported(msg_type: &str, mime: Option<&str>) -> bool {
     }
 }
 
+async fn collect_burst_texts(
+    state: &Arc<AppState>,
+    wa_settings: &crate::models::whatsapp::WaSettings,
+    api_key: &str,
+    messages: &[&WaMessage],
+) -> Vec<String> {
+    let mut texts = Vec::new();
+    for m in messages {
+        if let Some(t) = m.body.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            texts.push(t.to_string());
+        }
+        if wa_settings.audio_transcription_enabled
+            && wa_settings.ai_uses_audio_transcription
+            && m.msg_type == "audio"
+        {
+            if let Some(text) = ensure_audio_transcription(state, wa_settings, api_key, m).await {
+                texts.push(format!("[audio transcrito]\n{}", text));
+            }
+        }
+    }
+    texts
+}
+
+async fn ensure_audio_transcription(
+    state: &Arc<AppState>,
+    wa_settings: &crate::models::whatsapp::WaSettings,
+    api_key: &str,
+    message: &WaMessage,
+) -> Option<String> {
+    if let Some(existing) = message.audio_transcription.as_ref() {
+        if existing.status == "completed" {
+            return existing.text.clone().filter(|t| !t.trim().is_empty());
+        }
+    }
+    let message_id = message.id?;
+    let media_id = message.media_id.as_deref()?;
+    let (bytes, mime) = match load_media_bytes_for_transcription(state, wa_settings, message).await
+    {
+        Some(v) => v,
+        None => return None,
+    };
+    let format = audio_format_from_mime(&mime);
+    let model = if wa_settings.stt_model.trim().is_empty() {
+        "openai/whisper-large-v3"
+    } else {
+        wa_settings.stt_model.trim()
+    };
+    let language = match wa_settings.stt_language.trim() {
+        "" | "auto" => None,
+        lang => Some(lang.to_string()),
+    };
+    let client = OpenRouterClient::new(
+        state.reqwest_client.clone(),
+        resolve_base_url(),
+        api_key.to_string(),
+        AiRelay::from_config(&state.config),
+    );
+    let req = AudioTranscriptionRequest {
+        model: model.to_string(),
+        input_audio: InputAudioInner {
+            data: B64.encode(bytes),
+            format: format.to_string(),
+        },
+        language: language.clone(),
+    };
+    let transcription = match client.transcribe_audio(&req).await {
+        Ok(resp) => AudioTranscription {
+            status: "completed".to_string(),
+            text: Some(resp.text.trim().to_string()).filter(|t| !t.is_empty()),
+            model: Some(model.to_string()),
+            language,
+            error: None,
+            created_at: Some(BsonDateTime::now()),
+            cost: resp.usage.and_then(|u| u.cost),
+        },
+        Err(e) => {
+            tracing::warn!(
+                "[ai_agent.dispatch] transcription failed media_id={} message={:?}: {:?}",
+                media_id,
+                message.id,
+                e
+            );
+            AudioTranscription {
+                status: "failed".to_string(),
+                text: None,
+                model: Some(model.to_string()),
+                language,
+                error: Some("stt_failed".to_string()),
+                created_at: Some(BsonDateTime::now()),
+                cost: None,
+            }
+        }
+    };
+    let text = transcription.text.clone();
+    match state
+        .db
+        .update_message_audio_transcription(&message_id, &transcription)
+        .await
+    {
+        Ok(Some(updated)) => {
+            let item = build_message_item(state, updated).await;
+            let ev = crate::modules::whatsapp::ws::WsServerEvent::MensajeModificado {
+                conversation_id: message.conversation_id.to_hex(),
+                message: item,
+                change_type: "transcription".to_string(),
+            };
+            crate::modules::whatsapp::ws::broadcast_all(&state.ws_registry, &ev).await;
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!("[ai_agent.dispatch] saving transcription failed: {}", e),
+    }
+    text
+}
+
+async fn load_media_bytes_for_transcription(
+    state: &Arc<AppState>,
+    wa_settings: &crate::models::whatsapp::WaSettings,
+    message: &WaMessage,
+) -> Option<(Vec<u8>, String)> {
+    let media_id = message.media_id.as_deref()?;
+    if let Some((bytes, mime, _)) = state.redis.get_media_cache(media_id).await {
+        return Some((bytes, mime));
+    }
+    let token = decrypt_payload(&ai_agent_secret(), &wa_settings.access_token)?;
+    let mut svc = crate::modules::whatsapp::service::WhatsAppService::new(
+        state.reqwest_client.clone(),
+        wa_settings.phone_number_id.clone(),
+        token,
+    );
+    if let (Some(url), Some(secret)) = (
+        state.config.relay_url.as_ref(),
+        state.config.relay_secret.as_ref(),
+    ) {
+        svc = svc.with_media_relay(crate::modules::whatsapp::service::MediaRelay {
+            url: url.clone(),
+            secret: secret.clone(),
+        });
+    }
+    match svc.download_media(media_id).await {
+        Ok((bytes, mime, filename)) => {
+            if bytes.len() <= MEDIA_CACHE_MAX_BYTES {
+                state
+                    .redis
+                    .set_media_cache(media_id, &bytes, &mime, filename.as_deref())
+                    .await;
+            }
+            Some((bytes, mime))
+        }
+        Err(e) => {
+            tracing::warn!(
+                "[ai_agent.dispatch] transcription media download failed media_id={}: {}",
+                media_id,
+                e
+            );
+            None
+        }
+    }
+}
+
+fn audio_format_from_mime(mime: &str) -> &'static str {
+    match mime.split(';').next().unwrap_or(mime).trim() {
+        "audio/wav" | "audio/x-wav" => "wav",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/flac" => "flac",
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" => "m4a",
+        "audio/webm" => "webm",
+        "audio/aac" => "aac",
+        _ => "ogg",
+    }
+}
+
 /// Construye los `MediaInput` para el LLM bajando el binario via Meta. Solo
 /// soporta tipos que el modelo multimodal procesa inline. Si la descarga falla, devolvemos
 /// vacío y la IA responderá solo al texto/caption.
@@ -1894,6 +2059,10 @@ async fn build_media_inputs(
     wa_settings: &crate::models::whatsapp::WaSettings,
     inbound: &WaMessage,
 ) -> Vec<MediaInput> {
+    if inbound.msg_type == "audio" {
+        return Vec::new();
+    }
+
     let media_id = match inbound.media_id.as_deref() {
         Some(m) if !m.is_empty() => m,
         _ => {
@@ -2107,6 +2276,7 @@ async fn send_live_response(
         location: None,
         reactions: vec![],
         raw_payload: None,
+        audio_transcription: None,
         ai_processed_at: None,
         timestamp: now,
     };

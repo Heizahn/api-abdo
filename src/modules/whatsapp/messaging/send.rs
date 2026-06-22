@@ -280,6 +280,7 @@ pub async fn send_message_handler(
         location: sent.location,
         reactions: vec![],
         raw_payload: None,
+        audio_transcription: None,
         ai_processed_at: None,
         timestamp: DateTime::now(),
     };

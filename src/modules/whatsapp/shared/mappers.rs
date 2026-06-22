@@ -4,7 +4,10 @@ use std::sync::Arc;
 use crate::{
     db::{UserRepository, WhatsAppRepository},
     error::ApiError,
-    models::whatsapp::{MessageItem, ReplyToItem, WaConversation, WaMessage},
+    models::whatsapp::{
+        AudioTranscription, AudioTranscriptionItem, MessageItem, ReplyToItem, WaConversation,
+        WaMessage,
+    },
     state::AppState,
 };
 
@@ -50,8 +53,21 @@ pub(crate) fn msg_to_item(
         location: m.location,
         reactions: m.reactions,
         raw_payload: m.raw_payload,
+        audio_transcription: m.audio_transcription.map(transcription_to_item),
         ai_processed_at: m.ai_processed_at.map(time::iso8601),
         created_at: time::iso8601(m.timestamp),
+    }
+}
+
+fn transcription_to_item(t: AudioTranscription) -> AudioTranscriptionItem {
+    AudioTranscriptionItem {
+        status: t.status,
+        text: t.text,
+        model: t.model,
+        language: t.language,
+        error: t.error,
+        created_at: t.created_at.map(time::iso8601),
+        cost: t.cost,
     }
 }
 

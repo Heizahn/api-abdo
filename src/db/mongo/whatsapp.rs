@@ -17,9 +17,10 @@ use crate::db::{
     WhatsAppRepository,
 };
 use crate::models::whatsapp::{
-    ConversationStats, StatusError, UrlPreview, WaConversation, WaConversationAiState,
-    WaConversationEvent, WaConversationEventInput, WaConversationOpen, WaMessage, WaPurposeUsage,
-    WaPurposesPatch, WaQuickReply, WaSettings, WaTemplate, WaTemplateStatus, WaTicket,
+    AudioTranscription, ConversationStats, StatusError, UrlPreview, WaConversation,
+    WaConversationAiState, WaConversationEvent, WaConversationEventInput, WaConversationOpen,
+    WaMessage, WaPurposeUsage, WaPurposesPatch, WaQuickReply, WaSettings, WaTemplate,
+    WaTemplateStatus, WaTicket,
 };
 
 impl MongoDB {
@@ -651,6 +652,21 @@ impl WhatsAppRepository for MongoDB {
         Ok(())
     }
 
+    async fn update_message_audio_transcription(
+        &self,
+        id: &ObjectId,
+        transcription: &AudioTranscription,
+    ) -> Result<Option<WaMessage>, String> {
+        self.wa_messages()
+            .find_one_and_update(
+                doc! { "_id": id },
+                doc! { "$set": { "audio_transcription": mongodb::bson::to_bson(transcription).map_err(|e| e.to_string())? } },
+            )
+            .return_document(mongodb::options::ReturnDocument::After)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     async fn update_conversation_ai_state(
         &self,
         id: &ObjectId,
@@ -1246,6 +1262,12 @@ impl WhatsAppRepository for MongoDB {
         enable_conversation_state: Option<bool>,
         pre_classifier_enabled: Option<bool>,
         trivial_responses: Option<Vec<crate::models::whatsapp::TrivialResponse>>,
+        audio_transcription_enabled: Option<bool>,
+        stt_model: Option<String>,
+        stt_language: Option<String>,
+        show_audio_transcription: Option<bool>,
+        ai_uses_audio_transcription: Option<bool>,
+        max_audio_transcription_seconds: Option<u32>,
     ) -> Result<(), String> {
         let mut set_doc = doc! { "updated_at": DateTime::now() };
         let mut unset_doc = Document::new();
@@ -1330,6 +1352,30 @@ impl WhatsAppRepository for MongoDB {
                 "trivial_responses",
                 mongodb::bson::to_bson(&tr).map_err(|e| e.to_string())?,
             );
+        }
+        if let Some(v) = audio_transcription_enabled {
+            set_doc.insert("audio_transcription_enabled", v);
+        }
+        if let Some(v) = stt_model {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                set_doc.insert("stt_model", trimmed);
+            }
+        }
+        if let Some(v) = stt_language {
+            let trimmed = v.trim();
+            if !trimmed.is_empty() {
+                set_doc.insert("stt_language", trimmed);
+            }
+        }
+        if let Some(v) = show_audio_transcription {
+            set_doc.insert("show_audio_transcription", v);
+        }
+        if let Some(v) = ai_uses_audio_transcription {
+            set_doc.insert("ai_uses_audio_transcription", v);
+        }
+        if let Some(v) = max_audio_transcription_seconds {
+            set_doc.insert("max_audio_transcription_seconds", v);
         }
 
         let mut update_doc = doc! { "$set": set_doc };

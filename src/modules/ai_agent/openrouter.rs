@@ -86,6 +86,30 @@ pub struct ChatCompletionRequest {
     pub stream: Option<bool>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct AudioTranscriptionRequest {
+    pub model: String,
+    pub input_audio: InputAudioInner,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AudioTranscriptionResponse {
+    pub text: String,
+    #[serde(default)]
+    pub usage: Option<AudioTranscriptionUsage>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct AudioTranscriptionUsage {
+    #[serde(default)]
+    pub seconds: Option<f64>,
+    #[serde(default)]
+    pub cost: Option<f64>,
+}
+
 /// Discriminante para el campo `tool_choice`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -293,6 +317,80 @@ impl OpenRouterClient {
             api_key,
             relay,
         }
+    }
+
+    pub async fn transcribe_audio(
+        &self,
+        req: &AudioTranscriptionRequest,
+    ) -> Result<AudioTranscriptionResponse, ApiError> {
+        if self.api_key.is_empty() {
+            return Err(ApiError::domain_simple(
+                axum::http::StatusCode::BAD_GATEWAY,
+                "ai_auth_failed",
+                "OpenRouter API key no configurada",
+            ));
+        }
+
+        let target_url = format!("{}/audio/transcriptions", self.base_url);
+        let request_builder = match &self.relay {
+            Some(r) => self
+                .http
+                .post(&r.url)
+                .query(&[("url", target_url.as_str())])
+                .header("x-relay-secret", &r.secret)
+                .header("authorization", format!("Bearer {}", self.api_key)),
+            None => self
+                .http
+                .post(&target_url)
+                .header("authorization", format!("Bearer {}", self.api_key)),
+        };
+
+        let resp = request_builder
+            .header("HTTP-Referer", "https://api.abdo.local")
+            .header("X-OpenRouter-Title", "api-abdo")
+            .json(req)
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("[openrouter] transcription request failed: {}", e);
+                ApiError::domain_simple(
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    "ai_upstream_error",
+                    "Error de red contactando OpenRouter",
+                )
+            })?;
+
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+        if status.is_success() {
+            return serde_json::from_str::<AudioTranscriptionResponse>(&body_text).map_err(|e| {
+                tracing::warn!(
+                    "[openrouter] decode transcription response failed: {} | body: {}",
+                    e,
+                    body_text
+                );
+                ApiError::domain_simple(
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    "ai_invalid_response",
+                    "Respuesta inválida de OpenRouter",
+                )
+            });
+        }
+
+        tracing::error!(
+            "[openrouter] transcription non-2xx {}: {}",
+            status,
+            body_text
+        );
+        Err(ApiError::domain_simple(
+            axum::http::StatusCode::BAD_GATEWAY,
+            if status.as_u16() == 400 {
+                "ai_invalid_request"
+            } else {
+                "ai_upstream_error"
+            },
+            "No se pudo transcribir el audio con OpenRouter",
+        ))
     }
 
     /// Llama `POST {base_url}/chat/completions`. Maneja retries para errores

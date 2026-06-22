@@ -99,6 +99,18 @@ pub async fn create_settings_handler(
         enable_conversation_state: true,
         pre_classifier_enabled: false,
         trivial_responses: Vec::new(),
+        audio_transcription_enabled: payload.audio_transcription_enabled.unwrap_or(true),
+        stt_model: payload
+            .stt_model
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "openai/whisper-large-v3".to_string()),
+        stt_language: payload
+            .stt_language
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "es".to_string()),
+        show_audio_transcription: payload.show_audio_transcription.unwrap_or(true),
+        ai_uses_audio_transcription: payload.ai_uses_audio_transcription.unwrap_or(true),
+        max_audio_transcription_seconds: payload.max_audio_transcription_seconds.unwrap_or(120),
         created_at: now,
         updated_at: now,
     };
@@ -169,6 +181,12 @@ pub async fn update_settings_handler(
             payload.enable_conversation_state,
             payload.pre_classifier_enabled,
             payload.trivial_responses,
+            payload.audio_transcription_enabled,
+            payload.stt_model,
+            payload.stt_language,
+            payload.show_audio_transcription,
+            payload.ai_uses_audio_transcription,
+            payload.max_audio_transcription_seconds,
         )
         .await
         .map_err(|e| ApiError::DatabaseError(e))?;

@@ -524,6 +524,7 @@ No se trabaja en este repo ahora, pero queda el contrato esperado.
 3. Fase 3 — Limpiar prompts sin ObjectIds hardcodeados.
 4. Fase 4 — Verificar pausa por conversación.
 5. Fase 5 — Probar routing pagos en VM desarrollo.
+   - [x] Agregar transcripción STT de audios de WhatsApp vía OpenRouter `/audio/transcriptions` para que IA y humanos puedan leer notas de voz.
 6. Fase 6 — Resolver imagen-only solo si falla en pruebas.
 7. Fase 7 — Hardening puntual de `report_payment` según errores observados.
 8. Fase 8 — Limpieza documental.

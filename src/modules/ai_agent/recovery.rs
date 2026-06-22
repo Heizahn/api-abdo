@@ -109,6 +109,7 @@ pub async fn run_ai_recovery(state: Arc<AppState>) {
             location: None,
             reactions: vec![],
             raw_payload: None,
+            audio_transcription: None,
             timestamp: DateTime::now(),
         };
 

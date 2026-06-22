@@ -793,6 +793,11 @@ pub trait WhatsAppRepository {
         message_ids: &[ObjectId],
         when: mongodb::bson::DateTime,
     ) -> Result<(), String>;
+    async fn update_message_audio_transcription(
+        &self,
+        id: &ObjectId,
+        transcription: &crate::models::whatsapp::AudioTranscription,
+    ) -> Result<Option<WaMessage>, String>;
     async fn assign_conversation(
         &self,
         id: &ObjectId,
@@ -965,6 +970,12 @@ pub trait WhatsAppRepository {
         enable_conversation_state: Option<bool>,
         pre_classifier_enabled: Option<bool>,
         trivial_responses: Option<Vec<crate::models::whatsapp::TrivialResponse>>,
+        audio_transcription_enabled: Option<bool>,
+        stt_model: Option<String>,
+        stt_language: Option<String>,
+        show_audio_transcription: Option<bool>,
+        ai_uses_audio_transcription: Option<bool>,
+        max_audio_transcription_seconds: Option<u32>,
     ) -> Result<(), String>;
     async fn delete_wa_settings(&self, id: &ObjectId) -> Result<(), String>;
     /// Busca `WaSettings` activos con el propósito `purpose` configurado.
