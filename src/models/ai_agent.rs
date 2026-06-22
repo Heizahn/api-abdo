@@ -348,7 +348,7 @@ pub struct AiClientLookup {
 pub struct AiInvoice {
     pub id: String,
     /// Saldo pendiente convertido a bolívares aplicando tasa BCV vigente +
-    /// IVA (DEFAULT). Es el monto listo para mostrar al cliente, sin
+    /// IVA del cliente. Es el monto listo para mostrar al cliente, sin
     /// conversiones adicionales.
     pub amount_bs: f64,
     pub reason: String,

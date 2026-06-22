@@ -25,6 +25,7 @@ use crate::{
     },
     models::{
         ai_agent::{AiAgent, AiAgentMode, AiInvoice, AiToolConfig, ConnectionType},
+        db::Tax,
         payment::PaymentMethod,
         whatsapp::{StatePatch, WaTicket, WaTicketTimelineEntry},
     },
@@ -527,7 +528,7 @@ const TOOL_CATALOG: &[ToolMeta] = &[
     ToolMeta {
         name: T_GET_INVOICES,
         display_name: "Consultar deudas / facturas",
-        ui_description: "Devuelve las deudas activas con su saldo pendiente convertido a bolívares (tasa BCV vigente + IVA aplicado). El campo `amount_bs` es lo que falta por cobrar HOY, listo para mostrar al cliente.",
+        ui_description: "Devuelve las deudas activas con su saldo pendiente convertido a bolívares (tasa BCV vigente + IVA del cliente). El campo `amount_bs` es lo que falta por cobrar HOY, listo para mostrar al cliente.",
         ui_category: "lookup",
         default_enabled: true,
         operational_category: ToolCategory::InfoLookup,
@@ -567,7 +568,7 @@ const TOOL_CATALOG: &[ToolMeta] = &[
     ToolMeta {
         name: T_CALCULATE_AMOUNT_BS,
         display_name: "Calcular monto en Bs",
-        ui_description: "Convierte USD a Bs aplicando la tasa BCV vigente y el IVA configurado (sTarget=DEFAULT). Llamar al cotizar precios en bolívares.",
+        ui_description: "Convierte USD/Bs aplicando la tasa BCV vigente y, si se pasa client_id, el IVA del cliente. Llamar al cotizar montos en bolívares.",
         ui_category: "info",
         default_enabled: false,
         operational_category: ToolCategory::InfoLookup,
@@ -715,7 +716,7 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
         T_GET_INVOICES => Some((
             "Lista las deudas activas del cliente con el SALDO PENDIENTE de cada una \
              (monto original menos abonos parciales ya recibidos), YA CONVERTIDO a bolívares \
-             aplicando la tasa BCV vigente y el IVA configurado. Usar después de \
+             aplicando la tasa BCV vigente y el IVA del cliente. Usar después de \
              lookup_customer para responder consultas de saldo, monto a pagar o estado de \
              cobranza. El campo `amount_bs` es Bs listos para mostrar al cliente — NO lo \
              conviertas, NO le agregues IVA, NO lo trates como USD. NUNCA inventar números \
@@ -795,7 +796,8 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
              Pasá `amount_usd` para convertir USD→Bs, o `amount_bs` para convertir \
              Bs→USD. Pasá EXACTAMENTE UNO de los dos, nunca ambos ni ninguno. \
              El `amount_bs` (tanto input como output) SIEMPRE incluye IVA — es el \
-             monto real que el cliente paga o transfiere. \
+             monto real que el cliente paga o transfiere. Si el cliente ya está identificado, \
+             pasá `client_id` para aplicar su IVA configurado. \
              El response devuelve siempre `amount_usd`, `amount_bs`, `bcv_rate`, \
              `rate_date` e `iva_percent` como info de transparencia.",
             json!({
@@ -808,6 +810,10 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                     "amount_bs": {
                         "type": "number",
                         "description": "Monto en bolívares (CON IVA incluido) a convertir a USD. Mayor a 0. Mutuamente excluyente con amount_usd."
+                    },
+                    "client_id": {
+                        "type": "string",
+                        "description": "ObjectId hex del cliente devuelto por lookup_customer. Opcional; si viene, se usa su IVA configurado."
                     }
                 },
                 "required": []
@@ -1194,10 +1200,8 @@ async fn exec_get_invoices(args: Value, ctx: &ToolContext, started: Instant) -> 
         }
     }
 
-    // Step 5: resolve BCV rate + IVA (DEFAULT) — mismo contrato que
-    // `exec_calculate_amount_bs` y que `/v2/utils/calculate`. Si falla, abortamos:
-    // el LLM tiene la regla "Tool falla → request_human" y nunca debe inventar
-    // montos. Devolver USD como fallback abriría el bug que estamos cerrando.
+    // Step 5: resolve BCV rate + IVA del cliente. Si falla, abortamos: el LLM
+    // tiene la regla "Tool falla → request_human" y nunca debe inventar montos.
     let rate: f64 = match ctx.state.redis.get_exchange_rate().await {
         Ok(Some(r)) => r,
         _ => match ctx.state.db.get_latest_exchange_rate().await {
@@ -1208,10 +1212,9 @@ async fn exec_get_invoices(args: Value, ctx: &ToolContext, started: Instant) -> 
     if rate == 0.0 {
         return ToolResult::err("exchange_rate_zero", started);
     }
-    let iva_factor = match ctx.state.db.find_tax_by_id(None).await {
-        Ok(Some(t)) => t.iva,
-        Ok(None) => return ToolResult::err("tax_config_missing", started),
-        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    let iva_factor = match resolve_tax_for_client(Some(client_oid), ctx, started).await {
+        Ok(t) => t.iva,
+        Err(e) => return e,
     };
 
     // Step 6: compute remaining balance (USD), convert to Bs, filter, then take(limit).
@@ -3389,11 +3392,34 @@ struct CalculateAmountBsArgs {
     amount_usd: Option<f64>,
     #[serde(default)]
     amount_bs: Option<f64>,
+    #[serde(default)]
+    client_id: Option<String>,
 }
 
 #[inline]
 fn round2(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
+}
+
+async fn resolve_tax_for_client(
+    client_id: Option<ObjectId>,
+    ctx: &ToolContext,
+    started: Instant,
+) -> Result<Tax, ToolResult> {
+    let tax_id = match client_id {
+        Some(id) => match ctx.state.db.find_client_by_id(&id.to_hex()).await {
+            Ok(client) if client._id == id => client.id_tax,
+            Ok(_) => return Err(ToolResult::err("client_not_found", started)),
+            Err(e) => return Err(ToolResult::err(format!("db_error:{}", e), started)),
+        },
+        None => None,
+    };
+
+    match ctx.state.db.find_tax_by_id(tax_id).await {
+        Ok(Some(t)) => Ok(t),
+        Ok(None) => Err(ToolResult::err("tax_config_missing", started)),
+        Err(e) => Err(ToolResult::err(format!("db_error:{}", e), started)),
+    }
 }
 
 async fn exec_calculate_amount_bs(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
@@ -3422,14 +3448,22 @@ async fn exec_calculate_amount_bs(args: Value, ctx: &ToolContext, started: Insta
         return ToolResult::err("exchange_rate_zero", started);
     }
 
-    // 4. Resolve tax — misma lógica que `/v2/utils/calculate`: sin id_tax,
-    //    `find_tax_by_id(None)` cae automáticamente a `sTarget = "DEFAULT"`.
-    //    Usar siempre DEFAULT mantiene un único contrato con el endpoint público
-    //    y evita drift cuando el admin cambia la configuración del IVA.
-    let tax = match ctx.state.db.find_tax_by_id(None).await {
-        Ok(Some(t)) => t,
-        Ok(None) => return ToolResult::err("tax_config_missing", started),
-        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    let client_oid = match parsed.client_id.as_deref() {
+        Some(raw) => match ObjectId::parse_str(raw) {
+            Ok(oid) => {
+                if let Err(e) = validate_client_owned_by_phone(oid, ctx, started).await {
+                    return e;
+                }
+                Some(oid)
+            }
+            Err(_) => return ToolResult::err("invalid_client_id", started),
+        },
+        None => None,
+    };
+
+    let tax = match resolve_tax_for_client(client_oid, ctx, started).await {
+        Ok(t) => t,
+        Err(e) => return e,
     };
     let iva_factor = tax.iva;
 
@@ -3772,10 +3806,10 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         None
     };
 
-    // 7. Find client (validate existence — id_tax no longer used, IVA is now global).
+    // 7. Find client and capture idTax for IVA.
     // NOTE: find_client_by_id returns Ok(fake_client) on "not found" — detect
     // by comparing returned _id to the queried _id.
-    let _client = match ctx.state.db.find_client_by_id(&client_oid.to_hex()).await {
+    let client = match ctx.state.db.find_client_by_id(&client_oid.to_hex()).await {
         Ok(c) if c._id == client_oid => c,
         Ok(_) => return ToolResult::err("client_not_found", started),
         Err(e) => {
@@ -3955,11 +3989,10 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         return ToolResult::err("exchange_rate_zero", started);
     }
 
-    // 11. Resolve iva_rate — siempre IVA empresarial (find_tax_by_id(None)),
-    // igual que exec_get_invoices. El IVA del cliente individual no aplica aquí.
-    let iva_rate: f64 = match ctx.state.db.find_tax_by_id(None).await {
+    let iva_rate: f64 = match ctx.state.db.find_tax_by_id(client.id_tax).await {
         Ok(Some(t)) => t.iva,
-        _ => 1.0,
+        Ok(None) => return ToolResult::err("tax_config_missing", started),
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
     };
 
     // 12. Compute the missing amount.

@@ -250,11 +250,11 @@ Cambio nuevo solicitado dentro de Fase 2: los montos en Bs deben calcularse con 
 
 #### Alcance backend mínimo
 
-- [ ] `get_invoices` debe resolver el cliente por `client_id` y usar su `idTax` para convertir deuda USD → Bs.
-- [ ] `calculate_amount_bs` debe poder recibir `client_id` opcional para usar el `idTax` del cliente cuando la conversión pertenezca a cobranzas.
-- [ ] `report_payment` debe usar el `idTax` del cliente cuando reciba `amount_usd` y tenga que derivar `amount_bs`.
-- [ ] Mantener fallback a `DEFAULT` si el cliente no tiene `idTax`, salvo que negocio indique que debe fallar.
-- [ ] Actualizar descripciones de tools/prompts que digan IVA `DEFAULT`, global o empresarial fijo.
+- [x] `get_invoices` debe resolver el cliente por `client_id` y usar su `idTax` para convertir deuda USD → Bs.
+- [x] `calculate_amount_bs` debe poder recibir `client_id` opcional para usar el `idTax` del cliente cuando la conversión pertenezca a cobranzas.
+- [x] `report_payment` debe usar el `idTax` del cliente cuando reciba `amount_usd` y tenga que derivar `amount_bs`.
+- [x] Mantener fallback a `DEFAULT` si el cliente no tiene `idTax`, salvo que negocio indique que debe fallar.
+- [x] Actualizar descripciones de tools/prompts que digan IVA `DEFAULT`, global o empresarial fijo.
 
 #### Alcance prompt/config Andrea
 

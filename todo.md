@@ -87,16 +87,13 @@ Contexto detectado:
 - `report_payment` tiene comentarios indicando que ya no usa IVA del cliente y usa IVA global/default.
 - `lookup_customer` no expone `tax_id`, aunque en `Customers` existe `idTax` y en DTOs de clientes aparece como `tax_id`.
 
-Plan tentativo mínimo, pendiente de confirmación:
-1. Resolver el `tax_id` real del cliente seleccionado (`Customers.idTax`) por `client_id`.
-2. Usar ese tax en `get_invoices` para que `amount_bs` salga con el IVA del cliente, no DEFAULT.
-3. Ajustar `calculate_amount_bs` para poder usar IVA del cliente cuando la conversión sea para un cliente identificado.
-4. Revisar si `report_payment` debe usar el IVA del cliente cuando recibe `amount_usd`.
-5. Mantener fallback a DEFAULT solo si el cliente no tiene `idTax` o si negocio lo autoriza explícitamente.
-6. Actualizar descripciones de tools/prompts donde dicen IVA default/global.
-
-Dudas antes de codear:
-- ¿El cambio aplica solo a clientes existentes/cobranzas o también a ventas/lista de planes?
-- Si el cliente no tiene `idTax`, ¿usamos DEFAULT o fallamos con error?
-- ¿`calculate_amount_bs` debe exigir/aceptar `client_id` para usar su tax?
-- ¿`report_payment(amount_usd)` también debe convertir con el tax del cliente?
+Plan mínimo aprobado para codear ahora:
+1. [x] Resolver el `tax_id` real del cliente seleccionado (`Customers.idTax`) por `client_id`.
+2. [x] Usar ese tax en `get_invoices` para que `amount_bs` salga con el IVA del cliente, no DEFAULT.
+3. [x] Ajustar `calculate_amount_bs` para aceptar `client_id` opcional y usar IVA del cliente cuando venga.
+4. [x] Ajustar `report_payment` para usar IVA del cliente al derivar montos.
+5. [x] Mantener fallback a DEFAULT si el cliente no tiene `idTax`.
+6. [x] Actualizar descripciones de tools donde dicen IVA default/global.
+7. [x] No tocar ventas/lista de planes en este cambio.
+8. [x] Bump version a `0.3.95`, `cargo check` OK.
+9. [ ] Commit y push.
