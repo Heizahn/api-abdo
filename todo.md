@@ -189,4 +189,4 @@ Plan mínimo aprobado:
 5. [x] Quitar el override a `openai/gpt-4o-audio-preview`; audio sin transcripción no debe romper el turno.
 6. [x] Emitir evento WS con el mensaje actualizado cuando se guarde la transcripción.
 7. [x] Bump versión, `cargo fmt`, `cargo check` OK.
-8. [ ] Commit y push.
+8. [x] Commit y push (`cb574c1`).
