@@ -59,20 +59,26 @@ fn substitute_prompt(text: &str, vars: &PromptVariables) -> String {
         .replace("{weekday}", &vars.weekday)
 }
 
-/// Modelo de OpenRouter que acepta `image_url` content blocks (confirmado multimodal).
-/// Se activa cuando el burst incluye imagen, con prioridad sobre audio (D1' defensive).
-const VISION_CAPABLE_MODEL: &str = "openai/gpt-4o-mini";
+/// Fallback de OpenRouter que acepta `image_url` content blocks.
+/// Solo se usa si el agente no tiene `model.model_id` configurado.
+const VISION_CAPABLE_MODEL_FALLBACK: &str = "openai/gpt-4o-mini";
 
-/// Modelo para turnos text-only. Single source of truth — hardcoded en código,
-/// no configurable por agente. Para cambiar el modelo: editar esta constante + redeploy.
-/// El field `AiAgent.model.model_id` en DB queda como dato muerto (back-compat).
+/// Modelo para turnos text-only. Se mantiene igual para no cambiar el costo/routing
+/// de conversaciones sin imagen en este ajuste.
 const TEXT_ONLY_MODEL: &str = "openai/gpt-oss-120b";
 
 /// Selector puro. Decide qué modelo de OpenRouter usar para este turno.
 /// El audio se transcribe antes del chat; nunca cambia el modelo conversacional.
-fn pick_effective_model(_has_audio: bool, has_image: bool) -> String {
+/// Con imagen, usa el modelo configurado del agente para poder probar modelos
+/// vision desde UI/config (ej: `qwen/qwen3.7-plus`) sin redeploy.
+fn pick_effective_model(_has_audio: bool, has_image: bool, agent_model_id: &str) -> String {
     if has_image {
-        VISION_CAPABLE_MODEL.to_string()
+        let configured = agent_model_id.trim();
+        if configured.is_empty() {
+            VISION_CAPABLE_MODEL_FALLBACK.to_string()
+        } else {
+            configured.to_string()
+        }
     } else {
         TEXT_ONLY_MODEL.to_string()
     }
@@ -703,11 +709,11 @@ pub async fn run_turn(
     let has_image = user_blocks
         .iter()
         .any(|b| matches!(b, ContentBlock::ImageUrl { .. }));
-    let effective_model_id = pick_effective_model(has_audio, has_image);
+    let effective_model_id = pick_effective_model(has_audio, has_image, &agent.model.model_id);
 
     // Mixed burst (audio+image) → vision-first (D1' defensive): strip audio blocks.
-    // gpt-4o-mini no procesa audio nativo; image es la señal más accionable.
-    if effective_model_id == VISION_CAPABLE_MODEL && has_audio {
+    // El audio ya se transcribe antes; la imagen es la señal más accionable.
+    if has_image && has_audio {
         user_blocks.retain(|b| !matches!(b, ContentBlock::InputAudio { .. }));
         tracing::warn!(
             "[ai_agent.runner] mixed burst audio+image routed to vision; audio blocks stripped"
@@ -1449,12 +1455,12 @@ mod text_tool_invocation_tests {
 
 #[cfg(test)]
 mod pick_effective_model_tests {
-    use super::{pick_effective_model, TEXT_ONLY_MODEL, VISION_CAPABLE_MODEL};
+    use super::{pick_effective_model, TEXT_ONLY_MODEL, VISION_CAPABLE_MODEL_FALLBACK};
 
     #[test]
     fn pick_effective_model_text_only_returns_hardcoded() {
         // D1: text-only always returns TEXT_ONLY_MODEL regardless of any agent config.
-        let result = pick_effective_model(false, false);
+        let result = pick_effective_model(false, false, "qwen/qwen3.7-plus");
         assert_eq!(result, TEXT_ONLY_MODEL);
         assert_eq!(result, "openai/gpt-oss-120b");
     }
@@ -1462,20 +1468,26 @@ mod pick_effective_model_tests {
     #[test]
     fn pick_effective_model_audio_only_stays_text_model() {
         // El audio se transcribe antes del chat; no cambia el modelo conversacional.
-        let result = pick_effective_model(true, false);
+        let result = pick_effective_model(true, false, "qwen/qwen3.7-plus");
         assert_eq!(result, TEXT_ONLY_MODEL);
     }
 
     #[test]
-    fn pick_effective_model_image_only_overrides_to_vision_model() {
-        let result = pick_effective_model(false, true);
-        assert_eq!(result, VISION_CAPABLE_MODEL);
+    fn pick_effective_model_image_only_uses_configured_agent_model() {
+        let result = pick_effective_model(false, true, "qwen/qwen3.7-plus");
+        assert_eq!(result, "qwen/qwen3.7-plus");
     }
 
     #[test]
-    fn pick_effective_model_mixed_routes_to_vision_defensive() {
-        // D1' amended: vision-first on mixed (audio+image). Audio se descarta.
-        let result = pick_effective_model(true, true);
-        assert_eq!(result, VISION_CAPABLE_MODEL);
+    fn pick_effective_model_image_only_falls_back_when_agent_model_empty() {
+        let result = pick_effective_model(false, true, " ");
+        assert_eq!(result, VISION_CAPABLE_MODEL_FALLBACK);
+    }
+
+    #[test]
+    fn pick_effective_model_mixed_routes_to_configured_vision_model() {
+        // Vision-first on mixed (audio+image). Audio se transcribe antes.
+        let result = pick_effective_model(true, true, "qwen/qwen3.7-plus");
+        assert_eq!(result, "qwen/qwen3.7-plus");
     }
 }
