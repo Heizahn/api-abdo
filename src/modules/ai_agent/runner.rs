@@ -946,9 +946,21 @@ pub async fn run_turn(
         // queremos que Andrea responda primero con el monto pendiente en Bs.
         // y no que salte automáticamente a ofrecer datos de pago si el cliente
         // todavía no los pidió.
-        let get_invoices_succeeded_in_iter = tool_call_logs[logs_before..]
+        let get_invoices_logs: Vec<_> = tool_call_logs[logs_before..]
             .iter()
-            .any(|t| t.tool_name == "get_invoices" && t.success);
+            .filter(|t| t.tool_name == "get_invoices" && t.success)
+            .collect();
+        let get_invoices_succeeded_in_iter = !get_invoices_logs.is_empty();
+        let get_invoices_empty_in_iter = get_invoices_logs.iter().any(|t| {
+            serde_json::from_str::<serde_json::Value>(&t.result_summary)
+                .ok()
+                .and_then(|v| {
+                    v.get("items")
+                        .and_then(|items| items.as_array())
+                        .map(Vec::is_empty)
+                })
+                .unwrap_or(false)
+        });
         let burst_intent_saldo = burst_intents.iter().any(|i| i == "saldo");
         let burst_intent_pago = burst_intents.iter().any(|i| i == "pago");
         if get_invoices_succeeded_in_iter && burst_intent_saldo && !burst_intent_pago {
@@ -956,16 +968,20 @@ pub async fn run_turn(
                 "[ai_agent.runner] saldo/deuda + get_invoices OK — inyectando system note de respuesta directa (iter={})",
                 iter
             );
+            let note = if get_invoices_empty_in_iter {
+                "IMPORTANTE: el cliente está preguntando su saldo/deuda y `get_invoices` devolvió `items: []`. \
+                 Respondé que está al día/solvente. NO digas que tiene Bs. 0 pendiente. \
+                 NO des datos de pago ni preguntes si quiere pagar."
+            } else {
+                "IMPORTANTE: el cliente está preguntando su saldo/deuda. \
+                 Respondé PRIMERO de forma directa con lo que debe en Bs. \
+                 usando el resultado de `get_invoices`. Si hay varias deudas, \
+                 resumilas claramente. NO des datos de pago ni preguntes si \
+                 quiere pagar a menos que el cliente lo pida explícitamente."
+            };
             messages.push(ChatMessage {
                 role: "system".into(),
-                content: Some(MessageContent::Text(
-                    "IMPORTANTE: el cliente está preguntando su saldo/deuda. \
-                     Respondé PRIMERO de forma directa con lo que debe en Bs. \
-                     usando el resultado de `get_invoices`. Si hay varias deudas, \
-                     resumilas claramente. NO des datos de pago ni preguntes si \
-                     quiere pagar a menos que el cliente lo pida explícitamente."
-                        .to_string(),
-                )),
+                content: Some(MessageContent::Text(note.to_string())),
                 ..Default::default()
             });
         }
