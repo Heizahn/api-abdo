@@ -4,7 +4,8 @@
     "rust-best-practices": {
       "source": "apollographql/skills",
       "sourceType": "github",
-      "computedHash": "3f89cd417842ca60bffefea01ee88fc28116b75a8e69329c4d6db446fbfcad02"
+      "skillPath": "skills/rust-best-practices/SKILL.md",
+      "computedHash": "fd336f2f772eb46ddf8658de5f9dd8faa1f35615b316665307fc82eeb4b2e658"
     }
   }
 }

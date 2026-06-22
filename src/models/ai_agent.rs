@@ -802,6 +802,8 @@ pub struct AiAgentItem {
     pub label: String,
     pub description: String,
     pub is_receptionist: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<AiAgentPurpose>,
     pub workspace_ids: Vec<String>,
     pub enabled: bool,
     pub mode: AiAgentMode,
@@ -952,6 +954,8 @@ pub struct CreateAiAgentRequest {
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_receptionist: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<AiAgentPurpose>,
     /// ObjectId hex de cada workspace donde el agente atiende. Puede estar
     /// vacío al crear; cada id se valida contra `WaSettings`.
     #[serde(default)]
@@ -988,6 +992,8 @@ pub struct UpdateAiAgentRequest {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_receptionist: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<AiAgentPurpose>,
     /// Reemplaza la lista entera cuando viene. Cada id se valida.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_ids: Option<Vec<String>>,

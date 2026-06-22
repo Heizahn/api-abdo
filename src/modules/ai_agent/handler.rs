@@ -276,6 +276,7 @@ fn agent_to_item(a: AiAgent) -> AiAgentItem {
         label: a.label,
         description: a.description,
         is_receptionist: a.is_receptionist,
+        purpose: a.purpose,
         workspace_ids: a.workspace_ids.into_iter().map(|o| o.to_hex()).collect(),
         enabled: a.enabled,
         mode: a.mode,
@@ -593,6 +594,9 @@ pub async fn create_ai_agent_handler(
     if let Some(v) = body.is_receptionist {
         agent.is_receptionist = v;
     }
+    if let Some(v) = body.purpose {
+        agent.purpose = Some(v);
+    }
     if let Some(v) = body.enabled {
         agent.enabled = v;
     }
@@ -725,6 +729,9 @@ pub async fn update_ai_agent_handler(
     }
     if let Some(v) = body.is_receptionist {
         agent.is_receptionist = v;
+    }
+    if let Some(v) = body.purpose {
+        agent.purpose = Some(v);
     }
     if let Some(v) = new_workspace_oids {
         agent.workspace_ids = v;
