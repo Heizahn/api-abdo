@@ -895,8 +895,10 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
              — sin imagen el tool falla. (3) Pasá `amount_bs` O `amount_usd`, NUNCA ambos: \
              el sistema deriva el otro con la tasa BCV vigente. \
              (4) `issuing_bank_id` es el banco EMISOR / ORIGEN — desde dónde el CLIENTE \
-             envió la transferencia, NO el banco destino del proveedor. Llamá `list_banks` \
-             ANTES y pasá el id elegido. Si en el comprobante hay 'banco destino' y 'banco \
+             envió la transferencia, NO el banco destino del proveedor. Para evitar IDs \
+             inventados, preferí pasar el nombre o código BCV del banco (ej: 'Banco de \
+             Venezuela' o '0102'). Si llamaste `list_banks`, también podés pasar el id \
+             devuelto, copiado literal. Si en el comprobante hay 'banco destino' y 'banco \
              origen', usá el ORIGEN. Si el cliente dijo solo el nombre del banco y coincide \
              con el destino, preguntale '¿desde qué banco hiciste el pago?' antes de reportar. \
              El campo `bank` (texto libre) queda DEPRECADO — usá `issuing_bank_id`. \
@@ -910,7 +912,7 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                     "media_id":         { "type": "string", "description": "ID exacto del media de WhatsApp de la foto del comprobante. DEBE ser uno de los IDs listados en `[turn_state] available_media_ids` (numérico, ej: '1281788957402373'). PROHIBIDO inventar, usar placeholders ('...', 'image_0', 'media_X'), o pasar IDs que no estén en esa lista — el tool rechaza con `media_id_not_in_conversation`. Si el cliente no envió comprobante todavía, NO llames esta tool: pedile la foto primero." },
                     "amount_bs":        { "type": "number", "description": "Monto en bolívares. Mutuamente excluyente con amount_usd." },
                     "amount_usd":       { "type": "number", "description": "Monto en dólares. Mutuamente excluyente con amount_bs. PREFERÍ siempre `amount_bs` — el sistema deriva el USD internamente con el IVA correcto." },
-                    "issuing_bank_id":  { "type": "string", "description": "Banco EMISOR / ORIGEN del pago: aquel donde el cliente TIENE su cuenta y desde donde envió la transferencia. NO es el banco destino del proveedor. En el comprobante suele aparecer como 'banco origen', 'banco emisor', o 'desde'. ATENCIÓN comprobante app BDV: el campo 'Banco' en esa app es el banco DESTINO y 'Origen' es el número de cuenta de origen (no el nombre del banco emisor — resolverlo requiere conocer el prefijo, ej: 0102=BDV, 0134=Banesco). Pasá el ObjectId hex devuelto por list_banks (recomendado). El backend también acepta nombre o código BCV (ej: 'Banco de Venezuela' o '0102') y resuelve server-side. NO inventes un ObjectId hex; si no tenés el id exacto, pasá el nombre del banco en texto. — Si ves un prefijo de 4 dígitos en el comprobante (ej: '0134'), llamá list_banks(prefix: '0134') para resolver el banco antes de reportar." },
+                    "issuing_bank_id":  { "type": "string", "description": "Banco EMISOR / ORIGEN del pago: aquel donde el cliente TIENE su cuenta y desde donde envió la transferencia. NO es el banco destino del proveedor. En el comprobante suele aparecer como 'banco origen', 'banco emisor', o 'desde'. ATENCIÓN comprobante app BDV: el campo 'Banco' en esa app es el banco DESTINO y 'Origen' es el número de cuenta de origen (no el nombre del banco emisor — resolverlo requiere conocer el prefijo, ej: 0102=BDV, 0134=Banesco). Preferí pasar nombre o código BCV (ej: 'Banco de Venezuela' o '0102'); el backend lo resuelve server-side. Solo pases un ObjectId hex si lo copiaste literalmente del resultado de list_banks en este mismo turno. NO inventes un ObjectId hex; si no tenés el id exacto, pasá el nombre/código del banco en texto. — Si ves un prefijo de 4 dígitos en el comprobante (ej: '0134'), llamá list_banks(prefix: '0134') para resolver el banco antes de reportar." },
                     "bank":             { "type": "string", "description": "[DEPRECATED] Nombre libre del banco origen. Usar issuing_bank_id en su lugar." },
                     "phone":            { "type": "string", "description": "Teléfono asociado al pago móvil. Opcional." },
                     "debt_id":          { "type": "string", "description": "ObjectId hex de la deuda específica si el cliente la mencionó. Opcional — si falta, el reporte queda como abono a cuenta." },
@@ -925,7 +927,8 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
         T_LIST_BANKS => Some((
             "Identificá el banco emisor de un comprobante pasando el prefijo de 4 dígitos \
              (ej: '0134') o el nombre. Sin argumentos, devuelve la lista completa. \
-             Usar ANTES de report_payment; pasar el id devuelto al campo issuing_bank_id.",
+             Usar ANTES de report_payment cuando haya duda; en report_payment podés pasar \
+             el id devuelto, o simplemente el nombre/código BCV del banco.",
             json!({
                 "type": "object",
                 "properties": {
@@ -3842,11 +3845,12 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
                     Ok(b) => b,
                     Err(e) => return ToolResult::err(e, started),
                 };
-                let needle = s.to_lowercase();
+                let needle = normalize_bank_lookup_text(s);
                 let exact: Vec<&(ObjectId, String, String)> = banks
                     .iter()
                     .filter(|(_, name, code)| {
-                        name.to_lowercase() == needle || code.to_lowercase() == needle
+                        normalize_bank_lookup_text(name) == needle
+                            || normalize_bank_lookup_text(code) == needle
                     })
                     .collect();
                 let candidates: Vec<&(ObjectId, String, String)> = if !exact.is_empty() {
@@ -3855,8 +3859,8 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
                     banks
                         .iter()
                         .filter(|(_, name, code)| {
-                            name.to_lowercase().contains(&needle)
-                                || code.to_lowercase().contains(&needle)
+                            bank_name_matches_query(name, s)
+                                || normalize_bank_lookup_text(code).starts_with(&needle)
                         })
                         .collect()
                 };

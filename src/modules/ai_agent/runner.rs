@@ -464,6 +464,118 @@ fn safe_failed_report_payment_response(tool_logs: &[AiToolCallLog]) -> Option<St
     Some(lines.join("\n"))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UniqueBankChoice {
+    id: String,
+    bank_name: String,
+    bank_code: String,
+}
+
+fn is_bank_resolution_error(error: &str) -> bool {
+    error.starts_with("issuing_bank_id_invalid") || error.starts_with("issuing_bank_not_recognized")
+}
+
+fn unique_bank_from_list_banks_summary(summary: &str) -> Option<UniqueBankChoice> {
+    let value: serde_json::Value = serde_json::from_str(summary).ok()?;
+    let items = value.get("items")?.as_array()?;
+    if items.len() != 1 {
+        return None;
+    }
+    let item = &items[0];
+    Some(UniqueBankChoice {
+        id: item.get("id")?.as_str()?.to_string(),
+        bank_name: item.get("bank_name")?.as_str()?.to_string(),
+        bank_code: item.get("bank_code")?.as_str()?.to_string(),
+    })
+}
+
+fn report_payment_bank_retry_args(
+    tool_logs: &[AiToolCallLog],
+) -> Option<(serde_json::Value, UniqueBankChoice)> {
+    let failed_idx = tool_logs.iter().rposition(|t| {
+        t.tool_name == "report_payment"
+            && !t.success
+            && t.error
+                .as_deref()
+                .map(is_bank_resolution_error)
+                .unwrap_or(false)
+    })?;
+
+    // Si ya hubo otro report_payment después del fallo, el modelo ya reintentó
+    // o tomó otro camino. No hagamos un segundo intento automático.
+    if tool_logs[failed_idx + 1..]
+        .iter()
+        .any(|t| t.tool_name == "report_payment")
+    {
+        return None;
+    }
+
+    let bank = tool_logs[failed_idx + 1..]
+        .iter()
+        .rev()
+        .find(|t| t.tool_name == "list_banks" && t.success)
+        .and_then(|t| unique_bank_from_list_banks_summary(&t.result_summary))?;
+
+    let mut retry_args = tool_logs[failed_idx].args.clone();
+    let obj = retry_args.as_object_mut()?;
+    obj.insert(
+        "issuing_bank_id".to_string(),
+        serde_json::Value::String(bank.id.clone()),
+    );
+    Some((retry_args, bank))
+}
+
+async fn maybe_auto_retry_report_payment_after_bank_lookup(
+    tool_call_logs: &mut Vec<AiToolCallLog>,
+    state_patches_acc: &mut Vec<StatePatch>,
+    tool_ctx: &ToolContext,
+) -> bool {
+    let Some((retry_args, bank)) = report_payment_bank_retry_args(tool_call_logs) else {
+        return false;
+    };
+
+    tracing::info!(
+        "[ai_agent.runner] auto-retry report_payment con banco único de list_banks: {} ({}) id={}",
+        bank.bank_name,
+        bank.bank_code,
+        bank.id
+    );
+
+    let result = execute_tool("report_payment", retry_args.clone(), tool_ctx).await;
+    if result.success {
+        tracing::info!(
+            "[ai_agent.runner] auto-retry report_payment OK duration_ms={} summary={}",
+            result.duration_ms,
+            truncate_summary(&result.data),
+        );
+        state_patches_acc.extend(result.state_patches.iter().cloned());
+    } else {
+        tracing::warn!(
+            "[ai_agent.runner] auto-retry report_payment falló duration_ms={} error={:?}",
+            result.duration_ms,
+            result.error,
+        );
+        state_patches_acc.push(StatePatch::AddFailedAttempt {
+            tool: "report_payment".to_string(),
+            error: result
+                .error
+                .clone()
+                .unwrap_or_else(|| "unknown_error".into()),
+        });
+    }
+
+    let success = result.success;
+    tool_call_logs.push(AiToolCallLog {
+        tool_name: "report_payment".to_string(),
+        args: retry_args,
+        result_summary: truncate_summary(&result.data),
+        success,
+        error: result.error,
+        duration_ms: result.duration_ms,
+    });
+    success
+}
+
 fn safe_report_payment_response(tool_logs: &[AiToolCallLog]) -> Option<String> {
     let log = tool_logs
         .iter()
@@ -1270,6 +1382,17 @@ pub async fn run_turn(
             });
         }
 
+        if maybe_auto_retry_report_payment_after_bank_lookup(
+            &mut tool_call_logs,
+            &mut state_patches_acc,
+            tool_ctx,
+        )
+        .await
+        {
+            response_text = safe_report_payment_response(&tool_call_logs);
+            break 'turn;
+        }
+
         // ── Guardrail: report_payment falló ──────────────────────────────────
         // Si report_payment devolvió success=false en esta iteración, el LLM
         // podría alucinar "tu pago fue registrado" en el próximo turno de texto
@@ -1285,14 +1408,28 @@ pub async fn run_turn(
                 error_code,
                 iter
             );
-            messages.push(ChatMessage {
-                role: "system".into(),
-                content: Some(MessageContent::Text(format!(
+            let corrective_note = if is_bank_resolution_error(error_code) {
+                format!(
+                    "IMPORTANTE: report_payment falló (error: `{}`). NO le confirmes al cliente \
+                     que el pago fue registrado — NO fue registrado. El problema es el banco \
+                     emisor/origen. Llamá `list_banks` con el nombre o código del banco indicado \
+                     por el cliente o visible en el comprobante. Si devuelve un único banco, \
+                     reintentá `report_payment` conservando client_id, reference, amount_bs, \
+                     payment_date, media_id y destination_*, cambiando solo issuing_bank_id. \
+                     No pidas de nuevo comprobante, monto, referencia ni fecha.",
+                    error_code
+                )
+            } else {
+                format!(
                     "IMPORTANTE: report_payment falló (error: `{}`). NO le confirmes al cliente \
                      que el pago fue registrado — NO fue registrado. Debés pedirle los datos \
                      faltantes o explicarle el problema antes de continuar.",
                     error_code
-                ))),
+                )
+            };
+            messages.push(ChatMessage {
+                role: "system".into(),
+                content: Some(MessageContent::Text(corrective_note)),
                 ..Default::default()
             });
         }
@@ -1574,8 +1711,9 @@ mod text_tool_invocation_tests {
     use super::{
         confirms_ticket_created_without_success, detect_text_tool_invocations,
         looks_like_meta_output_leak, promises_internal_transfer_without_success,
-        safe_failed_report_payment_response, safe_report_payment_response,
-        strip_text_tool_invocations,
+        report_payment_bank_retry_args, safe_failed_report_payment_response,
+        safe_report_payment_response, strip_text_tool_invocations,
+        unique_bank_from_list_banks_summary,
     };
     use crate::models::ai_agent::AiToolCallLog;
 
@@ -1792,6 +1930,71 @@ mod text_tool_invocation_tests {
         assert!(text.contains("- Monto: Bs. 16.536,00"));
         assert!(text.contains("- Referencia: 006471366804"));
         assert!(!text.contains("pendiente de aprobación"));
+    }
+
+    #[test]
+    fn unique_bank_from_list_banks_summary_requires_exactly_one_item() {
+        let summary = serde_json::json!({
+            "items": [{
+                "id": "6925cf0e372b21c253ddb013",
+                "bank_name": "BANCO DE VENEZUELA",
+                "bank_code": "0102"
+            }]
+        })
+        .to_string();
+
+        let bank = unique_bank_from_list_banks_summary(&summary).unwrap();
+
+        assert_eq!(bank.id, "6925cf0e372b21c253ddb013");
+        assert_eq!(bank.bank_code, "0102");
+    }
+
+    #[test]
+    fn report_payment_bank_retry_args_reuses_failed_args_with_unique_bank() {
+        let failed_args = serde_json::json!({
+            "client_id": "6837c4ef337ea073c77fefa7",
+            "reference": "006471366804",
+            "amount_bs": 16536.0,
+            "payment_date": "2026-06-23T16:30:00Z",
+            "media_id": "2167805554145548",
+            "issuing_bank_id": "6837c3a5337ea073c77fefa0",
+            "destination_bank": "Banesco (0134)",
+            "destination_phone": "04144271554"
+        });
+        let logs = [
+            failed_report_payment_log(
+                failed_args,
+                "issuing_bank_id_invalid: '6837c3a5337ea073c77fefa0' no existe",
+            ),
+            AiToolCallLog {
+                tool_name: "list_banks".to_string(),
+                args: serde_json::json!({"name": "Banco de Venezuela"}),
+                result_summary: serde_json::json!({
+                    "items": [{
+                        "id": "6925cf0e372b21c253ddb013",
+                        "bank_name": "BANCO DE VENEZUELA",
+                        "bank_code": "0102"
+                    }]
+                })
+                .to_string(),
+                success: true,
+                error: None,
+                duration_ms: 1,
+            },
+        ];
+
+        let (retry_args, bank) = report_payment_bank_retry_args(&logs).unwrap();
+
+        assert_eq!(bank.id, "6925cf0e372b21c253ddb013");
+        assert_eq!(
+            retry_args["issuing_bank_id"],
+            serde_json::json!("6925cf0e372b21c253ddb013")
+        );
+        assert_eq!(retry_args["reference"], serde_json::json!("006471366804"));
+        assert_eq!(
+            retry_args["media_id"],
+            serde_json::json!("2167805554145548")
+        );
     }
 }
 
