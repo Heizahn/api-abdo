@@ -395,6 +395,10 @@ Pendiente inmediato:
 - [x] Si el leak ocurre después de `report_payment success=true`, reemplazar por respuesta segura/determinística usando los datos del tool result/args.
 - [x] Para `report_payment OK` nuevo: responder “Pago registrado” con monto, referencia y estado pendiente de aprobación.
 - [x] Para pago ya existente aprobado/pendiente: responder que ya estaba registrado en ese estado, sin presentarlo como nuevo.
+- [ ] Caso Felipe: si `report_payment` retorna `success=false` (`destination_bank_mismatch`, banco inválido, datos inconsistentes, etc.), Andrea NO debe decir ni insinuar que registró o que va a registrar el pago.
+  - Debe responder de forma segura: “No pude registrar el pago” + motivo concreto + dato exacto que debe confirmar el cliente.
+  - Si el fallo es `destination_bank_mismatch`, pedir confirmar banco/cuenta destino configurada vs banco destino leído en el comprobante.
+  - Guardrail backend recomendado: ante `tool_result report_payment success=false`, bloquear respuestas ambiguas tipo “dame un momento”, “voy a registrar”, “ya tengo todo”, “lo registro ahora”.
 - [ ] Ajustar prompt de Sofía: transferencias IA son internas/silenciosas; nunca decir “te transfiero con Andrea/Pagos”.
 - [ ] Ajustar prompt de Sofía: imagen sola con posible comprobante → `transfer_to_agent` a Pagos/Andrea sin mensaje visible.
 - [ ] Ajustar prompt de Andrea: extraer datos visibles del comprobante y pedir solo datos faltantes.
