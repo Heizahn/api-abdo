@@ -363,8 +363,22 @@ Problemas observados en dev:
   - No debe registrar banco beneficiario como `issuing_bank_id`.
 - `openai/gpt-4o-mini` falló en lectura visual de comprobantes; se decidió probar `qwen/qwen3.7-plus` en desarrollo por su modalidad imagen+texto y costo bajo.
 
+### Estado 2026-06-23
+
+Resultados de prueba en dev:
+
+- `qwen/qwen3.7-plus` ya se usa en turnos con imagen de Andrea/Pagos.
+- Texto sin imagen sigue por override a `openai/gpt-oss-120b`.
+- Flujo Humberto funcionó de principio a fin: comprobante leído, confirmación, pago ya aprobado detectado y audio respondido correctamente.
+- Flujo Luis funcionó hasta registrar pago nuevo, pero un turno posterior a `report_payment OK` filtró texto interno/meta al cliente: “The assistant output is garbled... final answer...”.
+- El warning `model_id 'qwen/qwen3.7-plus' no reconocido — usando RATES_DEFAULT` afecta solo estimación de costos/métricas; no implica que Qwen no se haya usado.
+
 Pendiente inmediato:
 
+- [ ] Agregar guardrail anti fuga meta/thinking en respuestas al cliente (`assistant output`, `garbled`, `final answer`, placeholders tipo `{monto}`/`{ref}`, líneas sueltas `...`).
+- [ ] Si el leak ocurre después de `report_payment success=true`, reemplazar por respuesta segura/determinística usando los datos del tool result/args.
+- [ ] Para `report_payment OK` nuevo: responder “Pago registrado” con monto, referencia y estado pendiente de aprobación.
+- [ ] Para pago ya existente aprobado/pendiente: responder que ya estaba registrado en ese estado, sin presentarlo como nuevo.
 - [ ] Ajustar prompt de Sofía: transferencias IA son internas/silenciosas; nunca decir “te transfiero con Andrea/Pagos”.
 - [ ] Ajustar prompt de Sofía: imagen sola con posible comprobante → `transfer_to_agent` a Pagos/Andrea sin mensaje visible.
 - [ ] Ajustar prompt de Andrea: extraer datos visibles del comprobante y pedir solo datos faltantes.

@@ -345,6 +345,100 @@ fn promises_internal_transfer_without_success(text: &str, tool_logs: &[AiToolCal
     .any(|target| lower.contains(target))
 }
 
+/// Detecta fugas de texto meta/interno del modelo que no deben llegar al
+/// cliente. Caso real: tras `report_payment OK`, gpt-oss emitió
+/// "The assistant output is garbled... final answer..." con placeholders.
+fn looks_like_meta_output_leak(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    [
+        "the assistant output",
+        "assistant output is garbled",
+        "need to correct",
+        "proper message",
+        "final answer",
+        "let's produce",
+        "extra nonsense",
+        "{monto}",
+        "{ref}",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn format_bs_amount(value: f64) -> String {
+    let raw = format!("{:.2}", value.abs());
+    let (int_part, decimal_part) = raw.split_once('.').unwrap_or((raw.as_str(), "00"));
+    let mut grouped_rev = String::new();
+    for (i, ch) in int_part.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            grouped_rev.push('.');
+        }
+        grouped_rev.push(ch);
+    }
+    let grouped: String = grouped_rev.chars().rev().collect();
+    let sign = if value.is_sign_negative() { "-" } else { "" };
+    format!("{}{},{}", sign, grouped, decimal_part)
+}
+
+fn value_str<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| value.get(*key)?.as_str())
+}
+
+fn value_f64(value: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| value.get(*key)?.as_f64())
+}
+
+/// Respuesta determinística para el caso más sensible: `report_payment` ya
+/// terminó OK y el texto del LLM salió contaminado con meta-instrucciones.
+fn safe_report_payment_response(tool_logs: &[AiToolCallLog]) -> Option<String> {
+    let log = tool_logs
+        .iter()
+        .rev()
+        .find(|t| t.tool_name == "report_payment" && t.success)?;
+    let result: serde_json::Value =
+        serde_json::from_str(&log.result_summary).unwrap_or(serde_json::Value::Null);
+
+    let reference =
+        value_str(&log.args, &["reference"]).or_else(|| value_str(&result, &["matched_reference"]));
+    let amount = value_f64(&log.args, &["amount_bs"])
+        .or_else(|| value_f64(&result, &["amount_bs", "matched_amount_bs"]));
+    let already_registered = result
+        .get("already_registered")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let mut lines = Vec::new();
+    if already_registered {
+        let raw_state =
+            value_str(&result, &["matched_state", "matched_state_raw"]).unwrap_or("registrado");
+        let state = if raw_state.eq_ignore_ascii_case("activo") {
+            "Aprobado"
+        } else {
+            raw_state
+        };
+        lines.push(format!(
+            "Este pago ya estaba registrado y se encuentra en estado {}.",
+            state
+        ));
+    } else {
+        lines.push("✅ Pago registrado".to_string());
+    }
+
+    if let Some(amount) = amount {
+        lines.push(format!("- Monto: Bs. {}", format_bs_amount(amount)));
+    }
+    if let Some(reference) = reference {
+        lines.push(format!("- Referencia: {}", reference));
+    }
+    if !already_registered {
+        lines.push("- Estado: pendiente de aprobación".to_string());
+    }
+    lines.push(String::new());
+    lines.push("¿Te puedo ayudar en algo más?".to_string());
+
+    Some(lines.join("\n"))
+}
+
 /// Una entrada del historial de conversación que llega al runner. El handler
 /// del sandbox lo construye desde el body del POST; en producción (PR 3) lo
 /// arma desde `WaMessages`.
@@ -955,6 +1049,21 @@ pub async fn run_turn(
                 break 'turn;
             }
 
+            if looks_like_meta_output_leak(&text) {
+                tracing::warn!(
+                    "[ai_agent.runner] fuga meta/thinking detectada (iter={}): preview='{}'",
+                    iter,
+                    text.chars().take(200).collect::<String>(),
+                );
+                response_text = safe_report_payment_response(&tool_call_logs).or_else(|| {
+                    Some(
+                        "Disculpá, tuve un problema redactando la respuesta. Ya estoy revisando tu caso."
+                            .to_string(),
+                    )
+                });
+                break 'turn;
+            }
+
             response_text = Some(text);
             break 'turn;
         }
@@ -1230,6 +1339,23 @@ pub async fn run_turn(
         );
     }
 
+    // Defensa final: si cualquier path de síntesis dejó pasar meta-lenguaje
+    // interno, no lo exponemos al cliente.
+    if response_text
+        .as_deref()
+        .is_some_and(looks_like_meta_output_leak)
+    {
+        tracing::warn!(
+            "[ai_agent.runner] respuesta final contenía fuga meta/thinking — reemplazando por fallback seguro"
+        );
+        response_text = safe_report_payment_response(&tool_call_logs).or_else(|| {
+            Some(
+                "Disculpá, tuve un problema redactando la respuesta. Ya estoy revisando tu caso."
+                    .to_string(),
+            )
+        });
+    }
+
     // Fallback honesto: solo si ni la síntesis pudo redactar. NO promete un
     // traspaso (este path no escala de verdad) — pide reformular.
     if response_text.is_none() {
@@ -1344,7 +1470,8 @@ mod extract_message_text_tests {
 mod text_tool_invocation_tests {
     use super::{
         confirms_ticket_created_without_success, detect_text_tool_invocations,
-        promises_internal_transfer_without_success, strip_text_tool_invocations,
+        looks_like_meta_output_leak, promises_internal_transfer_without_success,
+        safe_report_payment_response, strip_text_tool_invocations,
     };
     use crate::models::ai_agent::AiToolCallLog;
 
@@ -1356,6 +1483,17 @@ mod text_tool_invocation_tests {
             success,
             error: None,
             duration_ms: 0,
+        }
+    }
+
+    fn report_payment_log(args: serde_json::Value, result: serde_json::Value) -> AiToolCallLog {
+        AiToolCallLog {
+            tool_name: "report_payment".to_string(),
+            args,
+            result_summary: result.to_string(),
+            success: true,
+            error: None,
+            duration_ms: 10,
         }
     }
 
@@ -1462,6 +1600,64 @@ mod text_tool_invocation_tests {
     fn strip_is_idempotent_on_clean_text() {
         let text = "Tu saldo es Bs. 5.798,39. ¿Algo más?";
         assert_eq!(strip_text_tool_invocations(text), text);
+    }
+
+    #[test]
+    fn detects_meta_output_leak_from_real_payment_case() {
+        let text = "Oops!\n\nThe assistant output is garbled. Need to correct. \
+                    Should respond with proper message per spec: after successful report_payment ok=true. \
+                    Let's produce correct final answer. {monto} {ref}";
+        assert!(looks_like_meta_output_leak(text));
+    }
+
+    #[test]
+    fn safe_report_payment_response_formats_new_payment() {
+        let logs = [report_payment_log(
+            serde_json::json!({
+                "amount_bs": 14408.07,
+                "reference": "005947453020"
+            }),
+            serde_json::json!({
+                "ok": true,
+                "mode": "live",
+                "payment_id": "6a3aad5ce0c5a3f02ec333b3",
+                "already_registered": false,
+                "amount_bs": 14408.07
+            }),
+        )];
+
+        let text = safe_report_payment_response(&logs).unwrap();
+
+        assert!(text.contains("✅ Pago registrado"));
+        assert!(text.contains("- Monto: Bs. 14.408,07"));
+        assert!(text.contains("- Referencia: 005947453020"));
+        assert!(text.contains("- Estado: pendiente de aprobación"));
+        assert!(!looks_like_meta_output_leak(&text));
+    }
+
+    #[test]
+    fn safe_report_payment_response_formats_already_approved_payment() {
+        let logs = [report_payment_log(
+            serde_json::json!({
+                "amount_bs": 16536.0,
+                "reference": "006471366804"
+            }),
+            serde_json::json!({
+                "ok": true,
+                "already_registered": true,
+                "matched_state": "Aprobado",
+                "matched_amount_bs": 16536.0,
+                "matched_reference": "006471366804"
+            }),
+        )];
+
+        let text = safe_report_payment_response(&logs).unwrap();
+
+        assert!(text.contains("ya estaba registrado"));
+        assert!(text.contains("estado Aprobado"));
+        assert!(text.contains("- Monto: Bs. 16.536,00"));
+        assert!(text.contains("- Referencia: 006471366804"));
+        assert!(!text.contains("pendiente de aprobación"));
     }
 }
 
