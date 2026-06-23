@@ -403,6 +403,24 @@ Pendiente inmediato:
 - [ ] Decidir política final de modelos: si backend decide modelos, la UI no debe mostrar `model_id` como editable; mostrar solo temperatura/tokens/timeout o texto “modelo gestionado por backend”.
 - [ ] Si se mantiene modelo por agente, habilitar UI/API operativa para cambiar `model.model_id` sin confusión.
 
+### Fase 5.1 — Handoff humano por reactivación urgente post-pago
+
+Motivo: en pruebas dev Andrea respondió correctamente el pago, pero ante mensajes como “necesito urgente que me reactiven” empezó a prometer prioridad, monitoreo, tiempos de respuesta o avisos futuros sin ejecutar una acción real. Eso debe derivarse a humano.
+
+Reglas esperadas para Andrea/Pagos:
+
+- [ ] Si el cliente solo pregunta por el estado de reactivación, responder de forma prudente: el pago quedó registrado/aprobado y la reactivación depende del proceso de cobranza/sistema.
+- [ ] Si el cliente expresa urgencia, insistencia o afectación del servicio (`urgente`, `necesito internet`, `me suspendieron`, `reactívenme`, `cuánto tarda`, `ya me reactivaron` repetido), Andrea debe ejecutar handoff humano (`request_human` o mecanismo equivalente), no seguir conversando indefinidamente.
+- [ ] Andrea no debe prometer “marcar prioridad”, “monitorear”, “avisar novedades”, “menos de 30 minutos” ni acciones internas que no pueda ejecutar realmente.
+- [ ] En horario laboral, informar al cliente que el caso será derivado a un asesor para revisión lo antes posible.
+- [ ] Fuera de horario laboral, informar que el caso queda derivado para el próximo horario de atención y no prometer atención inmediata.
+- [ ] Horario laboral inicial: lunes a viernes 08:00–17:00, sábado 08:00–12:00, domingo cerrado.
+- [ ] El backend debe poder emitir un evento/estado de derivación urgente para que el front notifique visualmente al agente humano.
+- [ ] El front debe mostrar/alertar que la IA derivó el caso por reactivación urgente post-pago.
+- [ ] Definir texto estándar cliente en horario laboral y fuera de horario.
+- [ ] Ajustar el system prompt de Andrea con estas reglas.
+- [ ] Probar con Luis/Humberto: pago registrado/aprobado + cliente pide reactivación urgente → derivación humana y notificación visible en front.
+
 ### Rutas a probar con Sofía activa
 
 - [ ] “saldo”
