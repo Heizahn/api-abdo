@@ -32,6 +32,8 @@ impl AiConfigRepository for MongoDB {
         &self,
         api_key_cipher: Option<String>,
         default_model: Option<String>,
+        text_model: Option<String>,
+        vision_model: Option<String>,
         audio_transcription_enabled: Option<bool>,
         stt_model: Option<String>,
         stt_language: Option<String>,
@@ -51,6 +53,12 @@ impl AiConfigRepository for MongoDB {
         }
         if let Some(m) = default_model {
             set_doc.insert("default_model", m);
+        }
+        if let Some(m) = text_model {
+            set_doc.insert("text_model", m);
+        }
+        if let Some(m) = vision_model {
+            set_doc.insert("vision_model", m);
         }
         if let Some(v) = audio_transcription_enabled {
             set_doc.insert("audio_transcription_enabled", v);
@@ -77,6 +85,8 @@ impl AiConfigRepository for MongoDB {
         let on_insert_candidates = doc! {
             "openrouter_api_key": "",
             "default_model": "",
+            "text_model": "",
+            "vision_model": "",
         };
         let mut on_insert_filtered = bson::Document::new();
         for (k, v) in on_insert_candidates {

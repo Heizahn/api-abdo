@@ -1536,11 +1536,19 @@ pub async fn patch_ai_config_handler(
     // Normalizar campos.
     let trimmed_key = body.api_key.as_ref().map(|s| s.trim().to_string());
     let trimmed_model = body.default_model.as_ref().map(|s| s.trim().to_string());
+    let trimmed_text_model = body.text_model.as_ref().map(|s| s.trim().to_string());
+    let trimmed_vision_model = body.vision_model.as_ref().map(|s| s.trim().to_string());
     let trimmed_stt_model = body.stt_model.as_ref().map(|s| s.trim().to_string());
     let trimmed_stt_language = body.stt_language.as_ref().map(|s| s.trim().to_string());
 
     let key_present = trimmed_key.as_deref().map_or(false, |s| !s.is_empty());
     let model_present = trimmed_model.as_deref().map_or(false, |s| !s.is_empty());
+    let text_model_present = trimmed_text_model
+        .as_deref()
+        .map_or(false, |s| !s.is_empty());
+    let vision_model_present = trimmed_vision_model
+        .as_deref()
+        .map_or(false, |s| !s.is_empty());
     let stt_model_present = trimmed_stt_model
         .as_deref()
         .map_or(false, |s| !s.is_empty());
@@ -1554,12 +1562,15 @@ pub async fn patch_ai_config_handler(
         || body.ai_uses_audio_transcription.is_some()
         || body.max_audio_transcription_seconds.is_some();
 
+    let model_field_present = model_present || text_model_present || vision_model_present;
+
     // Al menos un campo reconocido debe estar presente y no vacío.
-    if !key_present && !model_present && !transcription_field_present {
+    if !key_present && !model_field_present && !transcription_field_present {
         return Err(ApiError::ValidationError {
             code: "empty_patch".into(),
             field: "request_body".into(),
-            message: "Debe proveer al menos api_key o default_model".into(),
+            message: "Debe proveer al menos api_key, default_model, text_model o vision_model"
+                .into(),
         });
     }
 
@@ -1582,6 +1593,24 @@ pub async fn patch_ai_config_handler(
             });
         }
     }
+    if let Some(ref m) = trimmed_text_model {
+        if text_model_present && m.len() > MAX_MODEL_LEN {
+            return Err(ApiError::ValidationError {
+                code: "field_too_long".into(),
+                field: "text_model".into(),
+                message: format!("text_model supera {} caracteres", MAX_MODEL_LEN),
+            });
+        }
+    }
+    if let Some(ref m) = trimmed_vision_model {
+        if vision_model_present && m.len() > MAX_MODEL_LEN {
+            return Err(ApiError::ValidationError {
+                code: "field_too_long".into(),
+                field: "vision_model".into(),
+                message: format!("vision_model supera {} caracteres", MAX_MODEL_LEN),
+            });
+        }
+    }
     if let Some(ref m) = trimmed_stt_model {
         if stt_model_present && m.len() > MAX_MODEL_LEN {
             return Err(ApiError::ValidationError {
@@ -1601,6 +1630,16 @@ pub async fn patch_ai_config_handler(
     };
 
     let model_to_set = if model_present { trimmed_model } else { None };
+    let text_model_to_set = if text_model_present {
+        trimmed_text_model
+    } else {
+        None
+    };
+    let vision_model_to_set = if vision_model_present {
+        trimmed_vision_model
+    } else {
+        None
+    };
     let stt_model_to_set = if stt_model_present {
         trimmed_stt_model
     } else {
@@ -1617,6 +1656,8 @@ pub async fn patch_ai_config_handler(
         .upsert_ai_config(
             api_key_cipher,
             model_to_set,
+            text_model_to_set,
+            vision_model_to_set,
             body.audio_transcription_enabled,
             stt_model_to_set,
             stt_language_to_set,

@@ -373,27 +373,28 @@ Resultados de prueba en dev:
 - Flujo Luis funcionó hasta registrar pago nuevo, pero un turno posterior a `report_payment OK` filtró texto interno/meta al cliente: “The assistant output is garbled... final answer...”.
 - El warning `model_id 'qwen/qwen3.7-plus' no reconocido — usando RATES_DEFAULT` afecta solo estimación de costos/métricas; no implica que Qwen no se haya usado.
 - Decisión nueva: los modelos OpenRouter deben configurarse globalmente desde `PATCH /v1/auth-user/whatsapp/ai-agent/config`, igual que la transcripción, con un modelo para texto y otro para visión/imagen que apliquen a todos los agentes.
+- Backend `0.3.108`: configuración global por modalidad implementada en `AiConfig`, `GET/PATCH /config` y selección runtime del runner.
 
 Pendiente inmediato:
 
-- [ ] Agregar en `AiConfig` global campos de modelo por modalidad:
+- [x] Agregar en `AiConfig` global campos de modelo por modalidad:
   - `text_model` / alias `textModel`: modelo para turnos sin imagen (reemplaza hardcode `openai/gpt-oss-120b`).
   - `vision_model` / alias `visionModel`: modelo para turnos con imagen (reemplaza uso de `agent.model.model_id` para visión).
   - mantener `default_model` como compatibilidad legacy o alias temporal durante la migración.
-- [ ] `GET /v1/auth-user/whatsapp/ai-agent/config` debe devolver `text_model` y `vision_model`.
-- [ ] `PATCH /v1/auth-user/whatsapp/ai-agent/config` debe aceptar `text_model`/`textModel` y `vision_model`/`visionModel`, con validación de longitud igual a modelos existentes.
-- [ ] Runtime `runner`: seleccionar modelo por modalidad desde config global:
+- [x] `GET /v1/auth-user/whatsapp/ai-agent/config` debe devolver `text_model` y `vision_model`.
+- [x] `PATCH /v1/auth-user/whatsapp/ai-agent/config` debe aceptar `text_model`/`textModel` y `vision_model`/`visionModel`, con validación de longitud igual a modelos existentes.
+- [x] Runtime `runner`: seleccionar modelo por modalidad desde config global:
   - texto/audio transcrito sin imagen → `AiConfig.text_model`, fallback actual `openai/gpt-oss-120b`.
   - imagen o mixto imagen+texto/audio → `AiConfig.vision_model`, fallback actual `agent.model.model_id` y luego `openai/gpt-4o-mini`.
-- [ ] Invalidar cache Redis de config global al cambiar modelos.
+- [x] Invalidar cache Redis de config global al cambiar modelos.
 - [ ] Probar candidatos text-only en dev:
   - `qwen/qwen3-235b-a22b-2507` como candidato principal costo/beneficio.
   - `deepseek/deepseek-v4-flash` como candidato DeepSeek económico.
   - baseline `openai/gpt-oss-120b`.
-- [ ] Agregar guardrail anti fuga meta/thinking en respuestas al cliente (`assistant output`, `garbled`, `final answer`, placeholders tipo `{monto}`/`{ref}`, líneas sueltas `...`).
-- [ ] Si el leak ocurre después de `report_payment success=true`, reemplazar por respuesta segura/determinística usando los datos del tool result/args.
-- [ ] Para `report_payment OK` nuevo: responder “Pago registrado” con monto, referencia y estado pendiente de aprobación.
-- [ ] Para pago ya existente aprobado/pendiente: responder que ya estaba registrado en ese estado, sin presentarlo como nuevo.
+- [x] Agregar guardrail anti fuga meta/thinking en respuestas al cliente (`assistant output`, `garbled`, `final answer`, placeholders tipo `{monto}`/`{ref}`, líneas sueltas `...`).
+- [x] Si el leak ocurre después de `report_payment success=true`, reemplazar por respuesta segura/determinística usando los datos del tool result/args.
+- [x] Para `report_payment OK` nuevo: responder “Pago registrado” con monto, referencia y estado pendiente de aprobación.
+- [x] Para pago ya existente aprobado/pendiente: responder que ya estaba registrado en ese estado, sin presentarlo como nuevo.
 - [ ] Ajustar prompt de Sofía: transferencias IA son internas/silenciosas; nunca decir “te transfiero con Andrea/Pagos”.
 - [ ] Ajustar prompt de Sofía: imagen sola con posible comprobante → `transfer_to_agent` a Pagos/Andrea sin mensaje visible.
 - [ ] Ajustar prompt de Andrea: extraer datos visibles del comprobante y pedir solo datos faltantes.

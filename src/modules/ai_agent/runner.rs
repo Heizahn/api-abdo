@@ -25,6 +25,7 @@
 use std::time::Instant;
 
 use crate::{
+    db::AiConfigRepository,
     error::ApiError,
     models::{
         ai_agent::{AiAgent, AiInteraction, AiToolCallLog},
@@ -60,19 +61,29 @@ fn substitute_prompt(text: &str, vars: &PromptVariables) -> String {
 }
 
 /// Fallback de OpenRouter que acepta `image_url` content blocks.
-/// Solo se usa si el agente no tiene `model.model_id` configurado.
+/// Solo se usa si no hay `AiConfig.vision_model` ni `agent.model.model_id`.
 const VISION_CAPABLE_MODEL_FALLBACK: &str = "openai/gpt-4o-mini";
 
-/// Modelo para turnos text-only. Se mantiene igual para no cambiar el costo/routing
-/// de conversaciones sin imagen en este ajuste.
+/// Fallback para turnos text-only cuando `AiConfig.text_model` no está seteado.
 const TEXT_ONLY_MODEL: &str = "openai/gpt-oss-120b";
 
 /// Selector puro. Decide qué modelo de OpenRouter usar para este turno.
 /// El audio se transcribe antes del chat; nunca cambia el modelo conversacional.
-/// Con imagen, usa el modelo configurado del agente para poder probar modelos
-/// vision desde UI/config (ej: `qwen/qwen3.7-plus`) sin redeploy.
-fn pick_effective_model(_has_audio: bool, has_image: bool, agent_model_id: &str) -> String {
+/// Prioridad:
+/// - imagen: `vision_model` global → modelo legacy del agente → fallback vision.
+/// - texto/audio transcrito: `text_model` global → fallback text-only.
+fn pick_effective_model(
+    _has_audio: bool,
+    has_image: bool,
+    agent_model_id: &str,
+    global_text_model: &str,
+    global_vision_model: &str,
+) -> String {
     if has_image {
+        let global = global_vision_model.trim();
+        if !global.is_empty() {
+            return global.to_string();
+        }
         let configured = agent_model_id.trim();
         if configured.is_empty() {
             VISION_CAPABLE_MODEL_FALLBACK.to_string()
@@ -80,7 +91,12 @@ fn pick_effective_model(_has_audio: bool, has_image: bool, agent_model_id: &str)
             configured.to_string()
         }
     } else {
-        TEXT_ONLY_MODEL.to_string()
+        let global = global_text_model.trim();
+        if global.is_empty() {
+            TEXT_ONLY_MODEL.to_string()
+        } else {
+            global.to_string()
+        }
     }
 }
 
@@ -744,6 +760,43 @@ pub async fn run_turn(
         prompt_vars,
     );
 
+    // Nuevo turno del usuario: texto + adjuntos.
+    let mut user_blocks: Vec<ContentBlock> = Vec::new();
+    if !user_message.trim().is_empty() {
+        user_blocks.push(ContentBlock::Text {
+            text: user_message.to_string(),
+        });
+    }
+    for m in user_media {
+        user_blocks.push(m.to_content_block());
+    }
+
+    let has_audio = user_blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::InputAudio { .. }));
+    let has_image = user_blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::ImageUrl { .. }));
+
+    let (global_text_model, global_vision_model) = match tool_ctx.state.db.get_ai_config().await {
+        Ok(Some(cfg)) => (cfg.text_model, cfg.vision_model),
+        Ok(None) => (String::new(), String::new()),
+        Err(e) => {
+            tracing::warn!(
+                "[ai_agent.runner] no se pudo leer AiConfig para modelos globales: {}",
+                e
+            );
+            (String::new(), String::new())
+        }
+    };
+    let effective_model_id = pick_effective_model(
+        has_audio,
+        has_image,
+        &agent.model.model_id,
+        &global_text_model,
+        &global_vision_model,
+    );
+
     // ── Diagnóstico ────────────────────────────────────────────────────────
     let enabled_tool_names: Vec<&str> = agent
         .tools
@@ -754,7 +807,7 @@ pub async fn run_turn(
     tracing::info!(
         "[ai_agent.runner] turno start (agent_id={}, model={}, system_chars={}, tools_enabled={}, history_turns={}, has_customer_ctx={}, has_transfer_ctx={}, has_first_turn_note={}, has_reopen_note={}, has_agent_state={})",
         agent.id.map(|o| o.to_hex()).unwrap_or_default(),
-        agent.model.model_id,
+        effective_model_id,
         system_instruction.chars().count(),
         enabled_tool_names.len(),
         history.len(),
@@ -790,25 +843,6 @@ pub async fn run_turn(
 
     // Historial previo.
     messages.extend(convert_history(history));
-
-    // Nuevo turno del usuario: texto + adjuntos.
-    let mut user_blocks: Vec<ContentBlock> = Vec::new();
-    if !user_message.trim().is_empty() {
-        user_blocks.push(ContentBlock::Text {
-            text: user_message.to_string(),
-        });
-    }
-    for m in user_media {
-        user_blocks.push(m.to_content_block());
-    }
-
-    let has_audio = user_blocks
-        .iter()
-        .any(|b| matches!(b, ContentBlock::InputAudio { .. }));
-    let has_image = user_blocks
-        .iter()
-        .any(|b| matches!(b, ContentBlock::ImageUrl { .. }));
-    let effective_model_id = pick_effective_model(has_audio, has_image, &agent.model.model_id);
 
     // Mixed burst (audio+image) → vision-first (D1' defensive): strip audio blocks.
     // El audio ya se transcribe antes; la imagen es la señal más accionable.
@@ -1666,36 +1700,71 @@ mod pick_effective_model_tests {
     use super::{pick_effective_model, TEXT_ONLY_MODEL, VISION_CAPABLE_MODEL_FALLBACK};
 
     #[test]
-    fn pick_effective_model_text_only_returns_hardcoded() {
-        // D1: text-only always returns TEXT_ONLY_MODEL regardless of any agent config.
-        let result = pick_effective_model(false, false, "qwen/qwen3.7-plus");
+    fn pick_effective_model_text_only_uses_global_text_model() {
+        let result = pick_effective_model(
+            false,
+            false,
+            "qwen/qwen3.7-plus",
+            "qwen/qwen3-235b-a22b-2507",
+            "",
+        );
+        assert_eq!(result, "qwen/qwen3-235b-a22b-2507");
+    }
+
+    #[test]
+    fn pick_effective_model_text_only_falls_back_when_global_empty() {
+        let result = pick_effective_model(false, false, "qwen/qwen3.7-plus", " ", "");
         assert_eq!(result, TEXT_ONLY_MODEL);
         assert_eq!(result, "openai/gpt-oss-120b");
     }
 
     #[test]
-    fn pick_effective_model_audio_only_stays_text_model() {
+    fn pick_effective_model_audio_only_uses_global_text_model() {
         // El audio se transcribe antes del chat; no cambia el modelo conversacional.
-        let result = pick_effective_model(true, false, "qwen/qwen3.7-plus");
-        assert_eq!(result, TEXT_ONLY_MODEL);
+        let result = pick_effective_model(
+            true,
+            false,
+            "qwen/qwen3.7-plus",
+            "deepseek/deepseek-v4-flash",
+            "",
+        );
+        assert_eq!(result, "deepseek/deepseek-v4-flash");
     }
 
     #[test]
-    fn pick_effective_model_image_only_uses_configured_agent_model() {
-        let result = pick_effective_model(false, true, "qwen/qwen3.7-plus");
+    fn pick_effective_model_image_only_uses_global_vision_model() {
+        let result = pick_effective_model(
+            false,
+            true,
+            "openai/gpt-4o-mini",
+            "qwen/qwen3-235b-a22b-2507",
+            "qwen/qwen3.7-plus",
+        );
         assert_eq!(result, "qwen/qwen3.7-plus");
     }
 
     #[test]
-    fn pick_effective_model_image_only_falls_back_when_agent_model_empty() {
-        let result = pick_effective_model(false, true, " ");
+    fn pick_effective_model_image_only_uses_legacy_agent_model_when_global_empty() {
+        let result = pick_effective_model(false, true, "qwen/qwen3.7-plus", "", " ");
+        assert_eq!(result, "qwen/qwen3.7-plus");
+    }
+
+    #[test]
+    fn pick_effective_model_image_only_falls_back_when_all_vision_models_empty() {
+        let result = pick_effective_model(false, true, " ", "", " ");
         assert_eq!(result, VISION_CAPABLE_MODEL_FALLBACK);
     }
 
     #[test]
-    fn pick_effective_model_mixed_routes_to_configured_vision_model() {
+    fn pick_effective_model_mixed_routes_to_global_vision_model() {
         // Vision-first on mixed (audio+image). Audio se transcribe antes.
-        let result = pick_effective_model(true, true, "qwen/qwen3.7-plus");
-        assert_eq!(result, "qwen/qwen3.7-plus");
+        let result = pick_effective_model(
+            true,
+            true,
+            "qwen/qwen3.7-plus",
+            "deepseek/deepseek-v4-flash",
+            "qwen/qwen3-vl-32b-instruct",
+        );
+        assert_eq!(result, "qwen/qwen3-vl-32b-instruct");
     }
 }

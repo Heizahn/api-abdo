@@ -28,9 +28,15 @@ pub struct AiConfig {
     /// AES-GCM ciphertext (Base64URL) de la OpenRouter API key. String vacío = no configurada.
     #[serde(default)]
     pub openrouter_api_key: String,
-    /// Slug del modelo default pre-rellenado al crear un nuevo AiAgent.
+    /// Slug legacy del modelo default pre-rellenado al crear un nuevo AiAgent.
     #[serde(default)]
     pub default_model: String,
+    /// Modelo global para turnos sin imagen (texto y audio transcrito). Vacío = fallback runtime.
+    #[serde(default)]
+    pub text_model: String,
+    /// Modelo global para turnos con imagen/visión. Vacío = fallback runtime.
+    #[serde(default)]
+    pub vision_model: String,
     /// Configuración global de transcripción de audios. `None` = usar settings legacy del número WA.
     #[serde(default)]
     pub audio_transcription_enabled: Option<bool>,
@@ -56,6 +62,8 @@ impl AiConfig {
         AiConfigDto {
             has_api_key: !self.openrouter_api_key.is_empty(),
             default_model: self.default_model.clone(),
+            text_model: self.text_model.clone(),
+            vision_model: self.vision_model.clone(),
             audio_transcription_enabled: self.audio_transcription_enabled,
             stt_model: self.stt_model.clone(),
             stt_language: self.stt_language.clone(),
@@ -77,8 +85,12 @@ impl AiConfig {
 pub struct AiConfigDto {
     /// `true` si hay una api_key configurada (no expone el valor).
     pub has_api_key: bool,
-    /// Slug del modelo default para nuevos agentes. Vacío = sin configurar.
+    /// Slug legacy del modelo default para nuevos agentes. Vacío = sin configurar.
     pub default_model: String,
+    /// Modelo global para turnos sin imagen. Vacío = usar fallback runtime.
+    pub text_model: String,
+    /// Modelo global para turnos con imagen/visión. Vacío = usar fallback runtime.
+    pub vision_model: String,
     /// Configuración global de transcripción. `null` = no configurada; runtime usa settings legacy del número WA.
     pub audio_transcription_enabled: Option<bool>,
     pub stt_model: Option<String>,
@@ -98,6 +110,8 @@ impl Default for AiConfigDto {
         Self {
             has_api_key: false,
             default_model: String::new(),
+            text_model: String::new(),
+            vision_model: String::new(),
             audio_transcription_enabled: None,
             stt_model: None,
             stt_language: None,
@@ -130,6 +144,24 @@ pub struct AiConfigPatchRequest {
         alias = "defaultModelId"
     )]
     pub default_model: Option<String>,
+    /// Modelo global para turnos sin imagen (texto y audio transcrito).
+    #[serde(
+        default,
+        alias = "textModel",
+        alias = "text_model_id",
+        alias = "textModelId"
+    )]
+    pub text_model: Option<String>,
+    /// Modelo global para turnos con imagen/visión.
+    #[serde(
+        default,
+        alias = "visionModel",
+        alias = "image_model",
+        alias = "imageModel",
+        alias = "vision_model_id",
+        alias = "visionModelId"
+    )]
+    pub vision_model: Option<String>,
     #[serde(default)]
     pub audio_transcription_enabled: Option<bool>,
     #[serde(default)]
@@ -1431,6 +1463,8 @@ mod tests {
             id: None,
             openrouter_api_key: "ciphertext_abc".to_string(),
             default_model: "openai/gpt-4o".to_string(),
+            text_model: "qwen/qwen3-235b-a22b-2507".to_string(),
+            vision_model: "qwen/qwen3.7-plus".to_string(),
             audio_transcription_enabled: None,
             stt_model: None,
             stt_language: None,
@@ -1446,6 +1480,8 @@ mod tests {
             "has_api_key should be true when key is non-empty"
         );
         assert_eq!(dto.default_model, "openai/gpt-4o");
+        assert_eq!(dto.text_model, "qwen/qwen3-235b-a22b-2507");
+        assert_eq!(dto.vision_model, "qwen/qwen3.7-plus");
         assert!(dto.updated_at.is_some(), "updated_at should be present");
         assert_eq!(dto.editor_id, Some("user-uuid-123".to_string()));
     }
@@ -1456,6 +1492,8 @@ mod tests {
             id: None,
             openrouter_api_key: "some_cipher".to_string(),
             default_model: String::new(),
+            text_model: String::new(),
+            vision_model: String::new(),
             audio_transcription_enabled: None,
             stt_model: None,
             stt_language: None,
@@ -1479,6 +1517,8 @@ mod tests {
             id: None,
             openrouter_api_key: String::new(),
             default_model: String::new(),
+            text_model: String::new(),
+            vision_model: String::new(),
             audio_transcription_enabled: None,
             stt_model: None,
             stt_language: None,
@@ -1500,8 +1540,26 @@ mod tests {
         let dto = AiConfigDto::default();
         assert!(!dto.has_api_key);
         assert!(dto.default_model.is_empty());
+        assert!(dto.text_model.is_empty());
+        assert!(dto.vision_model.is_empty());
         assert!(dto.updated_at.is_none());
         assert!(dto.editor_id.is_none());
+    }
+
+    #[test]
+    fn ai_config_patch_accepts_global_model_aliases() {
+        let raw = serde_json::json!({
+            "textModel": "qwen/qwen3-235b-a22b-2507",
+            "visionModel": "qwen/qwen3.7-plus"
+        });
+
+        let input: AiConfigPatchRequest = serde_json::from_value(raw).unwrap();
+
+        assert_eq!(
+            input.text_model.as_deref(),
+            Some("qwen/qwen3-235b-a22b-2507")
+        );
+        assert_eq!(input.vision_model.as_deref(), Some("qwen/qwen3.7-plus"));
     }
 
     #[test]

@@ -1701,6 +1701,8 @@ pub trait AiConfigRepository: Send + Sync {
         &self,
         api_key_cipher: Option<String>,
         default_model: Option<String>,
+        text_model: Option<String>,
+        vision_model: Option<String>,
         audio_transcription_enabled: Option<bool>,
         stt_model: Option<String>,
         stt_language: Option<String>,
