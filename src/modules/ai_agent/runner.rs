@@ -304,8 +304,13 @@ fn confirms_ticket_created_without_success(text: &str, tool_logs: &[AiToolCallLo
 /// Detecta cuando el agente promete una transferencia interna como texto
 /// visible, pero no llamó `transfer_to_agent`. Las transferencias entre IAs
 /// deben ser silenciosas: el cliente solo ve la respuesta del agente destino.
+/// Si ya hubo escalación humana real (`request_human`/`create_ticket`), frases
+/// como "te pasará un asesor" son válidas y no deben forzar reintentos.
 fn promises_internal_transfer_without_success(text: &str, tool_logs: &[AiToolCallLog]) -> bool {
-    if has_successful_tool_call(tool_logs, "transfer_to_agent") {
+    if has_successful_tool_call(tool_logs, "transfer_to_agent")
+        || has_successful_tool_call(tool_logs, "request_human")
+        || has_successful_tool_call(tool_logs, "create_ticket")
+    {
         return false;
     }
 
@@ -1400,6 +1405,13 @@ mod text_tool_invocation_tests {
     fn false_transfer_promise_allows_transfer_after_tool_success() {
         let text = "Te voy a transferir con Andrea para registrar tu pago.";
         let logs = [tool_log("transfer_to_agent", true)];
+        assert!(!promises_internal_transfer_without_success(text, &logs));
+    }
+
+    #[test]
+    fn false_transfer_promise_allows_human_handoff_after_request_human_success() {
+        let text = "Voy a pasarte con un asesor del equipo de cobranzas para validar tu caso.";
+        let logs = [tool_log("request_human", true)];
         assert!(!promises_internal_transfer_without_success(text, &logs));
     }
 

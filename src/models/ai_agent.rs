@@ -1089,17 +1089,21 @@ pub struct AiScheduleInput {
 
 #[derive(Debug, Deserialize, ToSchema, Default)]
 pub struct AiModelConfigInput {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "modelId", skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "maxTokens", skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "timeoutSeconds",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub timeout_seconds: Option<u32>,
     /// `Some(non-empty)` cifra y guarda. `None` o `Some("")` no toca la
     /// guardada.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "apiKey", skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 }
 
@@ -1498,6 +1502,23 @@ mod tests {
         assert!(dto.default_model.is_empty());
         assert!(dto.updated_at.is_none());
         assert!(dto.editor_id.is_none());
+    }
+
+    #[test]
+    fn ai_model_config_input_accepts_camel_case_aliases() {
+        let raw = serde_json::json!({
+            "modelId": "qwen/qwen3.7-plus",
+            "maxTokens": 1800,
+            "timeoutSeconds": 45,
+            "apiKey": "ignored-per-agent-key"
+        });
+
+        let input: AiModelConfigInput = serde_json::from_value(raw).unwrap();
+
+        assert_eq!(input.model_id.as_deref(), Some("qwen/qwen3.7-plus"));
+        assert_eq!(input.max_tokens, Some(1800));
+        assert_eq!(input.timeout_seconds, Some(45));
+        assert_eq!(input.api_key.as_deref(), Some("ignored-per-agent-key"));
     }
 
     // ─── estimate_cost_usd tests ─────────────────────────────────────────────
