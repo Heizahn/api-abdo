@@ -375,6 +375,7 @@ Resultados de prueba en dev:
 - Decisión nueva: los modelos OpenRouter deben configurarse globalmente desde `PATCH /v1/auth-user/whatsapp/ai-agent/config`, igual que la transcripción, con un modelo para texto y otro para visión/imagen que apliquen a todos los agentes.
 - Backend `0.3.108`: configuración global por modalidad implementada en `AiConfig`, `GET/PATCH /config` y selección runtime del runner.
 - Backend `0.3.109`: límite de `system_prompt` de agentes AI subido de 20.000 a 30.000 caracteres para permitir el prompt completo de Andrea/Pagos.
+- Backend `0.3.110`: hardening de Fase 5: respuesta segura para `report_payment` fallido, aliases BNC/Banco Nacional de Crédito en `list_banks`, rechazo de `issuing_bank_id` inválido y razón WS `urgent_reactivation_handoff` para derivaciones urgentes.
 
 Pendiente inmediato:
 
@@ -396,18 +397,19 @@ Pendiente inmediato:
 - [x] Si el leak ocurre después de `report_payment success=true`, reemplazar por respuesta segura/determinística usando los datos del tool result/args.
 - [x] Para `report_payment OK` nuevo: responder “Pago registrado” con monto, referencia y estado pendiente de aprobación.
 - [x] Para pago ya existente aprobado/pendiente: responder que ya estaba registrado en ese estado, sin presentarlo como nuevo.
-- [ ] Caso Felipe: si `report_payment` retorna `success=false` (`destination_bank_mismatch`, banco inválido, datos inconsistentes, etc.), Andrea NO debe decir ni insinuar que registró o que va a registrar el pago.
+- [x] Caso Felipe: si `report_payment` retorna `success=false` (`destination_bank_mismatch`, banco inválido, datos inconsistentes, etc.), Andrea NO debe decir ni insinuar que registró o que va a registrar el pago.
   - Debe responder de forma segura: “No pude registrar el pago” + motivo concreto + dato exacto que debe confirmar el cliente.
   - Si el fallo es `destination_bank_mismatch`, pedir confirmar banco/cuenta destino configurada vs banco destino leído en el comprobante.
-  - Guardrail backend recomendado: ante `tool_result report_payment success=false`, bloquear respuestas ambiguas tipo “dame un momento”, “voy a registrar”, “ya tengo todo”, “lo registro ahora”.
+  - Guardrail backend implementado: ante último `tool_result report_payment success=false`, se reemplaza la respuesta final por texto seguro determinístico.
 - [ ] Ajustar prompt de Sofía: transferencias IA son internas/silenciosas; nunca decir “te transfiero con Andrea/Pagos”.
 - [ ] Ajustar prompt de Sofía: imagen sola con posible comprobante → `transfer_to_agent` a Pagos/Andrea sin mensaje visible.
 - [ ] Ajustar prompt de Andrea: extraer datos visibles del comprobante y pedir solo datos faltantes.
 - [ ] Ajustar prompt de Andrea: “Beneficiario/Banco destino” nunca es `issuing_bank_id`; si falta origen, preguntar solo “¿Desde qué banco pagaste?”.
-- [ ] Revisar/mejorar `list_banks` y catálogo/aliases para bancos comunes:
+- [x] Revisar/mejorar `list_banks` y catálogo/aliases para bancos comunes:
   - `BNC` → `Banco Nacional de Crédito`.
   - `Banco Nacional de Credito` sin tilde → mismo banco.
   - Confirmar código oficial de BNC y evitar confundirlo con `0102` Banco de Venezuela.
+  - Backend: búsqueda tolerante a tildes/tokens y alias BNC sin confundir Banco Venezolano de Crédito.
   - Si banco declarado por el cliente y prefijo/código bancario entran en conflicto, Andrea NO debe registrar; debe pedir una aclaratoria única y precisa.
 - [ ] Probar `qwen/qwen3.7-plus` con comprobantes reales en dev.
 - [ ] Decidir política final de modelos: si backend decide modelos, la UI no debe mostrar `model_id` como editable; mostrar solo temperatura/tokens/timeout o texto “modelo gestionado por backend”.
@@ -425,7 +427,7 @@ Reglas esperadas para Andrea/Pagos:
 - [ ] En horario laboral, informar al cliente que el caso será derivado a un asesor para revisión lo antes posible.
 - [ ] Fuera de horario laboral, informar que el caso queda derivado para el próximo horario de atención y no prometer atención inmediata.
 - [ ] Horario laboral inicial: lunes a viernes 08:00–17:00, sábado 08:00–12:00, domingo cerrado.
-- [ ] El backend debe poder emitir un evento/estado de derivación urgente para que el front notifique visualmente al agente humano.
+- [x] El backend debe poder emitir un evento/estado de derivación urgente para que el front notifique visualmente al agente humano (`IA_PAUSADA.reason = "urgent_reactivation_handoff"`).
 - [ ] El front debe mostrar/alertar que la IA derivó el caso por reactivación urgente post-pago.
 - [ ] Definir texto estándar cliente en horario laboral y fuera de horario.
 - [ ] Ajustar el system prompt de Andrea con estas reglas.

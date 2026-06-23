@@ -46,6 +46,7 @@ pub const REASON_KEYWORD_MATCHED: &str = "keyword_matched";
 pub const REASON_NO_RESOLUTION: &str = "no_resolution";
 pub const REASON_MAX_ID_ATTEMPTS: &str = "max_identification_attempts";
 pub const REASON_CRITICAL_TOOL_FAILURE: &str = "critical_tool_failure";
+pub const REASON_URGENT_REACTIVATION: &str = "urgent_reactivation_handoff";
 
 const FALLBACK_FAREWELL: &str = "Te derivo con un compañero del equipo para que te atienda.";
 

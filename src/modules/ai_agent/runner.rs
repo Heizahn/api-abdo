@@ -406,6 +406,64 @@ fn value_f64(value: &serde_json::Value, keys: &[&str]) -> Option<f64> {
 
 /// Respuesta determinística para el caso más sensible: `report_payment` ya
 /// terminó OK y el texto del LLM salió contaminado con meta-instrucciones.
+fn latest_report_payment_log(tool_logs: &[AiToolCallLog]) -> Option<&AiToolCallLog> {
+    tool_logs
+        .iter()
+        .rev()
+        .find(|t| t.tool_name == "report_payment")
+}
+
+fn safe_failed_report_payment_response(tool_logs: &[AiToolCallLog]) -> Option<String> {
+    let log = latest_report_payment_log(tool_logs)?;
+    if log.success {
+        return None;
+    }
+
+    let error = log.error.as_deref().unwrap_or("unknown_error");
+    let reference = value_str(&log.args, &["reference"]);
+    let amount = value_f64(&log.args, &["amount_bs"]);
+
+    let mut lines = Vec::new();
+    lines.push("No pude registrar el pago todavía.".to_string());
+
+    if error.starts_with("destination_bank_mismatch") {
+        lines.push("Los datos del banco destino del comprobante no coinciden con la cuenta de pago configurada.".to_string());
+        lines.push(
+            "Por favor confirma si pagaste a la cuenta correcta o envíame el comprobante correcto."
+                .to_string(),
+        );
+    } else if error.starts_with("issuing_bank_id_invalid") {
+        lines.push(
+            "El banco desde donde salió el pago no quedó validado correctamente.".to_string(),
+        );
+        lines.push("Confírmame exactamente desde qué banco realizaste el pago.".to_string());
+    } else if error.starts_with("issuing_bank_not_recognized")
+        || error.starts_with("issuing_bank_ambiguous")
+    {
+        lines.push("No pude confirmar el banco desde donde realizaste el pago.".to_string());
+        lines.push("Indícame el banco emisor exacto para intentarlo nuevamente.".to_string());
+    } else if error.starts_with("reference_required") {
+        lines.push("Me falta la referencia del comprobante.".to_string());
+    } else if error.starts_with("amount_required") {
+        lines.push("Me falta el monto del comprobante.".to_string());
+    } else if error.starts_with("payment_date_required") {
+        lines.push("Me falta la fecha que aparece en el comprobante.".to_string());
+    } else {
+        lines.push(
+            "Hay un dato del comprobante que necesito validar antes de continuar.".to_string(),
+        );
+    }
+
+    if let Some(amount) = amount {
+        lines.push(format!("- Monto leído: Bs. {}", format_bs_amount(amount)));
+    }
+    if let Some(reference) = reference {
+        lines.push(format!("- Referencia leída: {}", reference));
+    }
+
+    Some(lines.join("\n"))
+}
+
 fn safe_report_payment_response(tool_logs: &[AiToolCallLog]) -> Option<String> {
     let log = tool_logs
         .iter()
@@ -1089,12 +1147,14 @@ pub async fn run_turn(
                     iter,
                     text.chars().take(200).collect::<String>(),
                 );
-                response_text = safe_report_payment_response(&tool_call_logs).or_else(|| {
-                    Some(
-                        "Disculpá, tuve un problema redactando la respuesta. Ya estoy revisando tu caso."
-                            .to_string(),
-                    )
-                });
+                response_text = safe_report_payment_response(&tool_call_logs)
+                    .or_else(|| safe_failed_report_payment_response(&tool_call_logs))
+                    .or_else(|| {
+                        Some(
+                            "Disculpá, tuve un problema redactando la respuesta. Ya estoy revisando tu caso."
+                                .to_string(),
+                        )
+                    });
                 break 'turn;
             }
 
@@ -1373,6 +1433,13 @@ pub async fn run_turn(
         );
     }
 
+    if let Some(safe_failed) = safe_failed_report_payment_response(&tool_call_logs) {
+        tracing::warn!(
+            "[ai_agent.runner] report_payment fallido detectado al cierre — usando respuesta segura"
+        );
+        response_text = Some(safe_failed);
+    }
+
     // Defensa final: si cualquier path de síntesis dejó pasar meta-lenguaje
     // interno, no lo exponemos al cliente.
     if response_text
@@ -1382,12 +1449,14 @@ pub async fn run_turn(
         tracing::warn!(
             "[ai_agent.runner] respuesta final contenía fuga meta/thinking — reemplazando por fallback seguro"
         );
-        response_text = safe_report_payment_response(&tool_call_logs).or_else(|| {
-            Some(
-                "Disculpá, tuve un problema redactando la respuesta. Ya estoy revisando tu caso."
-                    .to_string(),
-            )
-        });
+        response_text = safe_report_payment_response(&tool_call_logs)
+            .or_else(|| safe_failed_report_payment_response(&tool_call_logs))
+            .or_else(|| {
+                Some(
+                    "Disculpá, tuve un problema redactando la respuesta. Ya estoy revisando tu caso."
+                        .to_string(),
+                )
+            });
     }
 
     // Fallback honesto: solo si ni la síntesis pudo redactar. NO promete un
@@ -1505,7 +1574,8 @@ mod text_tool_invocation_tests {
     use super::{
         confirms_ticket_created_without_success, detect_text_tool_invocations,
         looks_like_meta_output_leak, promises_internal_transfer_without_success,
-        safe_report_payment_response, strip_text_tool_invocations,
+        safe_failed_report_payment_response, safe_report_payment_response,
+        strip_text_tool_invocations,
     };
     use crate::models::ai_agent::AiToolCallLog;
 
@@ -1527,6 +1597,17 @@ mod text_tool_invocation_tests {
             result_summary: result.to_string(),
             success: true,
             error: None,
+            duration_ms: 10,
+        }
+    }
+
+    fn failed_report_payment_log(args: serde_json::Value, error: &str) -> AiToolCallLog {
+        AiToolCallLog {
+            tool_name: "report_payment".to_string(),
+            args,
+            result_summary: "{}".to_string(),
+            success: false,
+            error: Some(error.to_string()),
             duration_ms: 10,
         }
     }
@@ -1667,6 +1748,25 @@ mod text_tool_invocation_tests {
         assert!(text.contains("- Referencia: 005947453020"));
         assert!(text.contains("- Estado: pendiente de aprobación"));
         assert!(!looks_like_meta_output_leak(&text));
+    }
+
+    #[test]
+    fn safe_failed_report_payment_response_formats_destination_mismatch() {
+        let logs = [failed_report_payment_log(
+            serde_json::json!({
+                "amount_bs": 2430.0,
+                "reference": "1134146101"
+            }),
+            "destination_bank_mismatch: el comprobante dice 'BANCO DE VENEZUELA' pero la cuenta del proveedor está en 'Tesoro'",
+        )];
+
+        let text = safe_failed_report_payment_response(&logs).unwrap();
+
+        assert!(text.contains("No pude registrar el pago"));
+        assert!(text.contains("banco destino"));
+        assert!(text.contains("- Monto leído: Bs. 2.430,00"));
+        assert!(text.contains("- Referencia leída: 1134146101"));
+        assert!(!text.contains("Pago registrado"));
     }
 
     #[test]

@@ -1262,6 +1262,21 @@ struct RequestHumanArgs {
     reason: Option<String>,
 }
 
+fn looks_like_urgent_reactivation(reason: &str) -> bool {
+    let normalized = normalize_bank_lookup_text(reason);
+    let has_reactivation = ["reactiv", "suspend", "corte", "servicio", "internet"]
+        .iter()
+        .any(|needle| normalized.contains(needle));
+    let has_urgency = ["urgent", "prioridad", "pronto", "rapido", "rapida"]
+        .iter()
+        .any(|needle| normalized.contains(needle));
+    let has_payment_context = ["pago", "pag", "comprobante", "cobranza", "saldo", "deuda"]
+        .iter()
+        .any(|needle| normalized.contains(needle));
+
+    has_reactivation && (has_urgency || has_payment_context)
+}
+
 async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
     let parsed: RequestHumanArgs =
         serde_json::from_value(args).unwrap_or(RequestHumanArgs { reason: None });
@@ -1287,6 +1302,17 @@ async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) ->
         Some(trimmed_reason)
     };
 
+    let escalation_reason = if looks_like_urgent_reactivation(trimmed_reason) {
+        escalation::REASON_URGENT_REACTIVATION
+    } else {
+        escalation::REASON_REQUEST_HUMAN
+    };
+    let handoff_priority = if escalation_reason == escalation::REASON_URGENT_REACTIVATION {
+        "urgent"
+    } else {
+        "normal"
+    };
+
     // El runner enviará el texto final del modelo como respuesta a este turno;
     // el helper NO manda farewell para no duplicar mensajes (el modelo va a
     // armar la despedida basado en `farewell_to_human` que ve en personality).
@@ -1294,7 +1320,7 @@ async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) ->
         &ctx.state,
         &conv_id,
         &ctx.agent_snapshot,
-        escalation::REASON_REQUEST_HUMAN,
+        escalation_reason,
         note,
         false,
     )
@@ -1305,6 +1331,9 @@ async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) ->
             "ok": true,
             "mode": "live",
             "reason": reason,
+            "escalation_reason": escalation_reason,
+            "handoff_priority": handoff_priority,
+            "handoff_type": if handoff_priority == "urgent" { "reactivation_post_payment" } else { "general" },
             "ai_disabled": true,
         }),
         started,
@@ -2158,6 +2187,52 @@ async fn load_banks_for_lookup(
         .collect())
 }
 
+fn normalize_bank_lookup_text(input: &str) -> String {
+    input
+        .chars()
+        .map(|ch| match ch {
+            'á' | 'à' | 'ä' | 'â' | 'Á' | 'À' | 'Ä' | 'Â' => 'a',
+            'é' | 'è' | 'ë' | 'ê' | 'É' | 'È' | 'Ë' | 'Ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' | 'Í' | 'Ì' | 'Ï' | 'Î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' | 'Ó' | 'Ò' | 'Ö' | 'Ô' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' | 'Ú' | 'Ù' | 'Ü' | 'Û' => 'u',
+            'ñ' | 'Ñ' => 'n',
+            ch if ch.is_ascii_alphanumeric() => ch.to_ascii_lowercase(),
+            _ => ' ',
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn bank_name_matches_query(bank_name: &str, query: &str) -> bool {
+    let normalized_name = normalize_bank_lookup_text(bank_name);
+    let normalized_query = normalize_bank_lookup_text(query);
+    if normalized_query.is_empty() {
+        return true;
+    }
+
+    if normalized_name.contains(&normalized_query) {
+        return true;
+    }
+
+    // Alias operativo: BNC = Banco Nacional de Crédito. Evita confundirlo con
+    // Banco Venezolano de Crédito porque exige el token "nacional".
+    if normalized_query == "bnc" {
+        return normalized_name.contains("banco")
+            && normalized_name.contains("nacional")
+            && normalized_name.contains("credito");
+    }
+
+    // Búsqueda por tokens para tolerar sufijos legales y ordenamientos menores.
+    let query_tokens: Vec<&str> = normalized_query.split_whitespace().collect();
+    !query_tokens.is_empty()
+        && query_tokens
+            .iter()
+            .all(|token| normalized_name.contains(token))
+}
+
 fn filter_banks(items: Vec<Value>, args: &ListBanksArgs) -> Vec<Value> {
     if args.prefix.is_none() && args.name.is_none() {
         return items;
@@ -2166,7 +2241,7 @@ fn filter_banks(items: Vec<Value>, args: &ListBanksArgs) -> Vec<Value> {
         .into_iter()
         .filter(|item| {
             let code = item["bank_code"].as_str().unwrap_or("").to_lowercase();
-            let name = item["bank_name"].as_str().unwrap_or("").to_lowercase();
+            let name = item["bank_name"].as_str().unwrap_or("");
             let prefix_match = args
                 .prefix
                 .as_ref()
@@ -2175,7 +2250,7 @@ fn filter_banks(items: Vec<Value>, args: &ListBanksArgs) -> Vec<Value> {
             let name_match = args
                 .name
                 .as_ref()
-                .map(|n| name.contains(&n.to_lowercase()))
+                .map(|n| bank_name_matches_query(name, n))
                 .unwrap_or(true);
             prefix_match && name_match
         })
@@ -2238,6 +2313,52 @@ async fn exec_list_banks(args: Value, ctx: &ToolContext, started: Instant) -> To
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bank_items_fixture() -> Vec<Value> {
+        vec![
+            json!({ "id": "000000000000000000000001", "bank_name": "BANCO DE VENEZUELA", "bank_code": "0102" }),
+            json!({ "id": "000000000000000000000002", "bank_name": "BANCO NACIONAL DE CREDITO", "bank_code": "0191" }),
+            json!({ "id": "000000000000000000000003", "bank_name": "BANCO VENEZOLANO DE CREDITO", "bank_code": "0104" }),
+        ]
+    }
+
+    #[test]
+    fn filter_banks_matches_bnc_alias_without_confusing_other_credit_banks() {
+        let filtered = filter_banks(
+            bank_items_fixture(),
+            &ListBanksArgs {
+                prefix: None,
+                name: Some("BNC".to_string()),
+            },
+        );
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0]["bank_code"], "0191");
+    }
+
+    #[test]
+    fn filter_banks_matches_credito_without_accent() {
+        let filtered = filter_banks(
+            bank_items_fixture(),
+            &ListBanksArgs {
+                prefix: None,
+                name: Some("Banco Nacional de Crédito".to_string()),
+            },
+        );
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0]["bank_code"], "0191");
+    }
+
+    #[test]
+    fn urgent_reactivation_reason_is_detected_for_front_signal() {
+        assert!(looks_like_urgent_reactivation(
+            "Cliente pagó y necesita reactivación urgente del servicio"
+        ));
+        assert!(!looks_like_urgent_reactivation(
+            "Cliente quiere hablar con un asesor"
+        ));
+    }
 
     fn make_zone(
         display_name: &str,
@@ -3793,13 +3914,17 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         match banks.iter().find(|(oid, _, _)| *oid == bank_oid) {
             Some((_, name, code)) => Some(format!("{} - {}", code, name.to_uppercase())),
             None => {
-                // ObjectId válido pero no existe en el catálogo — el LLM probablemente
-                // copió el ejemplo del schema. Fallback graceful: bank_origin queda vacío.
                 tracing::warn!(
-                    "[ai_agent.report_payment] issuing_bank_id={} no existe en catálogo; bank_origin quedará vacío",
+                    "[ai_agent.report_payment] issuing_bank_id={} no existe en catálogo; rechazando report_payment",
                     bank_oid.to_hex()
                 );
-                None
+                return ToolResult::err(
+                    format!(
+                        "issuing_bank_id_invalid: '{}' no existe en el catálogo de bancos. Usá list_banks y pasá el id exacto del banco emisor.",
+                        bank_oid.to_hex()
+                    ),
+                    started,
+                );
             }
         }
     } else {
