@@ -374,6 +374,7 @@ Resultados de prueba en dev:
 - El warning `model_id 'qwen/qwen3.7-plus' no reconocido — usando RATES_DEFAULT` afecta solo estimación de costos/métricas; no implica que Qwen no se haya usado.
 - Decisión nueva: los modelos OpenRouter deben configurarse globalmente desde `PATCH /v1/auth-user/whatsapp/ai-agent/config`, igual que la transcripción, con un modelo para texto y otro para visión/imagen que apliquen a todos los agentes.
 - Backend `0.3.108`: configuración global por modalidad implementada en `AiConfig`, `GET/PATCH /config` y selección runtime del runner.
+- Backend `0.3.109`: límite de `system_prompt` de agentes AI subido de 20.000 a 30.000 caracteres para permitir el prompt completo de Andrea/Pagos.
 
 Pendiente inmediato:
 

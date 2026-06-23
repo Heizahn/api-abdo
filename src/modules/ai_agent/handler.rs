@@ -63,7 +63,7 @@ const AI_AGENT_ROLE: f32 = 99.0;
 
 const LABEL_MAX_LEN: usize = 100;
 const DESCRIPTION_MAX_LEN: usize = 500;
-const PROMPT_MAX_LEN: usize = 20_000;
+const PROMPT_MAX_LEN: usize = 30_000;
 const FAQ_QUESTION_MAX_LEN: usize = 500;
 const FAQ_ANSWER_MAX_LEN: usize = 4_000;
 const FAQ_TAG_MAX_LEN: usize = 64;
