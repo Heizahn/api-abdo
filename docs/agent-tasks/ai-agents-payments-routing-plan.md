@@ -399,6 +399,11 @@ Pendiente inmediato:
 - [ ] Ajustar prompt de Sofía: imagen sola con posible comprobante → `transfer_to_agent` a Pagos/Andrea sin mensaje visible.
 - [ ] Ajustar prompt de Andrea: extraer datos visibles del comprobante y pedir solo datos faltantes.
 - [ ] Ajustar prompt de Andrea: “Beneficiario/Banco destino” nunca es `issuing_bank_id`; si falta origen, preguntar solo “¿Desde qué banco pagaste?”.
+- [ ] Revisar/mejorar `list_banks` y catálogo/aliases para bancos comunes:
+  - `BNC` → `Banco Nacional de Crédito`.
+  - `Banco Nacional de Credito` sin tilde → mismo banco.
+  - Confirmar código oficial de BNC y evitar confundirlo con `0102` Banco de Venezuela.
+  - Si banco declarado por el cliente y prefijo/código bancario entran en conflicto, Andrea NO debe registrar; debe pedir una aclaratoria única y precisa.
 - [ ] Probar `qwen/qwen3.7-plus` con comprobantes reales en dev.
 - [ ] Decidir política final de modelos: si backend decide modelos, la UI no debe mostrar `model_id` como editable; mostrar solo temperatura/tokens/timeout o texto “modelo gestionado por backend”.
 - [ ] Si se mantiene modelo por agente, habilitar UI/API operativa para cambiar `model.model_id` sin confusión.
