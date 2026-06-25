@@ -559,6 +559,156 @@ fn should_force_urgent_reactivation_handoff(
             .is_some_and(|text| response_promises_unsupported_reactivation_action(text, tool_logs))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForcedHumanHandoffKind {
+    Support,
+    Sales,
+    General,
+}
+
+impl ForcedHumanHandoffKind {
+    fn reason(self, user_message: &str) -> String {
+        match self {
+            Self::Support => format!("Área: soporte. Mensaje: '{}'.", user_message.trim()),
+            Self::Sales => format!("Área: ventas. Mensaje: '{}'.", user_message.trim()),
+            Self::General => format!(
+                "Solicitud de atención humana. Mensaje: '{}'.",
+                user_message.trim()
+            ),
+        }
+    }
+
+    fn client_message(self) -> String {
+        match self {
+            Self::Support => "Te comunico con soporte para revisar tu caso. Te contactarán en breve por este mismo chat.".to_string(),
+            Self::Sales => "Te comunico con un asesor comercial para ayudarte. Te contactarán en breve por este mismo chat.".to_string(),
+            Self::General => "Te comunico con un asesor del equipo. Te contactarán en breve por este mismo chat.".to_string(),
+        }
+    }
+}
+
+fn text_has_support_context(text: &str) -> bool {
+    let normalized = normalize_spanish_text(text);
+    [
+        "soporte",
+        "falla tecnica",
+        "tecnico",
+        "sin internet",
+        "no tengo internet",
+        "no tengo servicio",
+        "luz roja",
+        "router",
+        "onu",
+        "fibra",
+        "cable",
+        "lentitud",
+        "lento",
+        "no navega",
+        "sin conexion",
+        "problema con tu internet",
+        "revisar tu caso",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+fn text_has_sales_context(text: &str) -> bool {
+    let normalized = normalize_spanish_text(text);
+    [
+        "ventas",
+        "comercial",
+        "contratar",
+        "instalacion",
+        "instalar",
+        "cobertura",
+        "planes",
+        "asesor comercial",
+        "servicio nuevo",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+fn response_promises_human_handoff_without_tool(
+    text: &str,
+    tool_logs: &[AiToolCallLog],
+) -> Option<ForcedHumanHandoffKind> {
+    if has_successful_tool_call(tool_logs, "request_human")
+        || has_successful_tool_call(tool_logs, "create_ticket")
+    {
+        return None;
+    }
+
+    let normalized = normalize_spanish_text(text);
+    let mentions_human_target = [
+        "asesor",
+        "humano",
+        "soporte",
+        "tecnico",
+        "comercial",
+        "equipo",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker));
+    let promises_contact_or_handoff = [
+        "te comunico",
+        "comunico con",
+        "te conecto",
+        "conectar",
+        "te paso",
+        "pasarte",
+        "deriv",
+        "transfer",
+        "te contactaran",
+        "contactaran en breve",
+        "por este mismo chat",
+        "revisar tu caso",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker));
+
+    if !(mentions_human_target && promises_contact_or_handoff) {
+        return None;
+    }
+
+    if text_has_support_context(text) {
+        Some(ForcedHumanHandoffKind::Support)
+    } else if text_has_sales_context(text) {
+        Some(ForcedHumanHandoffKind::Sales)
+    } else {
+        Some(ForcedHumanHandoffKind::General)
+    }
+}
+
+fn should_force_human_handoff(
+    user_message: &str,
+    response_text: Option<&str>,
+    tool_logs: &[AiToolCallLog],
+) -> Option<ForcedHumanHandoffKind> {
+    if has_successful_tool_call(tool_logs, "request_human")
+        || has_successful_tool_call(tool_logs, "create_ticket")
+    {
+        return None;
+    }
+
+    if let Some(kind) =
+        response_text.and_then(|text| response_promises_human_handoff_without_tool(text, tool_logs))
+    {
+        return Some(kind);
+    }
+
+    // Si la intención del mensaje actual es soporte/ventas y el agente no hizo
+    // el handoff real, convertimos el turno en derivación efectiva para que el
+    // front reciba IA_PAUSADA + razón visual. Esto evita promesas sin acción.
+    if text_has_support_context(user_message) {
+        Some(ForcedHumanHandoffKind::Support)
+    } else if text_has_sales_context(user_message) {
+        Some(ForcedHumanHandoffKind::Sales)
+    } else {
+        None
+    }
+}
+
 fn urgent_reactivation_handoff_client_message() -> String {
     if is_business_hours_caracas() {
         "Entiendo la urgencia. Ya dejé tu caso derivado a un asesor de cobranzas para revisar la reactivación lo antes posible.".to_string()
@@ -1288,6 +1438,7 @@ pub async fn run_turn(
     // Cuenta reintentos por promesa de transferencia interna sin tool OK.
     let mut false_transfer_retries: u32 = 0;
     let mut forced_urgent_reactivation_handoff = false;
+    let mut forced_human_handoff = false;
 
     'turn: for iter in 0..MAX_ITERATIONS {
         let req = ChatCompletionRequest {
@@ -1842,6 +1993,42 @@ pub async fn run_turn(
         });
     }
 
+    if !forced_urgent_reactivation_handoff {
+        if let Some(kind) =
+            should_force_human_handoff(user_message, response_text.as_deref(), &tool_call_logs)
+        {
+            tracing::warn!(
+                "[ai_agent.runner] promesa/intent de handoff humano sin request_human — ejecutando request_human determinístico ({:?})",
+                kind
+            );
+            let args = serde_json::json!({ "reason": kind.reason(user_message) });
+            let result = execute_tool("request_human", args.clone(), tool_ctx).await;
+            if result.success {
+                state_patches_acc.extend(result.state_patches.iter().cloned());
+                escalated = true;
+                escalation_reason = Some("tool:request_human".to_string());
+                forced_human_handoff = true;
+                response_text = Some(kind.client_message());
+            } else {
+                state_patches_acc.push(crate::models::whatsapp::StatePatch::AddFailedAttempt {
+                    tool: "request_human".to_string(),
+                    error: result
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "unknown_error".into()),
+                });
+            }
+            tool_call_logs.push(AiToolCallLog {
+                tool_name: "request_human".to_string(),
+                args,
+                result_summary: truncate_summary(&result.data),
+                success: result.success,
+                error: result.error,
+                duration_ms: result.duration_ms,
+            });
+        }
+    }
+
     // Fallback honesto: solo si ni la síntesis pudo redactar. NO promete un
     // traspaso (este path no escala de verdad) — pide reformular.
     if response_text.is_none() {
@@ -1913,6 +2100,8 @@ pub async fn run_turn(
                 "tool:request_human:{}",
                 crate::modules::ai_agent::escalation::REASON_URGENT_REACTIVATION
             ))
+        } else if forced_human_handoff {
+            Some("tool:request_human".to_string())
         } else {
             escalation_reason
         },
@@ -1965,9 +2154,11 @@ mod text_tool_invocation_tests {
         confirms_ticket_created_without_success, customer_requests_urgent_reactivation,
         detect_text_tool_invocations, looks_like_meta_output_leak,
         promises_internal_transfer_without_success, report_payment_bank_retry_args,
+        response_promises_human_handoff_without_tool,
         response_promises_unsupported_reactivation_action, safe_failed_report_payment_response,
-        safe_report_payment_response, should_force_urgent_reactivation_handoff,
-        strip_text_tool_invocations, unique_bank_from_list_banks_summary,
+        safe_report_payment_response, should_force_human_handoff,
+        should_force_urgent_reactivation_handoff, strip_text_tool_invocations,
+        unique_bank_from_list_banks_summary, ForcedHumanHandoffKind,
     };
     use crate::models::ai_agent::AiToolCallLog;
     use crate::models::ai_agent::{AiAgent, AiAgentPurpose};
@@ -2234,6 +2425,56 @@ mod text_tool_invocation_tests {
             &["pago".to_string()],
             &logs,
         ));
+    }
+
+    #[test]
+    fn human_handoff_promise_without_tool_is_detected_as_support() {
+        let text = "Te comunico con soporte para revisar tu caso. Te contactarán en breve por este mismo chat.";
+        assert_eq!(
+            response_promises_human_handoff_without_tool(text, &[]),
+            Some(ForcedHumanHandoffKind::Support)
+        );
+    }
+
+    #[test]
+    fn support_intent_forces_request_human_when_tool_was_not_called() {
+        assert_eq!(
+            should_force_human_handoff("No Tengo internet", Some("Te comunico con soporte."), &[]),
+            Some(ForcedHumanHandoffKind::Support)
+        );
+    }
+
+    #[test]
+    fn sales_intent_forces_request_human_when_tool_was_not_called() {
+        assert_eq!(
+            should_force_human_handoff(
+                "Quiero contratar internet para mi casa",
+                Some("Te comunico con un asesor comercial."),
+                &[],
+            ),
+            Some(ForcedHumanHandoffKind::Sales)
+        );
+    }
+
+    #[test]
+    fn human_handoff_not_forced_after_request_human_success() {
+        let logs = [tool_log("request_human", true)];
+        assert_eq!(
+            should_force_human_handoff(
+                "No Tengo internet",
+                Some("Te comunico con soporte."),
+                &logs
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn payment_text_does_not_force_general_handoff() {
+        assert_eq!(
+            should_force_human_handoff("Saldo", Some("Tu saldo es Bs. 10"), &[]),
+            None
+        );
     }
 
     #[test]
