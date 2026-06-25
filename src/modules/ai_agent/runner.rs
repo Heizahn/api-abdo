@@ -381,6 +381,184 @@ fn looks_like_meta_output_leak(text: &str) -> bool {
     .any(|marker| lower.contains(marker))
 }
 
+fn normalize_spanish_text(text: &str) -> String {
+    text.to_lowercase()
+        .replace(['á', 'à', 'ä', 'â'], "a")
+        .replace(['é', 'è', 'ë', 'ê'], "e")
+        .replace(['í', 'ì', 'ï', 'î'], "i")
+        .replace(['ó', 'ò', 'ö', 'ô'], "o")
+        .replace(['ú', 'ù', 'ü', 'û'], "u")
+        .replace('ñ', "n")
+}
+
+fn customer_requests_urgent_reactivation(text: &str) -> bool {
+    let normalized = normalize_spanish_text(text);
+    let has_reactivation_context = [
+        "reactiv",
+        "suspend",
+        "corte",
+        "cortaron",
+        "sin internet",
+        "no tengo internet",
+        "internet",
+        "servicio",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker));
+    if !has_reactivation_context {
+        return false;
+    }
+
+    let has_direct_urgency = [
+        "urgent",
+        "urgencia",
+        "necesito",
+        "por favor",
+        "rapido",
+        "rapida",
+        "pronto",
+        "prioridad",
+        "sin internet",
+        "no tengo internet",
+        "me suspendieron",
+        "reactivenme",
+        "reactiveme",
+        "reactivarme",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker));
+    if has_direct_urgency {
+        return true;
+    }
+
+    let has_payment_context = ["pago", "pague", "pagado", "comprobante", "aprobado"]
+        .iter()
+        .any(|marker| normalized.contains(marker));
+    let asks_timing = [
+        "cuanto tarda",
+        "cuanto falta",
+        "cuando",
+        "ya me reactivaron",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker));
+
+    has_payment_context && asks_timing
+}
+
+fn response_promises_unsupported_reactivation_action(
+    text: &str,
+    tool_logs: &[AiToolCallLog],
+) -> bool {
+    if has_successful_tool_call(tool_logs, "request_human")
+        || has_successful_tool_call(tool_logs, "create_ticket")
+    {
+        return false;
+    }
+
+    let normalized = normalize_spanish_text(text);
+    let has_reactivation_context = [
+        "reactiv", "suspend", "servicio", "internet", "cobranza", "pago",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker));
+    if !has_reactivation_context {
+        return false;
+    }
+
+    let unsupported_internal_action = [
+        "prioridad",
+        "monitore",
+        "monitorear",
+        "monitoreando",
+        "avisare",
+        "te aviso",
+        "te informo",
+        "te mantendre informado",
+        "pendiente de tu caso",
+        "menos de 30",
+        "30 minuto",
+        "acelerar",
+        "marcare",
+        "marco como",
+        "lo reporto",
+        "gestionare",
+        "voy a gestionar",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker));
+
+    let unsupported_handoff_promise = ["asesor", "humano", "compañero", "companero"]
+        .iter()
+        .any(|target| normalized.contains(target))
+        && ["deriv", "pasar", "transfer", "conectar"]
+            .iter()
+            .any(|verb| normalized.contains(verb));
+
+    unsupported_internal_action || unsupported_handoff_promise
+}
+
+fn has_payment_context_for_urgent_handoff(
+    agent: &AiAgent,
+    user_message: &str,
+    burst_intents: &[String],
+    tool_logs: &[AiToolCallLog],
+) -> bool {
+    matches!(
+        agent.purpose,
+        Some(crate::models::ai_agent::AiAgentPurpose::Pagos)
+    ) || burst_intents.iter().any(|i| i == "pago")
+        || tool_logs
+            .iter()
+            .any(|t| t.tool_name == "report_payment" && t.success)
+        || ["pago", "pague", "pagado", "comprobante"]
+            .iter()
+            .any(|marker| normalize_spanish_text(user_message).contains(marker))
+}
+
+fn should_force_urgent_reactivation_handoff(
+    agent: &AiAgent,
+    user_message: &str,
+    response_text: Option<&str>,
+    burst_intents: &[String],
+    tool_logs: &[AiToolCallLog],
+) -> bool {
+    if has_successful_tool_call(tool_logs, "request_human")
+        || has_successful_tool_call(tool_logs, "create_ticket")
+    {
+        return false;
+    }
+
+    if !has_payment_context_for_urgent_handoff(agent, user_message, burst_intents, tool_logs) {
+        return false;
+    }
+
+    customer_requests_urgent_reactivation(user_message)
+        || response_text
+            .is_some_and(|text| response_promises_unsupported_reactivation_action(text, tool_logs))
+}
+
+fn urgent_reactivation_handoff_client_message() -> String {
+    if is_business_hours_caracas() {
+        "Entiendo la urgencia. Ya dejé tu caso derivado a un asesor de cobranzas para revisar la reactivación lo antes posible.".to_string()
+    } else {
+        "Entiendo la urgencia. Dejé tu caso derivado a un asesor de cobranzas para revisión en el próximo horario de atención.".to_string()
+    }
+}
+
+fn is_business_hours_caracas() -> bool {
+    use chrono::{Datelike, Timelike, Weekday};
+
+    let now = crate::utils::timezone::VenezuelaDateTime::now().in_venezuela();
+    match now.weekday() {
+        Weekday::Mon | Weekday::Tue | Weekday::Wed | Weekday::Thu | Weekday::Fri => {
+            (8..17).contains(&now.hour())
+        }
+        Weekday::Sat => (8..12).contains(&now.hour()),
+        Weekday::Sun => false,
+    }
+}
+
 fn format_bs_amount(value: f64) -> String {
     let raw = format!("{:.2}", value.abs());
     let (int_part, decimal_part) = raw.split_once('.').unwrap_or((raw.as_str(), "00"));
@@ -1088,6 +1266,7 @@ pub async fn run_turn(
     let mut false_ticket_retries: u32 = 0;
     // Cuenta reintentos por promesa de transferencia interna sin tool OK.
     let mut false_transfer_retries: u32 = 0;
+    let mut forced_urgent_reactivation_handoff = false;
 
     'turn: for iter in 0..MAX_ITERATIONS {
         let req = ChatCompletionRequest {
@@ -1596,6 +1775,52 @@ pub async fn run_turn(
             });
     }
 
+    // Defensa final: reactivación urgente post-pago no puede quedar en promesas
+    // vagas de prioridad/monitoreo. Si el cliente pidió reactivación urgente o
+    // el modelo prometió una acción interna sin `request_human`, hacemos el
+    // handoff real desde backend y reemplazamos el texto por un copy seguro.
+    if should_force_urgent_reactivation_handoff(
+        agent,
+        user_message,
+        response_text.as_deref(),
+        burst_intents,
+        &tool_call_logs,
+    ) {
+        tracing::warn!(
+            "[ai_agent.runner] reactivación urgente post-pago sin handoff real — ejecutando request_human determinístico"
+        );
+        let args = serde_json::json!({
+            "reason": "Cliente solicita reactivación urgente post-pago; derivación humana requerida"
+        });
+        let result = execute_tool("request_human", args.clone(), tool_ctx).await;
+        if result.success {
+            state_patches_acc.extend(result.state_patches.iter().cloned());
+            escalated = true;
+            escalation_reason = Some(format!(
+                "tool:request_human:{}",
+                crate::modules::ai_agent::escalation::REASON_URGENT_REACTIVATION
+            ));
+            forced_urgent_reactivation_handoff = true;
+            response_text = Some(urgent_reactivation_handoff_client_message());
+        } else {
+            state_patches_acc.push(crate::models::whatsapp::StatePatch::AddFailedAttempt {
+                tool: "request_human".to_string(),
+                error: result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "unknown_error".into()),
+            });
+        }
+        tool_call_logs.push(AiToolCallLog {
+            tool_name: "request_human".to_string(),
+            args,
+            result_summary: truncate_summary(&result.data),
+            success: result.success,
+            error: result.error,
+            duration_ms: result.duration_ms,
+        });
+    }
+
     // Fallback honesto: solo si ni la síntesis pudo redactar. NO promete un
     // traspaso (este path no escala de verdad) — pide reformular.
     if response_text.is_none() {
@@ -1662,7 +1887,14 @@ pub async fn run_turn(
         cost_usd_estimate,
         latency_ms,
         escalated,
-        escalation_reason,
+        escalation_reason: if forced_urgent_reactivation_handoff {
+            Some(format!(
+                "tool:request_human:{}",
+                crate::modules::ai_agent::escalation::REASON_URGENT_REACTIVATION
+            ))
+        } else {
+            escalation_reason
+        },
         finish_reason,
         transfer,
         state_patches: state_patches_acc,
@@ -1709,13 +1941,15 @@ mod extract_message_text_tests {
 #[cfg(test)]
 mod text_tool_invocation_tests {
     use super::{
-        confirms_ticket_created_without_success, detect_text_tool_invocations,
-        looks_like_meta_output_leak, promises_internal_transfer_without_success,
-        report_payment_bank_retry_args, safe_failed_report_payment_response,
-        safe_report_payment_response, strip_text_tool_invocations,
-        unique_bank_from_list_banks_summary,
+        confirms_ticket_created_without_success, customer_requests_urgent_reactivation,
+        detect_text_tool_invocations, looks_like_meta_output_leak,
+        promises_internal_transfer_without_success, report_payment_bank_retry_args,
+        response_promises_unsupported_reactivation_action, safe_failed_report_payment_response,
+        safe_report_payment_response, should_force_urgent_reactivation_handoff,
+        strip_text_tool_invocations, unique_bank_from_list_banks_summary,
     };
     use crate::models::ai_agent::AiToolCallLog;
+    use crate::models::ai_agent::{AiAgent, AiAgentPurpose};
 
     fn tool_log(tool_name: &str, success: bool) -> AiToolCallLog {
         AiToolCallLog {
@@ -1747,6 +1981,60 @@ mod text_tool_invocation_tests {
             success: false,
             error: Some(error.to_string()),
             duration_ms: 10,
+        }
+    }
+
+    fn minimal_agent_with_purpose(purpose: Option<AiAgentPurpose>) -> AiAgent {
+        let now = mongodb::bson::DateTime::now();
+        AiAgent {
+            id: None,
+            label: "Andrea".to_string(),
+            description: String::new(),
+            is_receptionist: false,
+            workspace_ids: Vec::new(),
+            enabled: true,
+            mode: crate::models::ai_agent::AiAgentMode::Live,
+            ai_user_id: "ai".to_string(),
+            schedule: crate::models::ai_agent::AiSchedule {
+                timezone: "America/Caracas".to_string(),
+                always_on: true,
+                weekdays: vec![1, 2, 3, 4, 5, 6, 7],
+                from_hour: 0,
+                to_hour: 23,
+            },
+            model: crate::models::ai_agent::AiModelConfig {
+                provider: "openrouter".to_string(),
+                model_id: "openai/gpt-oss-120b".to_string(),
+                temperature: 0.7,
+                max_tokens: 1000,
+                timeout_seconds: 20,
+                api_key_encrypted: String::new(),
+            },
+            personality: crate::models::ai_agent::AiPersonality {
+                assistant_name: "Andrea".to_string(),
+                locale: "es-VE".to_string(),
+                tone: "warm".to_string(),
+                greeting: String::new(),
+                farewell: String::new(),
+                farewell_to_human: String::new(),
+                forbidden_phrases: Vec::new(),
+            },
+            system_prompt: String::new(),
+            tools: Vec::new(),
+            escalation: crate::models::ai_agent::AiEscalationRules {
+                keywords: Vec::new(),
+                max_turns_without_resolution: 0,
+                qualification_window_turns: 0,
+                max_identification_attempts: 0,
+                escalate_on_critical_tool_failure: true,
+                always_escalate_when_asked: true,
+                default_ticket_category_id: None,
+            },
+            limits: crate::models::ai_agent::AiLimits::defaults(),
+            debounce_seconds: 0,
+            purpose,
+            created_at: now,
+            updated_at: now,
         }
     }
 
@@ -1861,6 +2149,56 @@ mod text_tool_invocation_tests {
                     Should respond with proper message per spec: after successful report_payment ok=true. \
                     Let's produce correct final answer. {monto} {ref}";
         assert!(looks_like_meta_output_leak(text));
+    }
+
+    #[test]
+    fn urgent_reactivation_detects_post_payment_customer_pressure() {
+        assert!(customer_requests_urgent_reactivation(
+            "Ya pagué, necesito urgente que me reactiven el internet"
+        ));
+        assert!(customer_requests_urgent_reactivation(
+            "Cuánto tarda la reactivación si ya mandé el comprobante?"
+        ));
+        assert!(!customer_requests_urgent_reactivation(
+            "Quiero consultar el estado de mi pago"
+        ));
+    }
+
+    #[test]
+    fn unsupported_reactivation_promise_requires_real_handoff() {
+        let text =
+            "Ya marqué tu caso como prioridad y estaré monitoreando la reactivación del servicio.";
+        assert!(response_promises_unsupported_reactivation_action(text, &[]));
+
+        let logs = [tool_log("request_human", true)];
+        assert!(!response_promises_unsupported_reactivation_action(
+            text, &logs
+        ));
+    }
+
+    #[test]
+    fn urgent_reactivation_handoff_is_forced_for_pagos_agent() {
+        let agent = minimal_agent_with_purpose(Some(AiAgentPurpose::Pagos));
+        assert!(should_force_urgent_reactivation_handoff(
+            &agent,
+            "Ya pagué, necesito internet urgente",
+            Some("Lo marco como prioridad y te aviso."),
+            &["pago".to_string()],
+            &[],
+        ));
+    }
+
+    #[test]
+    fn urgent_reactivation_handoff_not_forced_after_request_human() {
+        let agent = minimal_agent_with_purpose(Some(AiAgentPurpose::Pagos));
+        let logs = [tool_log("request_human", true)];
+        assert!(!should_force_urgent_reactivation_handoff(
+            &agent,
+            "Ya pagué, necesito internet urgente",
+            Some("Te derivo con un asesor."),
+            &["pago".to_string()],
+            &logs,
+        ));
     }
 
     #[test]

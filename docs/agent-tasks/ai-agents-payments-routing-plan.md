@@ -376,6 +376,7 @@ Resultados de prueba en dev:
 - Backend `0.3.108`: configuración global por modalidad implementada en `AiConfig`, `GET/PATCH /config` y selección runtime del runner.
 - Backend `0.3.109`: límite de `system_prompt` de agentes AI subido de 20.000 a 30.000 caracteres para permitir el prompt completo de Andrea/Pagos.
 - Backend `0.3.110`: hardening de Fase 5: respuesta segura para `report_payment` fallido, aliases BNC/Banco Nacional de Crédito en `list_banks`, rechazo de `issuing_bank_id` inválido y razón WS `urgent_reactivation_handoff` para derivaciones urgentes.
+- Backend `0.3.112`: guardrail determinístico para reactivación urgente post-pago: si Andrea/Pagos intenta prometer prioridad/monitoreo/tiempos sin `request_human`, el runner ejecuta handoff humano real y reemplaza la respuesta por texto seguro según horario.
 
 Pendiente inmediato:
 
@@ -422,14 +423,16 @@ Motivo: en pruebas dev Andrea respondió correctamente el pago, pero ante mensaj
 Reglas esperadas para Andrea/Pagos:
 
 - [ ] Si el cliente solo pregunta por el estado de reactivación, responder de forma prudente: el pago quedó registrado/aprobado y la reactivación depende del proceso de cobranza/sistema.
-- [ ] Si el cliente expresa urgencia, insistencia o afectación del servicio (`urgente`, `necesito internet`, `me suspendieron`, `reactívenme`, `cuánto tarda`, `ya me reactivaron` repetido), Andrea debe ejecutar handoff humano (`request_human` o mecanismo equivalente), no seguir conversando indefinidamente.
-- [ ] Andrea no debe prometer “marcar prioridad”, “monitorear”, “avisar novedades”, “menos de 30 minutos” ni acciones internas que no pueda ejecutar realmente.
-- [ ] En horario laboral, informar al cliente que el caso será derivado a un asesor para revisión lo antes posible.
-- [ ] Fuera de horario laboral, informar que el caso queda derivado para el próximo horario de atención y no prometer atención inmediata.
-- [ ] Horario laboral inicial: lunes a viernes 08:00–17:00, sábado 08:00–12:00, domingo cerrado.
+- [x] Si el cliente expresa urgencia, insistencia o afectación del servicio (`urgente`, `necesito internet`, `me suspendieron`, `reactívenme`, `cuánto tarda`, `ya me reactivaron` repetido), Andrea debe ejecutar handoff humano (`request_human` o mecanismo equivalente), no seguir conversando indefinidamente.
+  - Backend: si el modelo no lo ejecuta, el runner fuerza `request_human` para casos post-pago/reconfiguración urgente.
+- [x] Andrea no debe prometer “marcar prioridad”, “monitorear”, “avisar novedades”, “menos de 30 minutos” ni acciones internas que no pueda ejecutar realmente.
+  - Backend: detecta esas promesas sin handoff real y las reemplaza por derivación segura.
+- [x] En horario laboral, informar al cliente que el caso será derivado a un asesor para revisión lo antes posible.
+- [x] Fuera de horario laboral, informar que el caso queda derivado para el próximo horario de atención y no prometer atención inmediata.
+- [x] Horario laboral inicial: lunes a viernes 08:00–17:00, sábado 08:00–12:00, domingo cerrado.
 - [x] El backend debe poder emitir un evento/estado de derivación urgente para que el front notifique visualmente al agente humano (`IA_PAUSADA.reason = "urgent_reactivation_handoff"`).
 - [ ] El front debe mostrar/alertar que la IA derivó el caso por reactivación urgente post-pago.
-- [ ] Definir texto estándar cliente en horario laboral y fuera de horario.
+- [x] Definir texto estándar cliente en horario laboral y fuera de horario.
 - [ ] Ajustar el system prompt de Andrea con estas reglas.
 - [ ] Probar con Luis/Humberto: pago registrado/aprobado + cliente pide reactivación urgente → derivación humana y notificación visible en front.
 
