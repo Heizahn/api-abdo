@@ -1034,7 +1034,7 @@ impl From<AiLimits> for AiLimitsDto {
 
 /// Body de `POST /ai-agent/agents`. `label` y `description` son requeridos;
 /// el resto cae a defaults.
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CreateAiAgentRequest {
     pub label: String,
     pub description: String,
@@ -1105,7 +1105,7 @@ pub struct UpdateAiAgentRequest {
     pub debounce_seconds: Option<u32>,
 }
 
-#[derive(Debug, Deserialize, ToSchema, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
 pub struct AiScheduleInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
@@ -1119,7 +1119,7 @@ pub struct AiScheduleInput {
     pub to_hour: Option<u8>,
 }
 
-#[derive(Debug, Deserialize, ToSchema, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
 pub struct AiModelConfigInput {
     #[serde(default, alias = "modelId", skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
@@ -1139,7 +1139,7 @@ pub struct AiModelConfigInput {
     pub api_key: Option<String>,
 }
 
-#[derive(Debug, Deserialize, ToSchema, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
 pub struct AiPersonalityInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant_name: Option<String>,
@@ -1157,7 +1157,7 @@ pub struct AiPersonalityInput {
     pub forbidden_phrases: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct AiToolConfigInput {
     pub name: String,
     pub enabled: bool,
@@ -1168,7 +1168,7 @@ pub struct AiToolConfigInput {
     pub config: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize, ToSchema, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
 pub struct AiEscalationRulesInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keywords: Option<Vec<String>>,
@@ -1186,7 +1186,7 @@ pub struct AiEscalationRulesInput {
     pub default_ticket_category_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize, ToSchema, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
 pub struct AiLimitsInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns_per_day: Option<u32>,
@@ -1225,7 +1225,7 @@ pub struct AiAgentFaqItem {
     pub updated_at: String,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CreateAiAgentFaqRequest {
     pub question: String,
     pub answer: String,
@@ -1258,6 +1258,91 @@ pub struct AiAgentFaqListResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AiAgentDeleteResponse {
     pub ok: bool,
+}
+
+// ─── Export/import portable de agentes ──────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AiAgentTransferTargetRef {
+    /// ObjectId del agente destino en el entorno origen del export.
+    pub source_id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<AiAgentPurpose>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AiAgentExportData {
+    pub schema_version: u32,
+    pub source_agent_id: String,
+    pub agent: CreateAiAgentRequest,
+    #[serde(default)]
+    pub faqs: Vec<CreateAiAgentFaqRequest>,
+    /// Metadata portable para reconstruir `transfer_to_agent.allowed_targets`
+    /// cuando los ObjectIds del entorno origen no existen en producción.
+    #[serde(default)]
+    pub transfer_targets: Vec<AiAgentTransferTargetRef>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiAgentExportResponse {
+    pub ok: bool,
+    pub data: AiAgentExportData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AiAgentImportRequest {
+    #[serde(flatten)]
+    pub data: AiAgentExportData,
+    /// Si viene, reemplaza los `workspace_ids` del JSON exportado. Es el modo
+    /// recomendado al importar de desarrollo a producción.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_ids_override: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiAgentImportData {
+    pub source_agent_id: String,
+    pub agent: AiAgentItem,
+    pub imported_faqs: usize,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiAgentImportResponse {
+    pub ok: bool,
+    pub data: AiAgentImportData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AiAgentsExportPackageData {
+    pub schema_version: u32,
+    pub agents: Vec<AiAgentExportData>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiAgentsExportPackageResponse {
+    pub ok: bool,
+    pub data: AiAgentsExportPackageData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AiAgentsImportPackageRequest {
+    #[serde(flatten)]
+    pub data: AiAgentsExportPackageData,
+    /// Si viene, reemplaza los `workspace_ids` de todos los agentes importados.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_ids_override: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiAgentsImportPackageData {
+    pub imported: Vec<AiAgentImportData>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiAgentsImportPackageResponse {
+    pub ok: bool,
+    pub data: AiAgentsImportPackageData,
 }
 
 // ─── Test connection ────────────────────────────────────────────────────────

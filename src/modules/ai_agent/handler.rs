@@ -25,7 +25,7 @@ use axum::{
 };
 use mongodb::bson::{oid::ObjectId, DateTime as BsonDateTime};
 use serde::Deserialize;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     crypto::aes::encrypt_payload,
@@ -36,14 +36,19 @@ use crate::{
     error::ApiError,
     models::{
         ai_agent::{
-            AiAgent, AiAgentDeleteResponse, AiAgentFaq, AiAgentFaqItem, AiAgentFaqListResponse,
-            AiAgentFaqResponse, AiAgentItem, AiAgentMetricsDailyBucketDto, AiAgentMetricsData,
-            AiAgentMetricsResponse, AiAgentMode, AiAgentPreClassBreakdown, AiAgentResponse,
-            AiAgentsListResponse, AiConfigDto, AiConfigPatchRequest, AiConfigResponse,
-            AiEscalationRules, AiLimits, AiModelConfig, AiPersonality, AiSchedule, AiToolConfig,
-            CreateAiAgentFaqRequest, CreateAiAgentRequest, TestConnectionData,
-            TestConnectionRequest, TestConnectionResponse, TestConnectionSource,
-            UpdateAiAgentFaqRequest, UpdateAiAgentRequest,
+            AiAgent, AiAgentDeleteResponse, AiAgentExportData, AiAgentExportResponse, AiAgentFaq,
+            AiAgentFaqItem, AiAgentFaqListResponse, AiAgentFaqResponse, AiAgentImportData,
+            AiAgentImportRequest, AiAgentImportResponse, AiAgentItem, AiAgentMetricsDailyBucketDto,
+            AiAgentMetricsData, AiAgentMetricsResponse, AiAgentMode, AiAgentPreClassBreakdown,
+            AiAgentResponse, AiAgentTransferTargetRef, AiAgentsExportPackageData,
+            AiAgentsExportPackageResponse, AiAgentsImportPackageData, AiAgentsImportPackageRequest,
+            AiAgentsImportPackageResponse, AiAgentsListResponse, AiConfigDto, AiConfigPatchRequest,
+            AiConfigResponse, AiEscalationRules, AiEscalationRulesInput, AiLimits, AiLimitsInput,
+            AiModelConfig, AiModelConfigInput, AiPersonality, AiPersonalityInput, AiSchedule,
+            AiScheduleInput, AiToolConfig, AiToolConfigInput, CreateAiAgentFaqRequest,
+            CreateAiAgentRequest, TestConnectionData, TestConnectionRequest,
+            TestConnectionResponse, TestConnectionSource, UpdateAiAgentFaqRequest,
+            UpdateAiAgentRequest,
         },
         users::User,
     },
@@ -71,6 +76,7 @@ const FAQ_TAGS_MAX_COUNT: usize = 16;
 
 const TEST_TIMEOUT_MAX: u32 = 30;
 const DEFAULT_TEST_MODEL: &str = "openai/gpt-4o-mini";
+const AI_AGENT_EXPORT_SCHEMA_VERSION: u32 = 1;
 
 fn require_superadmin(u: &User) -> Result<(), ApiError> {
     if u.role != SUPERADMIN_ROLE {
@@ -316,6 +322,160 @@ fn faq_to_item(f: AiAgentFaq) -> AiAgentFaqItem {
     }
 }
 
+fn schedule_to_input(s: &AiSchedule) -> AiScheduleInput {
+    AiScheduleInput {
+        timezone: Some(s.timezone.clone()),
+        always_on: Some(s.always_on),
+        weekdays: Some(s.weekdays.clone()),
+        from_hour: Some(s.from_hour),
+        to_hour: Some(s.to_hour),
+    }
+}
+
+fn model_to_input(m: &AiModelConfig) -> AiModelConfigInput {
+    AiModelConfigInput {
+        model_id: Some(m.model_id.clone()),
+        temperature: Some(m.temperature),
+        max_tokens: Some(m.max_tokens),
+        timeout_seconds: Some(m.timeout_seconds),
+        // Nunca exportamos secretos. La key efectiva vive en AiConfig global.
+        api_key: None,
+    }
+}
+
+fn personality_to_input(p: &AiPersonality) -> AiPersonalityInput {
+    AiPersonalityInput {
+        assistant_name: Some(p.assistant_name.clone()),
+        locale: Some(p.locale.clone()),
+        tone: Some(p.tone.clone()),
+        greeting: Some(p.greeting.clone()),
+        farewell: Some(p.farewell.clone()),
+        farewell_to_human: Some(p.farewell_to_human.clone()),
+        forbidden_phrases: Some(p.forbidden_phrases.clone()),
+    }
+}
+
+fn tool_to_input(t: &AiToolConfig) -> AiToolConfigInput {
+    AiToolConfigInput {
+        name: t.name.clone(),
+        enabled: t.enabled,
+        description_override: t.description_override.clone(),
+        config: t.config.clone(),
+    }
+}
+
+fn escalation_to_input(e: &AiEscalationRules) -> AiEscalationRulesInput {
+    AiEscalationRulesInput {
+        keywords: Some(e.keywords.clone()),
+        max_turns_without_resolution: Some(e.max_turns_without_resolution),
+        qualification_window_turns: Some(e.qualification_window_turns),
+        max_identification_attempts: Some(e.max_identification_attempts),
+        escalate_on_critical_tool_failure: Some(e.escalate_on_critical_tool_failure),
+        always_escalate_when_asked: Some(e.always_escalate_when_asked),
+        default_ticket_category_id: e.default_ticket_category_id.clone(),
+    }
+}
+
+fn limits_to_input(l: &AiLimits) -> AiLimitsInput {
+    AiLimitsInput {
+        max_turns_per_day: Some(l.max_turns_per_day),
+        max_turns_per_conversation: Some(l.max_turns_per_conversation),
+        max_tokens_per_day: Some(l.max_tokens_per_day),
+        cost_alert_threshold_pct: Some(l.cost_alert_threshold_pct),
+    }
+}
+
+fn agent_to_create_request(a: &AiAgent) -> CreateAiAgentRequest {
+    CreateAiAgentRequest {
+        label: a.label.clone(),
+        description: a.description.clone(),
+        is_receptionist: Some(a.is_receptionist),
+        purpose: a.purpose,
+        workspace_ids: a.workspace_ids.iter().map(|id| id.to_hex()).collect(),
+        enabled: Some(a.enabled),
+        mode: Some(a.mode),
+        schedule: Some(schedule_to_input(&a.schedule)),
+        model: Some(model_to_input(&a.model)),
+        personality: Some(personality_to_input(&a.personality)),
+        system_prompt: Some(a.system_prompt.clone()),
+        tools: Some(a.tools.iter().map(tool_to_input).collect()),
+        escalation: Some(escalation_to_input(&a.escalation)),
+        limits: Some(limits_to_input(&a.limits)),
+        debounce_seconds: Some(a.debounce_seconds),
+    }
+}
+
+fn faq_to_create_request(f: &AiAgentFaq) -> CreateAiAgentFaqRequest {
+    CreateAiAgentFaqRequest {
+        question: f.question.clone(),
+        answer: f.answer.clone(),
+        tags: f.tags.clone(),
+    }
+}
+
+fn transfer_target_ids_from_tools(tools: &[AiToolConfig]) -> Vec<ObjectId> {
+    let mut ids = Vec::new();
+    for tool in tools.iter().filter(|t| t.name == "transfer_to_agent") {
+        let Some(arr) = tool
+            .config
+            .as_ref()
+            .and_then(|cfg| cfg.get("allowed_targets"))
+            .and_then(|v| v.as_array())
+        else {
+            continue;
+        };
+        for value in arr {
+            let Some(raw) = value.as_str() else { continue };
+            if let Ok(oid) = ObjectId::parse_str(raw) {
+                if !ids.contains(&oid) {
+                    ids.push(oid);
+                }
+            }
+        }
+    }
+    ids
+}
+
+async fn export_data_for_agent(
+    state: &Arc<AppState>,
+    agent: AiAgent,
+) -> Result<AiAgentExportData, ApiError> {
+    let agent_id = agent
+        .id
+        .ok_or_else(|| ApiError::Internal("agent sin _id".into()))?;
+    let faqs = state
+        .db
+        .list_ai_agent_faqs(&agent_id)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+
+    let target_ids = transfer_target_ids_from_tools(&agent.tools);
+    let targets = state
+        .db
+        .find_ai_agents_by_ids(&target_ids)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    let transfer_targets = targets
+        .into_iter()
+        .filter_map(|target| {
+            let source_id = target.id.map(|id| id.to_hex())?;
+            Some(AiAgentTransferTargetRef {
+                source_id,
+                label: target.label,
+                purpose: target.purpose,
+            })
+        })
+        .collect();
+
+    Ok(AiAgentExportData {
+        schema_version: AI_AGENT_EXPORT_SCHEMA_VERSION,
+        source_agent_id: agent_id.to_hex(),
+        agent: agent_to_create_request(&agent),
+        faqs: faqs.iter().map(faq_to_create_request).collect(),
+        transfer_targets,
+    })
+}
+
 // ============================================
 // AI user sintético — uno por agente
 // ============================================
@@ -557,26 +717,11 @@ pub async fn get_ai_agent_handler(
     }))
 }
 
-#[utoipa::path(
-    post,
-    path = "/v1/auth-user/whatsapp/ai-agent/agents",
-    tag = "WhatsApp — AI Agent",
-    security(("bearerAuth" = [])),
-    request_body = CreateAiAgentRequest,
-    responses(
-        (status = 201, description = "Agente creado", body = AiAgentResponse),
-        (status = 400, description = "qualification_window_turns_out_of_range"),
-        (status = 422, description = "Validación"),
-        (status = 404, description = "workspace_not_found"),
-    )
-)]
-pub async fn create_ai_agent_handler(
-    State(state): State<Arc<AppState>>,
-    Extension(current_user): Extension<User>,
-    Json(body): Json<CreateAiAgentRequest>,
-) -> Result<(StatusCode, Json<AiAgentResponse>), ApiError> {
-    require_superadmin(&current_user)?;
-
+async fn create_ai_agent_from_request(
+    state: &Arc<AppState>,
+    current_user: &User,
+    body: CreateAiAgentRequest,
+) -> Result<AiAgent, ApiError> {
     let label = body.label.trim().to_string();
     let description = body.description.trim().to_string();
     validate_required(&label, "label")?;
@@ -587,9 +732,9 @@ pub async fn create_ai_agent_handler(
         validate_string_len(p, "system_prompt", PROMPT_MAX_LEN)?;
     }
 
-    let workspace_oids = parse_and_validate_workspace_ids(&state, &body.workspace_ids).await?;
+    let workspace_oids = parse_and_validate_workspace_ids(state, &body.workspace_ids).await?;
 
-    let ai_user_id = ensure_ai_user_for_agent(&state, &label, &current_user.id).await?;
+    let ai_user_id = ensure_ai_user_for_agent(state, &label, &current_user.id).await?;
     let now = BsonDateTime::now();
     let mut agent = default_agent(label, description, ai_user_id, now);
     agent.workspace_ids = workspace_oids;
@@ -607,7 +752,6 @@ pub async fn create_ai_agent_handler(
         agent.mode = v;
     }
     apply_schedule(&mut agent.schedule, body.schedule);
-    // I1: api_key en body es deprecated. Emitir warn, ignorar y persistir vacío.
     if let Some(ref m) = body.model {
         if m.api_key
             .as_deref()
@@ -615,13 +759,12 @@ pub async fn create_ai_agent_handler(
             .unwrap_or(false)
         {
             tracing::warn!(
-                "[ai_agent.handler] create: api_key en body está deprecada y es ignorada. \
+                "[ai_agent.handler] create/import: api_key en body está deprecada y es ignorada. \
                  Configurar la key global en PATCH /v1/auth-user/whatsapp/ai-agent/config"
             );
         }
     }
     apply_model(&mut agent.model, body.model)?;
-    // Forzar api_key_encrypted a vacío (ignoramos cualquier valor que apply_model haya seteado).
     agent.model.api_key_encrypted = String::new();
     apply_personality(&mut agent.personality, body.personality);
     if let Some(sp) = body.system_prompt {
@@ -644,13 +787,35 @@ pub async fn create_ai_agent_handler(
         agent.debounce_seconds = d;
     }
 
-    validate_tools_config(&state, &agent.tools, None).await?;
+    validate_tools_config(state, &agent.tools, None).await?;
 
-    let saved = state
+    state
         .db
         .create_ai_agent(agent)
         .await
-        .map_err(ApiError::DatabaseError)?;
+        .map_err(ApiError::DatabaseError)
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/ai-agent/agents",
+    tag = "WhatsApp — AI Agent",
+    security(("bearerAuth" = [])),
+    request_body = CreateAiAgentRequest,
+    responses(
+        (status = 201, description = "Agente creado", body = AiAgentResponse),
+        (status = 400, description = "qualification_window_turns_out_of_range"),
+        (status = 422, description = "Validación"),
+        (status = 404, description = "workspace_not_found"),
+    )
+)]
+pub async fn create_ai_agent_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user): Extension<User>,
+    Json(body): Json<CreateAiAgentRequest>,
+) -> Result<(StatusCode, Json<AiAgentResponse>), ApiError> {
+    require_superadmin(&current_user)?;
+    let saved = create_ai_agent_from_request(&state, &current_user, body).await?;
 
     Ok((
         StatusCode::CREATED,
@@ -820,6 +985,397 @@ pub async fn delete_ai_agent_handler(
     }
     state.redis.invalidate_ai_models_cache(&oid.to_hex()).await;
     Ok(Json(AiAgentDeleteResponse { ok: true }))
+}
+
+fn transfer_target_unresolved(source_id: &str) -> ApiError {
+    ApiError::ValidationError {
+        code: "transfer_target_unresolved".into(),
+        field: "tools.transfer_to_agent.config.allowed_targets".into(),
+        message: format!(
+            "No se pudo resolver el agente destino '{}' en este entorno",
+            source_id
+        ),
+    }
+}
+
+fn resolve_transfer_target_id(
+    source_id: &str,
+    refs: &[AiAgentTransferTargetRef],
+    source_to_new: &HashMap<String, String>,
+    existing_agents: &[AiAgent],
+) -> Option<String> {
+    if let Some(mapped) = source_to_new.get(source_id) {
+        return Some(mapped.clone());
+    }
+
+    if existing_agents
+        .iter()
+        .any(|a| a.id.map(|id| id.to_hex()).as_deref() == Some(source_id))
+    {
+        return Some(source_id.to_string());
+    }
+
+    let meta = refs.iter().find(|r| r.source_id == source_id)?;
+    if let Some(purpose) = meta.purpose {
+        let mut candidates = existing_agents
+            .iter()
+            .filter(|a| a.purpose == Some(purpose));
+        if let Some(exact_label) = candidates
+            .clone()
+            .find(|a| a.label.eq_ignore_ascii_case(&meta.label))
+        {
+            return exact_label.id.map(|id| id.to_hex());
+        }
+        if let Some(first) = candidates.next() {
+            return first.id.map(|id| id.to_hex());
+        }
+    }
+
+    existing_agents
+        .iter()
+        .find(|a| a.label.eq_ignore_ascii_case(&meta.label))
+        .and_then(|a| a.id.map(|id| id.to_hex()))
+}
+
+fn rewrite_transfer_targets(
+    tools: &mut [AiToolConfigInput],
+    refs: &[AiAgentTransferTargetRef],
+    source_to_new: &HashMap<String, String>,
+    existing_agents: &[AiAgent],
+) -> Result<(), ApiError> {
+    for tool in tools.iter_mut().filter(|t| t.name == "transfer_to_agent") {
+        let Some(cfg) = tool.config.as_mut() else {
+            continue;
+        };
+        let Some(arr) = cfg.get("allowed_targets").and_then(|v| v.as_array()) else {
+            continue;
+        };
+
+        let mut rewritten = Vec::new();
+        for value in arr {
+            let Some(source_id) = value.as_str() else {
+                if tool.enabled {
+                    return Err(ApiError::ValidationError {
+                        code: "invalid_transfer_target".into(),
+                        field: "tools.transfer_to_agent.config.allowed_targets".into(),
+                        message: "Cada allowed_target debe ser string".into(),
+                    });
+                }
+                continue;
+            };
+
+            match resolve_transfer_target_id(source_id, refs, source_to_new, existing_agents) {
+                Some(resolved) => rewritten.push(serde_json::Value::String(resolved)),
+                None if tool.enabled => return Err(transfer_target_unresolved(source_id)),
+                None => {}
+            }
+        }
+        cfg["allowed_targets"] = serde_json::Value::Array(rewritten);
+    }
+
+    Ok(())
+}
+
+fn disable_transfer_to_agent_for_bootstrap(body: &mut CreateAiAgentRequest) {
+    let Some(tools) = body.tools.as_mut() else {
+        return;
+    };
+    for tool in tools.iter_mut().filter(|t| t.name == "transfer_to_agent") {
+        tool.enabled = false;
+    }
+}
+
+async fn import_faqs_for_agent(
+    state: &Arc<AppState>,
+    agent_id: ObjectId,
+    faqs: &[CreateAiAgentFaqRequest],
+) -> Result<usize, ApiError> {
+    for f in faqs {
+        let question = f.question.trim().to_string();
+        let answer = f.answer.trim().to_string();
+        validate_required(&question, "question")?;
+        validate_required(&answer, "answer")?;
+        validate_string_len(&question, "question", FAQ_QUESTION_MAX_LEN)?;
+        validate_string_len(&answer, "answer", FAQ_ANSWER_MAX_LEN)?;
+        validate_tags(&f.tags)?;
+
+        let now = BsonDateTime::now();
+        let faq = AiAgentFaq {
+            id: None,
+            agent_id,
+            question,
+            answer,
+            tags: f.tags.clone(),
+            created_at: now,
+            updated_at: now,
+        };
+        state
+            .db
+            .create_ai_agent_faq(faq)
+            .await
+            .map_err(ApiError::DatabaseError)?;
+    }
+    Ok(faqs.len())
+}
+
+async fn create_imported_agent(
+    state: &Arc<AppState>,
+    current_user: &User,
+    data: &AiAgentExportData,
+    workspace_ids_override: Option<&[String]>,
+    source_to_new: &HashMap<String, String>,
+) -> Result<(AiAgent, usize), ApiError> {
+    if data.schema_version != AI_AGENT_EXPORT_SCHEMA_VERSION {
+        return Err(ApiError::ValidationError {
+            code: "unsupported_schema_version".into(),
+            field: "schema_version".into(),
+            message: format!("schema_version {} no soportado", data.schema_version),
+        });
+    }
+
+    let existing_agents = state
+        .db
+        .list_ai_agents(None)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    let mut body = data.agent.clone();
+    if let Some(override_ids) = workspace_ids_override {
+        body.workspace_ids = override_ids.to_vec();
+    }
+    if let Some(tools) = body.tools.as_mut() {
+        rewrite_transfer_targets(
+            tools,
+            &data.transfer_targets,
+            source_to_new,
+            &existing_agents,
+        )?;
+    }
+
+    let saved = create_ai_agent_from_request(state, current_user, body).await?;
+    let saved_id = saved
+        .id
+        .ok_or_else(|| ApiError::Internal("agente importado sin _id".into()))?;
+    let imported_faqs = import_faqs_for_agent(state, saved_id, &data.faqs).await?;
+
+    Ok((saved, imported_faqs))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/ai-agent/agents/{id}/export",
+    tag = "WhatsApp — AI Agent",
+    security(("bearerAuth" = [])),
+    params(("id" = String, Path, description = "ObjectId hex")),
+    responses(
+        (status = 200, description = "Export portable del agente", body = AiAgentExportResponse),
+        (status = 404, description = "agent_not_found"),
+    )
+)]
+pub async fn export_ai_agent_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user): Extension<User>,
+    Path(id): Path<String>,
+) -> Result<Json<AiAgentExportResponse>, ApiError> {
+    require_superadmin(&current_user)?;
+    let oid = parse_oid(&id, "id")?;
+    let agent = state
+        .db
+        .find_ai_agent_by_id(&oid)
+        .await
+        .map_err(ApiError::DatabaseError)?
+        .ok_or_else(agent_not_found)?;
+    Ok(Json(AiAgentExportResponse {
+        ok: true,
+        data: export_data_for_agent(&state, agent).await?,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExportPackageQuery {
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/auth-user/whatsapp/ai-agent/agents/export-package",
+    tag = "WhatsApp — AI Agent",
+    security(("bearerAuth" = [])),
+    params(("workspace_id" = Option<String>, Query, description = "Filtrar por workspace")),
+    responses(
+        (status = 200, description = "Paquete portable de agentes", body = AiAgentsExportPackageResponse),
+    )
+)]
+pub async fn export_ai_agents_package_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user): Extension<User>,
+    Query(q): Query<ExportPackageQuery>,
+) -> Result<Json<AiAgentsExportPackageResponse>, ApiError> {
+    require_superadmin(&current_user)?;
+    let ws_oid = match q.workspace_id.as_deref() {
+        Some(s) if !s.trim().is_empty() => Some(parse_oid(s.trim(), "workspace_id")?),
+        _ => None,
+    };
+    let agents = state
+        .db
+        .list_ai_agents(ws_oid.as_ref())
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    let mut exported = Vec::with_capacity(agents.len());
+    for agent in agents {
+        exported.push(export_data_for_agent(&state, agent).await?);
+    }
+
+    Ok(Json(AiAgentsExportPackageResponse {
+        ok: true,
+        data: AiAgentsExportPackageData {
+            schema_version: AI_AGENT_EXPORT_SCHEMA_VERSION,
+            agents: exported,
+        },
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/ai-agent/agents/import",
+    tag = "WhatsApp — AI Agent",
+    security(("bearerAuth" = [])),
+    request_body = AiAgentImportRequest,
+    responses(
+        (status = 201, description = "Agente importado", body = AiAgentImportResponse),
+        (status = 422, description = "Validación"),
+    )
+)]
+pub async fn import_ai_agent_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user): Extension<User>,
+    Json(body): Json<AiAgentImportRequest>,
+) -> Result<(StatusCode, Json<AiAgentImportResponse>), ApiError> {
+    require_superadmin(&current_user)?;
+    let (saved, imported_faqs) = create_imported_agent(
+        &state,
+        &current_user,
+        &body.data,
+        body.workspace_ids_override.as_deref(),
+        &HashMap::new(),
+    )
+    .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(AiAgentImportResponse {
+            ok: true,
+            data: AiAgentImportData {
+                source_agent_id: body.data.source_agent_id,
+                agent: agent_to_item(saved),
+                imported_faqs,
+            },
+        }),
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/auth-user/whatsapp/ai-agent/agents/import-package",
+    tag = "WhatsApp — AI Agent",
+    security(("bearerAuth" = [])),
+    request_body = AiAgentsImportPackageRequest,
+    responses(
+        (status = 201, description = "Paquete de agentes importado", body = AiAgentsImportPackageResponse),
+        (status = 422, description = "Validación"),
+    )
+)]
+pub async fn import_ai_agents_package_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(current_user): Extension<User>,
+    Json(body): Json<AiAgentsImportPackageRequest>,
+) -> Result<(StatusCode, Json<AiAgentsImportPackageResponse>), ApiError> {
+    require_superadmin(&current_user)?;
+    if body.data.schema_version != AI_AGENT_EXPORT_SCHEMA_VERSION {
+        return Err(ApiError::ValidationError {
+            code: "unsupported_schema_version".into(),
+            field: "schema_version".into(),
+            message: format!("schema_version {} no soportado", body.data.schema_version),
+        });
+    }
+
+    let mut source_to_new = HashMap::new();
+    let mut created = Vec::with_capacity(body.data.agents.len());
+
+    for data in &body.data.agents {
+        let mut bootstrap = data.clone();
+        disable_transfer_to_agent_for_bootstrap(&mut bootstrap.agent);
+        let (saved, imported_faqs) = create_imported_agent(
+            &state,
+            &current_user,
+            &bootstrap,
+            body.workspace_ids_override.as_deref(),
+            &HashMap::new(),
+        )
+        .await?;
+        let new_id = saved
+            .id
+            .ok_or_else(|| ApiError::Internal("agente importado sin _id".into()))?
+            .to_hex();
+        source_to_new.insert(data.source_agent_id.clone(), new_id);
+        created.push((data, saved, imported_faqs));
+    }
+
+    let existing_agents = state
+        .db
+        .list_ai_agents(None)
+        .await
+        .map_err(ApiError::DatabaseError)?;
+    let mut imported = Vec::with_capacity(created.len());
+
+    for (data, mut saved, imported_faqs) in created {
+        let mut final_body = data.agent.clone();
+        if let Some(override_ids) = body.workspace_ids_override.as_deref() {
+            final_body.workspace_ids = override_ids.to_vec();
+        }
+        if let Some(tools) = final_body.tools.as_mut() {
+            rewrite_transfer_targets(
+                tools,
+                &data.transfer_targets,
+                &source_to_new,
+                &existing_agents,
+            )?;
+            saved.tools = tools
+                .iter()
+                .map(|t| AiToolConfig {
+                    name: t.name.clone(),
+                    enabled: t.enabled,
+                    description_override: t.description_override.clone(),
+                    config: t.config.clone(),
+                })
+                .collect();
+        }
+        saved.updated_at = BsonDateTime::now();
+        let saved_id = saved
+            .id
+            .ok_or_else(|| ApiError::Internal("agente importado sin _id".into()))?;
+        validate_tools_config(&state, &saved.tools, Some(&saved_id)).await?;
+        let replaced = state
+            .db
+            .replace_ai_agent(&saved_id, saved)
+            .await
+            .map_err(ApiError::DatabaseError)?
+            .ok_or_else(agent_not_found)?;
+
+        imported.push(AiAgentImportData {
+            source_agent_id: data.source_agent_id.clone(),
+            agent: agent_to_item(replaced),
+            imported_faqs,
+        });
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(AiAgentsImportPackageResponse {
+            ok: true,
+            data: AiAgentsImportPackageData { imported },
+        }),
+    ))
 }
 
 // ============================================

@@ -2,17 +2,20 @@ use utoipa::OpenApi;
 
 use crate::db::mongo::{PaymentDetails, ResultGroupedByDate};
 use crate::models::ai_agent::{
-    AiAgentDeleteResponse, AiAgentFaqItem, AiAgentFaqListResponse, AiAgentFaqResponse, AiAgentItem,
-    AiAgentMetricsDailyBucketDto, AiAgentMetricsData, AiAgentMetricsResponse, AiAgentMode,
-    AiAgentPreClassBreakdown, AiAgentPurpose, AiAgentResponse, AiAgentsListResponse,
-    AiBusinessDataDeleteResponse, AiConfigDto, AiConfigPatchRequest, AiConfigResponse,
-    AiCoverageZoneItem, AiCoverageZoneResponse, AiCoverageZonesListResponse, AiEscalationRulesDto,
-    AiEscalationRulesInput, AiInstallationConfigItem, AiInstallationConfigResponse,
-    AiInstallationConfigsListResponse, AiLimitsDto, AiLimitsInput, AiModelConfigDto,
-    AiModelConfigInput, AiPersonalityDto, AiPersonalityInput, AiPlanItem, AiPlanResponse,
-    AiPlansListResponse, AiPromotionItem, AiPromotionResponse, AiPromotionsListResponse,
-    AiScheduleDto, AiScheduleInput, AiToolConfigDto, AiToolConfigInput, ConnectionType,
-    CreateAiAgentFaqRequest, CreateAiAgentRequest, CreateAiCoverageZoneRequest,
+    AiAgentDeleteResponse, AiAgentExportData, AiAgentExportResponse, AiAgentFaqItem,
+    AiAgentFaqListResponse, AiAgentFaqResponse, AiAgentImportData, AiAgentImportRequest,
+    AiAgentImportResponse, AiAgentItem, AiAgentMetricsDailyBucketDto, AiAgentMetricsData,
+    AiAgentMetricsResponse, AiAgentMode, AiAgentPreClassBreakdown, AiAgentPurpose, AiAgentResponse,
+    AiAgentTransferTargetRef, AiAgentsExportPackageData, AiAgentsExportPackageResponse,
+    AiAgentsImportPackageData, AiAgentsImportPackageRequest, AiAgentsImportPackageResponse,
+    AiAgentsListResponse, AiBusinessDataDeleteResponse, AiConfigDto, AiConfigPatchRequest,
+    AiConfigResponse, AiCoverageZoneItem, AiCoverageZoneResponse, AiCoverageZonesListResponse,
+    AiEscalationRulesDto, AiEscalationRulesInput, AiInstallationConfigItem,
+    AiInstallationConfigResponse, AiInstallationConfigsListResponse, AiLimitsDto, AiLimitsInput,
+    AiModelConfigDto, AiModelConfigInput, AiPersonalityDto, AiPersonalityInput, AiPlanItem,
+    AiPlanResponse, AiPlansListResponse, AiPromotionItem, AiPromotionResponse,
+    AiPromotionsListResponse, AiScheduleDto, AiScheduleInput, AiToolConfigDto, AiToolConfigInput,
+    ConnectionType, CreateAiAgentFaqRequest, CreateAiAgentRequest, CreateAiCoverageZoneRequest,
     CreateAiPlanRequest, CreateAiPromotionRequest, PoliticalDivisionItem,
     PoliticalDivisionsResponse, TestConnectionData, TestConnectionRequest, TestConnectionResponse,
     TestConnectionSource, UpdateAiAgentFaqRequest, UpdateAiAgentRequest,
@@ -104,7 +107,7 @@ use crate::modules::whatsapp::conversations::lifecycle::{
 #[openapi(
     info(
         title = "API ABDO",
-        version = "0.3.115",
+        version = "0.3.116",
         description = "API REST para gestión de clientes ISP. Autenticación vía cookies HttpOnly.\n\n\
             **Canal recomendado**: cookies `access_token` + `refresh_token` con `Secure` y `SameSite`.\n\
             **Compatibilidad temporal**: Bearer header / body refresh / WS query token sólo durante ventana de migración."
@@ -235,6 +238,10 @@ use crate::modules::whatsapp::conversations::lifecycle::{
         crate::modules::ai_agent::handler::create_ai_agent_handler,
         crate::modules::ai_agent::handler::update_ai_agent_handler,
         crate::modules::ai_agent::handler::delete_ai_agent_handler,
+        crate::modules::ai_agent::handler::export_ai_agent_handler,
+        crate::modules::ai_agent::handler::export_ai_agents_package_handler,
+        crate::modules::ai_agent::handler::import_ai_agent_handler,
+        crate::modules::ai_agent::handler::import_ai_agents_package_handler,
         crate::modules::ai_agent::handler::list_ai_agent_faqs_handler,
         crate::modules::ai_agent::handler::create_ai_agent_faq_handler,
         crate::modules::ai_agent::handler::update_ai_agent_faq_handler,
@@ -390,6 +397,11 @@ use crate::modules::whatsapp::conversations::lifecycle::{
             AiAgentItem,
             CreateAiAgentRequest, UpdateAiAgentRequest,
             AiAgentResponse, AiAgentsListResponse,
+            AiAgentTransferTargetRef, AiAgentExportData, AiAgentExportResponse,
+            AiAgentImportRequest, AiAgentImportData, AiAgentImportResponse,
+            AiAgentsExportPackageData, AiAgentsExportPackageResponse,
+            AiAgentsImportPackageRequest, AiAgentsImportPackageData,
+            AiAgentsImportPackageResponse,
             AiAgentFaqItem, CreateAiAgentFaqRequest, UpdateAiAgentFaqRequest,
             AiAgentFaqResponse, AiAgentFaqListResponse,
             AiAgentDeleteResponse,

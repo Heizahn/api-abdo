@@ -53,6 +53,22 @@ pub fn user_routes() -> Router<Arc<AppState>> {
             get(handler::list_ai_agents_handler).post(handler::create_ai_agent_handler),
         )
         .route(
+            "/v1/auth-user/whatsapp/ai-agent/agents/export-package",
+            get(handler::export_ai_agents_package_handler),
+        )
+        .route(
+            "/v1/auth-user/whatsapp/ai-agent/agents/import",
+            post(handler::import_ai_agent_handler),
+        )
+        .route(
+            "/v1/auth-user/whatsapp/ai-agent/agents/import-package",
+            post(handler::import_ai_agents_package_handler),
+        )
+        .route(
+            "/v1/auth-user/whatsapp/ai-agent/agents/:id/export",
+            get(handler::export_ai_agent_handler),
+        )
+        .route(
             "/v1/auth-user/whatsapp/ai-agent/agents/:id",
             get(handler::get_ai_agent_handler)
                 .patch(handler::update_ai_agent_handler)
