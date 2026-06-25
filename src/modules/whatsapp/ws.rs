@@ -191,9 +191,11 @@ pub enum WsServerEvent {
     /// Lo dispara la tool `request_human` o, en una iteración futura, un
     /// "take" manual desde la UI.
     ///
-    /// `reason` es uno de: `"request_human"`, `"transfer_to_agent_failed"`,
-    /// `"manual"`. `by` es `"ai_agent"` cuando el origen fue una tool del
-    /// loop, o el UUID del usuario que pausó manualmente.
+    /// `reason` es uno de: `"request_human"`, `"support_handoff"`,
+    /// `"sales_handoff"`, `"urgent_reactivation_handoff"`,
+    /// `"transfer_to_agent_failed"`, `"manual"`, etc. `by` es `"ai_agent"`
+    /// cuando el origen fue una tool del loop, o el UUID del usuario que pausó
+    /// manualmente.
     #[serde(rename = "IA_PAUSADA")]
     IaPausada {
         conversation_id: String,

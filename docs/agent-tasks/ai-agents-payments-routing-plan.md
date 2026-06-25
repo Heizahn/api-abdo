@@ -242,7 +242,7 @@ Después de tener API para `purpose`, ajustar en desarrollo:
 - [ ] Mantener `report_payment=true`.
 - [ ] Mantener `get_payment_methods=true`.
 - [ ] Mantener `get_invoices=true`.
-- [ ] Desactivar `create_ticket` para Andrea; tickets quedan para soporte. En casos complejos de pagos, usar `request_human`.
+- [x] Desactivar `create_ticket` para Andrea y Sofía. Los tickets quedan ocultos/despriorizados; soporte, ventas y casos complejos usan `request_human` + alertas visuales del chat.
 
 ### IVA por `tax_id` del cliente
 
@@ -311,7 +311,7 @@ Objetivo: confirmar que la IA se pausa solo por chat/conversación, no global.
 - [ ] `ai_disabled=true` evita dispatch IA.
 - [ ] `status=in_progress` evita dispatch IA.
 - [ ] `request_human` pausa la IA en esa conversación.
-- [ ] `create_ticket` + `request_human` no dejan a la IA respondiendo luego.
+- [ ] `request_human` no deja a la IA respondiendo luego. `create_ticket` queda fuera del flujo operativo actual.
 - [ ] Humano tomando un chat no afecta otros chats.
 - [ ] Reabrir conversación limpia/rehabilita IA según flujo esperado.
 - [ ] `ai_active_agent_id` no revive IA si humano ya tomó el chat.
@@ -377,6 +377,7 @@ Resultados de prueba en dev:
 - Backend `0.3.109`: límite de `system_prompt` de agentes AI subido de 20.000 a 30.000 caracteres para permitir el prompt completo de Andrea/Pagos.
 - Backend `0.3.110`: hardening de Fase 5: respuesta segura para `report_payment` fallido, aliases BNC/Banco Nacional de Crédito en `list_banks`, rechazo de `issuing_bank_id` inválido y razón WS `urgent_reactivation_handoff` para derivaciones urgentes.
 - Backend `0.3.112`: guardrail determinístico para reactivación urgente post-pago: si Andrea/Pagos intenta prometer prioridad/monitoreo/tiempos sin `request_human`, el runner ejecuta handoff humano real y reemplaza la respuesta por texto seguro según horario.
+- Backend `0.3.113`: tickets desactivados por defecto para nuevos agentes IA; `request_human` ahora emite razones visuales más específicas (`support_handoff`, `sales_handoff`, `urgent_reactivation_handoff`) para que el front alerte desde el chat sin depender de tickets.
 
 Pendiente inmediato:
 
@@ -432,6 +433,7 @@ Reglas esperadas para Andrea/Pagos:
 - [x] Horario laboral inicial: lunes a viernes 08:00–17:00, sábado 08:00–12:00, domingo cerrado.
 - [x] El backend debe poder emitir un evento/estado de derivación urgente para que el front notifique visualmente al agente humano (`IA_PAUSADA.reason = "urgent_reactivation_handoff"`).
 - [ ] El front debe mostrar/alertar que la IA derivó el caso por reactivación urgente post-pago.
+- [ ] El front debe mostrar/alertar soporte humano cuando `IA_PAUSADA.reason = "support_handoff"` y comercial cuando `reason = "sales_handoff"`.
 - [x] Definir texto estándar cliente en horario laboral y fuera de horario.
 - [ ] Ajustar el system prompt de Andrea con estas reglas.
 - [ ] Probar con Luis/Humberto: pago registrado/aprobado + cliente pide reactivación urgente → derivación humana y notificación visible en front.

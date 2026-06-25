@@ -39,6 +39,8 @@ use super::ai_agent_secret;
 // Reasons que llegan al evento WS y al timeline. Stable strings — el front
 // los usa para decidir copy / icono.
 pub const REASON_REQUEST_HUMAN: &str = "request_human";
+pub const REASON_SUPPORT_HANDOFF: &str = "support_handoff";
+pub const REASON_SALES_HANDOFF: &str = "sales_handoff";
 pub const REASON_CONVERSATION_TURN_LIMIT: &str = "conversation_turn_limit";
 pub const REASON_DAILY_TURN_LIMIT: &str = "daily_turn_limit";
 pub const REASON_DAILY_TOKEN_LIMIT: &str = "daily_token_limit";

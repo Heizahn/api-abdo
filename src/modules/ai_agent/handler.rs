@@ -220,7 +220,10 @@ fn default_agent(
             },
             AiToolConfig {
                 name: "create_ticket".into(),
-                enabled: true,
+                // Tickets quedan desactivados por defecto para nuevos agentes:
+                // el flujo principal de WhatsApp IA usa alertas visuales del
+                // chat + request_human/asignación humana.
+                enabled: false,
                 description_override: None,
                 config: None,
             },

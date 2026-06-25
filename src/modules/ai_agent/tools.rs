@@ -1280,6 +1280,55 @@ fn looks_like_urgent_reactivation(reason: &str) -> bool {
     has_reactivation && (has_urgency || has_payment_context)
 }
 
+fn looks_like_support_handoff(reason: &str) -> bool {
+    let normalized = normalize_bank_lookup_text(reason);
+    [
+        "area soporte",
+        "soporte",
+        "falla tecnica",
+        "tecnico",
+        "sin internet",
+        "no tengo internet",
+        "luz roja",
+        "router",
+        "onu",
+        "fibra",
+        "cable",
+        "lentitud",
+        "no navega",
+        "sin conexion",
+        "foto del equipo",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+fn looks_like_sales_handoff(reason: &str) -> bool {
+    let normalized = normalize_bank_lookup_text(reason);
+    [
+        "area ventas",
+        "comercial",
+        "ventas",
+        "contratar",
+        "instalacion",
+        "instalar",
+        "cobertura",
+        "planes",
+        "asesor comercial",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+fn handoff_type_for_reason(escalation_reason: &str) -> &'static str {
+    match escalation_reason {
+        escalation::REASON_URGENT_REACTIVATION => "reactivation_post_payment",
+        escalation::REASON_SUPPORT_HANDOFF => "support",
+        escalation::REASON_SALES_HANDOFF => "sales",
+        _ => "general",
+    }
+}
+
 async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
     let parsed: RequestHumanArgs =
         serde_json::from_value(args).unwrap_or(RequestHumanArgs { reason: None });
@@ -1307,6 +1356,10 @@ async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) ->
 
     let escalation_reason = if looks_like_urgent_reactivation(trimmed_reason) {
         escalation::REASON_URGENT_REACTIVATION
+    } else if looks_like_support_handoff(trimmed_reason) {
+        escalation::REASON_SUPPORT_HANDOFF
+    } else if looks_like_sales_handoff(trimmed_reason) {
+        escalation::REASON_SALES_HANDOFF
     } else {
         escalation::REASON_REQUEST_HUMAN
     };
@@ -1315,6 +1368,7 @@ async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) ->
     } else {
         "normal"
     };
+    let handoff_type = handoff_type_for_reason(escalation_reason);
 
     // El runner enviará el texto final del modelo como respuesta a este turno;
     // el helper NO manda farewell para no duplicar mensajes (el modelo va a
@@ -1336,7 +1390,7 @@ async fn exec_request_human(args: Value, ctx: &ToolContext, started: Instant) ->
             "reason": reason,
             "escalation_reason": escalation_reason,
             "handoff_priority": handoff_priority,
-            "handoff_type": if handoff_priority == "urgent" { "reactivation_post_payment" } else { "general" },
+            "handoff_type": handoff_type,
             "ai_disabled": true,
         }),
         started,
@@ -2361,6 +2415,46 @@ mod tests {
         assert!(!looks_like_urgent_reactivation(
             "Cliente quiere hablar con un asesor"
         ));
+    }
+
+    #[test]
+    fn support_handoff_reason_is_detected_for_front_signal() {
+        assert!(looks_like_support_handoff(
+            "Área: soporte. Mensaje: 'No tengo internet'. Foto del equipo adjunta."
+        ));
+        assert!(looks_like_support_handoff(
+            "Cliente reporta luz roja en la ONU"
+        ));
+        assert!(!looks_like_support_handoff("Área: pagos. Mensaje: 'saldo'"));
+    }
+
+    #[test]
+    fn sales_handoff_reason_is_detected_for_front_signal() {
+        assert!(looks_like_sales_handoff(
+            "Área: ventas. Cliente quiere contratar internet"
+        ));
+        assert!(looks_like_sales_handoff(
+            "Te comunico con un asesor comercial"
+        ));
+        assert!(!looks_like_sales_handoff(
+            "Área: soporte. Mensaje: 'No tengo internet'"
+        ));
+    }
+
+    #[test]
+    fn handoff_type_maps_visual_alert_reasons() {
+        assert_eq!(
+            handoff_type_for_reason(escalation::REASON_SUPPORT_HANDOFF),
+            "support"
+        );
+        assert_eq!(
+            handoff_type_for_reason(escalation::REASON_SALES_HANDOFF),
+            "sales"
+        );
+        assert_eq!(
+            handoff_type_for_reason(escalation::REASON_URGENT_REACTIVATION),
+            "reactivation_post_payment"
+        );
     }
 
     fn make_zone(
