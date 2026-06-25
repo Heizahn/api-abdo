@@ -222,9 +222,10 @@ const KNOWN_TOOL_NAMES: &[&str] = &[
 ];
 
 /// Devuelve los nombres de tools que aparecen como invocación-en-texto en
-/// `text`. Detecta dos formatos comunes en los prompts del proyecto:
+/// `text`. Detecta formatos comunes en los prompts del proyecto:
 ///   - `[<tool_name>` (notación de Sofía: `[transfer_to_agent → Pagos, ...]`)
 ///   - `<<TOOL_CALL: <tool_name>` (metanotación de ejemplo en el prompt de Andrea)
+///   - `<tool_name>(...)` (el modelo copia literalmente ejemplos tipo `request_human(...)`)
 ///
 /// Si el LLM emite estos patrones en su `content` SIN haber hecho un
 /// function_call real, está replicando los ejemplos como si fueran su output
@@ -234,12 +235,16 @@ fn detect_text_tool_invocations(text: &str) -> Vec<&'static str> {
         .iter()
         .copied()
         .filter(|tool| {
-            text.contains(&format!("[{}", tool)) || text.contains(&format!("<<TOOL_CALL: {}", tool))
+            text.contains(&format!("[{}", tool))
+                || text.contains(&format!("<<TOOL_CALL: {}", tool))
+                || text.contains(&format!("{}(", tool))
+                || text.contains(&format!("{} (", tool))
         })
         .collect()
 }
 
-/// Remueve `[<tool_name> ... ]` y `<<TOOL_CALL: <tool_name> ... >>` de `text`.
+/// Remueve `[<tool_name> ... ]`, `<<TOOL_CALL: <tool_name> ... >>` y
+/// `<tool_name>(...)` de `text`.
 /// Best-effort: si el bracket/marker no cierra, corta hasta el primer newline
 /// como fallback. Trim final para que el mensaje resultante no quede con
 /// líneas en blanco.
@@ -273,6 +278,22 @@ fn strip_text_tool_invocations(text: &str) -> String {
                         .unwrap_or(out.len())
                 });
             out.replace_range(start..end, "");
+        }
+
+        for function_pat in [format!("{}(", tool), format!("{} (", tool)] {
+            while let Some(start) = out.find(&function_pat) {
+                let after = start + function_pat.len();
+                let end = out[after..]
+                    .find(')')
+                    .map(|i| after + i + 1)
+                    .unwrap_or_else(|| {
+                        out[after..]
+                            .find('\n')
+                            .map(|i| after + i)
+                            .unwrap_or(out.len())
+                    });
+                out.replace_range(start..end, "");
+            }
         }
     }
     out.trim().to_string()
@@ -2061,6 +2082,13 @@ mod text_tool_invocation_tests {
     }
 
     #[test]
+    fn detects_bare_request_human_function_text() {
+        let text = "request_human(\n  reason=\"Área: soporte. Mensaje: 'No Tengo internet'.\"\n)\n\nTe comunico con soporte.";
+        let hits = detect_text_tool_invocations(text);
+        assert_eq!(hits, vec!["request_human"]);
+    }
+
+    #[test]
     fn does_not_match_normal_text() {
         let text =
             "Tu saldo pendiente es Bs. 5.798,39, vencimiento 17/04. ¿Querés los métodos de pago?";
@@ -2125,6 +2153,13 @@ mod text_tool_invocation_tests {
         let text = "Consulto tu saldo. <<TOOL_CALL: get_invoices(client_id=\"abc\")>> Listo.";
         let cleaned = strip_text_tool_invocations(text);
         assert_eq!(cleaned, "Consulto tu saldo.  Listo.");
+    }
+
+    #[test]
+    fn strip_removes_bare_request_human_function_text() {
+        let text = "request_human(\n  reason=\"Área: soporte. Mensaje: 'No Tengo internet'.\"\n)\n\nTe comunico con soporte para revisar tu caso.";
+        let cleaned = strip_text_tool_invocations(text);
+        assert_eq!(cleaned, "Te comunico con soporte para revisar tu caso.");
     }
 
     #[test]

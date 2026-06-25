@@ -378,6 +378,7 @@ Resultados de prueba en dev:
 - Backend `0.3.110`: hardening de Fase 5: respuesta segura para `report_payment` fallido, aliases BNC/Banco Nacional de Crédito en `list_banks`, rechazo de `issuing_bank_id` inválido y razón WS `urgent_reactivation_handoff` para derivaciones urgentes.
 - Backend `0.3.112`: guardrail determinístico para reactivación urgente post-pago: si Andrea/Pagos intenta prometer prioridad/monitoreo/tiempos sin `request_human`, el runner ejecuta handoff humano real y reemplaza la respuesta por texto seguro según horario.
 - Backend `0.3.113`: tickets desactivados por defecto para nuevos agentes IA; `request_human` ahora emite razones visuales más específicas (`support_handoff`, `sales_handoff`, `urgent_reactivation_handoff`) para que el front alerte desde el chat sin depender de tickets.
+- Backend `0.3.114`: guardrail anti tool-call-as-text ampliado para detectar y limpiar invocaciones literales tipo `request_human(...)` que el modelo copie del prompt; evita que el cliente vea la pseudo-tool como texto.
 
 Pendiente inmediato:
 
