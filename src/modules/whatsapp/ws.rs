@@ -17,7 +17,7 @@ use crate::{
         user_jwt::UserJwtService,
     },
     db::{SalesRepository, UserRepository, WhatsAppRepository},
-    models::whatsapp::{ConversationItem, MessageItem, TicketItem},
+    models::whatsapp::{AudioTranscriptionItem, ConversationItem, MessageItem, TicketItem},
     state::{AppState, WsRegistry},
 };
 
@@ -124,6 +124,16 @@ pub enum WsServerEvent {
         message: MessageItem,
         /// Tipo de delta aplicado: "edit" o "revoke".
         change_type: String,
+    },
+
+    /// Estado de transcripción de audio actualizado para un mensaje existente.
+    /// Permite al front parchear sólo `message.audio_transcription` en cache y
+    /// mostrar "Transcribiendo audio..." mientras termina el STT.
+    #[serde(rename = "AUDIO_TRANSCRIPTION_UPDATED")]
+    AudioTranscriptionUpdated {
+        conversation_id: String,
+        message_id: String,
+        audio_transcription: AudioTranscriptionItem,
     },
 
     /// Preview de URL listo para un mensaje ya existente. El front debe
@@ -896,6 +906,41 @@ mod tests {
         assert_eq!(
             event_json["datos"]["message"]["wa_message_id"],
             "wamid.message"
+        );
+    }
+
+    #[test]
+    fn audio_transcription_updated_event_serialize_roundtrip() {
+        let event = WsServerEvent::AudioTranscriptionUpdated {
+            conversation_id: "507f191e810c19729de860ec".to_string(),
+            message_id: "507f191e810c19729de860ea".to_string(),
+            audio_transcription: AudioTranscriptionItem {
+                status: "processing".to_string(),
+                text: None,
+                model: Some("openai/gpt-4o-mini-transcribe".to_string()),
+                language: Some("es".to_string()),
+                error: None,
+                created_at: Some("2026-06-05T00:00:00Z".to_string()),
+                cost: None,
+            },
+        };
+
+        let payload = serde_json::to_string(&event).expect("serialize event");
+        let event_json: serde_json::Value =
+            serde_json::from_str(&payload).expect("deserialize payload json");
+
+        assert_eq!(event_json["tipo"], "AUDIO_TRANSCRIPTION_UPDATED");
+        assert_eq!(
+            event_json["datos"]["conversation_id"],
+            "507f191e810c19729de860ec"
+        );
+        assert_eq!(
+            event_json["datos"]["message_id"],
+            "507f191e810c19729de860ea"
+        );
+        assert_eq!(
+            event_json["datos"]["audio_transcription"]["status"],
+            "processing"
         );
     }
 }

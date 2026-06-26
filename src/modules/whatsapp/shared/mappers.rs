@@ -59,7 +59,7 @@ pub(crate) fn msg_to_item(
     }
 }
 
-fn transcription_to_item(t: AudioTranscription) -> AudioTranscriptionItem {
+pub(crate) fn transcription_to_item(t: AudioTranscription) -> AudioTranscriptionItem {
     AudioTranscriptionItem {
         status: t.status,
         text: t.text,

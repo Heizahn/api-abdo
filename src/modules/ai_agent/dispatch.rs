@@ -31,7 +31,7 @@ use crate::{
         ai_agent::{AiAgent, AiAgentMode, AiAgentPurpose, AiInteraction},
         whatsapp::{AudioTranscription, StatePatch, WaConversationAiState, WaMessage},
     },
-    modules::whatsapp::shared::build_message_item,
+    modules::whatsapp::shared::{build_message_item, transcription_to_item},
     state::AppState,
 };
 
@@ -1958,21 +1958,52 @@ async fn ensure_audio_transcription(
     }
     let message_id = message.id?;
     let media_id = message.media_id.as_deref()?;
-    let (bytes, mime) = match load_media_bytes_for_transcription(state, wa_settings, message).await
-    {
-        Some(v) => v,
-        None => return None,
-    };
-    let format = audio_format_from_mime(&mime);
     let model = audio_cfg.stt_model.trim();
-    if model.is_empty() {
-        tracing::warn!("[ai_agent.dispatch] audio transcription skipped: stt_model not configured");
-        return None;
-    }
     let language = match audio_cfg.stt_language.trim() {
         "" | "auto" => None,
         lang => Some(lang.to_string()),
     };
+
+    if model.is_empty() {
+        tracing::warn!("[ai_agent.dispatch] audio transcription skipped: stt_model not configured");
+        let transcription = failed_audio_transcription(None, language, "stt_model_not_configured");
+        persist_and_broadcast_audio_transcription(state, message, message_id, &transcription, true)
+            .await;
+        return None;
+    }
+
+    let processing = AudioTranscription {
+        status: "processing".to_string(),
+        text: None,
+        model: Some(model.to_string()),
+        language: language.clone(),
+        error: None,
+        created_at: Some(BsonDateTime::now()),
+        cost: None,
+    };
+    persist_and_broadcast_audio_transcription(state, message, message_id, &processing, false).await;
+
+    let (bytes, mime) = match load_media_bytes_for_transcription(state, wa_settings, message).await
+    {
+        Some(v) => v,
+        None => {
+            let transcription = failed_audio_transcription(
+                Some(model.to_string()),
+                language,
+                "media_download_failed",
+            );
+            persist_and_broadcast_audio_transcription(
+                state,
+                message,
+                message_id,
+                &transcription,
+                true,
+            )
+            .await;
+            return None;
+        }
+    };
+    let format = audio_format_from_mime(&mime);
     let client = OpenRouterClient::new(
         state.reqwest_client.clone(),
         resolve_base_url(),
@@ -2004,36 +2035,66 @@ async fn ensure_audio_transcription(
                 message.id,
                 e
             );
-            AudioTranscription {
-                status: "failed".to_string(),
-                text: None,
-                model: Some(model.to_string()),
-                language,
-                error: Some("stt_failed".to_string()),
-                created_at: Some(BsonDateTime::now()),
-                cost: None,
-            }
+            failed_audio_transcription(Some(model.to_string()), language, "stt_failed")
         }
     };
     let text = transcription.text.clone();
+    persist_and_broadcast_audio_transcription(state, message, message_id, &transcription, true)
+        .await;
+    text
+}
+
+fn failed_audio_transcription(
+    model: Option<String>,
+    language: Option<String>,
+    error: &str,
+) -> AudioTranscription {
+    AudioTranscription {
+        status: "failed".to_string(),
+        text: None,
+        model,
+        language,
+        error: Some(error.to_string()),
+        created_at: Some(BsonDateTime::now()),
+        cost: None,
+    }
+}
+
+async fn persist_and_broadcast_audio_transcription(
+    state: &Arc<AppState>,
+    message: &WaMessage,
+    message_id: ObjectId,
+    transcription: &AudioTranscription,
+    broadcast_full_message_delta: bool,
+) {
     match state
         .db
-        .update_message_audio_transcription(&message_id, &transcription)
+        .update_message_audio_transcription(&message_id, transcription)
         .await
     {
         Ok(Some(updated)) => {
-            let item = build_message_item(state, updated).await;
-            let ev = crate::modules::whatsapp::ws::WsServerEvent::MensajeModificado {
-                conversation_id: message.conversation_id.to_hex(),
-                message: item,
-                change_type: "transcription".to_string(),
-            };
-            crate::modules::whatsapp::ws::broadcast_all(&state.ws_registry, &ev).await;
+            let transcription_event =
+                crate::modules::whatsapp::ws::WsServerEvent::AudioTranscriptionUpdated {
+                    conversation_id: message.conversation_id.to_hex(),
+                    message_id: message_id.to_hex(),
+                    audio_transcription: transcription_to_item(transcription.clone()),
+                };
+            crate::modules::whatsapp::ws::broadcast_all(&state.ws_registry, &transcription_event)
+                .await;
+
+            if broadcast_full_message_delta {
+                let item = build_message_item(state, updated).await;
+                let ev = crate::modules::whatsapp::ws::WsServerEvent::MensajeModificado {
+                    conversation_id: message.conversation_id.to_hex(),
+                    message: item,
+                    change_type: "transcription".to_string(),
+                };
+                crate::modules::whatsapp::ws::broadcast_all(&state.ws_registry, &ev).await;
+            }
         }
         Ok(None) => {}
         Err(e) => tracing::warn!("[ai_agent.dispatch] saving transcription failed: {}", e),
     }
-    text
 }
 
 async fn load_media_bytes_for_transcription(
