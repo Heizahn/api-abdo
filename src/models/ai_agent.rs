@@ -901,9 +901,26 @@ pub struct AiAgentItem {
     pub tools: Vec<AiToolConfigDto>,
     pub escalation: AiEscalationRulesDto,
     pub limits: AiLimitsDto,
+    /// Contrato operativo para que el front no infiera comportamiento legacy
+    /// desde labels antiguos del editor.
+    pub runtime_contract: AiAgentRuntimeContractDto,
     pub debounce_seconds: u32,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AiAgentRuntimeContractDto {
+    /// `false`: greeting/farewell/farewell_to_human no se inyectan al LLM.
+    /// El prompt principal gobierna la redacción del agente.
+    pub personality_templates_visible_to_llm: bool,
+    /// Mecanismo real de handoff usado por la IA: pausa la IA y asigna humano.
+    pub handoff_mechanism: String,
+    /// Indica si la tool `create_ticket` está habilitada para este agente.
+    pub create_ticket_enabled: bool,
+    /// `true` solo cuando `create_ticket_enabled` y existe categoría default.
+    /// El front debe ocultar/deshabilitar la categoría de ticket si es `false`.
+    pub default_ticket_category_effective: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -942,8 +959,14 @@ pub struct AiPersonalityDto {
     pub assistant_name: String,
     pub locale: String,
     pub tone: String,
+    /// Plantilla legacy del editor. Se persiste y se devuelve para compatibilidad,
+    /// pero no se inyecta al LLM.
     pub greeting: String,
+    /// Plantilla legacy del editor. Se persiste y se devuelve para compatibilidad,
+    /// pero no se inyecta al LLM.
     pub farewell: String,
+    /// Mensaje server-side enviado únicamente cuando la API ya pausó la IA y
+    /// derivó a humano. Se persiste por compatibilidad, pero no se inyecta al LLM.
     pub farewell_to_human: String,
     pub forbidden_phrases: Vec<String>,
 }

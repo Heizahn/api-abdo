@@ -264,7 +264,9 @@ fn default_agent(
             max_identification_attempts: 2,
             escalate_on_critical_tool_failure: true,
             always_escalate_when_asked: true,
-            default_ticket_category_id: Some("soporte_primer_segundo_nivel".into()),
+            // Legacy: sólo aplica si `create_ticket` está habilitada. Para nuevos
+            // agentes la derivación real es request_human + asignación humana.
+            default_ticket_category_id: None,
         },
         limits: AiLimits::defaults(),
         debounce_seconds: 10,
@@ -280,6 +282,12 @@ fn default_agent(
 
 fn agent_to_item(a: AiAgent) -> AiAgentItem {
     let api_key_set = !a.model.api_key_encrypted.is_empty();
+    let create_ticket_enabled = a
+        .tools
+        .iter()
+        .any(|t| t.name == "create_ticket" && t.enabled);
+    let default_ticket_category_effective =
+        create_ticket_enabled && a.escalation.default_ticket_category_id.is_some();
     AiAgentItem {
         id: a.id.map(|o| o.to_hex()).unwrap_or_default(),
         label: a.label,
@@ -304,6 +312,12 @@ fn agent_to_item(a: AiAgent) -> AiAgentItem {
         tools: a.tools.into_iter().map(Into::into).collect(),
         escalation: a.escalation.into(),
         limits: a.limits.into(),
+        runtime_contract: crate::models::ai_agent::AiAgentRuntimeContractDto {
+            personality_templates_visible_to_llm: false,
+            handoff_mechanism: "pause_ai_and_assign_human".to_string(),
+            create_ticket_enabled,
+            default_ticket_category_effective,
+        },
         debounce_seconds: a.debounce_seconds,
         created_at: iso8601(a.created_at),
         updated_at: iso8601(a.updated_at),

@@ -1193,15 +1193,11 @@ fn build_system_instruction(
     if !p.locale.is_empty() {
         personality_lines.push(format!("locale: {}", p.locale));
     }
-    if !p.greeting.trim().is_empty() {
-        personality_lines.push(format!("greeting: {}", p.greeting.trim()));
-    }
-    if !p.farewell.trim().is_empty() {
-        personality_lines.push(format!("farewell: {}", p.farewell.trim()));
-    }
-    if !p.farewell_to_human.trim().is_empty() {
-        personality_lines.push(format!("farewell_to_human: {}", p.farewell_to_human.trim()));
-    }
+    // `greeting`, `farewell` y `farewell_to_human` son plantillas legacy del
+    // editor/UI. No se inyectan al LLM porque suelen contener copy operativo
+    // ("Soy Andrea", "te paso con un asesor") que puede contradecir el
+    // system_prompt. `farewell_to_human` lo usa server-side `auto_escalate`
+    // sólo cuando la escalación realmente ocurrió.
     if !p.forbidden_phrases.is_empty() {
         personality_lines.push(format!(
             "forbidden_phrases: {}",
@@ -2204,10 +2200,10 @@ mod extract_message_text_tests {
 #[cfg(test)]
 mod text_tool_invocation_tests {
     use super::{
-        confirms_ticket_created_without_success, customer_requests_urgent_reactivation,
-        detect_text_tool_invocations, looks_like_meta_output_leak,
-        promises_internal_transfer_without_success, report_payment_bank_retry_args,
-        response_promises_human_handoff_without_tool,
+        build_system_instruction, confirms_ticket_created_without_success,
+        customer_requests_urgent_reactivation, detect_text_tool_invocations,
+        looks_like_meta_output_leak, promises_internal_transfer_without_success,
+        report_payment_bank_retry_args, response_promises_human_handoff_without_tool,
         response_promises_unsupported_reactivation_action, safe_failed_report_payment_response,
         safe_report_payment_response, should_force_human_handoff,
         should_force_urgent_reactivation_handoff,
@@ -2248,6 +2244,24 @@ mod text_tool_invocation_tests {
             error: Some(error.to_string()),
             duration_ms: 10,
         }
+    }
+
+    #[test]
+    fn system_instruction_does_not_expose_legacy_personality_templates() {
+        let mut agent = minimal_agent_with_purpose(None);
+        agent.system_prompt = "Prompt principal".to_string();
+        agent.personality.greeting = "¡Hola! Soy Andrea del equipo de cobranzas".to_string();
+        agent.personality.farewell = "¡Listo! Cualquier cosa".to_string();
+        agent.personality.farewell_to_human = "Voy a pasarte con un asesor".to_string();
+
+        let system =
+            build_system_instruction(&agent, None, None, None, None, None, None, None, None, None);
+
+        assert!(system.contains("Prompt principal"));
+        assert!(system.contains("assistant_name: Andrea"));
+        assert!(!system.contains("Soy Andrea del equipo de cobranzas"));
+        assert!(!system.contains("Voy a pasarte con un asesor"));
+        assert!(!system.contains("farewell_to_human"));
     }
 
     fn minimal_agent_with_purpose(purpose: Option<AiAgentPurpose>) -> AiAgent {
