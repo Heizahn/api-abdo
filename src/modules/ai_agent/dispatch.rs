@@ -103,6 +103,7 @@ pub fn dispatch_inbound_async(state: Arc<AppState>, inbound: WaMessage, workspac
                 "[ai_agent.dispatch] conv {} con ai_disabled=true, skip",
                 conv_hex
             );
+            transcribe_inbound_audio_for_ui_if_needed(&state, &workspace_id, &inbound).await;
             return;
         }
         if conv.status == "in_progress" {
@@ -110,6 +111,7 @@ pub fn dispatch_inbound_async(state: Arc<AppState>, inbound: WaMessage, workspac
                 "[ai_agent.dispatch] conv {} con status=in_progress (humano atendiendo), skip",
                 conv_hex
             );
+            transcribe_inbound_audio_for_ui_if_needed(&state, &workspace_id, &inbound).await;
             return;
         }
 
@@ -1882,6 +1884,7 @@ fn is_inline_supported(msg_type: &str, mime: Option<&str>) -> bool {
 
 struct EffectiveAudioTranscriptionConfig {
     enabled: bool,
+    show_transcription: bool,
     ai_uses_transcription: bool,
     stt_model: String,
     stt_language: String,
@@ -1912,6 +1915,10 @@ async fn resolve_audio_transcription_config(
             .as_ref()
             .and_then(|cfg| cfg.audio_transcription_enabled)
             .unwrap_or(wa_settings.audio_transcription_enabled),
+        show_transcription: global
+            .as_ref()
+            .and_then(|cfg| cfg.show_audio_transcription)
+            .unwrap_or(wa_settings.show_audio_transcription),
         ai_uses_transcription: global
             .as_ref()
             .and_then(|cfg| cfg.ai_uses_audio_transcription)
@@ -1933,15 +1940,80 @@ async fn collect_burst_texts(
         if let Some(t) = m.body.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
             texts.push(t.to_string());
         }
-        if audio_cfg.enabled && audio_cfg.ai_uses_transcription && m.msg_type == "audio" {
-            if let Some(text) =
-                ensure_audio_transcription(state, wa_settings, &audio_cfg, api_key, m).await
-            {
-                texts.push(format!("[audio transcrito]\n{}", text));
+        if audio_cfg.enabled
+            && (audio_cfg.ai_uses_transcription || audio_cfg.show_transcription)
+            && m.msg_type == "audio"
+        {
+            let transcribed =
+                ensure_audio_transcription(state, wa_settings, &audio_cfg, api_key, m).await;
+            if audio_cfg.ai_uses_transcription {
+                if let Some(text) = transcribed {
+                    texts.push(format!("[audio transcrito]\n{}", text));
+                }
             }
         }
     }
     texts
+}
+
+async fn transcribe_inbound_audio_for_ui_if_needed(
+    state: &Arc<AppState>,
+    workspace_id: &ObjectId,
+    message: &WaMessage,
+) {
+    if message.msg_type != "audio" || message.audio_transcription.is_some() {
+        return;
+    }
+
+    let wa_settings = match state.db.find_wa_settings_by_id(workspace_id).await {
+        Ok(Some(settings)) => settings,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(
+                "[ai_agent.dispatch] no se pudo cargar wa_settings para transcribir audio UI: {}",
+                e
+            );
+            return;
+        }
+    };
+    let audio_cfg = resolve_audio_transcription_config(state, &wa_settings).await;
+    if !audio_cfg.enabled || !audio_cfg.show_transcription {
+        return;
+    }
+
+    let message_id = match message.id {
+        Some(id) => id,
+        None => return,
+    };
+    let api_key = match resolve_ai_api_key(state).await {
+        Ok(key) => key,
+        Err(e) => {
+            tracing::warn!(
+                "[ai_agent.dispatch] api_key indisponible para transcripción UI: {:?}",
+                e
+            );
+            let language = match audio_cfg.stt_language.trim() {
+                "" | "auto" => None,
+                lang => Some(lang.to_string()),
+            };
+            let transcription = failed_audio_transcription(
+                Some(audio_cfg.stt_model.trim().to_string()).filter(|m| !m.is_empty()),
+                language,
+                "ai_global_config_missing",
+            );
+            persist_and_broadcast_audio_transcription(
+                state,
+                message,
+                message_id,
+                &transcription,
+                true,
+            )
+            .await;
+            return;
+        }
+    };
+
+    let _ = ensure_audio_transcription(state, &wa_settings, &audio_cfg, &api_key, message).await;
 }
 
 async fn ensure_audio_transcription(
