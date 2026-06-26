@@ -218,6 +218,7 @@ const KNOWN_TOOL_NAMES: &[&str] = &[
     "get_installation_info",
     "get_active_promotions",
     "get_payment_methods",
+    "get_customer_billing_info",
     "list_banks",
 ];
 

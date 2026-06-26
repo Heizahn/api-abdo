@@ -462,6 +462,7 @@ pub const T_REPORT_PAYMENT: &str = "report_payment";
 pub const T_GET_INSTALLATION_INFO: &str = "get_installation_info";
 pub const T_GET_ACTIVE_PROMOTIONS: &str = "get_active_promotions";
 pub const T_GET_PAYMENT_METHODS: &str = "get_payment_methods";
+pub const T_GET_CUSTOMER_BILLING_INFO: &str = "get_customer_billing_info";
 pub const T_LIST_BANKS: &str = "list_banks";
 
 /// Categoría operativa de un tool, usada por `dispatch.rs` para decidir si un
@@ -592,7 +593,7 @@ const TOOL_CATALOG: &[ToolMeta] = &[
     ToolMeta {
         name: T_REPORT_PAYMENT,
         display_name: "Reportar pago",
-        ui_description: "Registra un reporte de pago del cliente con referencia, monto y comprobante (foto). Crea un documento en PaymentReports en estado \"Pendiente\" y abre un ticket en cobranzas/facturación para que el equipo lo revise. La aprobación y el ajuste de saldo/deuda los hace un humano desde el panel.",
+        ui_description: "Registra un reporte de pago del cliente con referencia, monto y comprobante (foto). Crea un documento en PaymentReports en estado \"Pendiente\" y notifica al panel de cobranzas. La aprobación y el ajuste de saldo/deuda los hace un humano desde el panel.",
         ui_category: "action",
         default_enabled: false,
         operational_category: ToolCategory::Action,
@@ -609,6 +610,14 @@ const TOOL_CATALOG: &[ToolMeta] = &[
         name: T_GET_PAYMENT_METHODS,
         display_name: "Métodos de pago del proveedor",
         ui_description: "Devuelve los datos de pago móvil del proveedor que atiende al cliente (banco, cédula, teléfono). Llamar cuando el cliente pregunta '¿cómo pago?' o '¿a dónde transfiero?'.",
+        ui_category: "info",
+        default_enabled: false,
+        operational_category: ToolCategory::InfoLookup,
+    },
+    ToolMeta {
+        name: T_GET_CUSTOMER_BILLING_INFO,
+        display_name: "Plan y mensualidad del cliente",
+        ui_description: "Devuelve el plan actual del cliente, precio mensual en USD y monto mensual en Bs con IVA/tasa BCV. Usar para adelantos o mensualidades aún no facturadas.",
         ui_category: "info",
         default_enabled: false,
         operational_category: ToolCategory::InfoLookup,
@@ -885,11 +894,26 @@ fn tool_default(name: &str) -> Option<(&'static str, Value)> {
                 "required": ["client_id"]
             }),
         )),
+        T_GET_CUSTOMER_BILLING_INFO => Some((
+            "Devuelve el plan ACTUAL asignado al cliente y su mensualidad: nombre del plan, \
+             Mbps, precio mensual en USD y precio mensual en Bs con IVA/tasa BCV vigente. \
+             Usar después de `lookup_customer` cuando el cliente quiera adelantar una mensualidad, \
+             pagar un mes que aún no tiene factura/deuda activa, o pida 'monto y datos' para pagar \
+             su plan actual. No usar `list_plans` para clientes existentes: `list_plans` es catálogo \
+             comercial, esta tool es la fuente del plan real del cliente. Si la tool devuelve \
+             `plan_not_configured`, pide aclaratoria o deriva a humano; no inventes mensualidad.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "client_id": { "type": "string", "description": "ObjectId hex del cliente devuelto por lookup_customer." }
+                },
+                "required": ["client_id"]
+            }),
+        )),
         T_REPORT_PAYMENT => Some((
             "Registra un reporte de pago del cliente (referencia + monto + comprobante). \
-             Crea un documento en PaymentReports en estado \"Pendiente\" y abre un ticket en \
-             cobranzas/facturación para que el equipo lo revise. La aprobación y el ajuste de \
-             saldo/deuda los hace un humano desde el panel. \
+             Crea un documento en PaymentReports en estado \"Pendiente\" y notifica al panel \
+             de cobranzas. La aprobación y el ajuste de saldo/deuda los hace un humano desde el panel. \
              PRECONDICIONES: (1) llamá `lookup_customer` ANTES y confirmá con el cliente \
              cuál servicio si hay varios. (2) Pedile la foto del comprobante por WhatsApp \
              — sin imagen el tool falla. (3) Pasá `amount_bs` O `amount_usd`, NUNCA ambos: \
@@ -1085,6 +1109,7 @@ pub async fn execute_tool(name: &str, args: Value, ctx: &ToolContext) -> ToolRes
         T_GET_INSTALLATION_INFO => exec_get_installation_info(args, ctx, started).await,
         T_GET_ACTIVE_PROMOTIONS => exec_get_active_promotions(args, ctx, started).await,
         T_GET_PAYMENT_METHODS => exec_get_payment_methods(args, ctx, started).await,
+        T_GET_CUSTOMER_BILLING_INFO => exec_get_customer_billing_info(args, ctx, started).await,
         T_LIST_BANKS => exec_list_banks(args, ctx, started).await,
         other => ToolResult::err(format!("unknown_tool:{}", other), started),
     }
@@ -2177,6 +2202,103 @@ async fn exec_get_payment_methods(args: Value, ctx: &ToolContext, started: Insta
             value: "true".into(),
         },
     ])
+}
+
+// ============================================
+// Tool: get_customer_billing_info
+// ============================================
+
+async fn exec_get_customer_billing_info(
+    args: Value,
+    ctx: &ToolContext,
+    started: Instant,
+) -> ToolResult {
+    #[derive(Deserialize)]
+    struct Args {
+        client_id: String,
+    }
+
+    let parsed: Args = match serde_json::from_value(args) {
+        Ok(v) => v,
+        Err(e) => return ToolResult::err(format!("invalid_args:{}", e), started),
+    };
+
+    let client_oid = match ObjectId::parse_str(parsed.client_id.trim()) {
+        Ok(o) => o,
+        Err(_) => return ToolResult::err("invalid_client_id", started),
+    };
+    if let Err(e) = validate_client_owned_by_phone(client_oid, ctx, started).await {
+        return e;
+    }
+
+    let detail = match ctx
+        .state
+        .db
+        .get_client_by_id(&client_oid.to_hex(), None)
+        .await
+    {
+        Ok(Some(d)) => d,
+        Ok(None) => return ToolResult::err("client_not_found", started),
+        Err(e) => return ToolResult::err(format!("db_error:{}", e), started),
+    };
+
+    let Some(monthly_usd) = detail.plan_price.filter(|v| *v > 0.0) else {
+        return ToolResult::err("plan_not_configured", started);
+    };
+
+    let rate: f64 = match ctx.state.redis.get_exchange_rate().await {
+        Ok(Some(r)) => r,
+        _ => match ctx.state.db.get_latest_exchange_rate().await {
+            Ok(r) => r,
+            Err(_) => return ToolResult::err("exchange_rate_unavailable", started),
+        },
+    };
+    if rate == 0.0 {
+        return ToolResult::err("exchange_rate_zero", started);
+    }
+
+    let tax = match resolve_tax_for_client(Some(client_oid), ctx, started).await {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let iva_percent = round2((tax.iva - 1.0) * 100.0);
+    let monthly_bs = round2(monthly_usd * rate * tax.iva);
+    let rate_date = crate::utils::timezone::VenezuelaDateTime::now().date_string_venezuela();
+
+    let mut patches = vec![
+        StatePatch::AddCompletedAction("get_customer_billing_info".into()),
+        StatePatch::SetCurrentStep("billing_info_loaded".into()),
+    ];
+    if let Some(plan_name) = detail.plan_name.as_ref().filter(|s| !s.trim().is_empty()) {
+        patches.push(StatePatch::SetCollectedData {
+            key: "plan_name".into(),
+            value: plan_name.clone(),
+        });
+    }
+
+    ToolResult::ok(
+        json!({
+            "client_id": client_oid.to_hex(),
+            "status": detail.status,
+            "plan": {
+                "name": detail.plan_name,
+                "mbps": detail.plan_mbps,
+                "monthly_usd": monthly_usd,
+                "monthly_bs": monthly_bs,
+                "bcv_rate": rate,
+                "rate_date": rate_date,
+                "iva_percent": iva_percent,
+            },
+            "advance_payment": {
+                "supported": true,
+                "recommended_amount_usd": monthly_usd,
+                "recommended_amount_bs": monthly_bs,
+            },
+            "note": "Mensualidad del plan actual lista para adelantos o meses aún no facturados. Para pago móvil, llamá get_payment_methods. Para registrar comprobante, llamá report_payment sin debt_id si es abono/adelanto."
+        }),
+        started,
+    )
+    .with_patches(patches)
 }
 
 // ============================================

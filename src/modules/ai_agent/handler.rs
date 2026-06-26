@@ -246,6 +246,12 @@ fn default_agent(
                 config: None,
             },
             AiToolConfig {
+                name: "get_customer_billing_info".into(),
+                enabled: false,
+                description_override: None,
+                config: None,
+            },
+            AiToolConfig {
                 name: "check_coverage".into(),
                 enabled: false,
                 description_override: None,
