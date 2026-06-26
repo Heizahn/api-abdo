@@ -629,16 +629,34 @@ fn text_has_sales_context(text: &str) -> bool {
     .any(|marker| normalized.contains(marker))
 }
 
-fn response_promises_human_handoff_without_tool(
-    text: &str,
-    tool_logs: &[AiToolCallLog],
-) -> Option<ForcedHumanHandoffKind> {
-    if has_successful_tool_call(tool_logs, "request_human")
-        || has_successful_tool_call(tool_logs, "create_ticket")
-    {
-        return None;
-    }
+fn latest_report_payment_success_can_close_without_handoff(tool_logs: &[AiToolCallLog]) -> bool {
+    let Some(log) = tool_logs
+        .iter()
+        .rev()
+        .find(|t| t.tool_name == "report_payment" && t.success)
+    else {
+        return false;
+    };
 
+    let result: serde_json::Value =
+        serde_json::from_str(&log.result_summary).unwrap_or(serde_json::Value::Null);
+    let already_registered = result
+        .get("already_registered")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let is_same_client = result
+        .get("is_same_client")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    // Un reporte nuevo, o un duplicado del mismo cliente, se puede cerrar con
+    // copy informativo: "pendiente de aprobación / lo revisa cobranzas". Eso
+    // no debe convertirse en handoff real. Si la referencia pertenece a otro
+    // cliente, sí mantenemos abierto el camino a derivación humana.
+    !already_registered || is_same_client
+}
+
+fn detect_human_handoff_promise(text: &str) -> Option<ForcedHumanHandoffKind> {
     let normalized = normalize_spanish_text(text);
     let mentions_human_target = [
         "asesor",
@@ -678,6 +696,33 @@ fn response_promises_human_handoff_without_tool(
     } else {
         Some(ForcedHumanHandoffKind::General)
     }
+}
+
+fn should_replace_handoff_with_safe_payment_response(
+    response_text: Option<&str>,
+    tool_logs: &[AiToolCallLog],
+) -> bool {
+    latest_report_payment_success_can_close_without_handoff(tool_logs)
+        && response_text
+            .and_then(detect_human_handoff_promise)
+            .is_some()
+}
+
+fn response_promises_human_handoff_without_tool(
+    text: &str,
+    tool_logs: &[AiToolCallLog],
+) -> Option<ForcedHumanHandoffKind> {
+    if has_successful_tool_call(tool_logs, "request_human")
+        || has_successful_tool_call(tool_logs, "create_ticket")
+    {
+        return None;
+    }
+
+    if latest_report_payment_success_can_close_without_handoff(tool_logs) {
+        return None;
+    }
+
+    detect_human_handoff_promise(text)
 }
 
 fn should_force_human_handoff(
@@ -1947,6 +1992,14 @@ pub async fn run_turn(
             });
     }
 
+    if should_replace_handoff_with_safe_payment_response(response_text.as_deref(), &tool_call_logs)
+    {
+        tracing::warn!(
+            "[ai_agent.runner] report_payment OK con promesa falsa de handoff — usando respuesta segura de pago"
+        );
+        response_text = safe_report_payment_response(&tool_call_logs);
+    }
+
     // Defensa final: reactivación urgente post-pago no puede quedar en promesas
     // vagas de prioridad/monitoreo. Si el cliente pidió reactivación urgente o
     // el modelo prometió una acción interna sin `request_human`, hacemos el
@@ -2157,7 +2210,8 @@ mod text_tool_invocation_tests {
         response_promises_human_handoff_without_tool,
         response_promises_unsupported_reactivation_action, safe_failed_report_payment_response,
         safe_report_payment_response, should_force_human_handoff,
-        should_force_urgent_reactivation_handoff, strip_text_tool_invocations,
+        should_force_urgent_reactivation_handoff,
+        should_replace_handoff_with_safe_payment_response, strip_text_tool_invocations,
         unique_bank_from_list_banks_summary, ForcedHumanHandoffKind,
     };
     use crate::models::ai_agent::AiToolCallLog;
@@ -2474,6 +2528,80 @@ mod text_tool_invocation_tests {
         assert_eq!(
             should_force_human_handoff("Saldo", Some("Tu saldo es Bs. 10"), &[]),
             None
+        );
+    }
+
+    #[test]
+    fn payment_report_success_handoff_phrase_does_not_force_human_handoff() {
+        let logs = [report_payment_log(
+            serde_json::json!({
+                "amount_bs": 6712.52,
+                "reference": "061760271043"
+            }),
+            serde_json::json!({
+                "ok": true,
+                "mode": "live",
+                "payment_id": "6a3ed423ae66655561101e75",
+                "already_registered": false,
+                "amount_bs": 6712.52
+            }),
+        )];
+
+        let text =
+            "Te comunico con un asesor del equipo. Te contactarán en breve por este mismo chat.";
+
+        assert_eq!(
+            should_force_human_handoff("Solo me alcanzó para eso", Some(text), &logs),
+            None
+        );
+    }
+
+    #[test]
+    fn payment_report_success_handoff_phrase_is_replaced_by_safe_payment_response() {
+        let logs = [report_payment_log(
+            serde_json::json!({
+                "amount_bs": 6712.52,
+                "reference": "061760271043"
+            }),
+            serde_json::json!({
+                "ok": true,
+                "mode": "live",
+                "payment_id": "6a3ed423ae66655561101e75",
+                "already_registered": false,
+                "amount_bs": 6712.52
+            }),
+        )];
+
+        let text =
+            "Te comunico con un asesor del equipo. Te contactarán en breve por este mismo chat.";
+
+        assert!(should_replace_handoff_with_safe_payment_response(
+            Some(text),
+            &logs
+        ));
+    }
+
+    #[test]
+    fn payment_report_success_still_forces_support_handoff_when_user_reports_support_issue() {
+        let logs = [report_payment_log(
+            serde_json::json!({
+                "amount_bs": 6712.52,
+                "reference": "061760271043"
+            }),
+            serde_json::json!({
+                "ok": true,
+                "mode": "live",
+                "payment_id": "6a3ed423ae66655561101e75",
+                "already_registered": false,
+                "amount_bs": 6712.52
+            }),
+        )];
+
+        let text = "Te comunico con soporte para revisar tu caso.";
+
+        assert_eq!(
+            should_force_human_handoff("También estoy sin internet", Some(text), &logs),
+            Some(ForcedHumanHandoffKind::Support)
         );
     }
 
