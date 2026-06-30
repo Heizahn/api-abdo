@@ -25,7 +25,7 @@ use crate::modules::whatsapp::ws::{
 };
 use crate::{
     auth::user_jwt::UserProfileClaims,
-    db::WhatsAppRepository,
+    db::{AiAgentRepository, WhatsAppRepository},
     error::ApiError,
     models::whatsapp::{
         ConversationDetailResponse, MarkReadData, MarkReadResponse, TakeConversationResponse,
@@ -625,6 +625,14 @@ pub async fn mark_read_handler(
     }))
 }
 
+fn take_requires_intervene(
+    previous_status: &str,
+    ai_disabled: bool,
+    active_ai_agent_enabled: Option<bool>,
+) -> bool {
+    previous_status == "pending" && !ai_disabled && active_ai_agent_enabled.unwrap_or(false)
+}
+
 #[utoipa::path(
     post,
     path = "/v1/auth-user/whatsapp/conversations/{id}/take",
@@ -664,10 +672,27 @@ pub async fn take_conversation_handler(
     if previous_status != "pending" && previous_status != "closed" {
         return Err(ApiError::ConversationNotTakeable);
     }
-    if previous_status == "pending"
-        && !existing.ai_disabled
-        && existing.ai_active_agent_id.is_some()
-    {
+    let active_ai_agent_enabled = if previous_status == "pending" && !existing.ai_disabled {
+        match existing.ai_active_agent_id.as_ref() {
+            Some(agent_id) => {
+                let agent = state
+                    .db
+                    .find_ai_agent_by_id(agent_id)
+                    .await
+                    .map_err(ApiError::DatabaseError)?;
+                Some(agent.is_some_and(|a| a.enabled))
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    if take_requires_intervene(
+        &previous_status,
+        existing.ai_disabled,
+        active_ai_agent_enabled,
+    ) {
         return Err(ApiError::domain_simple(
             StatusCode::CONFLICT,
             "ai_active_use_intervene",
@@ -799,6 +824,13 @@ pub async fn take_conversation_handler(
             tracing::warn!("record_conversation_event failed: {}", e);
         }
     }
+
+    let ev_ia = WsServerEvent::IaPausada {
+        conversation_id: id.clone(),
+        reason: "manual_take".to_string(),
+        by: claims.id.clone(),
+    };
+    broadcast_all(&state.ws_registry, &ev_ia).await;
 
     Ok(Json(TakeConversationResponse {
         ok: true,
@@ -938,4 +970,29 @@ pub async fn transfer_conversation_handler(
         ok: true,
         data: conv_item,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::take_requires_intervene;
+
+    #[test]
+    fn take_requires_intervene_when_pending_ai_agent_is_enabled() {
+        assert!(take_requires_intervene("pending", false, Some(true)));
+    }
+
+    #[test]
+    fn take_allows_pending_chat_when_ai_agent_is_disabled() {
+        assert!(!take_requires_intervene("pending", false, Some(false)));
+    }
+
+    #[test]
+    fn take_allows_pending_chat_when_ai_agent_is_stale_or_missing() {
+        assert!(!take_requires_intervene("pending", false, None));
+    }
+
+    #[test]
+    fn take_allows_chat_when_ai_is_disabled_for_conversation() {
+        assert!(!take_requires_intervene("pending", true, Some(true)));
+    }
 }

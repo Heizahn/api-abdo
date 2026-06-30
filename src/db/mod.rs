@@ -812,7 +812,8 @@ pub trait WhatsAppRepository {
         assigned_to: &str,
     ) -> Result<Option<WaConversation>, String>;
     /// Intenta tomar una conversación tomable (`pending` o `closed`).
-    /// Al tomarla, la asigna al agente y la pasa a `status = "in_progress"`.
+    /// Al tomarla, la asigna al agente, la pasa a `status = "in_progress"`
+    /// y pausa la IA porque un humano tomó la conversación.
     /// Retorna `None` si otro actor la movió fuera de esos estados antes del update.
     async fn take_conversation(
         &self,

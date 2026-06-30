@@ -89,6 +89,20 @@ impl MongoDB {
     }
 }
 
+fn take_conversation_update(agent_id: &str) -> Document {
+    doc! {
+        "$set": {
+            "assigned_to": agent_id,
+            "status": "in_progress",
+            "ai_disabled": true,
+        },
+        "$unset": {
+            "ai_active_agent_id": "",
+            "ai_transfer_context": "",
+        }
+    }
+}
+
 #[async_trait]
 impl WhatsAppRepository for MongoDB {
     async fn find_conversation_by_phones(
@@ -779,26 +793,18 @@ impl WhatsAppRepository for MongoDB {
         id: &ObjectId,
         agent_id: &str,
     ) -> Result<Option<WaConversation>, String> {
-        use mongodb::options::UpdateModifications;
         use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
         let opts = FindOneAndUpdateOptions::builder()
             .return_document(ReturnDocument::After)
             .build();
 
         // Atómico: acepta `pending` (toma/reasignación) y `closed` (reopen+take).
-        // En ambos casos asigna el agente y fuerza `status = "in_progress"`.
         // Idempotente sólo para la ventana race pre-update: si otro actor la
         // mueve fuera de `pending|closed`, el filtro deja de matchear.
         let filter = doc! { "_id": id, "status": { "$in": ["pending", "closed"] } };
-        let pipeline = vec![doc! {
-            "$set": {
-                "assigned_to": agent_id,
-                "status": "in_progress"
-            }
-        }];
         let res = self
             .wa_conversations()
-            .find_one_and_update(filter, UpdateModifications::Pipeline(pipeline))
+            .find_one_and_update(filter, take_conversation_update(agent_id))
             .with_options(opts)
             .await
             .map_err(|e| e.to_string())?;
@@ -3347,5 +3353,23 @@ impl WaTicketRepository for MongoDB {
         // Devolvemos el doc actualizado para que el handler arme el response
         // y la entrada al timeline aparezca persistida.
         self.find_ticket_by_id(id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::take_conversation_update;
+
+    #[test]
+    fn take_conversation_update_pauses_and_clears_ai_state() {
+        let update = take_conversation_update("agent-123");
+        let set = update.get_document("$set").unwrap();
+        let unset = update.get_document("$unset").unwrap();
+
+        assert_eq!(set.get_str("assigned_to").unwrap(), "agent-123");
+        assert_eq!(set.get_str("status").unwrap(), "in_progress");
+        assert_eq!(set.get_bool("ai_disabled").unwrap(), true);
+        assert_eq!(unset.get_str("ai_active_agent_id").unwrap(), "");
+        assert_eq!(unset.get_str("ai_transfer_context").unwrap(), "");
     }
 }
