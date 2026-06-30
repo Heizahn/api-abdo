@@ -3905,6 +3905,53 @@ fn build_already_registered_hint(is_same_client: bool, matched_state: &str) -> S
     }
 }
 
+fn push_payment_fact_patch(patches: &mut Vec<StatePatch>, key: &str, value: Option<&str>) {
+    let Some(value) = value.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    patches.push(StatePatch::SetCollectedData {
+        key: key.to_string(),
+        value: value.to_string(),
+    });
+}
+
+fn push_payment_amount_patch(patches: &mut Vec<StatePatch>, key: &str, value: Option<f64>) {
+    let Some(value) = value.filter(|v| v.is_finite() && *v > 0.0) else {
+        return;
+    };
+    patches.push(StatePatch::SetCollectedData {
+        key: key.to_string(),
+        value: format!("{:.2}", round2(value)),
+    });
+}
+
+fn report_payment_success_state_patches(
+    payment_report_id: Option<&str>,
+    reference: &str,
+    media_id: &str,
+    amount_bs: Option<f64>,
+    amount_usd: Option<f64>,
+    payment_date: Option<&str>,
+    issuing_bank: Option<&str>,
+    issuing_bank_id: Option<&str>,
+) -> Vec<StatePatch> {
+    let mut patches = vec![
+        StatePatch::AddCompletedAction("report_payment".into()),
+        StatePatch::SetCurrentStep("payment_reported".into()),
+    ];
+
+    push_payment_fact_patch(&mut patches, "payment_report_id", payment_report_id);
+    push_payment_fact_patch(&mut patches, "payment_reference", Some(reference));
+    push_payment_fact_patch(&mut patches, "payment_media_id", Some(media_id));
+    push_payment_amount_patch(&mut patches, "payment_amount_bs", amount_bs);
+    push_payment_amount_patch(&mut patches, "payment_amount_usd", amount_usd);
+    push_payment_fact_patch(&mut patches, "payment_date", payment_date);
+    push_payment_fact_patch(&mut patches, "payment_issuing_bank", issuing_bank);
+    push_payment_fact_patch(&mut patches, "payment_issuing_bank_id", issuing_bank_id);
+
+    patches
+}
+
 async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -> ToolResult {
     use chrono::{DateTime, Utc};
     use tokio::fs::File;
@@ -4567,6 +4614,19 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         id_debt_oid.is_none(),
     );
 
+    let payment_date_for_state = payment_date.to_rfc3339();
+    let issuing_bank_id_for_state = parsed_issuing_bank_oid.as_ref().map(|oid| oid.to_hex());
+    let state_patches = report_payment_success_state_patches(
+        Some(&payment_id),
+        &reference,
+        &effective_media_id,
+        amount_input_bs,
+        amount_input_usd,
+        Some(&payment_date_for_state),
+        Some(&bank_origin_log),
+        issuing_bank_id_for_state.as_deref(),
+    );
+
     ToolResult::ok(
         json!({
             "ok": true,
@@ -4581,8 +4641,57 @@ async fn exec_report_payment(args: Value, ctx: &ToolContext, started: Instant) -
         }),
         started,
     )
-    .with_patches(vec![
-        StatePatch::AddCompletedAction("report_payment".into()),
-        StatePatch::SetCurrentStep("payment_reported".into()),
-    ])
+    .with_patches(state_patches)
+}
+
+#[cfg(test)]
+mod report_payment_tests {
+    use super::report_payment_success_state_patches;
+    use crate::models::whatsapp::StatePatch;
+
+    fn collected_value<'a>(patches: &'a [StatePatch], key: &str) -> Option<&'a str> {
+        patches.iter().find_map(|p| match p {
+            StatePatch::SetCollectedData { key: k, value } if k == key => Some(value.as_str()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn report_payment_success_patches_persist_only_provided_payment_facts() {
+        let patches = report_payment_success_state_patches(
+            Some("report-1"),
+            "1234567890",
+            "wamid-media-1",
+            Some(250.5),
+            None,
+            Some("2026-06-30T10:15:00+00:00"),
+            Some("0102 - BANCO DE VENEZUELA"),
+            Some("6863023c8c55023927f62d0e"),
+        );
+
+        assert!(patches
+            .iter()
+            .any(|p| p == &StatePatch::AddCompletedAction("report_payment".into())));
+        assert_eq!(
+            collected_value(&patches, "payment_reference"),
+            Some("1234567890")
+        );
+        assert_eq!(
+            collected_value(&patches, "payment_amount_bs"),
+            Some("250.50")
+        );
+        assert_eq!(
+            collected_value(&patches, "payment_date"),
+            Some("2026-06-30T10:15:00+00:00")
+        );
+        assert_eq!(
+            collected_value(&patches, "payment_media_id"),
+            Some("wamid-media-1")
+        );
+        assert_eq!(
+            collected_value(&patches, "payment_issuing_bank"),
+            Some("0102 - BANCO DE VENEZUELA")
+        );
+        assert_eq!(collected_value(&patches, "payment_amount_usd"), None);
+    }
 }

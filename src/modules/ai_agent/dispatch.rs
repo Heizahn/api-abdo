@@ -630,7 +630,27 @@ async fn run_dispatch(
             return Ok(());
         }
     }
-    let user_text = burst_texts.join("\n");
+    let mut user_text = burst_texts.join("\n");
+
+    if user_media.is_empty() && asks_about_previous_payment_media(&user_text) {
+        if let Some(m) = latest_reusable_inline_media(&recent, inbound_oid) {
+            let chunks = build_media_inputs(&state, &wa_settings, m).await;
+            if !chunks.is_empty() {
+                if let Some(mid) = m.media_id.as_deref().filter(|id| !id.is_empty()) {
+                    current_turn_media_ids.push(mid.to_string());
+                }
+                user_media.extend(chunks);
+                user_text.push_str(
+                    "\n\n[contexto: el usuario pregunta por otro pago/comprobante. Se adjunta de nuevo el media reciente para revisar sólo datos visibles; no infieras campos faltantes.]",
+                );
+                tracing::info!(
+                    "[ai_agent.dispatch] payment follow-up: media reciente reinyectado (conv={}, media_id={:?})",
+                    inbound.conversation_id.to_hex(),
+                    m.media_id
+                );
+            }
+        }
+    }
 
     // turn_state_owned: usa session_media_ids (ventana de recent completa) para
     // que el LLM vea fotos enviadas en bursts anteriores dentro del mismo turno.
@@ -1882,6 +1902,35 @@ fn is_inline_supported(msg_type: &str, mime: Option<&str>) -> bool {
     }
 }
 
+fn asks_about_previous_payment_media(text: &str) -> bool {
+    let t = super::tools::normalize_zone(text);
+    let mentions_payment = [
+        "pago",
+        "comprobante",
+        "recibo",
+        "transferencia",
+        "referencia",
+    ]
+    .iter()
+    .any(|needle| t.contains(needle));
+    let asks_other = [
+        "otro", "otra", "segundo", "segunda", "tercer", "tercero", "falt",
+    ]
+    .iter()
+    .any(|needle| t.contains(needle));
+
+    (mentions_payment && asks_other) || t.contains("y el otro") || t.contains("y la otra")
+}
+
+fn latest_reusable_inline_media(recent: &[WaMessage], before: ObjectId) -> Option<&WaMessage> {
+    recent.iter().rev().find(|m| {
+        m.direction == "in"
+            && m.id.map(|id| id < before).unwrap_or(false)
+            && m.media_id.as_deref().map_or(false, |id| !id.is_empty())
+            && is_inline_supported(m.msg_type.as_str(), m.media_mime_type.as_deref())
+    })
+}
+
 struct EffectiveAudioTranscriptionConfig {
     enabled: bool,
     show_transcription: bool,
@@ -2595,6 +2644,56 @@ fn pick_trivial<'a>(
 mod dispatch_tests {
     use super::*;
     use crate::models::whatsapp::TrivialResponse;
+    use mongodb::bson::DateTime;
+
+    fn make_message(
+        seconds: u32,
+        direction: &str,
+        msg_type: &str,
+        media_id: Option<&str>,
+        media_mime_type: Option<&str>,
+    ) -> WaMessage {
+        WaMessage {
+            id: Some(ObjectId::from_parts(seconds, [0; 5], [0; 3])),
+            conversation_id: ObjectId::new(),
+            wa_message_id: format!("wamid-{seconds}"),
+            direction: direction.to_string(),
+            msg_type: msg_type.to_string(),
+            body: None,
+            media_id: media_id.map(str::to_string),
+            media_mime_type: media_mime_type.map(str::to_string),
+            media_filename: None,
+            status: None,
+            meta_error_code: None,
+            meta_error_title: None,
+            meta_error_message: None,
+            meta_error_details: None,
+            failed_at: None,
+            sent_by: None,
+            source: None,
+            campaign_id: None,
+            campaign_recipient_id: None,
+            read_by_user_id: None,
+            read_at: None,
+            idempotency_key: None,
+            reply_to_wa_message_id: None,
+            is_forwarded: None,
+            is_frequently_forwarded: None,
+            ai_processed_at: None,
+            url_preview: None,
+            voice: false,
+            template_name: None,
+            template_language: None,
+            template_components: None,
+            interactive_payload: None,
+            contacts_payload: None,
+            location: None,
+            reactions: Vec::new(),
+            raw_payload: None,
+            audio_transcription: None,
+            timestamp: DateTime::now(),
+        }
+    }
 
     fn make_trivial(
         kind: &str,
@@ -2659,6 +2758,36 @@ mod dispatch_tests {
         let normalized = super::super::tools::normalize_zone("PROMOCION gratis");
         let result = pick_trivial(&items, "spam", &normalized);
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn asks_about_previous_payment_media_detects_other_payment_followups() {
+        assert!(asks_about_previous_payment_media("Y el otro pago?"));
+        assert!(asks_about_previous_payment_media(
+            "me falta el segundo comprobante"
+        ));
+        assert!(asks_about_previous_payment_media("la otra transferencia"));
+    }
+
+    #[test]
+    fn asks_about_previous_payment_media_ignores_unrelated_text() {
+        assert!(!asks_about_previous_payment_media("hola buenas tardes"));
+        assert!(!asks_about_previous_payment_media(
+            "cual es el banco para pagar"
+        ));
+    }
+
+    #[test]
+    fn latest_reusable_inline_media_picks_prior_inbound_image() {
+        let prior_image = make_message(10, "in", "image", Some("media-old"), Some("image/png"));
+        let outbound = make_message(11, "out", "text", None, None);
+        let current_text = make_message(12, "in", "text", None, None);
+        let current_oid = current_text.id.unwrap();
+        let recent = vec![prior_image, outbound, current_text];
+
+        let picked = latest_reusable_inline_media(&recent, current_oid).unwrap();
+
+        assert_eq!(picked.media_id.as_deref(), Some("media-old"));
     }
 }
 

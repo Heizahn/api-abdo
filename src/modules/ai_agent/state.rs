@@ -126,6 +126,16 @@ pub fn format_conversation_state(state: &WaConversationAiState) -> String {
             .map(|(k, v)| format!("  {}: {}", k, v))
             .collect();
         lines.push(format!("collected_data:\n{}", pairs.join("\n")));
+        if state
+            .collected_data
+            .keys()
+            .any(|k| k.starts_with("payment_"))
+        {
+            lines.push(
+                "stored_facts_note: use only listed stored values; do not infer missing payment fields."
+                    .to_string(),
+            );
+        }
     }
     if !state.pending_data.is_empty() {
         lines.push(format!("pending_data: {}", state.pending_data.join(", ")));
@@ -195,5 +205,66 @@ fn truncate_chars(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         s.chars().take(max).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::{apply_state_patches, format_conversation_state};
+    use crate::models::whatsapp::{StatePatch, WaConversationAiState};
+
+    fn collected_value(state: &WaConversationAiState, key: &str) -> Option<String> {
+        state.collected_data.get(key).cloned()
+    }
+
+    #[test]
+    fn apply_state_patches_persists_reported_payment_facts_without_fabricating_missing_fields() {
+        let state = apply_state_patches(
+            WaConversationAiState::default(),
+            &[
+                StatePatch::SetCollectedData {
+                    key: "payment_reference".into(),
+                    value: "1234567890".into(),
+                },
+                StatePatch::SetCollectedData {
+                    key: "payment_amount_bs".into(),
+                    value: "250.50".into(),
+                },
+                StatePatch::SetCollectedData {
+                    key: "payment_date".into(),
+                    value: "2026-06-30T10:15:00+00:00".into(),
+                },
+                StatePatch::SetCollectedData {
+                    key: "payment_media_id".into(),
+                    value: "wamid-media-1".into(),
+                },
+            ],
+        );
+
+        assert_eq!(
+            collected_value(&state, "payment_reference").as_deref(),
+            Some("1234567890")
+        );
+        assert_eq!(state.collected_data.get("payment_issuing_bank"), None);
+        assert_eq!(state.collected_data.get("payment_amount_usd"), None);
+    }
+
+    #[test]
+    fn format_conversation_state_exposes_payment_facts_with_no_inference_note() {
+        let mut collected_data = BTreeMap::new();
+        collected_data.insert("payment_reference".to_string(), "1234567890".to_string());
+        collected_data.insert("payment_amount_bs".to_string(), "250.50".to_string());
+        collected_data.insert("payment_media_id".to_string(), "wamid-media-1".to_string());
+
+        let rendered = format_conversation_state(&WaConversationAiState {
+            collected_data,
+            ..Default::default()
+        });
+
+        assert!(rendered.contains("payment_reference: 1234567890"));
+        assert!(rendered.contains("payment_amount_bs: 250.50"));
+        assert!(rendered.contains("do not infer missing payment fields"));
     }
 }
